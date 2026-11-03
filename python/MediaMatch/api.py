@@ -134,7 +134,10 @@ def match_title(index: MetadataIndex, title: str, year: int | None = None,
 def serve(index: MetadataIndex, host: str = "127.0.0.1", port: int = 8765) -> None:
     class Handler(BaseHTTPRequestHandler):
         def _respond(self, status: int, payload: object) -> None:
-            LOG.info("http_response id=%s method=%s path=%s status=%d body=%s elapsed_ms=%.1f",\n                     getattr(self, "request_id", "unknown"), self.command, self.path, status,\n                     json.dumps(payload, ensure_ascii=False, default=str),\n                     (time.monotonic() - getattr(self, "started", time.monotonic())) * 1000)
+            LOG.info("http_response id=%s method=%s path=%s status=%d body=%s elapsed_ms=%.1f",
+                     getattr(self, "request_id", "unknown"), self.command, self.path, status,
+                     json.dumps(payload, ensure_ascii=False, default=str),
+                     (time.monotonic() - getattr(self, "started", time.monotonic())) * 1000)
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
