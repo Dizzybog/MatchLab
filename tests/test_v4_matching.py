@@ -59,3 +59,9 @@ def test_v4_suffix_index_exists(tmp_path):
     with index.connect() as db:
         indexes = {row[1] for row in db.execute("PRAGMA index_list(titles)")}
     assert "title_reverse_suffix" in indexes
+
+
+def test_v4_clean_title_unaccent_and_word_removal():
+    from MediaMatch.index import clean_title
+    assert clean_title("Sex and the City") == "sexthecity"
+    assert clean_title("Bjørn & Ægir") == "bjornaegir"
