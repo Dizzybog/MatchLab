@@ -1,0 +1,17 @@
+services:
+  torrent-imdb-ai:
+    build: .
+    image: torrent-parse-match:local
+    container_name: torrent-parse-match
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - metadata:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  metadata:
