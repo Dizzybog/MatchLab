@@ -32,6 +32,7 @@ def parse(raw_title: str):
     )
 
 from .index import MetadataIndex
+from .anime_title_matcher import resolve_titled_anime, has_specific_anime_alias
 
 LOG = logging.getLogger(__name__)
 
@@ -76,7 +77,6 @@ def match_title(index: MetadataIndex, title: str, year: int | None = None,
             if not candidate.anime_ids.get("anidb"):
                 continue
             if season_number is not None:
-                from .anime_title_matcher import resolve_titled_anime, has_specific_anime_alias
                 result = (resolve_titled_anime(index, candidate.imdb_id,
                                                parsed_title, season_number, episode_number)
                           or (None if has_specific_anime_alias(index, candidate.imdb_id,
@@ -109,7 +109,6 @@ def match_title(index: MetadataIndex, title: str, year: int | None = None,
             imdb_season, imdb_episode = mapped["season"], mapped["episode"]
             anidb_id, anidb_episode = mapped["anidb_id"], mapped["anidb_episode"]
         else:
-            from .anime_title_matcher import resolve_titled_anime
             titled = resolve_titled_anime(index, best.imdb_id, parsed_title,
                                           imdb_season, imdb_episode)
             if titled is not None:
