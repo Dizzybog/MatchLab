@@ -106,7 +106,9 @@ def resolve_titled_anime(index, imdb_id: str, parsed_title: str,
             # The base title uses global TVDB season numbering.
             LOG.debug("anime_title stage=global imdb=%s anidb=%s season=%d episode=%d",
                       imdb_id, selected, season, episode)
-            return index.resolve_anime_episode(imdb_id, season, episode)
+            result = index.resolve_anime_episode(imdb_id, season, episode)
+            return (dict(anidb_id=result[0], anidb_episode=result[1],
+                         season=season, episode=episode) if result else None)
 
         # Specific subtitle/part uses a relative season offset among siblings
         # of the same IMDb ID (as in match_torrent_stream_anime_resolve).
@@ -151,4 +153,17 @@ def resolve_titled_anime(index, imdb_id: str, parsed_title: str,
         LOG.info("anime_title stage=relative imdb=%s title=%r selected=%s target=%s "
                  "relative_season=%d anidb_episode=%d",
                  imdb_id, parsed_title, selected, target, season, local)
-        return target, local
+        # Map back to the canonical TVDB/IMDb season and episode, rather
+        # than echoing the part-relative season from the torrent title.
+        mapped_rows = [m for m in rows if m["tvdb_season"] > 0
+                       and local >= max(m["start"], 1)
+                       and (m["end"] <= 0 or local <= m["end"])]
+        coordinates = {(m["tvdb_season"], local + m["offset"])
+                       for m in mapped_rows}
+        if len(coordinates) != 1:
+            LOG.warning("anime_title stage=canonical_ambiguous imdb=%s target=%s coordinates=%s",
+                        imdb_id, target, sorted(coordinates))
+            return None
+        tvdb_season, tvdb_episode = coordinates.pop()
+        return dict(anidb_id=target, anidb_episode=local,
+                    season=tvdb_season, episode=tvdb_episode)
