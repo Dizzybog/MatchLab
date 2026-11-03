@@ -156,7 +156,8 @@ class MetadataIndex:
             if series and release_title:
                 from .country_aliases import country_title_candidates
                 for candidate in country_title_candidates(release_title):
-                    country_rows.extend(valid(select("clean_title=?", (candidate,), _SERIES)))
+                    country_rows.extend(r for r in select("clean_title=?", (candidate,), _SERIES)
+                                        if eligible(r))
             if country_rows:
                 rows = country_rows
                 stage = "country_exact"
