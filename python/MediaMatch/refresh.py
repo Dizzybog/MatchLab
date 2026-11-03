@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .importers import update_imdb
+from .anidb_titles import download_anidb_titles, import_anidb_titles
 from .stremthru_sources import update_stremthru_anime
 from .index import MetadataIndex
 
@@ -31,7 +32,8 @@ def refresh_local(path: str | Path) -> tuple[int, int]:
         index = MetadataIndex(staging)
         imdb_count = update_imdb(index)
         anime_links, anime_episodes = update_stremthru_anime(index)
-        anime_count = anime_links + anime_episodes
+        alias_count = import_anidb_titles(index, download_anidb_titles())
+        anime_count = anime_links + anime_episodes + alias_count
         if imdb_count <= 0 or anime_links <= 0 or anime_episodes <= 0:
             raise ValueError("Metadata import incomplete; refusing to replace live database")
         with index.connect() as db:
