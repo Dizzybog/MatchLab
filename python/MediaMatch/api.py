@@ -37,8 +37,29 @@ def match_title(index: MetadataIndex, title: str, year: int | None = None,
     if not matches:
         return None
     best = matches[0]
-    # Without a year, identically named works are ambiguous.
-    if len(matches) > 1:
+    # A uniquely resolvable anime episode beats identically named non-anime
+    # titles, including live-action adaptations without episode crosswalks.
+    if len(matches) > 1 and parsed_episodes:
+        season_number = min(parsed_seasons) if parsed_seasons else None
+        episode_number = min(parsed_episodes)
+        verified = []
+        for candidate in matches:
+            if not candidate.anime_ids.get("anidb"):
+                continue
+            result = (
+                index.resolve_anime_episode(candidate.imdb_id, season_number, episode_number)
+                if season_number is not None
+                else index.resolve_anime_absolute(candidate.imdb_id, episode_number)
+            )
+            if result is not None:
+                verified.append(candidate)
+        if len(verified) == 1:
+            best = verified[0]
+        elif len(verified) > 1:
+            return None
+        elif not target_year:
+            return None
+    elif len(matches) > 1:
         other = matches[1]
         if not target_year or abs(best.year - target_year) == abs(other.year - target_year):
             return None
