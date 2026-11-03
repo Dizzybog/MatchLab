@@ -176,6 +176,70 @@ pub fn import_animeapi(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>{
     tx.commit()?;
     Ok(count)
 }
+
+/// Import AniDB's official compressed title aliases into an existing staging DB.
+/// The XML is processed incrementally to keep memory usage bounded.
+pub fn import_anidb_titles(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>{
+    use quick_xml::{Reader,events::Event};
+    let file=File::open(source)?;
+    let input:Box<dyn Read>=if source.extension().is_some_and(|e|e=="gz"){
+        Box::new(flate2::read::GzDecoder::new(BufReader::new(file)))
+    }else{Box::new(BufReader::new(file))};
+    let mut xml=Reader::from_reader(BufReader::new(input));
+    xml.config_mut().trim_text(true);
+    let mut db=Connection::open(db_path)?;
+    let tx=db.transaction()?;
+    let mut insert=tx.prepare_cached("INSERT OR IGNORE INTO anidb_titles VALUES(?1,?2,?3,?4,?5)")?;
+    let mut buf=Vec::new();
+    let mut anime_id=String::new();
+    let mut title_type=String::new();
+    let mut language=String::new();
+    let mut inside_title=false;
+    let mut count=0u64;
+    loop {
+        match xml.read_event_into(&mut buf)? {
+            Event::Start(ref e) if e.name().as_ref()==b"anime"=>{
+                anime_id.clear();
+                for attr in e.attributes().flatten(){
+                    if attr.key.as_ref()==b"aid"{
+                        anime_id=attr.unescape_value()?.into_owned();
+                    }
+                }
+            },
+            Event::Start(ref e) if e.name().as_ref()==b"title"=>{
+                inside_title=true;
+                title_type.clear();
+                language.clear();
+                for attr in e.attributes().flatten(){
+                    let key=attr.key.as_ref();
+                    let value=attr.unescape_value()?.into_owned();
+                    if key==b"type"{title_type=value;}
+                    else if key==b"lang" || key==b"xml:lang"{language=value;}
+                }
+            },
+            Event::Text(ref e) if inside_title && anime_id.parse::<u64>().unwrap_or(0)>0=>{
+                let title=e.unescape()?.into_owned();
+                let key=clean(&title);
+                if !key.is_empty() && matches!(title_type.as_str(),"main"|"official"|"syn"|"synonym"|"short"){
+                    insert.execute(params![anime_id,title,key,title_type,language])?;
+                    count+=1;
+                }
+            },
+            Event::End(ref e) if e.name().as_ref()==b"title"=>inside_title=false,
+            Event::End(ref e) if e.name().as_ref()==b"anime"=>anime_id.clear(),
+            Event::Eof=>break,
+            _=>{}
+        }
+        buf.clear();
+    }
+    drop(insert);
+    if count==0{return Err("AniDB titles contained no usable aliases".into());}
+    let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
+    tx.execute("INSERT OR REPLACE INTO metadata_state VALUES('anidb_titles',?1,?2)",
+        params![now,count])?;
+    tx.commit()?;
+    Ok(count)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
