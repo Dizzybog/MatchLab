@@ -161,50 +161,33 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
     } else {
         // Python match_title refuses ambiguous IMDb identities rather than
         // silently returning the first equally plausible candidate.
-        let mut chosen=imdb.first();
-        if let (Some(first),Some(second))=(imdb.first(),imdb.get(1)) {
-            let ambiguous=year.is_none() || (first.year-year.unwrap_or_default()).abs()
-                ==(second.year-year.unwrap_or_default()).abs();
-            if ambiguous {
-                // With episode coordinates, a single verified anime crosswalk
-                // can disambiguate otherwise identically named IMDb titles.
-                let mut verified=Vec::new();
-                if let Some(ep)=episodes.first() {
-                    for candidate in &imdb {
-                        let mapped=match seasons.first().copied() {
-                            Some(season) => {
-                                let titled=anime_title::resolve(&db,&candidate.imdb_id,title,season,*ep)
-                                    .map_err(|e|e.to_string())?;
-                                if titled.is_some(){titled}
-                                else if anime_title::has_specific_alias(&db,&candidate.imdb_id,title)
-                                    .map_err(|e|e.to_string())? {None}
-                                else {anime_resolver::resolve_season(&db,&candidate.imdb_id,season,*ep)
-                                    .map_err(|e|e.to_string())?}
-                            }
-                            None => anime_resolver::resolve_absolute(&db,&candidate.imdb_id,*ep)
-                                .map_err(|e|e.to_string())?,
-                        };
-                        if let Some(mapped)=mapped{verified.push((candidate,mapped));}
+        // Always select a candidate. A verified anime crosswalk takes priority;
+        // otherwise IMDb V4 ranking (including stable IMDb ID tie-break) wins.
+        let mut chosen_index=0usize;
+        if series {
+            if let Some(ep)=episodes.first().copied() {
+                for (index,candidate) in imdb.iter().enumerate() {
+                    let mapped=match seasons.first().copied() {
+                        Some(season) => {
+                            let titled=anime_title::resolve(&db,&candidate.imdb_id,title,season,ep)
+                                .map_err(|e|e.to_string())?;
+                            if titled.is_some(){titled}
+                            else if anime_title::has_specific_alias(&db,&candidate.imdb_id,title)
+                                .map_err(|e|e.to_string())? {None}
+                            else {anime_resolver::resolve_season(&db,&candidate.imdb_id,season,ep)
+                                .map_err(|e|e.to_string())?}
+                        }
+                        None => anime_resolver::resolve_absolute(&db,&candidate.imdb_id,ep)
+                            .map_err(|e|e.to_string())?,
+                    };
+                    if mapped.is_some() {
+                        chosen_index=index;
+                        break;
                     }
                 }
-                if verified.len()==1 {
-                    let (candidate,mapped)=&verified[0];
-                    let imdb_id=&candidate.imdb_id;
-                    let aid=&mapped.anidb_id;
-                    let ae=mapped.anidb_episode;
-                    let se=mapped.season;
-                    let ep=mapped.episode;
-                    return Ok(Diagnostic{parsed:Value::Object(parsed),normalized_title:key,
-                        imdb_candidates:imdb,anime_candidate:None,
-                        selected:Some(json!({"imdb_id":imdb_id,"season":se,"episode":ep,
-                            "sid":format!("{imdb_id}:{se}:{ep}"),
-                            "anime":{"anidb_id":aid,"episode":ae,"asid":format!("{aid}:{ae}")},
-                            "match_source":"imdb_verified_anime"})),
-                        reason:"Unique verified anime crosswalk among IMDb candidates".into()});
-                }
-                chosen=None;
             }
         }
+        let chosen=imdb.get(chosen_index);
         if let Some(c)=chosen {
             let mut selected_season=seasons.first().copied();
             let mut selected_episode=episodes.first().copied();
@@ -231,7 +214,9 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
                         "asid":format!("{}:{}",mapped.anidb_id,mapped.anidb_episode)});
                 } else if anime_title::has_specific_alias(&db,&c.imdb_id,title)
                     .map_err(|e|e.to_string())? {
-                    reject=true;
+                    // Keep the highest-ranked IMDb candidate when an anime
+                    // mapping cannot be verified; never return no match for a tie.
+                    reject=false;
                 }
             }
             if !reject {
