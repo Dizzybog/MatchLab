@@ -1,7 +1,7 @@
-mod imdb_v4;
 //! Experimental native Rust matching service.
 //! Runs against the same SQLite schema as the Python implementation.
 //! This is a parallel implementation, not yet a drop-in replacement.
+mod imdb_v4;
 use axum::{extract::State, http::StatusCode, routing::{get, post}, Json, Router};
 use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
