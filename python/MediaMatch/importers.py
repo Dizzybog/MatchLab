@@ -9,6 +9,7 @@ import json
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .index import MetadataIndex, clean_title
 
@@ -94,9 +95,27 @@ def import_anime_mappings(index: MetadataIndex, path: str | Path) -> int:
         for entry in payload.get("data", []):
             row = {k: "" for k in source_names}
             for item in entry.get("sources", []):
-                for key, source in source_names.items():
-                    if item.get("source", "").upper() == source:
-                        row[key] = str(item.get("id", ""))
+                # anime-offline-database uses URL strings, not {source, id} objects.
+                if isinstance(item, str):
+                    parsed = urlparse(item)
+                    host = (parsed.hostname or "").lower()
+                    ident = parsed.path.rstrip("/").split("/")[-1]
+                    if host in {"anidb.net", "www.anidb.net"}:
+                        row["anidb"] = ident.removeprefix("anime/")
+                    elif host in {"myanimelist.net", "www.myanimelist.net"}:
+                        row["mal"] = ident if ident.isdigit() else parsed.path.strip("/").split("/")[1] if len(parsed.path.strip("/").split("/")) > 1 else ""
+                    elif host in {"anilist.co", "www.anilist.co"}:
+                        row["anilist"] = parsed.path.strip("/").split("/")[1] if len(parsed.path.strip("/").split("/")) > 1 else ""
+                    elif host in {"kitsu.app", "kitsu.io"}:
+                        row["kitsu"] = ident
+                    elif host in {"imdb.com", "www.imdb.com"}:
+                        row["imdb"] = next((part for part in parsed.path.split("/") if part.startswith("tt") and part[2:].isdigit()), "")
+                    elif host in {"thetvdb.com", "www.thetvdb.com"}:
+                        row["tvdb"] = ident
+                elif isinstance(item, dict):
+                    for key, source in source_names.items():
+                        if str(item.get("source", "")).upper() == source:
+                            row[key] = str(item.get("id", ""))
             rows.append(row)
     else:
         rows = csv.DictReader(path.open(encoding="utf-8-sig", newline=""), delimiter="\t")
@@ -107,8 +126,8 @@ def import_anime_mappings(index: MetadataIndex, path: str | Path) -> int:
     db = index.connect()
     try:
         db.execute("BEGIN IMMEDIATE")
-        db.execute("DELETE FROM anime_ids")
-        db.execute("DELETE FROM episode_map")
+        # Preserve manually imported crosswalks and episode mappings on source refresh.
+        # Automatic imports only add known IDs; they must not erase other sources.
         for row in rows:
             imdb_id = row.get("imdb", "")
             key = imdb_id or row.get("anidb", "")
