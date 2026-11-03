@@ -77,3 +77,32 @@ def test_anime_url_sources_and_preserve_episode_maps(tmp_path):
     assert import_anime_mappings(index, file) >= 3
     assert index.anime_lookup("anidb", "123")["imdb"] == "tt0213338"
     assert index.map_anime_episode("123", 1, 2) == [("789", 1, 2)]
+
+
+def test_anime_episode_crosswalk_uses_sql_offset_priority(tmp_path):
+    index = MetadataIndex(tmp_path / "index.sqlite")
+    with index.connect() as db:
+        db.execute(
+            "INSERT INTO anime_ids VALUES(?,?,?)", ("tt2250192", "anidb", "15146"),
+        )
+        db.executemany(
+            "INSERT INTO episode_map VALUES(?,?,?,?,?,?,?,?)",
+            [
+                ("15146", "259640", 1, 4, 1, 20, 0, ""),
+                ("15146", "259640", 1, 4, 1, 12, 12, ""),
+            ],
+        )
+    assert index.resolve_anime_episode("tt2250192", 4, 15) == ("15146", 3)
+    assert index.resolve_anime_episode("tt2250192", 8, 15) is None
+
+
+def test_anime_episode_without_crosswalk_requires_unique_anidb(tmp_path):
+    index = MetadataIndex(tmp_path / "index.sqlite")
+    with index.connect() as db:
+        db.execute("INSERT INTO anime_ids VALUES(?,?,?)",
+                   ("tt0213338", "anidb", "23"))
+    assert index.resolve_anime_episode("tt0213338", 1, 9) == ("23", 9)
+    with index.connect() as db:
+        db.execute("INSERT INTO anime_ids VALUES(?,?,?)",
+                   ("tt0213338", "anidb", "24"))
+    assert index.resolve_anime_episode("tt0213338", 1, 9) is None
