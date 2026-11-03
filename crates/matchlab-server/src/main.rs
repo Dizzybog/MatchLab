@@ -290,8 +290,7 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
                     selected_episode=None;
                 }
             }
-            {
-                Some(json!({"imdb_id":c.imdb_id,"title":c.title,"year":c.year,
+            Some(json!({"imdb_id":c.imdb_id,"title":c.title,"year":c.year,
                     "category":if series {"series"} else {"movie"},
                     "season":selected_season,"episode":selected_episode,
                     "sid":if let (Some(se),Some(ep))=(selected_season,selected_episode){
@@ -300,7 +299,6 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
                     "anime":anime_result,"match_source":"imdb",
                     "matched_title":c.matched_title,"anime_ids":c.anime_ids,
                     "parsed":parsed}))
-            }else{None}
         }else{None}
     };
     let reason = if anime.is_some() {"Verified anime crosswalk"} else if selected.is_some() {
