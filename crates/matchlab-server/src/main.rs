@@ -261,7 +261,7 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
             let mut selected_season=seasons.first().copied();
             let mut selected_episode=episodes.first().copied();
             let mut anime_result=Value::Null;
-            let mut reject=false;
+
             if let Some(ep)=selected_episode {
                 let mapped=if let Some(season)=selected_season {
                     let titled=anime_title::resolve(&db,&c.imdb_id,title,season,ep)
@@ -281,14 +281,16 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
                     anime_result=json!({"anidb_id":mapped.anidb_id,
                         "episode":mapped.anidb_episode,
                         "asid":format!("{}:{}",mapped.anidb_id,mapped.anidb_episode)});
-                } else if anime_title::has_specific_alias(&db,&c.imdb_id,title)
-                    .map_err(|e|e.to_string())? {
-                    // Keep the highest-ranked IMDb candidate when an anime
-                    // mapping cannot be verified; never return no match for a tie.
-                    reject=false;
+                } else if !c.anime_ids.is_empty() ||
+                    anime_title::has_specific_alias(&db,&c.imdb_id,title)
+                        .map_err(|e|e.to_string())? {
+                    // Anime identity can be valid without a verified episode
+                    // crosswalk. Do not publish the raw release S/E as canonical.
+                    selected_season=None;
+                    selected_episode=None;
                 }
             }
-            if !reject {
+            {
                 Some(json!({"imdb_id":c.imdb_id,"title":c.title,"year":c.year,
                     "category":if series {"series"} else {"movie"},
                     "season":selected_season,"episode":selected_episode,
