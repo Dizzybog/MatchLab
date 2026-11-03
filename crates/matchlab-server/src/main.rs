@@ -30,6 +30,7 @@ struct Candidate {
     year: i32,
     media_type: String,
     matched_title: String,
+    anime_ids: std::collections::BTreeMap<String,String>,
     source: &'static str,
 }
 
@@ -95,7 +96,7 @@ fn candidates(db: &Connection, key: &str, year: Option<i32>, series: bool) -> ru
     )?;
     let rows = stmt.query_map(params![key,year], |r| {
         Ok(Candidate {imdb_id:r.get(0)?,title:r.get(1)?,year:r.get(2)?,
-            media_type:r.get(3)?,matched_title:r.get(4)?,source:"imdb"})
+            media_type:r.get(3)?,matched_title:r.get(4)?,anime_ids:Default::default(),source:"imdb"})
     })?;
     let mut result = Vec::new();
     for row in rows {
@@ -172,7 +173,7 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
         .map_err(|e|e.to_string())?;
     let imdb: Vec<Candidate> = imdb.into_iter().map(|m|Candidate{
         imdb_id:m.imdb_id,title:m.title,year:m.year,media_type:m.media_type,
-        matched_title:m.matched_title,source:"imdb"}).collect();
+        matched_title:m.matched_title,anime_ids:m.anime_ids,source:"imdb"}).collect();
     let anime = if series {
         episodes.first().map(|ep|anime_candidate(&db,&key,seasons.first().copied(),*ep))
             .transpose().map_err(|e|e.to_string())?.flatten()
@@ -186,7 +187,9 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
         Some(json!({"imdb_id":imdb_id,"season":season,"episode":episode,
             "sid":format!("{imdb_id}:{season}:{episode}"),
             "anime":{"anidb_id":anidb_id,"episode":ani_episode,"asid":format!("{anidb_id}:{ani_episode}")},
-            "match_source":"anime_priority"}))
+            "match_source":"anime_priority","title":title,"year":year.unwrap_or(0),
+            "category":"series","matched_title":title,
+            "anime_ids":{"anidb":anidb_id},"parsed":parsed}))
     } else {
         // Python match_title refuses ambiguous IMDb identities rather than
         // silently returning the first equally plausible candidate.
@@ -255,7 +258,9 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
                     "sid":if let (Some(se),Some(ep))=(selected_season,selected_episode){
                         format!("{}:{se}:{ep}",c.imdb_id)
                     }else{c.imdb_id.clone()},
-                    "anime":anime_result,"match_source":"imdb"}))
+                    "anime":anime_result,"match_source":"imdb",
+                    "matched_title":c.matched_title,"anime_ids":c.anime_ids,
+                    "parsed":parsed}))
             }else{None}
         }else{None}
     };
