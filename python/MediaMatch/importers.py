@@ -6,6 +6,8 @@ import csv
 import gzip
 import io
 import json
+import logging
+import time
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,13 +15,17 @@ from urllib.parse import urlparse
 
 from .index import MetadataIndex, clean_title
 
+LOG = logging.getLogger(__name__)
 IMDB_BASE = "https://datasets.imdbws.com/"
 _TYPES = {"movie", "tvMovie", "short", "tvShort", "tvSpecial", "tvSeries", "tvMiniSeries"}
 
 
 def _open_tsv(source: str | Path):
     if str(source).startswith(("https://", "http://")):
+        LOG.info("metadata_http_request method=GET url=%s", source)
+        started = time.monotonic()
         response = urllib.request.urlopen(str(source), timeout=120)
+        LOG.info("metadata_http_response url=%s status=%s content_length=%s elapsed_seconds=%.1f", source, response.status, response.headers.get("Content-Length", "unknown"), time.monotonic()-started)
         return io.TextIOWrapper(gzip.GzipFile(fileobj=response), encoding="utf-8", newline="")
     path = Path(source)
     binary = gzip.open(path, "rb") if path.suffix == ".gz" else path.open("rb")
@@ -33,6 +39,7 @@ def import_imdb(index: MetadataIndex, basics: str | Path, akas: str | Path,
     IMDb title.akas includes aliases for episodes, games and many other
     unsupported types. Never stage all of those rows on disk.
     """
+    LOG.info("imdb_import_start basics=%s akas=%s episodes=%s", basics, akas, episodes)
     db = index.connect()
     count = 0
     try:
@@ -85,6 +92,7 @@ def import_imdb(index: MetadataIndex, basics: str | Path, akas: str | Path,
             db.execute("DELETE FROM imdb_akas")
             batch.clear()
 
+        LOG.info("imdb_import_progress stage=basics count=%d", count)
         with _open_tsv(akas) as stream:
             for row in csv.DictReader(stream, delimiter="\t"):
                 title = row.get("title", "")
@@ -100,6 +108,7 @@ def import_imdb(index: MetadataIndex, basics: str | Path, akas: str | Path,
                 if len(batch) >= 20000:
                     flush_aliases()
         flush_aliases()
+        LOG.info("imdb_import_progress stage=akas count=%d", count)
         db.execute("DROP TABLE imdb_akas")
 
         if episodes:
@@ -125,7 +134,9 @@ def import_imdb(index: MetadataIndex, basics: str | Path, akas: str | Path,
         db.execute("INSERT OR REPLACE INTO metadata_state VALUES(?,?,?)",
                    ("imdb", datetime.now(UTC).isoformat(), count))
         db.commit()
+        LOG.info("imdb_import_success count=%d", count)
     except BaseException:
+        LOG.exception("imdb_import_failed")
         db.rollback()
         raise
     finally:

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import gzip
 import io
+import logging
+import time
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
 
 from .index import MetadataIndex, clean_title
 
+LOG = logging.getLogger(__name__)
 ANIDB_TITLES_URL = "https://anidb.net/api/anime-titles.xml.gz"
 
 
@@ -17,8 +20,12 @@ def download_anidb_titles() -> bytes:
     request = urllib.request.Request(ANIDB_TITLES_URL, headers={
         "User-Agent": "Mozilla/5.0 (compatible; torrent-parse-match/0.1)",
     })
+    LOG.info("metadata_http_request method=GET url=%s", ANIDB_TITLES_URL)
+    started = time.monotonic()
     with urllib.request.urlopen(request, timeout=180) as response:
-        return response.read()
+        payload = response.read()
+        LOG.info("metadata_http_response url=%s status=%s bytes=%d elapsed_seconds=%.1f", ANIDB_TITLES_URL, response.status, len(payload), time.monotonic()-started)
+        return payload
 
 
 def import_anidb_titles(index: MetadataIndex, archive: bytes) -> int:
@@ -62,4 +69,5 @@ def import_anidb_titles(index: MetadataIndex, archive: bytes) -> int:
             db.execute("INSERT OR REPLACE INTO metadata_state VALUES(?,?,?)",
                        ("anidb_titles", datetime.now(UTC).isoformat(), count))
             db.commit()
+    LOG.info("anidb_titles_import_success aliases=%d", count)
     return count

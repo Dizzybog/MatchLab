@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
+import time
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
 
 from .index import MetadataIndex
 
+LOG = logging.getLogger(__name__)
 ANIMEAPI_URL = "https://raw.githubusercontent.com/nattadasu/animeApi/refs/heads/v3/database/animeapi.tsv"
 ANIMELISTS_URL = "https://raw.githubusercontent.com/Anime-Lists/anime-lists/refs/heads/master/anime-list.xml"
 STREMTHRU_OVERRIDE_URL = "https://raw.githubusercontent.com/MunifTanjim/stremthru/main/internal/animelists/anime-list.override.xml"
@@ -21,8 +24,12 @@ STREMTHRU_OVERRIDE_URL = "https://raw.githubusercontent.com/MunifTanjim/stremthr
 
 def _download(url: str) -> bytes:
     request = urllib.request.Request(url, headers={"User-Agent": "torrent-parse-match/0.1"})
+    LOG.info("metadata_http_request method=GET url=%s", url)
+    started = time.monotonic()
     with urllib.request.urlopen(request, timeout=180) as response:
-        return response.read()
+        payload = response.read()
+        LOG.info("metadata_http_response url=%s status=%s bytes=%d elapsed_seconds=%.1f", url, response.status, len(payload), time.monotonic()-started)
+        return payload
 
 
 def _integer(value: str | None, default: int = 0) -> int:
@@ -70,6 +77,7 @@ def import_animeapi(index: MetadataIndex, payload: bytes) -> int:
         db.execute("INSERT OR REPLACE INTO metadata_state VALUES(?,?,?)",
                    ("animeapi", datetime.now(UTC).isoformat(), count))
         db.commit()
+    LOG.info("animeapi_import_success links=%d identities=%d", len(links), len(identities))
     return len(links)
 
 
@@ -101,6 +109,7 @@ def import_animelists(index: MetadataIndex, payload: bytes,
         db.execute("INSERT OR REPLACE INTO metadata_state VALUES(?,?,?)",
                    ("animelists", datetime.now(UTC).isoformat(), len(mappings)))
         db.commit()
+    LOG.info("animelists_import_success mappings=%d identities=%d", len(mappings), len(ids))
     return len(mappings)
 
 

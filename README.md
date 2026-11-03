@@ -9,7 +9,7 @@ You do not need to set up a database, download metadata manually, configure a sc
 ## What it does
 
 - Reads complete torrent release names, including quality and encoding tags.
-- Matches movies and TV series to IMDb titles and alternate names.
+- Matches movies and TV series to IMDb titles and alternate names using ordered exact, prefix, reverse-suffix and half-prefix matching stages.
 - Recognizes release years and season/episode numbers.
 - Supports anime aliases and conversions between different episode-numbering systems.
 - Returns **one match** in JSON, or `null` if it cannot determine a reliable match.
@@ -31,6 +31,8 @@ services:
   torrent-parse-match:
     image: ghcr.io/dizzybog/torrent-parse-match:latest
     pull_policy: always
+    environment:
+      LOG_LEVEL: DEBUG
     container_name: torrent-parse-match
     restart: unless-stopped
     ports:
@@ -79,6 +81,20 @@ docker logs -f torrent-parse-match
 ```
 
 The database is stored in the Docker volume, so restarting or updating the container does not delete it.
+
+### Logs and shutdown
+
+The container uses **tini** as PID 1 to forward signals and reap child processes. The API handles SIGTERM/SIGINT and stops accepting requests cleanly.
+
+By default, `LOG_LEVEL=DEBUG` prints timestamps and detailed diagnostics to standard output. View them with:
+
+```bash
+docker logs -f --timestamps torrent-parse-match
+```
+
+Logs include incoming HTTP method, path, remote IP and request body, each response status and JSON body, title parsing, IMDb candidate/matching stage, metadata freshness checks, download URLs and HTTP status, import counts, errors with stack traces, and startup/shutdown. Metadata checks run at startup and then daily; downloads occur when data is missing or at least seven days old. Set `LOG_LEVEL=INFO` to reduce per-candidate debug output.
+
+**Privacy:** Request titles and complete JSON request/response bodies appear in logs. Avoid putting secrets in request bodies or query strings, and restrict access to Docker logs. Metadata downloads are logged by URL and HTTP status; large metadata file contents are not logged.
 
 ## Use the API
 
@@ -160,6 +176,12 @@ To run the tests locally, install Python 3.11+, Rust and the package dependencie
 python -m pip install . pytest
 python -m pytest -q tests/
 ```
+
+## Matching behavior
+
+The IMDb matcher uses ordered matching stages inspired by its PostgreSQL V4 implementation: forward/exact prefix, shorter prefix, indexed reverse suffix, and half-prefix fallback. Candidate selection also uses year proximity, original title, US aliases, title type and alias counts. Season limits are checked for TV series. Matching runs entirely against local SQLite metadata; no PostgreSQL instance is needed.
+
+The implementation is not yet a byte-for-byte port of every PostgreSQL V4 branch. In particular, country-specific alias expansion and some existing-ID validation rules still differ. The source has regression tests for the core prefix and suffix cases.
 
 ## Current limitations
 
