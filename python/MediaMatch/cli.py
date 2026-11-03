@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 
 from .api import match_title, serve
 from .importers import import_anime_mappings, import_imdb, import_sql_crosswalk, update_anime, update_imdb
@@ -30,6 +31,9 @@ def main() -> None:
     match.add_argument("title")
     match.add_argument("--year", type=int)
     match.add_argument("--series", action="store_const", const=True, default=None)
+    daemon = commands.add_parser("service", help="API with automatic metadata updates")
+    daemon.add_argument("--host", default="0.0.0.0")
+    daemon.add_argument("--port", type=int, default=8765)
     server = commands.add_parser("serve")
     server.add_argument("--host", default="127.0.0.1")
     server.add_argument("--port", type=int, default=8765)
@@ -53,6 +57,10 @@ def main() -> None:
         print(f"Imported {links} anime series links and {maps} episode mappings")
     elif args.command == "match":
         print(json.dumps(match_title(index, args.title, args.year, series=args.series), ensure_ascii=False, indent=2))
+    elif args.command == "service":
+        from .service import run_service
+        logging.basicConfig(level=logging.INFO)
+        run_service(args.db, args.host, args.port)
     else:
         serve(index, args.host, args.port)
 
