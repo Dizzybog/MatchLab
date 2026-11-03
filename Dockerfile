@@ -7,7 +7,8 @@ RUN python3 -m venv /venv && /venv/bin/pip install --no-cache-dir maturin
 RUN /venv/bin/maturin build --release --interpreter /usr/bin/python3 --out /dist
 
 FROM python:3.11-slim-bookworm
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+RUN apt-get update && apt-get install -y --no-install-recommends tini && rm -rf /var/lib/apt/lists/*
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 LOG_LEVEL=DEBUG
 RUN useradd --system --uid 10001 --create-home app && mkdir -p /data && chown -R app:app /data
 COPY --from=builder /dist/*.whl /tmp/
 RUN pip install --no-cache-dir /tmp/*.whl && rm -f /tmp/*.whl
@@ -15,4 +16,5 @@ USER app
 VOLUME ["/data"]
 EXPOSE 8765
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=3)"
+ENTRYPOINT ["/usr/bin/tini", "-g", "--"]
 CMD ["media-match", "--db", "/data/metadata.sqlite3", "service", "--host", "0.0.0.0", "--port", "8765"]
