@@ -1,6 +1,6 @@
 //! Native IMDb metadata ingestion. Accepts locally downloaded IMDb TSV/TSV.GZ files.
 //! Builds a staging SQLite database and publishes it only after a complete import.
-use std::{error::Error,fs::{self,File},io::{Read,BufReader},path::{Path,PathBuf},time::{SystemTime,UNIX_EPOCH}};
+use std::{error::Error,fs::{self,File},io::{Read,BufReader},path::Path,time::{SystemTime,UNIX_EPOCH}};
 use rusqlite::{params,Connection};
 use unicode_normalization::UnicodeNormalization;
 
