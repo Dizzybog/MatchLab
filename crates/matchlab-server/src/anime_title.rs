@@ -4,7 +4,7 @@ use crate::{anime_resolver,imdb_v4};
 use std::collections::BTreeSet;
 
 #[derive(Debug,Clone)]
-struct Part {id:String,season:i64,offset:i64,start:i64}
+struct Part {id:String}
 
 pub fn resolve(db:&Connection,imdb:&str,title:&str,season:i64,episode:i64)
     -> rusqlite::Result<Option<anime_resolver::Episode>> {
@@ -44,8 +44,7 @@ pub fn resolve(db:&Connection,imdb:&str,title:&str,season:i64,episode:i64)
          FROM episode_map m JOIN anime_series_map l ON l.anidb_id=m.anidb_id
          WHERE l.imdb_id=?1 AND m.tvdb_id=?2 AND m.anidb_season>0 AND m.tvdb_season>0
          GROUP BY m.anidb_id ORDER BY 2,3,4,1")?;
-    let parts=stmt.query_map(params![imdb,family],|r|Ok(Part{id:r.get(0)?,
-        season:r.get(1)?,offset:r.get(2)?,start:r.get(3)?}))?
+    let parts=stmt.query_map(params![imdb,family],|r|Ok(Part{id:r.get(0)?}))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let Some(position)=parts.iter().position(|p|&p.id==selected)else{return Ok(None)};
     let Some(target)=parts.get(position.saturating_add(season as usize-1))else{return Ok(None)};
