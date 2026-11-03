@@ -19,5 +19,6 @@ jobs:
           python -m pip install . pytest
       - name: Run unit tests
         run: python -m pytest -q tests/test_media_match.py
+          python -m pytest -q -s tests/test_100_titles.py
       - name: Docker build
         run: docker build -t torrent-parse-match:test .
