@@ -241,6 +241,78 @@ pub fn import_anidb_titles(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error
     tx.commit()?;
     Ok(count)
 }
+
+/// Stream Anime-Lists mappings into the existing staging database.
+/// Explicit XML mapping entries are retained; implicit part-boundary inference
+/// and upstream override merging are handled separately.
+pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>{
+    use quick_xml::{Reader,events::Event};
+    let file=File::open(source)?;
+    let mut xml=Reader::from_reader(BufReader::new(file));
+    xml.config_mut().trim_text(true);
+    let mut db=Connection::open(db_path)?;
+    let tx=db.transaction()?;
+    let mut insert=tx.prepare_cached("INSERT INTO episode_map VALUES(?1,?2,?3,?4,?5,?6,?7,?8)")?;
+    let mut links=tx.prepare_cached("INSERT OR IGNORE INTO anime_series_map VALUES(?1,?2,?3,0)")?;
+    let mut buf=Vec::new();
+    let (mut aid,mut tvdb,mut imdb)=(String::new(),String::new(),String::new());
+    let (mut default_season,mut default_offset)=(0i64,0i64);
+    let mut count=0u64;
+    loop{
+        match xml.read_event_into(&mut buf)?{
+            Event::Start(ref e) if e.name().as_ref()==b"anime"=>{
+                aid.clear();tvdb.clear();imdb.clear();default_season=0;default_offset=0;
+                for a in e.attributes().flatten(){
+                    let value=a.unescape_value()?.into_owned();
+                    match a.key.as_ref(){
+                        b"anidbid"=>aid=value,
+                        b"tvdbid"=>tvdb=value,
+                        b"imdbid"=>imdb=value,
+                        b"defaulttvdbseason"=>default_season=if value=="a"{-1}else{value.parse().unwrap_or(0)},
+                        b"episodeoffset"=>default_offset=value.parse().unwrap_or(0),
+                        _=>{}
+                    }
+                }
+                if aid.parse::<u64>().unwrap_or(0)>0 && tvdb.parse::<u64>().unwrap_or(0)>0{
+                    if imdb.starts_with("tt"){links.execute(params![imdb,aid,tvdb])?;}
+                    if default_season!=0 {
+                        insert.execute(params![aid,tvdb,1,default_season,
+                            if default_season == -1{1}else{0},0,default_offset,""])?;
+                        count+=1;
+                    }
+                }
+            },
+            Event::Start(ref e) | Event::Empty(ref e) if e.name().as_ref()==b"mapping"=>{
+                if aid.is_empty()||tvdb.is_empty(){buf.clear();continue;}
+                let (mut ani,mut tv,mut start,mut end,mut offset)=(1i64,0i64,0i64,0i64,0i64);
+                for a in e.attributes().flatten(){
+                    let value=a.unescape_value()?.into_owned();
+                    match a.key.as_ref(){
+                        b"anidbseason"=>ani=value.parse().unwrap_or(1),
+                        b"tvdbseason"=>tv=value.parse().unwrap_or(0),
+                        b"start"=>start=value.parse().unwrap_or(0),
+                        b"end"=>end=value.parse().unwrap_or(0),
+                        b"offset"=>offset=value.parse().unwrap_or(0),
+                        _=>{}
+                    }
+                }
+                if (ani==0||ani==1)&&tv!=0{
+                    insert.execute(params![aid,tvdb,ani,tv,start,end,offset,""])?;
+                    count+=1;
+                }
+            },
+            Event::Eof=>break,
+            _=>{}
+        }
+        buf.clear();
+    }
+    drop(insert);drop(links);
+    if count==0{return Err("Anime-Lists contained no episode mappings".into());}
+    let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
+    tx.execute("INSERT OR REPLACE INTO metadata_state VALUES('animelists',?1,?2)",params![now,count])?;
+    tx.commit()?;
+    Ok(count)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
