@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
+import sys
 
 from .api import match_title, serve
 from .importers import import_anime_mappings, import_imdb, import_sql_crosswalk, update_anime, update_imdb
@@ -13,6 +15,7 @@ from .index import MetadataIndex
 def main() -> None:
     parser = argparse.ArgumentParser(prog="media-match")
     parser.add_argument("--db", default="metadata.sqlite3")
+    parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], default=os.getenv("LOG_LEVEL", "DEBUG").upper())
     commands = parser.add_subparsers(dest="command", required=True)
     imdb = commands.add_parser("import-imdb")
     imdb.add_argument("basics")
@@ -38,6 +41,10 @@ def main() -> None:
     server.add_argument("--host", default="127.0.0.1")
     server.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
+    logging.basicConfig(level=getattr(logging, args.log_level), stream=sys.stdout,
+                        format="%(asctime)s %(levelname)s [%(threadName)s] %(name)s: %(message)s",
+                        force=True)
+    logging.getLogger(__name__).info("startup command=%s db=%s log_level=%s", args.command, args.db, args.log_level)
     if args.command in {"update-all", "refresh-local"}:
         imdb_count, anime_count = refresh_local(args.db)
         print(f"Local metadata refreshed: {imdb_count} IMDb rows, {anime_count} anime IDs")
@@ -59,7 +66,6 @@ def main() -> None:
         print(json.dumps(match_title(index, args.title, args.year, series=args.series), ensure_ascii=False, indent=2))
     elif args.command == "service":
         from .service import run_service
-        logging.basicConfig(level=logging.INFO)
         run_service(args.db, args.host, args.port)
     else:
         serve(index, args.host, args.port)
