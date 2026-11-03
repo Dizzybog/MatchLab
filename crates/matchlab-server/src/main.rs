@@ -5,7 +5,7 @@ mod imdb_v4;
 mod anime_resolver;
 mod anime_title;
 mod country_aliases;
-use axum::{extract::State, http::StatusCode, routing::{get, post}, Json, Router};
+use axum::{extract::{Query, State}, http::StatusCode, routing::{get, post}, Json, Router};
 use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -323,6 +323,17 @@ async fn match_request(State(state):State<AppState>,Json(req):Json<MatchRequest>
     }
 }
 
+/// Python API compatibility: GET /match?title=...&year=...
+async fn get_match_request(State(state):State<AppState>,Query(req):Query<MatchRequest>)
+    -> (StatusCode,Json<Value>) {
+    let db=Arc::clone(&state.db);
+    match tokio::task::spawn_blocking(move ||diagnose(&db,&req)).await {
+        Ok(Ok(d))=>(StatusCode::OK,Json(d.selected.unwrap_or(Value::Null))),
+        Ok(Err(e))=>(StatusCode::BAD_REQUEST,Json(json!({"error":e}))),
+        Err(e)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":e.to_string()}))),
+    }
+}
+
 async fn debug_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
     -> (StatusCode,Json<Value>) {
     let db = Arc::clone(&state.db);
@@ -341,7 +352,7 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
     let db = env::var("MATCHLAB_DB").unwrap_or_else(|_|"/data/metadata.sqlite3".into());
     let host = env::var("MATCHLAB_HOST").unwrap_or_else(|_|"127.0.0.1:8766".into());
     let app = Router::new().route("/health",get(health))
-        .route("/match",post(match_request))
+        .route("/match",get(get_match_request).post(match_request))
         .route("/debug/match",post(debug_request))
         .with_state(AppState{db:Arc::new(PathBuf::from(db))});
     let listener = tokio::net::TcpListener::bind(&host).await?;
