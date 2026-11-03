@@ -167,3 +167,31 @@ def resolve_titled_anime(index, imdb_id: str, parsed_title: str,
         tvdb_season, tvdb_episode = coordinates.pop()
         return dict(anidb_id=target, anidb_episode=local,
                     season=tvdb_season, episode=tvdb_episode)
+
+
+def has_specific_anime_alias(index, imdb_id: str, parsed_title: str) -> bool:
+    """A known specific part title must not silently fall back to global S/E."""
+    with index.connect() as db:
+        links = _related(db, imdb_id)
+        if not links:
+            return False
+        aliases = _alias_candidates(db, links, parsed_title)
+        if not aliases:
+            return False
+        best = aliases[0]
+        if len({r[2] for r in aliases if r[:2] == best[:2]}) != 1:
+            return True  # Ambiguous specific title: reject unsafe fallback.
+        selected = best[2]
+        mapping = db.execute(
+            "SELECT tvdb_id FROM episode_map WHERE anidb_id=? "
+            "AND anidb_season>0 AND tvdb_season>0 "
+            "ORDER BY tvdb_season,offset,start LIMIT 1", (selected,),
+        ).fetchone()
+        if not mapping:
+            return True
+        base = db.execute(
+            "SELECT anidb_id FROM episode_map WHERE tvdb_id=? "
+            "AND anidb_season>0 AND tvdb_season>0 "
+            "ORDER BY tvdb_season,offset,start LIMIT 1", (mapping[0],),
+        ).fetchone()
+        return base is None or selected != base[0]
