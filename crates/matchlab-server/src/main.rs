@@ -448,6 +448,16 @@ mod tests {
             }
         }
         assert_eq!(checked,300);
+        // Episode 99 is outside the only verified AniDB interval (1..24).
+        // Preserve the series identity, never publish S01E99 as verified.
+        let unknown=diagnose(&path,&MatchRequest{
+            title:"Animationseries1.S01E99.1080p.WEB-DL".into(),
+            year:None,series:None}).unwrap().selected.unwrap();
+        assert_eq!(unknown["imdb_id"],"tt0000201");
+        assert!(unknown["season"].is_null());
+        assert!(unknown["episode"].is_null());
+        assert_eq!(unknown["sid"],"tt0000201");
+        assert!(unknown["anime"].is_null());
         std::fs::remove_file(&path).unwrap();
     }
     #[test]
