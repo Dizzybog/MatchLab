@@ -17,9 +17,10 @@ def _explicit_pairs(value: str) -> list[tuple[int, int]]:
     """Anime-Lists ';anidb-episode;tvdb-episode;' map expressions."""
     pairs = []
     for part in value.strip(";").split(";"):
-        found = re.fullmatch(r"(\\d+)-(\\d+)", part.strip())
+        found = re.fullmatch(r"(\d+)-(\d+(?:\+\d+)*)", part.strip())
         if found:
-            pairs.append((int(found[1]), int(found[2])))
+            for target in found[2].split("+"):
+                pairs.append((int(found[1]), int(target)))
     return pairs
 
 
