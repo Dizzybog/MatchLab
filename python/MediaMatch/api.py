@@ -75,11 +75,14 @@ def match_title(index: MetadataIndex, title: str, year: int | None = None,
         for candidate in matches:
             if not candidate.anime_ids.get("anidb"):
                 continue
-            result = (
-                index.resolve_anime_episode(candidate.imdb_id, season_number, episode_number)
-                if season_number is not None
-                else index.resolve_anime_absolute(candidate.imdb_id, episode_number)
-            )
+            if season_number is not None:
+                from .anime_title_matcher import resolve_titled_anime
+                result = (resolve_titled_anime(index, candidate.imdb_id,
+                                               parsed_title, season_number, episode_number)
+                          or index.resolve_anime_episode(candidate.imdb_id,
+                                                        season_number, episode_number))
+            else:
+                result = index.resolve_anime_absolute(candidate.imdb_id, episode_number)
             if result is not None:
                 verified.append(candidate)
         if len(verified) == 1:
@@ -104,8 +107,14 @@ def match_title(index: MetadataIndex, title: str, year: int | None = None,
             imdb_season, imdb_episode = mapped["season"], mapped["episode"]
             anidb_id, anidb_episode = mapped["anidb_id"], mapped["anidb_episode"]
         else:
-            mapped = index.resolve_anime_episode(best.imdb_id, imdb_season, imdb_episode)
+            from .anime_title_matcher import resolve_titled_anime
+            mapped = resolve_titled_anime(index, best.imdb_id, parsed_title,
+                                          imdb_season, imdb_episode)
             if mapped is None:
+                mapped = index.resolve_anime_episode(best.imdb_id, imdb_season, imdb_episode)
+            if mapped is None:
+                LOG.info("anime_unresolved imdb=%s title=%r season=%d episode=%d",
+                         best.imdb_id, parsed_title, imdb_season, imdb_episode)
                 return None
             anidb_id, anidb_episode = mapped
         anime = {
