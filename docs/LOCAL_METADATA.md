@@ -44,6 +44,16 @@ authenticated reverse proxy if public access is needed.
   `https://raw.githubusercontent.com/Anime-Lists/anime-lists/refs/heads/master/anime-list.xml`
   for AniDB/TVDB season, absolute episode and offset mappings.
 
+Only supported IMDb `titleType` values are persisted: `movie`, `tvMovie`,
+`short`, `tvShort`, `tvSpecial`, `tvSeries`, and `tvMiniSeries`.
+Episodes, games and all other types are excluded from title/alias storage.
+An otherwise valid title with an unknown release year is retained as year 0.
+
+Each full refresh rebuilds a **new SQLite database from scratch** to reclaim
+space and eliminate stale imported aliases. Custom data manually inserted into
+the old SQLite file is not carried forward. The previous live database is
+preserved if the new build fails.
+
 SQLite tables are `titles`, `seasons`, `anime_ids`,
 `anime_series_map`, `episode_map`, `anidb_titles`, `metadata_state`.
 
