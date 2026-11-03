@@ -254,6 +254,6 @@ mod tests {
         assert_eq!(found["anidb_episode"],4);
         assert!(anime_candidate(&db,"exampleanime",Some(2),4).unwrap().is_none());
         db.execute("INSERT INTO episode_map(anidb_id,tvdb_season,anidb_season,map,offset,start,end) VALUES('123',1,1,'',1,1,12)",[]).unwrap();
-        assert!(anime_candidate(&db,"exampleanime",Some(1),4).unwrap().is_none());
+        assert_eq!(anime_candidate(&db,"exampleanime",Some(1),4).unwrap().unwrap()["anidb_episode"],3);
     }
 }
