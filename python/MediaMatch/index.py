@@ -93,7 +93,7 @@ class MetadataIndex:
             return []
         allowed = _SERIES if series else _MOVIES
         with self.connect() as db:
-            rows = db.execute("SELECT * FROM titles WHERE clean_title=? AND year>0", (key,)).fetchall()
+            rows = db.execute("SELECT * FROM titles WHERE clean_title=? AND type IN ('movie','tvMovie','short','tvShort','tvSpecial','tvSeries','tvMiniSeries')", (key,)).fetchall()
             if not rows and len(key) >= 12:
                 # Bounded longest-prefix fallback using the existing B-tree index.
                 # Never use LIKE '%suffix': it scans the entire IMDb AKA table.
@@ -111,8 +111,8 @@ class MetadataIndex:
                     "SELECT t.* FROM anidb_titles a "
                     "JOIN anime_series_map l ON l.anidb_id=a.anidb_id "
                     "JOIN titles t ON t.imdb_id=l.imdb_id "
-                    "WHERE a.clean_title=? AND t.year>0 "
-                    "GROUP BY t.imdb_id,t.clean_title,t.year,t.region,t.ordering",
+                    "WHERE a.clean_title=? "
+                    "AND t.type IN ('tvSeries','tvMiniSeries')",
                     (key,),
                 ).fetchall()
             grouped: dict[str, list[sqlite3.Row]] = {}
@@ -126,9 +126,9 @@ class MetadataIndex:
             for imdb_id, aliases in grouped.items():
                 max_season = db.execute("SELECT max_season FROM seasons WHERE imdb_id=?", (imdb_id,)).fetchone()
                 best = min(aliases, key=lambda r: (
-                    abs(r["year"] - year) if year else 0,
+                    abs(r["year"] - year) if year and r["year"] else 9999 if year else 0,
                     0 if not duplicate or r["original"] else 1,
-                    r["year"],
+                    r["year"] or 9999,
                     0 if not duplicate or r["region"] == "US" else 1,
                     r["ordering"] or 0,
                 ))
@@ -148,12 +148,19 @@ class MetadataIndex:
                 types = {r["type"]: r["value"] for r in db.execute(
                     "SELECT type,value FROM anime_ids WHERE group_id=?", (imdb_id,)
                 )}
+                if "anidb" not in types:
+                    link = db.execute(
+                        "SELECT DISTINCT anidb_id FROM anime_series_map WHERE imdb_id=?",
+                        (imdb_id,),
+                    ).fetchall()
+                    if len(link) == 1:
+                        types["anidb"] = link[0][0]
                 matches.append(Match(imdb_id, best["title"], best["year"], best["category"],
                                      best["title"], types, best["type"]))
             matches.sort(key=lambda m: (
-                abs(m.year - year) if year else 0,
+                abs(m.year - year) if year and m.year else 9999 if year else 0,
                 min((0 if not duplicate or r["original"] else 1) for r in grouped[m.imdb_id]),
-                m.year,
+                m.year or 9999,
                 _MOVIE_TYPE_RANK.get(m.media_type, 0),
                 min((0 if not duplicate or r["region"] == "US" else 1) for r in grouped[m.imdb_id]),
                 -len(grouped[m.imdb_id]), m.imdb_id,
