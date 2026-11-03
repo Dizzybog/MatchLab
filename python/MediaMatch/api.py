@@ -31,8 +31,27 @@ def match_title(index: MetadataIndex, title: str, year: int | None = None,
         other = matches[1]
         if not target_year or abs(best.year - target_year) == abs(other.year - target_year):
             return None
+    imdb_season = min(parsed.seasons) if parsed.seasons else None
+    imdb_episode = min(parsed.episodes) if parsed.episodes else None
+    anime = None
+    if imdb_episode is not None and best.anime_ids.get("anidb"):
+        resolved = index.resolve_anime_episode(
+            best.imdb_id, imdb_season if imdb_season is not None else 1, imdb_episode,
+        )
+        if resolved:
+            anime = {
+                "anidb_id": resolved[0],
+                "episode": resolved[1],
+                "asid": f"{resolved[0]}:{resolved[1]}",
+            }
     return {
         "imdb_id": best.imdb_id,
+        "season": imdb_season,
+        "episode": imdb_episode,
+        "sid": (f"{best.imdb_id}:{imdb_season}:{imdb_episode}"
+                if imdb_season is not None and imdb_episode is not None
+                else best.imdb_id),
+        "anime": anime,
         "title": best.title,
         "year": best.year,
         "category": best.category,
