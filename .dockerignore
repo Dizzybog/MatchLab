@@ -1,0 +1,14 @@
+.git
+.github
+.venv
+__pycache__
+.pytest_cache
+.ruff_cache
+target
+data
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+*.tsv
+*.gz
