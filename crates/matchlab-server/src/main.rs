@@ -382,6 +382,15 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         tracing::info!("AniDB aliases imported: {count}");
         return Ok(());
     }
+    if args.get(1).is_some_and(|arg|arg=="import-animelists") {
+        if args.len()!=4 {
+            return Err("usage: matchlab-server import-animelists <database.sqlite3> <anime-list.xml>".into());
+        }
+        let count=metadata_import::import_animelists(
+            std::path::Path::new(&args[2]),std::path::Path::new(&args[3]))?;
+        tracing::info!("Anime-Lists mappings imported: {count}");
+        return Ok(());
+    }
     let db = env::var("MATCHLAB_DB").unwrap_or_else(|_|"/data/metadata.sqlite3".into());
     let host = env::var("MATCHLAB_HOST").unwrap_or_else(|_|"127.0.0.1:8766".into());
     let app = Router::new().route("/health",get(health))
