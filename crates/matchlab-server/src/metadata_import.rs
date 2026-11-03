@@ -256,12 +256,12 @@ pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>
     let mut links=tx.prepare_cached("INSERT OR IGNORE INTO anime_series_map VALUES(?1,?2,?3,0)")?;
     let mut buf=Vec::new();
     let (mut aid,mut tvdb,mut imdb)=(String::new(),String::new(),String::new());
-    let (mut default_season,mut default_offset)=(0i64,0i64);
     let mut count=0u64;
     loop{
         match xml.read_event_into(&mut buf)?{
             Event::Start(ref e) if e.name().as_ref()==b"anime"=>{
-                aid.clear();tvdb.clear();imdb.clear();default_season=0;default_offset=0;
+                aid.clear();tvdb.clear();imdb.clear();
+                let (mut default_season,mut default_offset)=(0i64,0i64);
                 for a in e.attributes().flatten(){
                     let value=a.unescape_value()?.into_owned();
                     match a.key.as_ref(){
