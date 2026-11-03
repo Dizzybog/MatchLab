@@ -313,6 +313,38 @@ pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>
     tx.commit()?;
     Ok(count)
 }
+
+/// Build all metadata in a disposable database, validate each required dataset,
+/// then atomically replace the live SQLite file only after success.
+/// Inputs are local files so callers can download and verify sources independently.
+pub fn refresh_from_files(
+    target:&Path,basics:&Path,akas:&Path,episodes:&Path,
+    animeapi:&Path,animelists:&Path,anidb_titles:&Path,
+)->Result<(u64,u64,u64,u64),Box<dyn Error>>{
+    let parent=target.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+    let stamp=SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let stage=parent.join(format!(".matchlab-full-{}-{stamp}.sqlite3",std::process::id()));
+    let result=(||{
+        let imdb=import_imdb(&stage,basics,akas,episodes)?;
+        let links=import_animeapi(&stage,animeapi)?;
+        let episodes_count=import_animelists(&stage,animelists)?;
+        let aliases=import_anidb_titles(&stage,anidb_titles)?;
+        if imdb==0||links==0||episodes_count==0||aliases==0{
+            return Err("incomplete metadata: refusing to replace live database".into());
+        }
+        {
+            let db=Connection::open(&stage)?;
+            let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
+            db.execute("INSERT OR REPLACE INTO metadata_state VALUES('full_refresh',?1,?2)",
+                params![now,imdb+links+episodes_count+aliases])?;
+        }
+        fs::rename(&stage,target)?;
+        Ok((imdb,links,episodes_count,aliases))
+    })();
+    if result.is_err(){let _=fs::remove_file(&stage);}
+    result
+}
 #[cfg(test)]
 mod tests {
     use super::*;
