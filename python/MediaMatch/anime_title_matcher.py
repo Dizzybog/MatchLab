@@ -118,7 +118,7 @@ def resolve_titled_anime(index, imdb_id: str, parsed_title: str,
             "FROM episode_map m JOIN anime_series_map l ON l.anidb_id=m.anidb_id "
             "WHERE l.imdb_id=? AND m.tvdb_id=? AND "
             "m.anidb_season>0 AND m.tvdb_season>0 "
-            "GROUP BY m.anidb_id ORDER BY tvdb_season,offset,start,anidb_id",
+            "GROUP BY m.anidb_id ORDER BY tvdb_season,offset,start,m.anidb_id",
             (imdb_id, family),
         ).fetchall()
         parts = [r["anidb_id"] for r in siblings]
