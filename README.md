@@ -236,3 +236,11 @@ Logs identify both candidate pools and the selected source as
 `match_source: "anime_priority"` for anime. The anime candidate's
 `title` and `year` fields are parsed from the release, not verified
 against IMDb title metadata.
+
+### MatchLab web dashboard
+
+Open **http://127.0.0.1:8765/dashboard** after the service is running and its initial metadata download has finished. The dashboard is included in the existing Docker image and uses the same HTTP port; no additional container or database is required.
+
+Paste a torrent release title, optionally override its year or type, and click **Analyze**. The dashboard shows parsed fields, IMDb V4 candidates, anime candidate and canonical episode mapping, selected IMDb ID/SID/ASID, reason for selection, execution time and expandable JSON diagnostics. The same diagnostics are available via `POST /debug/match` with `{"title":"Example.Show.S01E01"}`.
+
+The dashboard and diagnostic endpoint expose metadata and log complete request titles. Keep port 8765 bound to localhost or protect it with authentication and HTTPS before exposing it publicly. The provided Compose configuration binds to `127.0.0.1` by default.
