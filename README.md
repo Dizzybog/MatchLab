@@ -125,17 +125,18 @@ from MediaMatch import MetadataIndex
 from MediaMatch.api import match_title
 
 index = MetadataIndex("metadata.sqlite3")
-matches = match_title(index, "Dune 2021 2160p", year=2021)
+match = match_title(index, "Dune 2021 2160p", year=2021)  # dict or None
 ```
 
 ```sh
-media-match --db metadata.sqlite3 update-imdb
-media-match --db metadata.sqlite3 update-anime
+media-match --db metadata.sqlite3 refresh-local
 media-match --db metadata.sqlite3 match "Cowboy Bebop 1998"
 media-match --db metadata.sqlite3 serve --host 127.0.0.1 --port 8765
 ```
 
-The HTTP endpoint is `GET /match?title=...&year=...`. A scheduled GitHub workflow
-refreshes both source datasets and publishes the generated SQLite index as a
-30-day workflow artifact. For a persistent local service, schedule `update-all`
-with your operating system's task scheduler.
+The HTTP endpoints are `GET /match?title=...&year=...` and `POST /match`
+(with JSON `{"t_title":"..."}`). Both return one match object or JSON `null`.
+Metadata refresh runs **on the host**, not GitHub. See
+[`docs/LOCAL_METADATA.md`](docs/LOCAL_METADATA.md) for atomic local refresh
+and a weekly cron schedule. The full PostgreSQL V4 matcher and ASID resolver
+are not yet ported.
