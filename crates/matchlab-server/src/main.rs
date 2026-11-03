@@ -189,7 +189,7 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
             "anime":{"anidb_id":anidb_id,"episode":ani_episode,"asid":format!("{anidb_id}:{ani_episode}")},
             "match_source":"anime_priority","title":title,"year":year.unwrap_or(0),
             "category":"series","matched_title":title,
-            "anime_ids":{"anidb":anidb_id},"parsed":parsed}))
+            "anime_ids":{"anidb":anidb_id},"parsed":parsed.clone()}))
     } else {
         // Python match_title refuses ambiguous IMDb identities rather than
         // silently returning the first equally plausible candidate.
