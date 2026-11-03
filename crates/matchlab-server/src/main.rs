@@ -3,6 +3,7 @@
 //! This is a parallel implementation, not yet a drop-in replacement.
 mod imdb_v4;
 mod anime_resolver;
+mod anime_title;
 use axum::{extract::State, http::StatusCode, routing::{get, post}, Json, Router};
 use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
@@ -114,7 +115,12 @@ fn anime_candidate(db: &Connection, key: &str, season: Option<i64>, episode: i64
     // Resolve only through verified anime crosswalk tables, including explicit
     // mappings, split seasons and absolute numbering.
     let mapped = match season {
-        Some(season) if season > 0 => anime_resolver::resolve_season(db,imdb,season,episode)?,
+        Some(season) if season > 0 => {
+            let titled=anime_title::resolve(db,imdb,key,season,episode)?;
+            if titled.is_some() { titled }
+            else if anime_title::has_specific_alias(db,imdb,key)? { None }
+            else { anime_resolver::resolve_season(db,imdb,season,episode)? }
+        },
         None => anime_resolver::resolve_absolute(db,imdb,episode)?,
         _ => None,
     };
