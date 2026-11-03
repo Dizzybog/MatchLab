@@ -10,6 +10,8 @@ from pathlib import Path
 
 _SERIES = {"tvSeries", "tvMiniSeries"}
 _MOVIES = {"movie", "tvMovie", "short", "tvShort", "tvSpecial"}
+_MOVIE_TYPE_RANK = {"movie": 0, "tvMovie": 1, "short": 2,
+                    "tvShort": 3, "tvSpecial": 4}
 
 
 def clean_title(value: str) -> str:
@@ -25,6 +27,7 @@ class Match:
     category: str
     matched_title: str
     anime_ids: dict[str, str]
+    media_type: str = ""
 
 
 class MetadataIndex:
@@ -146,11 +149,12 @@ class MetadataIndex:
                     "SELECT type,value FROM anime_ids WHERE group_id=?", (imdb_id,)
                 )}
                 matches.append(Match(imdb_id, best["title"], best["year"], best["category"],
-                                     best["title"], types))
+                                     best["title"], types, best["type"]))
             matches.sort(key=lambda m: (
                 abs(m.year - year) if year else 0,
                 min((0 if not duplicate or r["original"] else 1) for r in grouped[m.imdb_id]),
                 m.year,
+                _MOVIE_TYPE_RANK.get(m.media_type, 0),
                 min((0 if not duplicate or r["region"] == "US" else 1) for r in grouped[m.imdb_id]),
                 -len(grouped[m.imdb_id]), m.imdb_id,
             ))
