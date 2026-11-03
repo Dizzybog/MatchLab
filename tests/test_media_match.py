@@ -129,8 +129,8 @@ def test_bidirectional_one_piece_style_numbering(tmp_path, monkeypatch):
 
     def fake_parse(title):
         import re
-        season_match = re.search(r"S(\\d+)E(\\d+)", title, re.I)
-        absolute_match = re.search(r"Episode\\s+(\\d+)", title, re.I)
+        season_match = re.search(r"S(\d+)E(\d+)", title, re.I)
+        absolute_match = re.search(r"Episode\s+(\d+)", title, re.I)
         seasons = [int(season_match[1])] if season_match else []
         episodes = [int(season_match[2])] if season_match else (
             [int(absolute_match[1])] if absolute_match else []
