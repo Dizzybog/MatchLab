@@ -153,10 +153,9 @@ def resolve_absolute_episode(index: MetadataIndex, imdb_id: str,
                           if m["anidb_id"] == link["anidb_id"]
                           and (not link["tvdb_id"] or m["tvdb_id"] == link["tvdb_id"])]
             absolutes = [m for m in associated if m["tvdb_season"] == -1]
-            # A mapping without a global offset is local only when no
-            # other AniDB part can claim the same IMDb title.
-            if not absolutes and len(ids) > 1:
-                continue
+            # Without absolute-order offsets, only accept a result if
+            # precisely one related AniDB part claims the episode.
+            # Ambiguity is rejected below rather than skipping all parts.
             offset = absolutes[0]["offset"] if len(absolutes) == 1 else 0
             local = episode - offset
             if local <= 0:
