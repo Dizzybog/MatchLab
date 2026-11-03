@@ -25,8 +25,10 @@ authenticated reverse proxy if public access is needed.
 - A full successful refresh timestamp is written **only after** all required
   sources were imported. A temporary SQLite database is atomically swapped
   into place. Data survives restarts through the Docker volume.
-- The API starts while the first import runs. `GET /health` reports
-  `metadata_current: false` until the initial import succeeds.
+- The API starts while the first import runs. `GET /health` responds
+  with HTTP 503 until the initial import succeeds; `POST /match` also
+  responds with HTTP 503 rather than incorrectly returning `null`.
+  Stale but previously successful metadata remains available.
 
 ## Public metadata sources
 
@@ -35,12 +37,15 @@ authenticated reverse proxy if public access is needed.
 - StremThru's animeApi v3 source:
   `https://raw.githubusercontent.com/nattadasu/animeApi/refs/heads/v3/database/animeapi.tsv`
   for IMDb/AniDB/TVDB/Trakt identities.
+- StremThru's AniDB title source:
+  `https://anidb.net/api/anime-titles.xml.gz`
+  for Japanese/romaji/English aliases.
 - StremThru's Anime-Lists source:
   `https://raw.githubusercontent.com/Anime-Lists/anime-lists/refs/heads/master/anime-list.xml`
   for AniDB/TVDB season, absolute episode and offset mappings.
 
 SQLite tables are `titles`, `seasons`, `anime_ids`,
-`anime_series_map`, `episode_map`, `metadata_state`.
+`anime_series_map`, `episode_map`, `anidb_titles`, `metadata_state`.
 
 ## API
 
@@ -58,8 +63,8 @@ and `S23E02` are supported through the imported crosswalk; the two are
 
 ## Known limitations
 
-This is not yet a full byte-for-byte port of StremThru's
-`PrepareAniDBTVDBEpisodeMaps`, its embedded XML overrides, and all
-special `map` expressions. It also does not yet guarantee full parity with
-the original PostgreSQL IMDb V4 title matcher. The Docker build and complete
-IMDb bulk refresh have not been validated on Oracle ARM in this PR.
+StremThru's embedded XML override rules, direct episode offsets, inferred
+TVDB season boundaries, and explicit episode maps have been ported. Some
+special episode-before semantics and additional StremThru title-ranking
+heuristics still need parity testing. The Docker build and complete IMDb
+bulk refresh have not been validated on Oracle ARM in this PR.
