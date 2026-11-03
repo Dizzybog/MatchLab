@@ -181,3 +181,19 @@ def test_self_hosted_stremthru_source_import(tmp_path):
     assert import_animelists(index, xml) >= 1
     assert index.resolve_anime_episode("tt0388629", 23, 2) == ("69", 1067)
     assert index.resolve_anime_absolute("tt0388629", 1067)["episode"] == 2
+
+
+def test_metadata_freshness_requires_complete_refresh(tmp_path):
+    from datetime import UTC, datetime, timedelta
+    from MediaMatch.service import metadata_due
+    path = tmp_path / "metadata.sqlite3"
+    assert metadata_due(path)
+    index = MetadataIndex(path)
+    assert metadata_due(path)
+    now = datetime.now(UTC)
+    with index.connect() as db:
+        db.execute("INSERT INTO metadata_state VALUES(?,?,?)",
+                   ("full_refresh", now.isoformat(), 10))
+    assert not metadata_due(path, now=now)
+    assert metadata_due(path, now=now + timedelta(days=7))
+    assert not metadata_due(path, now=now + timedelta(days=6, hours=23))
