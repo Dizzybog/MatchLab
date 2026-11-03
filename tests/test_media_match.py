@@ -101,7 +101,7 @@ def test_anime_episode_without_crosswalk_requires_unique_anidb(tmp_path):
     with index.connect() as db:
         db.execute("INSERT INTO anime_ids VALUES(?,?,?)",
                    ("tt0213338", "anidb", "23"))
-    assert index.resolve_anime_episode("tt0213338", 1, 9) == ("23", 9)
+    assert index.resolve_anime_episode("tt0213338", 1, 9) is None  # no crosswalk, no guess
     with index.connect() as db:
         db.execute("INSERT INTO anime_ids VALUES(?,?,?)",
                    ("tt0213338", "anidb", "24"))
