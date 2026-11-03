@@ -1,7 +1,7 @@
 //! IMDb V4 candidate search ported from MediaMatch/index.py.
 //! The ranking stages intentionally match the Python reference implementation.
 use rusqlite::{params, Connection, Row};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use unicode_normalization::UnicodeNormalization;
 use serde::Serialize;
 
