@@ -197,3 +197,39 @@ def test_metadata_freshness_requires_complete_refresh(tmp_path):
     assert not metadata_due(path, now=now)
     assert metadata_due(path, now=now + timedelta(days=7))
     assert not metadata_due(path, now=now + timedelta(days=6, hours=23))
+
+
+def test_stremthru_override_merging_and_explicit_map():
+    from MediaMatch.animelists import merged_items, prepare_episode_maps
+    original = b'''<anime-list><anime anidbid="230" tvdbid="76703"
+        defaulttvdbseason="a" episodeoffset="0">
+        <mapping-list><mapping anidbseason="1" tvdbseason="1"
+        start="1" end="12" offset="0" /></mapping-list>
+        </anime></anime-list>'''
+    override = b'''<anime-list><anime anidbid="230" tvdbid="76703"
+        episodeoffset="5"><mapping-list><mapping anidbseason="1"
+        tvdbseason="1" start="1" end="12" offset="2" /></mapping-list>
+        </anime></anime-list>'''
+    items = merged_items(original, override)
+    maps = prepare_episode_maps(items)
+    assert any(m[3] == -1 and m[6] == 5 for m in maps)
+    assert any(m[3] == 1 and m[6] == 2 for m in maps)
+
+
+def test_global_absolute_episodeoffset_for_multiple_anidb_parts(tmp_path):
+    index = MetadataIndex(tmp_path / "metadata.sqlite3")
+    with index.connect() as db:
+        db.executemany("INSERT INTO anime_series_map VALUES(?,?,?,?)", [
+            ("tt1234567", "6662", "114801", 0),
+            ("tt1234567", "9980", "114801", 0),
+        ])
+        db.executemany("INSERT INTO episode_map VALUES(?,?,?,?,?,?,?,?)", [
+            ("6662", "114801", 1, -1, 1, 175, 0, ""),
+            ("6662", "114801", 1, 4, 151, 175, -150, ""),
+            ("9980", "114801", 1, -1, 1, 102, 175, ""),
+            ("9980", "114801", 1, 5, 1, 51, 0, ""),
+        ])
+    absolute = index.resolve_anime_absolute("tt1234567", 177)
+    assert absolute is not None
+    assert (absolute["season"], absolute["episode"]) == (5, 2)
+    assert (absolute["anidb_id"], absolute["anidb_episode"]) == ("9980", 2)
