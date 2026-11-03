@@ -1,8 +1,7 @@
 [workspace]
 members = [
   "crates/ptt-core",
-  "crates/rtn-core",
-  "python/torrent_parse_rank_native",
+  "python/torrent_match_native",
 ]
 resolver = "2"
 
@@ -10,10 +9,10 @@ resolver = "2"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
-authors = ["Goldy"]
+authors = ["Dizzybog"]
 description = "A high-performance Rust implementation of The Best Damn Filename Parser You've Ever Used!"
-homepage = "https://github.com/g0ldyy/torrent-parse-rank"
-repository = "https://github.com/g0ldyy/torrent-parse-rank"
+homepage = "https://github.com/Dizzybog/torrent-parse-match"
+repository = "https://github.com/Dizzybog/torrent-parse-match"
 
 [workspace.dependencies]
 aho-corasick = "1.1.4"

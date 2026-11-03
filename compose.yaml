@@ -1,7 +1,7 @@
 services:
-  torrent-imdb-ai:
-    build: .
-    image: torrent-parse-match:local
+  torrent-parse-match:
+    image: ghcr.io/dizzybog/torrent-parse-match:latest
+    pull_policy: always
     container_name: torrent-parse-match
     restart: unless-stopped
     ports:

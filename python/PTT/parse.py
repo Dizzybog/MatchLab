@@ -3,7 +3,7 @@ from collections.abc import Callable
 from typing import Any
 
 import regex
-from torrent_parse_rank_native import (
+from torrent_match_native import (
     ptt_clean_title,
     ptt_languages_translation_table,
     ptt_parse_title,

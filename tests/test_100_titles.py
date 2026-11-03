@@ -1,4 +1,4 @@
-"""Run 100 real RTN parser + SQLite matcher calls against a deterministic fixture.
+"""Run 100 real built-in parser + SQLite matcher calls against a deterministic fixture.
 
 This is an offline integration simulation, not a benchmark against the live
 IMDb corpus. Every case and its single-result output is printed to CI logs.

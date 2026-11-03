@@ -3,9 +3,9 @@ requires = ["maturin>=1.12.6"]
 build-backend = "maturin"
 
 [project]
-name = "torrent-parse-rank"
+name = "torrent-parse-match"
 version = "0.1.0"
-authors = [{ name = "Goldy" }]
+authors = [{ name = "Dizzybog" }]
 description = "A high-performance Rust implementation of The Best Damn Filename Parser You've Ever Used!"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -28,8 +28,8 @@ classifiers = [
 media-match = "MediaMatch.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/g0ldyy/torrent-parse-rank"
-Issues = "https://github.com/g0ldyy/torrent-parse-rank/issues"
+Homepage = "https://github.com/Dizzybog/torrent-parse-match"
+Issues = "https://github.com/Dizzybog/torrent-parse-match/issues"
 
 [dependency-groups]
 dev = [
@@ -39,29 +39,28 @@ dev = [
 ]
 
 [tool.maturin]
-manifest-path = "python/torrent_parse_rank_native/Cargo.toml"
+manifest-path = "python/torrent_match_native/Cargo.toml"
 python-source = "python"
-python-packages = ["torrent_parse_rank_native", "PTT", "RTN", "MediaMatch"]
+python-packages = ["torrent_match_native", "PTT", "MediaMatch"]
 include = [
     { path = "LICENSE", format = "sdist" },
     { path = "LICENSE", format = "wheel" },
     { path = "python/MediaMatch/data/anime-list.override.xml", format = "wheel" },
 ]
 exclude = [
-    { path = "python/torrent_parse_rank_native/.gitignore", format = "wheel" },
-    { path = "python/torrent_parse_rank_native/Cargo.toml", format = "wheel" },
-    { path = "python/torrent_parse_rank_native/src/**", format = "wheel" },
+    { path = "python/torrent_match_native/.gitignore", format = "wheel" },
+    { path = "python/torrent_match_native/Cargo.toml", format = "wheel" },
+    { path = "python/torrent_match_native/src/**", format = "wheel" },
 ]
-module-name = "torrent_parse_rank_native._native"
+module-name = "torrent_match_native._native"
 features = ["pyo3/extension-module"]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py311"
 line-length = 100
 extend-exclude = [
     ".venv",
     ".upstream-tests-cache",
-    "parity_tests/upstream",
     "target",
 ]
 

@@ -7,7 +7,24 @@ import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from RTN import parse
+from types import SimpleNamespace
+from PTT import parse_title
+
+def parse(raw_title: str):
+    """Parse the entire release name using the built-in torrent parser."""
+    data = parse_title(raw_title)
+    def numbers(value):
+        if value is None: return []
+        if isinstance(value, int): return [value]
+        if isinstance(value, (list, tuple)): return [int(x) for x in value if isinstance(x, int) or str(x).isdigit()]
+        return [int(value)] if str(value).isdigit() else []
+    return SimpleNamespace(
+        parsed_title=data.get("title") or "",
+        year=data.get("year"),
+        seasons=numbers(data.get("seasons")),
+        episodes=numbers(data.get("episodes")),
+        model_dump=lambda **_: data,
+    )
 
 from .index import MetadataIndex
 
@@ -18,7 +35,7 @@ def match_title(index: MetadataIndex, title: str, year: int | None = None,
     if not isinstance(title, str) or not title.strip():
         raise ValueError("title must be a non-empty string")
     parsed = parse(title)
-    # RTN handles normal SxxExx / E numbering. Explicit "Episode 1067"
+    # The built-in parser handles normal SxxExx / E numbering. Explicit "Episode 1067"
     # is treated as absolute only when no season was provided.
     absolute = re.search(r"(?i)\b(?:episode|ep)\s*[. _-]*([0-9]{1,5})\b", title)
     parsed_seasons = list(parsed.seasons or [])

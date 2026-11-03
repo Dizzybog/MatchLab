@@ -1,4 +1,4 @@
-name: Validate Docker and metadata matching
+name: Test
 on:
   pull_request:
   push:
@@ -6,20 +6,18 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build and install package
+      - name: Install and test
         run: |
           python -m pip install --upgrade pip
           python -m pip install . pytest
-      - name: Run unit tests
-        run: |
           python -m pytest -q tests/test_media_match.py
           python -m pytest -q -s tests/test_100_titles.py
-      - name: Docker build
+      - name: Build Docker image
         run: docker build -t torrent-parse-match:test .

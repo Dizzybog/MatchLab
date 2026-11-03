@@ -2,7 +2,7 @@ import re
 from collections.abc import Callable
 from datetime import datetime
 
-from torrent_parse_rank_native import ptt_expand_number_range
+from torrent_match_native import ptt_expand_number_range
 
 MAX_EXPANDED_RANGE_ITEMS = 10_000
 
