@@ -79,9 +79,8 @@ def import_imdb(index: MetadataIndex, basics: str | Path, akas: str | Path,
                 SELECT b.imdb_id,a.title,a.clean_title,b.year,b.category,
                        a.region,a.original,a.ordering,b.type
                 FROM imdb_akas a
-                JOIN (SELECT imdb_id,year,category,type FROM titles
-                      WHERE ordering=0 GROUP BY imdb_id) b
-                ON b.imdb_id=a.tid""").rowcount
+                JOIN titles b ON b.imdb_id=a.tid
+                WHERE b.ordering=0""").rowcount
             count += max(inserted, 0)
             db.execute("DELETE FROM imdb_akas")
             batch.clear()
