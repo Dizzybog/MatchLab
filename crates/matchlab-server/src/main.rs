@@ -391,6 +391,18 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         tracing::info!("Anime-Lists mappings imported: {count}");
         return Ok(());
     }
+    if args.get(1).is_some_and(|arg|arg=="refresh-metadata") {
+        if args.len()!=9 {
+            return Err("usage: matchlab-server refresh-metadata <database.sqlite3> <title.basics.tsv.gz> <title.akas.tsv.gz> <title.episode.tsv.gz> <animeapi.tsv> <anime-list.xml> <anime-titles.xml.gz>".into());
+        }
+        let (imdb,links,mappings,aliases)=metadata_import::refresh_from_files(
+            std::path::Path::new(&args[2]),std::path::Path::new(&args[3]),
+            std::path::Path::new(&args[4]),std::path::Path::new(&args[5]),
+            std::path::Path::new(&args[6]),std::path::Path::new(&args[7]),
+            std::path::Path::new(&args[8]))?;
+        tracing::info!("metadata refresh completed: imdb={imdb} anime_links={links} episode_maps={mappings} aliases={aliases}");
+        return Ok(());
+    }
     let db = env::var("MATCHLAB_DB").unwrap_or_else(|_|"/data/metadata.sqlite3".into());
     let host = env::var("MATCHLAB_HOST").unwrap_or_else(|_|"127.0.0.1:8766".into());
     let app = Router::new().route("/health",get(health))
