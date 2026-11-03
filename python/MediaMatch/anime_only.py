@@ -76,3 +76,18 @@ def resolve_anime_title(index, parsed_title: str, season: int | None,
             return None
         mapped = {**mapped, "season": season, "episode": episode}
     return {"imdb_id": imdb_id, **mapped}
+
+
+def is_known_anime_title(index, parsed_title: str) -> bool:
+    """Prevent IMDb fallback after a recognized anime alias fails mapping."""
+    key = clean_title(parsed_title)
+    if len(key) < 4:
+        return False
+    with index.connect() as db:
+        return db.execute(
+            "SELECT 1 FROM anidb_titles a "
+            "JOIN anime_series_map l ON l.anidb_id=a.anidb_id "
+            "WHERE a.clean_title=? OR "
+            "(length(a.clean_title)>=6 AND ? LIKE a.clean_title||'%') LIMIT 1",
+            (key, key),
+        ).fetchone() is not None
