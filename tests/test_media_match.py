@@ -263,6 +263,9 @@ def test_same_title_anime_beats_live_action_when_episode_crosswalk_exists(tmp_pa
             ("tt0388629", "One Piece", "onepiece", 1999, "series", "US", 1, 1, "tvSeries"),
             ("tt11737520", "One Piece", "onepiece", 2023, "series", "US", 1, 1, "tvSeries"),
         ])
+        db.executemany("INSERT INTO seasons VALUES(?,?)", [
+            ("tt0388629", 23), ("tt11737520", 1),
+        ])
         db.execute("INSERT INTO anime_ids VALUES(?,?,?)", ("tt0388629", "anidb", "69"))
         db.execute("INSERT INTO anime_series_map VALUES(?,?,?,?)",
                    ("tt0388629", "69", "81797", 0))
