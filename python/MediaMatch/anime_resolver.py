@@ -24,21 +24,37 @@ def _explicit_pairs(value: str) -> list[tuple[int, int]]:
 
 
 def _links(db, imdb_id: str):
-    rows = db.execute(
+    """IMDb identities plus AniDB siblings belonging to the same TVDB series.
+
+    StremThru fetches related AniDB mappings by TVDB ID, not just by the
+    exact AniDB ID present in the identity dataset.
+    """
+    found = db.execute(
         "SELECT imdb_id,anidb_id,tvdb_id,trakt_season "
         "FROM anime_series_map WHERE imdb_id=?", (imdb_id,),
     ).fetchall()
-    if rows:
-        return rows
-    # Legacy imports without explicit series links: only a single AniDB ID is safe.
-    ids = db.execute(
-        "SELECT DISTINCT value FROM anime_ids WHERE group_id=? AND type='anidb'",
-        (imdb_id,),
-    ).fetchall()
-    if len(ids) != 1:
-        return []
-    return [{"imdb_id": imdb_id, "anidb_id": ids[0][0],
-             "tvdb_id": "", "trakt_season": 0}]
+    links = [dict(r) for r in found]
+    if not links:
+        ids = db.execute(
+            "SELECT DISTINCT value FROM anime_ids "
+            "WHERE group_id=? AND type='anidb'", (imdb_id,),
+        ).fetchall()
+        if len(ids) != 1:
+            return []
+        links = [dict(imdb_id=imdb_id, anidb_id=ids[0][0],
+                      tvdb_id="", trakt_season=0)]
+    tvdb_ids = {r["tvdb_id"] for r in links if r["tvdb_id"]}
+    known = {(r["anidb_id"], r["tvdb_id"]) for r in links}
+    for tvdb in tvdb_ids:
+        for row in db.execute(
+            "SELECT DISTINCT anidb_id FROM episode_map WHERE tvdb_id=?", (tvdb,),
+        ):
+            key = (row[0], tvdb)
+            if key not in known:
+                links.append(dict(imdb_id=imdb_id, anidb_id=row[0],
+                                  tvdb_id=tvdb, trakt_season=0))
+                known.add(key)
+    return links
 
 
 def _crosswalk(db, links):
