@@ -252,3 +252,27 @@ def test_anidb_title_alias_import_and_index(tmp_path):
             ("sousounofrieren1",),
         ).fetchone()
     assert row[0] == "1"
+
+
+def test_same_title_anime_beats_live_action_when_episode_crosswalk_exists(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from MediaMatch import api
+    index = MetadataIndex(tmp_path / "metadata.sqlite3")
+    with index.connect() as db:
+        db.executemany("INSERT INTO titles VALUES(?,?,?,?,?,?,?,?,?)", [
+            ("tt0388629", "One Piece", "onepiece", 1999, "series", "US", 1, 1, "tvSeries"),
+            ("tt11737520", "One Piece", "onepiece", 2023, "series", "US", 1, 1, "tvSeries"),
+        ])
+        db.execute("INSERT INTO anime_ids VALUES(?,?,?)", ("tt0388629", "anidb", "69"))
+        db.execute("INSERT INTO anime_series_map VALUES(?,?,?,?)",
+                   ("tt0388629", "69", "81797", 0))
+        db.execute("INSERT INTO episode_map VALUES(?,?,?,?,?,?,?,?)",
+                   ("69", "81797", 1, 1, 1, 24, 0, ""))
+    monkeypatch.setattr(api, "parse", lambda _: SimpleNamespace(
+        parsed_title="One Piece", year=None, seasons=[1], episodes=[2],
+        model_dump=lambda **__: {},
+    ))
+    result = api.match_title(index, "One Piece S01E02")
+    assert result is not None
+    assert result["imdb_id"] == "tt0388629"
+    assert result["anime"]["asid"] == "69:2"
