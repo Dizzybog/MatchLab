@@ -163,3 +163,21 @@ def test_split_season_reverse_mapping(tmp_path):
     result = index.resolve_anime_absolute("tt1234567", 14)
     assert result is not None
     assert (result["season"], result["episode"]) == (2, 2)
+
+
+def test_self_hosted_stremthru_source_import(tmp_path):
+    from MediaMatch.stremthru_sources import import_animeapi, import_animelists
+    index = MetadataIndex(tmp_path / "index.sqlite")
+    tsv = (
+        "imdb\\tanidb\\tthetvdb\\ttrakt_season\\ttrakt_may_invalid\\tmyanimelist\\n"
+        "tt0388629\\t69\\t81797\\t23\\tfalse\\t21\\n"
+    ).replace("\\t", "\t").replace("\\n", "\n").encode()
+    xml = (b'<anime-list><anime anidbid="69" tvdbid="81797" '
+           b'defaulttvdbseason="23" episodeoffset="-1065">'
+           b'<mapping-list><mapping anidbseason="1" tvdbseason="23" '
+           b'start="1066" end="1080" offset="-1065" /></mapping-list>'
+           b'</anime></anime-list>')
+    assert import_animeapi(index, tsv) == 1
+    assert import_animelists(index, xml) >= 1
+    assert index.resolve_anime_episode("tt0388629", 23, 2) == ("69", 1067)
+    assert index.resolve_anime_absolute("tt0388629", 1067)["episode"] == 2
