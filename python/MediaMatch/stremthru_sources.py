@@ -97,8 +97,11 @@ def import_animelists(index: MetadataIndex, payload: bytes) -> int:
             season = -1
         else:
             season = _integer(default_season, -999)
-        if season != -999:
-            mappings.add((anidb, tvdb, 1, season, 1, 0, default_offset, ""))
+        default_mapping = (
+            (anidb, tvdb, 1, season, 1, 0, default_offset, "")
+            if season != -999 else None
+        )
+        explicit_seasons = set()
         for mapping in item.findall("./mapping-list/mapping"):
             ani_season = _integer(mapping.get("anidbseason"), -1)
             tv_season = _integer(mapping.get("tvdbseason"), -999)
@@ -108,8 +111,11 @@ def import_animelists(index: MetadataIndex, payload: bytes) -> int:
             end = _integer(mapping.get("end"))
             offset = _integer(mapping.get("offset"), default_offset)
             explicit_map = (mapping.text or "").strip()
+            explicit_seasons.add((ani_season, tv_season))
             mappings.add((anidb, tvdb, ani_season, tv_season,
                           start, end, offset, explicit_map))
+        if default_mapping and (1, season) not in explicit_seasons:
+            mappings.add(default_mapping)
     if not mappings:
         raise ValueError("Anime-Lists returned no episode mappings")
     with index.connect() as db:
