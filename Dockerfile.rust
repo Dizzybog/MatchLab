@@ -1,6 +1,8 @@
 # Experimental native Rust API; does not replace the Python production image.
 FROM rust:1-bookworm AS builder
 WORKDIR /build
+ARG RUSTFLAGS="-D warnings"
+ENV RUSTFLAGS=$RUSTFLAGS
 COPY . .
 RUN cargo build --locked --release -p matchlab-server
 
