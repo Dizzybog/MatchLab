@@ -56,7 +56,7 @@ class MetadataIndex:
                     tvdb_season INTEGER NOT NULL, start INTEGER NOT NULL, end INTEGER NOT NULL,
                     offset INTEGER NOT NULL DEFAULT 0, map TEXT NOT NULL DEFAULT ''
                 );
-                CREATE TABLE IF NOT EXISTS metadata_state (
+                CREATE INDEX IF NOT EXISTS anime_lookup_idx ON anime_ids(type, value);\n                CREATE INDEX IF NOT EXISTS episode_lookup_idx ON episode_map(anidb_id, anidb_season, start, end);\n                CREATE TABLE IF NOT EXISTS metadata_state (
                     source TEXT PRIMARY KEY, updated_at TEXT NOT NULL, row_count INTEGER NOT NULL
                 );
             """)
@@ -76,13 +76,15 @@ class MetadataIndex:
         with self.connect() as db:
             rows = db.execute("SELECT * FROM titles WHERE clean_title=? AND year>0", (key,)).fetchall()
             if not rows and len(key) >= 12:
-                rows = db.execute(
-                    "SELECT * FROM titles WHERE length(clean_title)>length(?) "
-                    "AND clean_title LIKE '%' || ?", (key, key),
-                ).fetchall()
-                if rows:
-                    longest = max(len(row["clean_title"]) for row in rows)
-                    rows = [row for row in rows if len(row["clean_title"]) == longest]
+                # Bounded longest-prefix fallback using the existing B-tree index.
+                # Never use LIKE '%suffix': it scans the entire IMDb AKA table.
+                for size in range(len(key) - 1, max(9, len(key) // 2) - 1, -1):
+                    rows = db.execute(
+                        "SELECT * FROM titles WHERE clean_title=? AND year>0",
+                        (key[:size],),
+                    ).fetchall()
+                    if rows:
+                        break
             grouped: dict[str, list[sqlite3.Row]] = {}
             for row in rows:
                 if row["type"] in allowed:
