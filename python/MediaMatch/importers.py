@@ -55,13 +55,13 @@ def import_imdb(index: MetadataIndex, basics: str | Path, akas: str | Path,
                     continue
                 db.execute("INSERT OR IGNORE INTO titles VALUES(?,?,?,?,?,?,?,?,?)",
                            (imdb_id, title, normalized, year, category,
-                            None, 0, 0, title_type))
+                            "", 0, 0, title_type))
                 original = row.get("originalTitle", "")
                 original_key = clean_title(original)
                 if original_key and original_key != normalized:
                     db.execute("INSERT OR IGNORE INTO titles VALUES(?,?,?,?,?,?,?,?,?)",
                                (imdb_id, original, original_key, year, category,
-                                None, 1, 0, title_type))
+                                "", 1, 0, title_type))
                 count += 1
 
         # The temporary table is capped to a batch, not the full IMDb AKAs.
@@ -94,7 +94,7 @@ def import_imdb(index: MetadataIndex, basics: str | Path, akas: str | Path,
                 ordering = row.get("ordering", "")
                 batch.append((
                     row["titleId"], int(ordering) if ordering.isdigit() else 0,
-                    title, key, None if row.get("region") in (None, "\\N") else row["region"],
+                    title, key, "" if row.get("region") in (None, "\\N") else row["region"],
                     int(row.get("isOriginalTitle") == "1"),
                 ))
                 if len(batch) >= 20000:
