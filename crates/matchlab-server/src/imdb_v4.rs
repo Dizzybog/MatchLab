@@ -78,8 +78,18 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     if key.is_empty(){return Ok(vec![]);}
     let mut stage="forward_prefix";
     let mut rows=Vec::new();
-    // Country-qualified candidates are deliberately resolved by a separate
-    // country module; generic title lookup must not invent a country edition.
+    // Exact country-qualified aliases precede generic prefix matching.
+    if series {
+        for candidate in crate::country_aliases::candidates(release_title) {
+            let found=select(db,"clean_title=?1",&[&candidate])?;
+            for row in found {
+                if is_series(&row.media_type) && eligible(db,&row,required_season)? {
+                    rows.push(row);
+                }
+            }
+        }
+        if !rows.is_empty(){stage="country_exact";}
+    }
     if rows.is_empty(){rows=prefix(db,&key,&release,series,year,required_season)?;}
     if rows.is_empty(){
         for size in ((std::cmp::max(2,key.len()/2)+1)..key.len()).rev(){
