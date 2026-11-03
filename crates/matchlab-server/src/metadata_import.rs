@@ -218,7 +218,8 @@ pub fn import_anidb_titles(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error
                 }
             },
             Event::Text(ref e) if inside_title && anime_id.parse::<u64>().unwrap_or(0)>0=>{
-                let title=e.unescape()?.into_owned();
+                let decoded=String::from_utf8_lossy(e.as_ref());
+                let title=quick_xml::escape::unescape(&decoded)?.into_owned();
                 let key=clean(&title);
                 if !key.is_empty() && matches!(title_type.as_str(),"main"|"official"|"syn"|"synonym"|"short"){
                     insert.execute(params![anime_id,title,key,title_type,language])?;
