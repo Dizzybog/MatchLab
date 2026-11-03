@@ -286,6 +286,75 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     #[test]
+    fn three_hundred_end_to_end_matches() {
+        // These exercise the actual /match decision path, not just the parser.
+        // Synthetic metadata makes expected IDs and episodes deterministic.
+        let path=std::env::temp_dir().join(format!(
+            "matchlab_rust_300_{}_{}.sqlite3",std::process::id(),
+            std::thread::current().name().unwrap_or("test")));
+        let _=std::fs::remove_file(&path);
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
+            region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,
+                tvdb_season INTEGER,start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);").unwrap();
+        for i in 1..=100 {
+            let movie=format!("Cinemafilm{i}");
+            let series=format!("Televisionseries{i}");
+            let anime=format!("Animationseries{i}");
+            let mid=format!("tt{:07}",i);
+            let sid=format!("tt{:07}",i+100);
+            let aid=format!("tt{:07}",i+200);
+            let ani_id=format!("{}",i+1000);
+            for (id,name,category,kind) in [
+                (&mid,&movie,"movie","movie"),
+                (&sid,&series,"series","tvSeries"),
+                (&aid,&anime,"series","tvSeries")] {
+                db.execute("INSERT INTO titles VALUES(?1,?2,?3,2020,?4,'US',1,0,?5)",
+                    params![id,name,normalize(name),category,kind]).unwrap();
+            }
+            for id in [&sid,&aid] {
+                db.execute("INSERT INTO seasons VALUES(?1,10)",[id]).unwrap();
+            }
+            db.execute("INSERT INTO anime_series_map VALUES(?1,?2,?3,0)",
+                params![aid,ani_id,format!("tvdb{i}")]).unwrap();
+            db.execute("INSERT INTO anidb_titles VALUES(?1,?2,?3,'main','en')",
+                params![ani_id,anime,normalize(&anime)]).unwrap();
+            db.execute("INSERT INTO episode_map VALUES(?1,?2,1,1,1,24,0,'')",
+                params![ani_id,format!("tvdb{i}")]).unwrap();
+        }
+        drop(db);
+        let mut checked=0;
+        for i in 1..=100 {
+            for (raw,id,season,episode) in [
+                (format!("Cinemafilm{i}.2020.1080p.WEB-DL"),
+                    format!("tt{:07}",i),None,None),
+                (format!("Televisionseries{i}.S01E02.1080p.WEB-DL"),
+                    format!("tt{:07}",i+100),Some(1),Some(2)),
+                (format!("Animationseries{i}.S01E02.1080p.WEB-DL"),
+                    format!("tt{:07}",i+200),Some(1),Some(2))] {
+                let result=diagnose(&path,&MatchRequest{title:raw.clone(),year:None,
+                    series:None}).unwrap_or_else(|e|panic!("{raw}: {e}"));
+                let selected=result.selected.unwrap_or_else(||panic!("no match: {raw}"));
+                assert_eq!(selected["imdb_id"],id,"{raw}");
+                if let Some(season)=season {assert_eq!(selected["season"],season,"{raw}");}
+                if let Some(episode)=episode {assert_eq!(selected["episode"],episode,"{raw}");}
+                if raw.starts_with("Animationseries") {
+                    assert!(selected["anime"]["anidb_id"].is_string(),"{raw}");
+                }
+                checked+=1;
+            }
+        }
+        assert_eq!(checked,300);
+        std::fs::remove_file(&path).unwrap();
+    }
+    #[test]
     fn normalization_handles_accents_and_and_word() {
         assert_eq!(normalize("Bjørn & Ægir"),"bjorn aegir".replace(' ',""));
         assert_eq!(normalize("Rock and Roll"),"rockroll");
