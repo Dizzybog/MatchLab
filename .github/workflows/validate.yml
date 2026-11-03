@@ -5,11 +5,11 @@ on:
     branches: [main]
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - uses: dtolnay/rust-toolchain@stable
@@ -19,5 +19,11 @@ jobs:
           python -m pip install . pytest
           python -m pytest -q tests/test_media_match.py tests/test_v4_matching.py tests/test_country_anime_matching.py tests/test_anime_only.py tests/test_dashboard.py
           python -m pytest -q -s tests/test_100_titles.py
+      - name: Check Rust backend
+        run: RUSTFLAGS="-D warnings" cargo test -p matchlab-server --locked
       - name: Build Docker image
         run: docker build -t torrent-parse-match:test .
+      - name: Validate parity comparison utility
+        run: python -m py_compile scripts/compare_python_rust.py
+      - name: Build native Rust Docker image
+        run: docker build --build-arg RUSTFLAGS="-D warnings" -f Dockerfile.rust -t torrent-parse-match:rust-test .

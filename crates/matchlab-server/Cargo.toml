@@ -1,0 +1,16 @@
+[package]
+name = "matchlab-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ptt-core = { path = "../ptt-core" }
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+rusqlite = { version = "0.37", features = ["bundled", "functions"] }
+serde.workspace = true
+serde_json.workspace = true
+unicode-normalization.workspace = true
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

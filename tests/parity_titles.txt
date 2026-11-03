@@ -1,0 +1,16 @@
+# Smoke corpus; full real-world parity requires additional titles
+Dune.2021.1080p.BluRay.x265
+Dune.1984.1080p.BluRay
+Breaking.Bad.S01E01.1080p.BluRay
+The.Voice.US.S03E02.1080p.WEB-DL
+The.Office.US.S02E03.1080p.WEB-DL
+The.Simpsons.S10E05.1080p.WEB-DL
+Bobs.Burgers.S10E05.720p.WEB.x264
+90.Day.Fiance.S12E15.1080p.WEB
+Sousou.no.Frieren.S01E01.1080p.WEB-DL
+Frieren.Beyond.Journeys.End.S01E02.1080p
+Bleach.Episode.1067.1080p
+One.Piece.Episode.1067.1080p
+Food.Wars.The.Third.Plate.S03E11.1080p
+Pokemon.S20E01.1080p
+Attack.on.Titan.S04E01.1080p
