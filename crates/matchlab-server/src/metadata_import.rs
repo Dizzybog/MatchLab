@@ -128,6 +128,54 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
     if result.is_err(){let _=fs::remove_file(&stage);}
     result
 }
+
+/// Import a locally downloaded animeApi v3 TSV into an existing staging database.
+/// Never publish a partially imported anime dataset.
+pub fn import_animeapi(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>{
+    let mut db=Connection::open(db_path)?;
+    let tx=db.transaction()?;
+    let mut input=reader(source)?;
+    let headers=input.headers()?.clone();
+    let imdb=col(&headers,"imdb")?;
+    let anidb=col(&headers,"anidb")?;
+    let tvdb=col(&headers,"thetvdb")?;
+    let trakt=col(&headers,"trakt_season")?;
+    let mut links=tx.prepare_cached("INSERT OR IGNORE INTO anime_series_map VALUES(?1,?2,?3,?4)")?;
+    let mut identities=tx.prepare_cached("INSERT OR IGNORE INTO anime_ids VALUES(?1,?2,?3)")?;
+    let mut count=0u64;
+    for row in input.records(){
+        let r=row?;
+        let id=r.get(imdb).unwrap_or("").trim();
+        let aid=r.get(anidb).unwrap_or("").trim();
+        if !id.starts_with("tt") || !id[2..].bytes().all(|b|b.is_ascii_digit())
+            || aid.parse::<u64>().unwrap_or(0)==0 {continue;}
+        let tv=r.get(tvdb).unwrap_or("").trim();
+        let tv=if tv.parse::<u64>().unwrap_or(0)>0 {tv}else{""};
+        let may_invalid=headers.iter().position(|h|h=="trakt_may_invalid")
+            .and_then(|i|r.get(i)).is_some_and(|v|v.eq_ignore_ascii_case("true"));
+        let season=if may_invalid {0}else{r.get(trakt).unwrap_or("").parse::<i64>().unwrap_or(0)};
+        links.execute(params![id,aid,tv,season])?;
+        identities.execute(params![id,"anidb",aid])?;
+        for (column,source) in [("thetvdb","tvdb"),("myanimelist","mal"),
+            ("anilist","anilist"),("kitsu","kitsu")]{
+            if let Some(value)=headers.iter().position(|h|h==column).and_then(|i|r.get(i)){
+                let value=value.trim();
+                if !value.is_empty() && value!="0" && value!="unknown"{
+                    identities.execute(params![id,source,value])?;
+                }
+            }
+        }
+        count+=1;
+    }
+    drop(links);
+    drop(identities);
+    if count==0{return Err("animeApi contained no valid IMDb/AniDB links".into());}
+    let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
+    tx.execute("INSERT OR REPLACE INTO metadata_state VALUES('animeapi',?1,?2)",
+        params![now,count])?;
+    tx.commit()?;
+    Ok(count)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
