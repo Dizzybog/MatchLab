@@ -78,7 +78,7 @@ def match_title(index: MetadataIndex, title: str, year: int | None = None,
             mapped = index.resolve_anime_episode(best.imdb_id, imdb_season, imdb_episode)
             if mapped is None:
                 return None
-            anidb_id, anidb_episode = mapped
+            anidb_id, anidb_episode = mapped["anidb_id"], mapped["anidb_episode"]
         anime = {
             "anidb_id": anidb_id,
             "episode": anidb_episode,
