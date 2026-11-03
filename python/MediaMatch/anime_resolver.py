@@ -113,47 +113,64 @@ def resolve_season_episode(index: MetadataIndex, imdb_id: str,
 
 def resolve_absolute_episode(index: MetadataIndex, imdb_id: str,
                              episode: int) -> dict | None:
-    """Convert an absolute AniDB episode to IMDb season/episode.
+    """Translate a TVDB absolute episode to AniDB-local and IMDb S/E.
 
-    Unlike a season-based title, the number is interpreted as an AniDB
-    episode coordinate; a real crosswalk is mandatory to derive a season.
+    Anime-Lists tvdb_season=-1 entries contain the cumulative
+    `episodeoffset` for separate AniDB series (Fairy Tail, Bleach, etc.).
     """
     if episode <= 0:
         return None
     with index.connect() as db:
         links = _links(db, imdb_id)
-        mappings = _crosswalk(db, links)
+        if not links:
+            return None
+        ids = sorted({link["anidb_id"] for link in links})
+        placeholders = ",".join("?" for _ in ids)
+        all_rows = db.execute(
+            f"SELECT * FROM episode_map WHERE anidb_id IN ({placeholders}) "
+            "AND anidb_season>0", ids,
+        ).fetchall()
         candidates = []
         for link in links:
-            for m in mappings:
-                if m["anidb_id"] != link["anidb_id"]:
+            associated = [m for m in all_rows
+                          if m["anidb_id"] == link["anidb_id"]
+                          and (not link["tvdb_id"] or m["tvdb_id"] == link["tvdb_id"])]
+            absolutes = [m for m in associated if m["tvdb_season"] == -1]
+            # A mapping without a global offset is local only when no
+            # other AniDB part can claim the same IMDb title.
+            if not absolutes and len(ids) > 1:
+                continue
+            offset = absolutes[0]["offset"] if len(absolutes) == 1 else 0
+            local = episode - offset
+            if local <= 0:
+                continue
+            if absolutes and absolutes[0]["end"] > 0 and local > absolutes[0]["end"]:
+                continue
+            for m in associated:
+                if m["tvdb_season"] <= 0:
                     continue
-                if link["tvdb_id"] and link["tvdb_id"] != m["tvdb_id"]:
+                if local < max(m["start"], 1) or (m["end"] > 0 and local > m["end"]):
                     continue
-                if episode < max(m["start"], 1) or (m["end"] > 0 and episode > m["end"]):
-                    continue
-                split = _split(db, imdb_id, link, m, links, mappings)
+                split = _split(db, imdb_id, link, m, links, all_rows)
                 season = link["trakt_season"] if split else m["tvdb_season"]
                 if split:
-                    ep = episode - max(m["start"], 1) + 1
+                    tv_episode = local - max(m["start"], 1) + 1
                 else:
                     explicit = _explicit_pairs(m["map"])
                     if explicit:
-                        hits = [tv for ani, tv in explicit if ani == episode]
+                        hits = [tv for ani, tv in explicit if ani == local]
                         for tv in hits:
                             if season > 0 and tv > 0:
-                                candidates.append((m["start"], m["offset"], link["anidb_id"], season, tv))
+                                candidates.append((link["anidb_id"], local, season, tv))
                         continue
-                    ep = episode + m["offset"]
-                if season > 0 and ep > 0:
-                    candidates.append((m["start"], m["offset"], link["anidb_id"], season, ep))
-        if not candidates:
+                    tv_episode = local + m["offset"]
+                if season > 0 and tv_episode > 0:
+                    candidates.append((link["anidb_id"], local, season, tv_episode))
+        unique = set(candidates)
+        if len(unique) != 1:
             return None
-        candidates.sort(key=lambda r: (-r[0], -r[1], r[2]))
-        winner = candidates[0]
-        if len(candidates) > 1 and candidates[1][:2] == winner[:2] and candidates[1][2:] != winner[2:]:
-            return None
+        anidb_id, local, season, tv_episode = unique.pop()
         return {
-            "imdb_id": imdb_id, "season": winner[3], "episode": winner[4],
-            "anidb_id": winner[2], "anidb_episode": episode,
+            "imdb_id": imdb_id, "season": season, "episode": tv_episode,
+            "anidb_id": anidb_id, "anidb_episode": local,
         }
