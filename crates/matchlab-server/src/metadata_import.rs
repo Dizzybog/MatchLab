@@ -349,6 +349,30 @@ pub fn refresh_from_files(
 mod tests {
     use super::*;
     #[test]
+    fn animelists_imports_basic_season_and_episode_mapping() {
+        let folder=std::env::temp_dir().join(format!("matchlab-anime-test-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&folder).unwrap();
+        let db_path=folder.join("test.sqlite3");
+        let xml_path=folder.join("anime-list.xml");
+        fs::write(&xml_path,br#"<anime-list><anime anidbid="123" tvdbid="456" imdbid="tt1234567" defaulttvdbseason="2" episodeoffset="12"><mapping-list><mapping anidbseason="1" tvdbseason="3" start="5" end="10" offset="4"/></mapping-list></anime></anime-list>"#).unwrap();
+        let db=Connection::open(&db_path).unwrap();
+        db.execute_batch("CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER,start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER,PRIMARY KEY(imdb_id,anidb_id,tvdb_id,trakt_season));
+            CREATE TABLE metadata_state(source TEXT PRIMARY KEY,updated_at TEXT,row_count INTEGER);").unwrap();
+        drop(db);
+        let count=import_animelists(&db_path,&xml_path).unwrap();
+        assert_eq!(count,2);
+        let db=Connection::open(&db_path).unwrap();
+        let rows:i64=db.query_row("SELECT count(*) FROM episode_map WHERE anidb_id='123' AND tvdb_id='456'",[],|r|r.get(0)).unwrap();
+        assert_eq!(rows,2);
+        let links:i64=db.query_row("SELECT count(*) FROM anime_series_map WHERE imdb_id='tt1234567'",[],|r|r.get(0)).unwrap();
+        assert_eq!(links,1);
+        drop(db);
+        fs::remove_dir_all(&folder).unwrap();
+    }
+    #[test]
     fn failed_refresh_preserves_existing_database() {
         let folder=std::env::temp_dir().join(format!(
             "matchlab-refresh-test-{}-{}",
