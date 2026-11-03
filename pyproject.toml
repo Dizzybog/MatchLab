@@ -45,6 +45,7 @@ python-packages = ["torrent_parse_rank_native", "PTT", "RTN", "MediaMatch"]
 include = [
     { path = "LICENSE", format = "sdist" },
     { path = "LICENSE", format = "wheel" },
+    { path = "python/MediaMatch/data/anime-list.override.xml", format = "wheel" },
 ]
 exclude = [
     { path = "python/torrent_parse_rank_native/.gitignore", format = "wheel" },
