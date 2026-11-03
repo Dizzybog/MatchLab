@@ -106,3 +106,60 @@ def test_anime_episode_without_crosswalk_requires_unique_anidb(tmp_path):
         db.execute("INSERT INTO anime_ids VALUES(?,?,?)",
                    ("tt0213338", "anidb", "24"))
     assert index.resolve_anime_episode("tt0213338", 1, 9) is None
+
+
+def test_bidirectional_one_piece_style_numbering(tmp_path, monkeypatch):
+    """Synthetic crosswalk: absolute 1067 and season 23 episode 2 refer to one episode."""
+    from types import SimpleNamespace
+    from MediaMatch import api
+    index = MetadataIndex(tmp_path / "index.sqlite")
+    with index.connect() as db:
+        db.execute(
+            "INSERT INTO titles VALUES(?,?,?,?,?,?,?,?,?)",
+            ("tt0388629", "One Piece", "onepiece", 1999, "series", "US", 1, 1, "tvSeries"),
+        )
+        db.execute("INSERT INTO anime_ids VALUES(?,?,?)",
+                   ("tt0388629", "anidb", "69"))
+        db.execute("INSERT INTO anime_series_map VALUES(?,?,?,?)",
+                   ("tt0388629", "69", "81797", 0))
+        # This is synthetic test data, not a claim about One Piece's real mapping.
+        db.execute("INSERT INTO episode_map VALUES(?,?,?,?,?,?,?,?)",
+                   ("69", "81797", 1, 23, 1066, 1080, -1065, ""))
+        db.execute("INSERT INTO seasons VALUES(?,?)", ("tt0388629", 23))
+
+    def fake_parse(title):
+        import re
+        season_match = re.search(r"S(\\d+)E(\\d+)", title, re.I)
+        absolute_match = re.search(r"Episode\\s+(\\d+)", title, re.I)
+        seasons = [int(season_match[1])] if season_match else []
+        episodes = [int(season_match[2])] if season_match else (
+            [int(absolute_match[1])] if absolute_match else []
+        )
+        return SimpleNamespace(
+            parsed_title="One Piece", year=1999, seasons=seasons,
+            episodes=episodes, model_dump=lambda **_: {"title": "One Piece"},
+        )
+
+    monkeypatch.setattr(api, "parse", fake_parse)
+    absolute = api.match_title(index, "One Piece Episode 1067")
+    seasonal = api.match_title(index, "One Piece S23E02")
+    assert absolute is not None and seasonal is not None
+    assert absolute["sid"] == seasonal["sid"] == "tt0388629:23:2"
+    assert absolute["anime"]["asid"] == seasonal["anime"]["asid"] == "69:1067"
+
+
+def test_split_season_reverse_mapping(tmp_path):
+    index = MetadataIndex(tmp_path / "index.sqlite")
+    with index.connect() as db:
+        db.executemany("INSERT INTO anime_series_map VALUES(?,?,?,?)", [
+            ("tt1234567", "100", "456", 1),
+            ("tt1234567", "200", "456", 2),
+        ])
+        db.executemany("INSERT INTO episode_map VALUES(?,?,?,?,?,?,?,?)", [
+            ("100", "456", 1, 1, 1, 12, 0, ""),
+            ("200", "456", 1, 1, 13, 24, 0, ""),
+        ])
+    assert index.resolve_anime_episode("tt1234567", 2, 2) == ("200", 14)
+    result = index.resolve_anime_absolute("tt1234567", 14)
+    assert result is not None
+    assert (result["season"], result["episode"]) == (2, 2)
