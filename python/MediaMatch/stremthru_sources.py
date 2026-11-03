@@ -78,50 +78,21 @@ def import_animelists(index: MetadataIndex, payload: bytes) -> int:
     This reproduces the core StremThru anime-lists semantics, but not its
     embedded override file or every special-case 'map' expression.
     """
-    root = ET.fromstring(payload)
-    if root.tag != "anime-list":
-        raise ValueError("Unexpected Anime-Lists XML root")
-    mappings = set()
+    from .animelists import merged_items, prepare_episode_maps
+
+    items = merged_items(payload)
+    mappings = prepare_episode_maps(items)
     ids = set()
-    for item in root.findall("anime"):
-        anidb = (item.get("anidbid") or "").strip()
-        tvdb = (item.get("tvdbid") or "").strip()
-        if not anidb.isdigit() or not tvdb.isdigit():
-            continue
+    for item in items:
         imdb = (item.get("imdbid") or "").strip()
         if imdb.startswith("tt"):
-            ids.add((imdb, anidb, tvdb, 0))
-        default_season = item.get("defaulttvdbseason", "")
-        default_offset = _integer(item.get("episodeoffset"))
-        if default_season == "a":
-            season = -1
-        else:
-            season = _integer(default_season, -999)
-        default_mapping = (
-            (anidb, tvdb, 1, season, 1, 0, default_offset, "")
-            if season != -999 else None
-        )
-        explicit_seasons = set()
-        for mapping in item.findall("./mapping-list/mapping"):
-            ani_season = _integer(mapping.get("anidbseason"), -1)
-            tv_season = _integer(mapping.get("tvdbseason"), -999)
-            if ani_season < 0 or tv_season == -999:
-                continue
-            start = _integer(mapping.get("start"), 1)
-            end = _integer(mapping.get("end"))
-            offset = _integer(mapping.get("offset"), default_offset)
-            explicit_map = (mapping.text or "").strip()
-            explicit_seasons.add((ani_season, tv_season))
-            mappings.add((anidb, tvdb, ani_season, tv_season,
-                          start, end, offset, explicit_map))
-        if default_mapping and (1, season) not in explicit_seasons:
-            mappings.add(default_mapping)
+            ids.add((imdb, item.get("anidbid", ""), item.get("tvdbid", ""), 0))
     if not mappings:
         raise ValueError("Anime-Lists returned no episode mappings")
     with index.connect() as db:
         db.execute("BEGIN IMMEDIATE")
         db.execute("DELETE FROM episode_map")
-        db.executemany("INSERT INTO episode_map VALUES(?,?,?,?,?,?,?,?)", sorted(mappings))
+        db.executemany("INSERT INTO episode_map VALUES(?,?,?,?,?,?,?,?)", mappings)
         db.executemany("INSERT OR IGNORE INTO anime_series_map VALUES(?,?,?,?)", ids)
         db.executemany("INSERT OR IGNORE INTO anime_ids VALUES(?,?,?)",
                        ((imdb, "anidb", anidb) for imdb, anidb, _, _ in ids))
