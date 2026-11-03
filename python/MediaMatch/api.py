@@ -20,14 +20,14 @@ def match_title(index: MetadataIndex, title: str, year: int | None = None,
     parsed = parse(title)
     # RTN handles normal SxxExx / E numbering. Explicit "Episode 1067"
     # is treated as absolute only when no season was provided.
-    absolute = re.search(r"(?i)\\b(?:episode|ep)\\s*[. _-]*([0-9]{1,5})\\b", title)
+    absolute = re.search(r"(?i)\b(?:episode|ep)\s*[. _-]*([0-9]{1,5})\b", title)
     parsed_seasons = list(parsed.seasons or [])
     parsed_episodes = list(parsed.episodes or [])
     if absolute and not parsed_episodes:
         parsed_episodes = [int(absolute.group(1))]
     parsed_title = parsed.parsed_title
     if absolute and not parsed_seasons:
-        parsed_title = re.sub(r"(?i)\\b(?:episode|ep)\\s*[. _-]*[0-9]{1,5}\\b", "", parsed_title).strip(" ._-")
+        parsed_title = re.sub(r"(?i)\b(?:episode|ep)\s*[. _-]*[0-9]{1,5}\b", "", parsed_title).strip(" ._-")
     inferred_series = bool(parsed_seasons or parsed_episodes) if series is None else series
     target_year = year if year is not None else parsed.year
     matches = index.search(
