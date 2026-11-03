@@ -9,6 +9,7 @@ import json
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .index import MetadataIndex, clean_title
 
@@ -27,44 +28,100 @@ def _open_tsv(source: str | Path):
 
 def import_imdb(index: MetadataIndex, basics: str | Path, akas: str | Path,
                 episodes: str | Path | None = None) -> int:
-    """Import title.basics, title.akas and optional title.episode in one transaction."""
+    """Import only categorized movies/series and their aliases in bounded batches.
+
+    IMDb title.akas includes aliases for episodes, games and many other
+    unsupported types. Never stage all of those rows on disk.
+    """
     db = index.connect()
     count = 0
     try:
         db.execute("BEGIN IMMEDIATE")
         db.execute("DELETE FROM titles")
         db.execute("DELETE FROM seasons")
-        db.execute("CREATE TEMP TABLE imdb_akas (tid TEXT, ordering INTEGER, title TEXT, clean_title TEXT, region TEXT, original INTEGER)")
-        for row in csv.DictReader(_open_tsv(basics), delimiter="\t"):
-            if row["titleType"] not in _TYPES or row["startYear"] == "\\N":
-                continue
-            imdb_id, title_type, title, year = row["tconst"], row["titleType"], row["primaryTitle"], int(row["startYear"])
-            category = "series" if title_type in {"tvSeries", "tvMiniSeries"} else "movie"
-            db.execute("INSERT OR IGNORE INTO titles VALUES(?,?,?,?,?,?,?,?,?)",
-                       (imdb_id, title, clean_title(title), year, category, None, 0, 0, title_type))
-            original_title = row["originalTitle"]
-            if original_title != "\\N" and clean_title(original_title) != clean_title(title):
+        # IMDb type is authoritative. Unknown year does not imply unknown type.
+        with _open_tsv(basics) as stream:
+            for row in csv.DictReader(stream, delimiter="\t"):
+                title_type = row.get("titleType", "")
+                if title_type not in _TYPES:
+                    continue
+                imdb_id = row["tconst"]
+                title = row.get("primaryTitle", "")
+                year_text = row.get("startYear", "")
+                year = int(year_text) if year_text.isdigit() else 0
+                category = "series" if title_type in {"tvSeries", "tvMiniSeries"} else "movie"
+                normalized = clean_title(title)
+                if not normalized:
+                    continue
                 db.execute("INSERT OR IGNORE INTO titles VALUES(?,?,?,?,?,?,?,?,?)",
-                           (imdb_id, original_title, clean_title(original_title), year,
-                            category, None, 1, 0, title_type))
-            count += 1
-        db.executemany("INSERT INTO imdb_akas VALUES(?,?,?,?,?,?)", (
-            (row["titleId"], int(row["ordering"]), row["title"], clean_title(row["title"]),
-             None if row["region"] == "\\N" else row["region"],
-             int(row["isOriginalTitle"] == "1"))
-            for row in csv.DictReader(_open_tsv(akas), delimiter="\t")
-        ))
-        alias_rows = db.execute("""INSERT OR IGNORE INTO titles
-            SELECT b.imdb_id,a.title,a.clean_title,b.year,b.category,a.region,a.original,a.ordering,b.type
-            FROM imdb_akas a JOIN (SELECT imdb_id,year,category,type FROM titles GROUP BY imdb_id) b
-            ON b.imdb_id=a.tid""").rowcount
-        count += max(alias_rows, 0)
+                           (imdb_id, title, normalized, year, category,
+                            "", 0, 0, title_type))
+                original = row.get("originalTitle", "")
+                original_key = clean_title(original)
+                if original_key and original_key != normalized:
+                    db.execute("INSERT OR IGNORE INTO titles VALUES(?,?,?,?,?,?,?,?,?)",
+                               (imdb_id, original, original_key, year, category,
+                                "", 1, 0, title_type))
+                count += 1
+
+        # The temporary table is capped to a batch, not the full IMDb AKAs.
+        db.execute("""CREATE TEMP TABLE imdb_akas (
+            tid TEXT, ordering INTEGER, title TEXT, clean_title TEXT,
+            region TEXT, original INTEGER
+        )""")
+        batch = []
+        def flush_aliases() -> None:
+            nonlocal count
+            if not batch:
+                return
+            db.executemany("INSERT INTO imdb_akas VALUES(?,?,?,?,?,?)", batch)
+            inserted = db.execute("""INSERT OR IGNORE INTO titles
+                SELECT b.imdb_id,a.title,a.clean_title,b.year,b.category,
+                       a.region,a.original,a.ordering,b.type
+                FROM imdb_akas a
+                JOIN titles b ON b.imdb_id=a.tid
+                WHERE b.ordering=0""").rowcount
+            count += max(inserted, 0)
+            db.execute("DELETE FROM imdb_akas")
+            batch.clear()
+
+        with _open_tsv(akas) as stream:
+            for row in csv.DictReader(stream, delimiter="\t"):
+                title = row.get("title", "")
+                key = clean_title(title)
+                if not key:
+                    continue
+                ordering = row.get("ordering", "")
+                batch.append((
+                    row["titleId"], int(ordering) if ordering.isdigit() else 0,
+                    title, key, "" if row.get("region") in (None, "\\N") else row["region"],
+                    int(row.get("isOriginalTitle") == "1"),
+                ))
+                if len(batch) >= 20000:
+                    flush_aliases()
+        flush_aliases()
+        db.execute("DROP TABLE imdb_akas")
+
         if episodes:
-            seasons: dict[str, int] = {}
-            for row in csv.DictReader(_open_tsv(episodes), delimiter="\t"):
-                if row["seasonNumber"] != "\\N":
-                    seasons[row["parentTconst"]] = max(seasons.get(row["parentTconst"], 0), int(row["seasonNumber"]))
-            db.executemany("INSERT OR REPLACE INTO seasons VALUES(?,?)", seasons.items())
+            # Only keep max-season metadata for categorized TV series.
+            db.execute("""CREATE TEMP TABLE series_seasons (
+                imdb_id TEXT PRIMARY KEY, max_season INTEGER NOT NULL
+            )""")
+            with _open_tsv(episodes) as stream:
+                for row in csv.DictReader(stream, delimiter="\t"):
+                    season = row.get("seasonNumber", "")
+                    if not season.isdigit() or int(season) <= 0:
+                        continue
+                    db.execute("""INSERT INTO series_seasons VALUES(?,?)
+                        ON CONFLICT(imdb_id) DO UPDATE SET
+                        max_season=max(max_season,excluded.max_season)""",
+                        (row["parentTconst"], int(season)))
+            db.execute("""INSERT INTO seasons
+                SELECT s.imdb_id,s.max_season FROM series_seasons s
+                WHERE EXISTS(SELECT 1 FROM titles t
+                             WHERE t.imdb_id=s.imdb_id
+                               AND t.type IN ('tvSeries','tvMiniSeries'))""")
+            db.execute("DROP TABLE series_seasons")
         db.execute("INSERT OR REPLACE INTO metadata_state VALUES(?,?,?)",
                    ("imdb", datetime.now(UTC).isoformat(), count))
         db.commit()
@@ -94,9 +151,27 @@ def import_anime_mappings(index: MetadataIndex, path: str | Path) -> int:
         for entry in payload.get("data", []):
             row = {k: "" for k in source_names}
             for item in entry.get("sources", []):
-                for key, source in source_names.items():
-                    if item.get("source", "").upper() == source:
-                        row[key] = str(item.get("id", ""))
+                # anime-offline-database uses URL strings, not {source, id} objects.
+                if isinstance(item, str):
+                    parsed = urlparse(item)
+                    host = (parsed.hostname or "").lower()
+                    ident = parsed.path.rstrip("/").split("/")[-1]
+                    if host in {"anidb.net", "www.anidb.net"}:
+                        row["anidb"] = ident.removeprefix("anime/")
+                    elif host in {"myanimelist.net", "www.myanimelist.net"}:
+                        row["mal"] = ident if ident.isdigit() else parsed.path.strip("/").split("/")[1] if len(parsed.path.strip("/").split("/")) > 1 else ""
+                    elif host in {"anilist.co", "www.anilist.co"}:
+                        row["anilist"] = parsed.path.strip("/").split("/")[1] if len(parsed.path.strip("/").split("/")) > 1 else ""
+                    elif host in {"kitsu.app", "kitsu.io"}:
+                        row["kitsu"] = ident
+                    elif host in {"imdb.com", "www.imdb.com"}:
+                        row["imdb"] = next((part for part in parsed.path.split("/") if part.startswith("tt") and part[2:].isdigit()), "")
+                    elif host in {"thetvdb.com", "www.thetvdb.com"}:
+                        row["tvdb"] = ident
+                elif isinstance(item, dict):
+                    for key, source in source_names.items():
+                        if str(item.get("source", "")).upper() == source:
+                            row[key] = str(item.get("id", ""))
             rows.append(row)
     else:
         rows = csv.DictReader(path.open(encoding="utf-8-sig", newline=""), delimiter="\t")
@@ -107,8 +182,8 @@ def import_anime_mappings(index: MetadataIndex, path: str | Path) -> int:
     db = index.connect()
     try:
         db.execute("BEGIN IMMEDIATE")
-        db.execute("DELETE FROM anime_ids")
-        db.execute("DELETE FROM episode_map")
+        # Preserve manually imported crosswalks and episode mappings on source refresh.
+        # Automatic imports only add known IDs; they must not erase other sources.
         for row in rows:
             imdb_id = row.get("imdb", "")
             key = imdb_id or row.get("anidb", "")
@@ -145,3 +220,46 @@ def update_anime(index: MetadataIndex) -> int:
         temporary.write(payload)
         temporary.flush()
         return import_anime_mappings(index, temporary.name)
+
+
+def import_sql_crosswalk(index: MetadataIndex, series_tsv: str | Path,
+                         episodes_tsv: str | Path) -> tuple[int, int]:
+    """Import the two SQL backup tables exported to TSV.
+
+    Accepts anime_id_map columns imdb/anidb/tvdb/trakt_season and
+    anidb_tvdb_episode_map columns anidb_id/tvdb_id/anidb_season/
+    tvdb_season/start/end/offset/map. This replaces only crosswalk rows;
+    automatic anime metadata refresh does not delete them.
+    """
+    with open(series_tsv, encoding="utf-8-sig", newline="") as stream:
+        links = []
+        for row in csv.DictReader(stream, delimiter="\t"):
+            imdb = (row.get("imdb") or "").strip()
+            anidb = (row.get("anidb") or "").strip()
+            if not imdb.startswith("tt") or not anidb:
+                continue
+            links.append((imdb, anidb, (row.get("tvdb") or "").strip(),
+                          int(row.get("trakt_season") or 0)))
+    with open(episodes_tsv, encoding="utf-8-sig", newline="") as stream:
+        maps = []
+        for row in csv.DictReader(stream, delimiter="\t"):
+            if not row.get("anidb_id") or not row.get("tvdb_id"):
+                continue
+            maps.append((
+                row["anidb_id"].strip(), row["tvdb_id"].strip(),
+                int(row["anidb_season"]), int(row["tvdb_season"]),
+                int(row["start"]), int(row["end"]), int(row["offset"]),
+                row.get("map") or "",
+            ))
+    with index.connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("DELETE FROM anime_series_map")
+        db.execute("DELETE FROM episode_map")
+        db.executemany("INSERT OR IGNORE INTO anime_series_map VALUES(?,?,?,?)", links)
+        db.executemany("INSERT INTO episode_map VALUES(?,?,?,?,?,?,?,?)", maps)
+        db.executemany(
+            "INSERT OR IGNORE INTO anime_ids VALUES(?,?,?)",
+            ((imdb, "anidb", anidb) for imdb, anidb, _, _ in links),
+        )
+        db.commit()
+    return len(links), len(maps)
