@@ -144,6 +144,26 @@ fn anime_candidate(db: &Connection, key: &str, season: Option<i64>, episode: i64
         "episode":m.episode,"anidb_id":m.anidb_id,"anidb_episode":m.anidb_episode})))
 }
 
+/// Resolve a title-only anime identity from anime tables, without inventing
+/// season or episode coordinates. Exact aliases precede longest prefixes.
+fn anime_identity(db:&Connection,key:&str)->rusqlite::Result<Option<String>>{
+    if key.len()<4{return Ok(None);}
+    let mut stmt=db.prepare("SELECT DISTINCT a.clean_title,l.imdb_id
+        FROM anidb_titles a JOIN anime_series_map l ON l.anidb_id=a.anidb_id
+        WHERE a.clean_title=?1 OR (length(a.clean_title)>=6 AND ?1 LIKE a.clean_title||'%')
+        ORDER BY CASE WHEN a.clean_title=?1 THEN 0 ELSE 1 END,
+                 length(a.clean_title) DESC,l.imdb_id LIMIT 100")?;
+    let rows=stmt.query_map([key],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let Some((best_alias,best_imdb))=rows.first()else{return Ok(None)};
+    let exact=best_alias==key;
+    let size=best_alias.len();
+    if rows.iter().any(|(alias,id)|(alias==key)==exact&&alias.len()==size&&id!=best_imdb){
+        return Ok(None);
+    }
+    Ok(Some(best_imdb.clone()))
+}
+
 fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> {
     if req.title.trim().is_empty() || req.title.len() > 4096 { return Err("title must be 1–4096 bytes".into()); }
     let parsed = ptt_core::parse_title(&req.title,false).map_err(|e|e.to_string())?;
@@ -175,21 +195,35 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
         imdb_id:m.imdb_id,title:m.title,year:m.year,media_type:m.media_type,
         matched_title:m.matched_title,anime_ids:m.anime_ids,source:"imdb"}).collect();
     let anime = if series {
-        episodes.first().map(|ep|anime_candidate(&db,&key,seasons.first().copied(),*ep))
-            .transpose().map_err(|e|e.to_string())?.flatten()
+        if let Some(ep)=episodes.first(){
+            anime_candidate(&db,&key,seasons.first().copied(),*ep)
+                .map_err(|e|e.to_string())?
+        }else{
+            anime_identity(&db,&key).map_err(|e|e.to_string())?
+                .map(|id|json!({"imdb_id":id,"season":seasons.first(),
+                    "episode":null,"anidb_id":null,"anidb_episode":null}))
+        }
     } else { None };
     let selected = if let Some(a) = &anime {
         let imdb_id = a["imdb_id"].as_str().unwrap_or_default();
-        let season = a["season"].as_i64().unwrap_or(0);
-        let episode = a["episode"].as_i64().unwrap_or(0);
-        let anidb_id = a["anidb_id"].as_str().unwrap_or_default();
-        let ani_episode = a["anidb_episode"].as_i64().unwrap_or(0);
+        let season = a["season"].as_i64();
+        let episode = a["episode"].as_i64();
+        let anidb_id = a["anidb_id"].as_str();
+        let ani_episode = a["anidb_episode"].as_i64();
+        let anime_details=if let (Some(aid),Some(aep))=(anidb_id,ani_episode){
+            json!({"anidb_id":aid,"episode":aep,"asid":format!("{aid}:{aep}")})
+        }else{Value::Null};
+        let sid=if let (Some(se),Some(ep))=(season,episode){
+            format!("{imdb_id}:{se}:{ep}")
+        }else{imdb_id.to_string()};
+        let anime_ids=if let Some(aid)=anidb_id{
+            json!({"anidb":aid})
+        }else{json!({})};
         Some(json!({"imdb_id":imdb_id,"season":season,"episode":episode,
-            "sid":format!("{imdb_id}:{season}:{episode}"),
-            "anime":{"anidb_id":anidb_id,"episode":ani_episode,"asid":format!("{anidb_id}:{ani_episode}")},
+            "sid":sid,"anime":anime_details,
             "match_source":"anime_priority","title":title,"year":year.unwrap_or(0),
             "category":"series","matched_title":title,
-            "anime_ids":{"anidb":anidb_id},"parsed":parsed.clone()}))
+            "anime_ids":anime_ids,"parsed":parsed.clone()}))
     } else {
         // Python match_title refuses ambiguous IMDb identities rather than
         // silently returning the first equally plausible candidate.
