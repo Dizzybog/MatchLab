@@ -43,9 +43,8 @@ def refresh_local(path: str | Path) -> tuple[int, int]:
             )
             db.commit()
         # All connections are closed before the atomic replacement.
-        with index.connect() as db:
-            db.execute("PRAGMA journal_mode=DELETE")
-            db.execute("VACUUM")
+        # A new staging DB is already compact. Avoid VACUUM here:
+        # it would temporarily require another full database copy.
         os.replace(staging, target)
         return imdb_count, anime_count
     finally:
