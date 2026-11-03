@@ -61,7 +61,7 @@ def match_title(index: MetadataIndex, title: str, year: int | None = None,
     # from animeApi, AniDB titles and Anime-Lists mappings. IMDb tables are
     # deliberately not consulted on this path.
     if inferred_series and parsed_episodes:
-        from .anime_only import resolve_anime_title
+        from .anime_only import resolve_anime_title, is_known_anime_title
         anime_match = resolve_anime_title(
             index, parsed_title,
             min(parsed_seasons) if parsed_seasons else None,
@@ -90,6 +90,9 @@ def match_title(index: MetadataIndex, title: str, year: int | None = None,
                 "parsed": parsed.model_dump(mode="json"),
                 "match_source": "anime_only",
             }
+    if inferred_series and parsed_episodes and is_known_anime_title(index, parsed_title):
+        LOG.info("match_rejected source=anime_only reason=unresolved_or_ambiguous title=%r", parsed_title)
+        return None
     matches = index.search(
         parsed_title, target_year, series=inferred_series,
         required_max_season=max(parsed_seasons, default=0), limit=20,
