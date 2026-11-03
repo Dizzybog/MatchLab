@@ -164,7 +164,7 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
     let reason = if anime.is_some() {"Verified anime crosswalk"} else if selected.is_some() {
         "IMDb title candidate (experimental matching rules)"
     } else {"No eligible candidate"};
-    Ok(Diagnostic{parsed,normalized_title:key,imdb_candidates:imdb,anime_candidate:anime,
+    Ok(Diagnostic{parsed: Value::Object(parsed),normalized_title:key,imdb_candidates:imdb,anime_candidate:anime,
         selected,reason:reason.into()})
 }
 
