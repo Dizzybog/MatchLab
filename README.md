@@ -217,3 +217,24 @@ season. Detailed matching stages appear at `LOG_LEVEL=DEBUG`.
 This is a targeted port of the older `torrent_stream` anime resolver.
 Exact parity for all split Trakt seasons and exceptional Anime-Lists
 mapping expressions still requires fixture-based verification.
+
+
+### Anime-only matching (no IMDb title lookup)
+
+For recognized anime releases with an episode number, the API now first
+matches the parsed title against **AniDB titles** and follows identities from
+**animeApi / Anime-Lists** (`anime_series_map`). It derives the IMDb ID
+from these anime-specific mappings, not from IMDb's `titles` or `seasons`
+tables. Canonical season/episode and AniDB episode are resolved from the
+Anime-Lists `episode_map`, including title-relative anime parts.
+
+If an anime alias is recognized but its identity or episode mapping is
+ambiguous or invalid, the API returns `null` rather than guessing using
+IMDb title matches. Non-anime releases still use the IMDb matcher. The
+`match_source: "anime_only"` field identifies responses from this path.
+The `title` and `year` fields on that path are parsed from the torrent,
+not verified IMDb metadata.
+
+Anime titles without an episode number continue through the ordinary IMDb
+path; this limitation is intentional until identity-only ambiguity rules
+are fully verified.
