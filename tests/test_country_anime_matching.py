@@ -43,8 +43,8 @@ def test_anime_specific_title_relative_season(tmp_path):
             ("200", "Example Anime Arc Two", "exampleanimearctwo", "main", "en"),
             ("300", "Example Anime Arc Three", "exampleanimearcthree", "main", "en"),
         ])
-    assert resolve_titled_anime(index, "tt9999999", "Example Anime", 3, 4) == ("300", 4)
-    assert resolve_titled_anime(index, "tt9999999", "Example Anime Arc Two", 1, 4) == ("200", 4)
+    assert resolve_titled_anime(index, "tt9999999", "Example Anime", 3, 4) == dict(anidb_id="300", anidb_episode=4, season=3, episode=4)
+    assert resolve_titled_anime(index, "tt9999999", "Example Anime Arc Two", 1, 4) == dict(anidb_id="200", anidb_episode=4, season=2, episode=4)
     assert resolve_titled_anime(index, "tt9999999", "Example Anime Arc Two", 2, 4) == ("300", 4)
     assert resolve_titled_anime(index, "tt9999999", "Example Anime Arc Two", 3, 4) is None
 
