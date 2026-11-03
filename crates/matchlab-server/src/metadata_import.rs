@@ -263,7 +263,7 @@ pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>
     loop{
         match xml.read_event_into(&mut buf)?{
             Event::Start(ref e) if e.name().as_ref()==b"anime"=>{
-                aid.clear();tvdb.clear();imdb.clear();valid=false;
+                aid.clear();tvdb.clear();imdb.clear();
                 let (mut default_season,mut default_offset)=(None,0i64);
                 for a in e.attributes(){
                     let a=a?;
