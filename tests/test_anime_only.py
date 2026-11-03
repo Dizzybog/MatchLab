@@ -40,7 +40,7 @@ def test_anime_only_identity_without_imdb_titles(tmp_path):
     assert resolve_anime_title(index, "Example Anime Arc Two", 3, 4) is None
 
 
-def test_api_skips_imdb_search_for_anime(tmp_path, monkeypatch):
+def test_api_collects_both_pools_but_prefers_anime(tmp_path, monkeypatch):
     index = MetadataIndex(tmp_path / "index.sqlite")
     _fixture(index)
 
@@ -52,11 +52,14 @@ def test_api_skips_imdb_search_for_anime(tmp_path, monkeypatch):
         )
     monkeypatch.setattr(api, "parse", fake_parse)
 
-    def imdb_search_forbidden(*args, **kwargs):
-        raise AssertionError("IMDb titles table must not be searched for anime")
-    monkeypatch.setattr(index, "search", imdb_search_forbidden)
+    calls = []
+    def imdb_search(*args, **kwargs):
+        calls.append((args, kwargs))
+        return []
+    monkeypatch.setattr(index, "search", imdb_search)
     result = api.match_title(index, "Example.Anime.Arc.Two.S01E04")
-    assert result["match_source"] == "anime_only"
+    assert len(calls) == 1
+    assert result["match_source"] == "anime_priority"
     assert result["sid"] == "tt7777777:2:4"
     assert result["anime"]["asid"] == "200:4"
 
