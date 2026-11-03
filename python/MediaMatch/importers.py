@@ -164,3 +164,46 @@ def update_anime(index: MetadataIndex) -> int:
         temporary.write(payload)
         temporary.flush()
         return import_anime_mappings(index, temporary.name)
+
+
+def import_sql_crosswalk(index: MetadataIndex, series_tsv: str | Path,
+                         episodes_tsv: str | Path) -> tuple[int, int]:
+    """Import the two SQL backup tables exported to TSV.
+
+    Accepts anime_id_map columns imdb/anidb/tvdb/trakt_season and
+    anidb_tvdb_episode_map columns anidb_id/tvdb_id/anidb_season/
+    tvdb_season/start/end/offset/map. This replaces only crosswalk rows;
+    automatic anime metadata refresh does not delete them.
+    """
+    with open(series_tsv, encoding="utf-8-sig", newline="") as stream:
+        links = []
+        for row in csv.DictReader(stream, delimiter="\t"):
+            imdb = (row.get("imdb") or "").strip()
+            anidb = (row.get("anidb") or "").strip()
+            if not imdb.startswith("tt") or not anidb:
+                continue
+            links.append((imdb, anidb, (row.get("tvdb") or "").strip(),
+                          int(row.get("trakt_season") or 0)))
+    with open(episodes_tsv, encoding="utf-8-sig", newline="") as stream:
+        maps = []
+        for row in csv.DictReader(stream, delimiter="\t"):
+            if not row.get("anidb_id") or not row.get("tvdb_id"):
+                continue
+            maps.append((
+                row["anidb_id"].strip(), row["tvdb_id"].strip(),
+                int(row["anidb_season"]), int(row["tvdb_season"]),
+                int(row["start"]), int(row["end"]), int(row["offset"]),
+                row.get("map") or "",
+            ))
+    with index.connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("DELETE FROM anime_series_map")
+        db.execute("DELETE FROM episode_map")
+        db.executemany("INSERT OR IGNORE INTO anime_series_map VALUES(?,?,?,?)", links)
+        db.executemany("INSERT INTO episode_map VALUES(?,?,?,?,?,?,?,?)", maps)
+        db.executemany(
+            "INSERT OR IGNORE INTO anime_ids VALUES(?,?,?)",
+            ((imdb, "anidb", anidb) for imdb, anidb, _, _ in links),
+        )
+        db.commit()
+    return len(links), len(maps)
