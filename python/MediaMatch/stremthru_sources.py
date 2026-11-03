@@ -16,6 +16,7 @@ from .index import MetadataIndex
 
 ANIMEAPI_URL = "https://raw.githubusercontent.com/nattadasu/animeApi/refs/heads/v3/database/animeapi.tsv"
 ANIMELISTS_URL = "https://raw.githubusercontent.com/Anime-Lists/anime-lists/refs/heads/master/anime-list.xml"
+STREMTHRU_OVERRIDE_URL = "https://raw.githubusercontent.com/MunifTanjim/stremthru/main/internal/animelists/anime-list.override.xml"
 
 
 def _download(url: str) -> bytes:
@@ -72,7 +73,8 @@ def import_animeapi(index: MetadataIndex, payload: bytes) -> int:
     return len(links)
 
 
-def import_animelists(index: MetadataIndex, payload: bytes) -> int:
+def import_animelists(index: MetadataIndex, payload: bytes,
+                     override: bytes | None = None) -> int:
     """Read Anime-Lists mapping runs, retaining direct/absolute episode offsets.
 
     This reproduces the core StremThru anime-lists semantics, but not its
@@ -80,7 +82,7 @@ def import_animelists(index: MetadataIndex, payload: bytes) -> int:
     """
     from .animelists import merged_items, prepare_episode_maps
 
-    items = merged_items(payload)
+    items = merged_items(payload, override)
     mappings = prepare_episode_maps(items)
     ids = set()
     for item in items:
@@ -106,5 +108,6 @@ def update_stremthru_anime(index: MetadataIndex) -> tuple[int, int]:
     # Download both before modifying either table.
     api_payload = _download(ANIMEAPI_URL)
     xml_payload = _download(ANIMELISTS_URL)
+    override_payload = _download(STREMTHRU_OVERRIDE_URL)
     return (import_animeapi(index, api_payload),
-            import_animelists(index, xml_payload))
+            import_animelists(index, xml_payload, override_payload))
