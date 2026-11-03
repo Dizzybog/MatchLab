@@ -247,6 +247,7 @@ pub fn import_anidb_titles(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error
 /// and upstream override merging are handled separately.
 pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>{
     use quick_xml::{Reader,events::Event};
+    use rusqlite::OptionalExtension;
     let file=File::open(source)?;
     let mut xml=Reader::from_reader(BufReader::new(file));
     xml.config_mut().trim_text(true);
@@ -256,48 +257,85 @@ pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>
     let mut links=tx.prepare_cached("INSERT OR IGNORE INTO anime_series_map VALUES(?1,?2,?3,0)")?;
     let mut buf=Vec::new();
     let (mut aid,mut tvdb,mut imdb)=(String::new(),String::new(),String::new());
+    let mut valid=false;
+    let mut pending:Option<(i64,i64,i64,i64,i64,String)>=None;
     let mut count=0u64;
     loop{
         match xml.read_event_into(&mut buf)?{
             Event::Start(ref e) if e.name().as_ref()==b"anime"=>{
-                aid.clear();tvdb.clear();imdb.clear();
-                let (mut default_season,mut default_offset)=(0i64,0i64);
-                for a in e.attributes().flatten(){
+                aid.clear();tvdb.clear();imdb.clear();valid=false;
+                let (mut default_season,mut default_offset)=(None,0i64);
+                for a in e.attributes(){
+                    let a=a?;
                     let value=a.unescape_value()?.into_owned();
                     match a.key.as_ref(){
                         b"anidbid"=>aid=value,
                         b"tvdbid"=>tvdb=value,
                         b"imdbid"=>imdb=value,
-                        b"defaulttvdbseason"=>default_season=if value=="a"{-1}else{value.parse().unwrap_or(0)},
+                        b"defaulttvdbseason"=>default_season=if value=="a"{Some(-1)}else{value.parse().ok()},
                         b"episodeoffset"=>default_offset=value.parse().unwrap_or(0),
                         _=>{}
                     }
                 }
-                if aid.parse::<u64>().unwrap_or(0)>0 && tvdb.parse::<u64>().unwrap_or(0)>0{
+                valid=aid.parse::<u64>().unwrap_or(0)>0 && tvdb.parse::<u64>().unwrap_or(0)>0;
+                if valid{
                     if imdb.starts_with("tt"){links.execute(params![imdb,aid,tvdb])?;}
-                    if default_season!=0 {
-                        insert.execute(params![aid,tvdb,1,default_season,
-                            if default_season == -1{1}else{0},0,default_offset,""])?;
+                    if let Some(season)=default_season{
+                        insert.execute(params![aid,tvdb,1,season,
+                            if season == -1{1}else{0},0,default_offset,""])?;
                         count+=1;
                     }
                 }
             },
             Event::Start(ref e) | Event::Empty(ref e) if e.name().as_ref()==b"mapping"=>{
-                if aid.is_empty()||tvdb.is_empty(){buf.clear();continue;}
-                let (mut ani,mut tv,mut start,mut end,mut offset)=(1i64,0i64,0i64,0i64,0i64);
-                for a in e.attributes().flatten(){
+                if !valid{buf.clear();continue;}
+                let (mut ani,mut tv,mut start,mut end,mut offset)=(None,None,0i64,0i64,0i64);
+                let mut has_start=false;
+                let mut has_end=false;
+                let mut has_offset=false;
+                for a in e.attributes(){
+                    let a=a?;
                     let value=a.unescape_value()?.into_owned();
                     match a.key.as_ref(){
-                        b"anidbseason"=>ani=value.parse().unwrap_or(1),
-                        b"tvdbseason"=>tv=value.parse().unwrap_or(0),
-                        b"start"=>start=value.parse().unwrap_or(0),
-                        b"end"=>end=value.parse().unwrap_or(0),
-                        b"offset"=>offset=value.parse().unwrap_or(0),
+                        b"anidbseason"=>ani=value.parse::<i64>().ok(),
+                        b"tvdbseason"=>tv=value.parse::<i64>().ok(),
+                        b"start"=>{start=value.parse().unwrap_or(0);has_start=true;},
+                        b"end"=>{end=value.parse().unwrap_or(0);has_end=true;},
+                        b"offset"=>{offset=value.parse().unwrap_or(0);has_offset=true;},
                         _=>{}
                     }
                 }
-                if (ani==0||ani==1)&&tv!=0{
-                    insert.execute(params![aid,tvdb,ani,tv,start,end,offset,""])?;
+                if let (Some(ani),Some(tv))=(ani,tv){
+                    if ani==0||ani==1{
+                        let existing:Option<(i64,i64,i64)>=tx.query_row(
+                            "SELECT start,end,offset FROM episode_map WHERE anidb_id=?1 AND tvdb_id=?2 AND anidb_season=?3 AND tvdb_season=?4 ORDER BY rowid DESC LIMIT 1",
+                            params![aid,tvdb,ani,tv],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))
+                        ).optional()?;
+                        if let Some((old_start,old_end,old_offset))=existing{
+                            tx.execute("DELETE FROM episode_map WHERE anidb_id=?1 AND tvdb_id=?2 AND anidb_season=?3 AND tvdb_season=?4",
+                                params![aid,tvdb,ani,tv])?;
+                            if !has_start{start=old_start;}
+                            if !has_end{end=old_end;}
+                            if !has_offset{offset=old_offset;}
+                            count=count.saturating_sub(1);
+                        }
+                        if e.is_empty(){
+                            insert.execute(params![aid,tvdb,ani,tv,start,end,offset,""])?;
+                            count+=1;
+                        }else{
+                            pending=Some((ani,tv,start,end,offset,String::new()));
+                        }
+                    }
+                }
+            },
+            Event::Text(ref e) if pending.is_some()=>{
+                let decoded=String::from_utf8_lossy(e.as_ref());
+                let value=quick_xml::escape::unescape(&decoded)?;
+                if let Some(ref mut mapping)=pending{mapping.5.push_str(&value);}
+            },
+            Event::End(ref e) if e.name().as_ref()==b"mapping"=>{
+                if let Some((ani,tv,start,end,offset,mapping))=pending.take(){
+                    insert.execute(params![aid,tvdb,ani,tv,start,end,offset,mapping.trim()])?;
                     count+=1;
                 }
             },
