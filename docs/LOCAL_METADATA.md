@@ -1,124 +1,65 @@
-# Local IMDb + anime metadata refresh (Oracle / Linux)
+# Docker: autonomous metadata API
 
-Metadata updates run **on your server**, not in GitHub Actions. The API returns
-one IMDb match object or JSON `null` (never a candidate list).
+The container downloads and maintains all IMDb and anime metadata **on the machine
+running Docker**. No PostgreSQL, cron, manually exported files or API keys are required.
 
-## Install
-
-From the repository root:
+## Run
 
 ```bash
-uv sync --group dev
-uv run maturin develop --release
+docker compose up -d --build
+docker compose logs -f torrent-imdb-ai
 ```
 
-## Initial refresh
+A persistent Docker named volume `metadata` stores `/data/metadata.sqlite3`.
+The image runs as an unprivileged user (UID 10001) and listens on port 8765.
+The example Compose file binds to `127.0.0.1:8765`; configure your own
+authenticated reverse proxy if public access is needed.
+
+## Automatic refresh lifecycle
+
+- At **every startup**, inspect `metadata_state.full_refresh` in SQLite.
+- If the database is missing, incomplete, or the last successful full update
+  is **7 days old or older**, download and rebuild all metadata immediately.
+- While running, recheck every **24 hours**. Refresh only if at least 7 days old.
+- After a failed download/import, keep the last good database and retry in 1 hour.
+- A full successful refresh timestamp is written **only after** all required
+  sources were imported. A temporary SQLite database is atomically swapped
+  into place. Data survives restarts through the Docker volume.
+- The API starts while the first import runs. `GET /health` reports
+  `metadata_current: false` until the initial import succeeds.
+
+## Public metadata sources
+
+- IMDb official non-commercial bulk TSV files: `title.basics`,
+  `title.akas`, and `title.episode`.
+- StremThru's animeApi v3 source:
+  `https://raw.githubusercontent.com/nattadasu/animeApi/refs/heads/v3/database/animeapi.tsv`
+  for IMDb/AniDB/TVDB/Trakt identities.
+- StremThru's Anime-Lists source:
+  `https://raw.githubusercontent.com/Anime-Lists/anime-lists/refs/heads/master/anime-list.xml`
+  for AniDB/TVDB season, absolute episode and offset mappings.
+
+SQLite tables are `titles`, `seasons`, `anime_ids`,
+`anime_series_map`, `episode_map`, `metadata_state`.
+
+## API
 
 ```bash
-mkdir -p data
-uv run media-match --db "$PWD/data/metadata.sqlite3" refresh-local
+curl http://127.0.0.1:8765/health
+curl -X POST http://127.0.0.1:8765/match \
+  -H 'Content-Type: application/json' \
+  -d '{"t_title":"One Piece S23E02"}'
 ```
 
-The refresh downloads IMDb basics/AKAs/episodes, animeApi v3 and Anime-Lists,
-builds a temporary SQLite database **in the same directory**, then atomically
-replaces the live database. The existing database remains intact on download
-or import failure. Keep at least enough free disk space for two database copies.
+Returns one IMDb match with season/episode and AniDB mapping, or JSON
+`null` if the mapping is unavailable or ambiguous. Both `Episode 1067`
+and `S23E02` are supported through the imported crosswalk; the two are
+**not presumed equivalent** without matching metadata.
 
-This download is substantial. The first run can take a long time. AniDB/TVDB
-episode crosswalks and supplemental mappings must still be imported separately;
-the automatic anime source is not a complete equivalent of StremThru's
-`anime_id_map` and `anidb_tvdb_episode_map`.
+## Known limitations
 
-## Weekly local schedule
-
-Install a cron entry for the user that owns the checkout:
-
-```bash
-crontab -e
-```
-
-Add (replace `/opt/torrent-parse-match` with the real checkout path):
-
-```cron
-23 5 * * 1 cd /opt/torrent-parse-match && /usr/bin/flock -n /tmp/media-match-refresh.lock /usr/bin/env uv run media-match --db /opt/torrent-parse-match/data/metadata.sqlite3 refresh-local >> /opt/torrent-parse-match/data/refresh.log 2>&1
-```
-
-`uv` must be in cron's PATH; if installed in `~/.local/bin`, use its absolute
-path instead of `/usr/bin/env uv`. Run the command manually first.
-
-## Serve locally
-
-```bash
-uv run media-match --db "$PWD/data/metadata.sqlite3" serve --host 127.0.0.1 --port 8765
-```
-
-```bash
-curl -G 'http://127.0.0.1:8765/match' --data-urlencode 'title=Dune.2021.1080p'
-curl -X POST 'http://127.0.0.1:8765/match' -H 'Content-Type: application/json' \
-  -d '{"t_title":"Dune.2021.1080p"}'
-```
-
-The response is one match object, or `null` if no unique match can be
-established. The HTTP server has no authentication. Do **not** expose it to
-the public internet without an authenticated reverse proxy and rate limits.
-
-## Limitations
-
-This is a conservative matcher, **not** a complete port of the PostgreSQL V4
-trigger. Complex country variants, the full reverse-suffix logic, and AniDB
-episode-to-ASID selection still require parity tests against the original
-SQL functions. The current API returns `anime_ids` when a crosswalk exists,
-but does not promise an `asid` field. No match is preferable to a false ID.
-
-## Anime response fields
-
-For an episode torrent, the single-match JSON contains IMDb coordinates and
-an AniDB mapping when it can be resolved:
-
-```json
-{
-  "imdb_id": "tt2250192",
-  "season": 4,
-  "episode": 15,
-  "sid": "tt2250192:4:15",
-  "anime": {
-    "anidb_id": "15146",
-    "episode": 3,
-    "asid": "15146:3"
-  }
-}
-```
-
-The response also contains title/category/parser metadata. This example
-illustrates a TVDB offset of 12; it is not a live API result.
-
-The AniDB episode can differ from the IMDb/TVDB episode. When no safe AniDB
-mapping exists, `anime` is `null`; the matcher does not invent an ASID.
-The local refresh automatically downloads IMDb/AniDB identities from animeApi\nand AniDB/TVDB episode maps from Anime-Lists. This PR does not yet implement the full
-PostgreSQL split-season/Trakt mapping semantics.
-
-
-## Autonomous metadata sources (no StremThru database required)
-
-The application downloads and imports all three source families itself:
-
-- IMDb official non-commercial TSV: `title.basics`, `title.akas`, `title.episode`.
-- `nattadasu/animeApi` v3 `animeapi.tsv`: IMDb, AniDB, TVDB, Trakt season and other anime identities.
-- `Anime-Lists/anime-lists` `anime-list.xml`: AniDB/TVDB episode crosswalks, season and offset mappings.
-
-These are the same public anime source families used by StremThru's
-`sync-animeapi` and `sync-anidb-tvdb-episode-map` workers. No PostgreSQL
-export or user-provided metadata is required. The older `import-crosswalk`
-command is optional for manual troubleshooting, **not** part of setup.
-
-A weekly cron schedule invokes `refresh-local` on the server. All downloaded
-tables are rebuilt in a staging SQLite copy and swapped atomically after
-the refresh finishes. If any source fails, the old database remains in place.
-
-### Known parity gaps
-
-StremThru also ships an embedded Anime-Lists override XML and handles explicit
-mapping expressions and additional anime-title datasets. Those are not yet
-fully ported. The downloaded animeApi and Anime-Lists datasets do not guarantee
-that every IMDb title has an AniDB crosswalk. An unresolved episode must return
-`null` rather than a fabricated mapping.
+This is not yet a full byte-for-byte port of StremThru's
+`PrepareAniDBTVDBEpisodeMaps`, its embedded XML overrides, and all
+special `map` expressions. It also does not yet guarantee full parity with
+the original PostgreSQL IMDb V4 title matcher. The Docker build and complete
+IMDb bulk refresh have not been validated on Oracle ARM in this PR.
