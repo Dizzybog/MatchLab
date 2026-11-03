@@ -198,6 +198,10 @@ mod tests{
             INSERT INTO seasons VALUES('tt3',5);").unwrap();
         let movies=search(&db,"Dune",Some(2021),false,0,"Dune.2021.1080p",false,20).unwrap();
         assert_eq!(movies[0].imdb_id,"tt2");
+        let no_year=search(&db,"Dune",None,false,0,"Dune.1080p",false,20).unwrap();
+        assert!(!no_year.is_empty(),"equally plausible titles must still return a candidate");
+        assert_eq!(no_year[0].imdb_id,"tt1","stable ranking chooses the earlier title without a release year");
+
         let series=search(&db,"Breaking Bad",None,true,4,"Breaking.Bad.S04E02",true,20).unwrap();
         assert_eq!(series[0].imdb_id,"tt3");
         let rejected=search(&db,"Breaking Bad",None,true,9,"Breaking.Bad.S09E02",true,20).unwrap();
