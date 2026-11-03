@@ -43,4 +43,37 @@ def test_anime_ids_and_api_use_existing_parser(tmp_path):
     index = MetadataIndex(tmp_path / "index.sqlite")
     import_anime_mappings(index, file)
     assert index.anime_lookup("anidb", "123")["mal"] == "456"
-    assert match_title(index, "Cowboy Bebop 1998") == []
+    assert match_title(index, "Cowboy Bebop 1998") is None
+
+
+def test_single_result_and_ambiguity(tmp_path):
+    index = MetadataIndex(tmp_path / "index.sqlite")
+    with index.connect() as db:
+        db.executemany(
+            "INSERT INTO titles VALUES(?,?,?,?,?,?,?,?,?)",
+            [
+                ("tt0000001", "Dune", "dune", 1984, "movie", "US", 1, 1, "movie"),
+                ("tt0000002", "Dune", "dune", 2021, "movie", "US", 1, 1, "movie"),
+            ],
+        )
+    assert index.search("Dune", 2021)[0].imdb_id == "tt0000002"
+    assert index.search("Dune", 1984)[0].imdb_id == "tt0000001"
+
+
+def test_anime_url_sources_and_preserve_episode_maps(tmp_path):
+    import json
+    index = MetadataIndex(tmp_path / "index.sqlite")
+    with index.connect() as db:
+        db.execute("INSERT INTO episode_map VALUES(?,?,?,?,?,?,?,?)",
+                   ("123", "789", 1, 1, 1, 12, 0, ""))
+    file = tmp_path / "anime.json"
+    file.write_text(json.dumps({"data": [{
+        "sources": [
+            "https://anidb.net/anime/123",
+            "https://myanimelist.net/anime/456/Cowboy_Bebop",
+            "https://www.imdb.com/title/tt0213338/",
+        ],
+    }]}), encoding="utf-8")
+    assert import_anime_mappings(index, file) >= 3
+    assert index.anime_lookup("anidb", "123")["imdb"] == "tt0213338"
+    assert index.map_anime_episode("123", 1, 2) == [("789", 1, 2)]
