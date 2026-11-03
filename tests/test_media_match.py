@@ -284,3 +284,47 @@ def test_same_title_anime_beats_live_action_when_episode_crosswalk_exists(tmp_pa
 def test_anime_lists_explicit_one_to_many_map():
     from MediaMatch.anime_resolver import _explicit_pairs
     assert _explicit_pairs(";1-5+6;2-7;") == [(1, 5), (1, 6), (2, 7)]
+
+
+def test_imdb_import_keeps_only_supported_types_and_related_aliases(tmp_path):
+    basics = tmp_path / "types.basics.tsv.gz"
+    akas = tmp_path / "types.akas.tsv.gz"
+    episodes = tmp_path / "types.episodes.tsv.gz"
+    base_headers = ["tconst", "titleType", "primaryTitle", "originalTitle",
+                    "isAdult", "startYear", "endYear", "runtimeMinutes", "genres"]
+    _tsv(basics, base_headers, [
+        dict(tconst="tt0000001", titleType="movie", primaryTitle="Kept Film",
+             originalTitle="Kept Film", startYear="2020"),
+        dict(tconst="tt0000002", titleType="tvSeries", primaryTitle="Kept Show",
+             originalTitle="Kept Show", startYear="\\N"),
+        dict(tconst="tt0000003", titleType="tvEpisode", primaryTitle="Excluded Episode",
+             originalTitle="Excluded Episode", startYear="2020"),
+        dict(tconst="tt0000004", titleType="videoGame", primaryTitle="Excluded Game",
+             originalTitle="Excluded Game", startYear="2020"),
+        dict(tconst="tt0000005", titleType="tvPilot", primaryTitle="Excluded Pilot",
+             originalTitle="Excluded Pilot", startYear="2020"),
+    ])
+    _tsv(akas, ["titleId", "ordering", "title", "region", "language",
+                "types", "attributes", "isOriginalTitle"], [
+        dict(titleId=f"tt{i:07d}", ordering="1", title=f"Alias {i}",
+             region="US", isOriginalTitle="0") for i in range(1, 6)
+    ])
+    _tsv(episodes, ["tconst", "parentTconst", "seasonNumber", "episodeNumber"], [
+        dict(tconst="tt0000006", parentTconst="tt0000002",
+             seasonNumber="4", episodeNumber="1"),
+        dict(tconst="tt0000007", parentTconst="tt0000003",
+             seasonNumber="10", episodeNumber="1"),
+    ])
+    index = MetadataIndex(tmp_path / "types.sqlite3")
+    import_imdb(index, basics, akas, episodes)
+    with index.connect() as db:
+        assert {r[0] for r in db.execute("SELECT DISTINCT imdb_id FROM titles")} == {
+            "tt0000001", "tt0000002"
+        }
+        assert {r[0] for r in db.execute("SELECT DISTINCT imdb_id FROM seasons")} == {
+            "tt0000002"
+        }
+        assert db.execute("SELECT year FROM titles WHERE imdb_id='tt0000002' LIMIT 1").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM titles WHERE type NOT IN "
+                          "('movie','tvMovie','short','tvShort','tvSpecial',"
+                          "'tvSeries','tvMiniSeries')").fetchone()[0] == 0
