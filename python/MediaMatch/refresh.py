@@ -7,7 +7,8 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
-from .importers import update_anime, update_imdb
+from .importers import update_imdb
+from .stremthru_sources import update_stremthru_anime
 from .index import MetadataIndex
 
 
@@ -28,7 +29,8 @@ def refresh_local(path: str | Path) -> tuple[int, int]:
                 source.backup(dest)
         index = MetadataIndex(staging)
         imdb_count = update_imdb(index)
-        anime_count = update_anime(index)
+        anime_links, anime_episodes = update_stremthru_anime(index)
+        anime_count = anime_links + anime_episodes
         # All connections are closed before the atomic replacement.
         os.replace(staging, target)
         return imdb_count, anime_count
