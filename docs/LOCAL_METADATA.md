@@ -19,7 +19,7 @@ mkdir -p data
 uv run media-match --db "$PWD/data/metadata.sqlite3" refresh-local
 ```
 
-The refresh downloads IMDb basics/AKAs/episodes and anime-offline-database,
+The refresh downloads IMDb basics/AKAs/episodes, animeApi v3 and Anime-Lists,
 builds a temporary SQLite database **in the same directory**, then atomically
 replaces the live database. The existing database remains intact on download
 or import failure. Keep at least enough free disk space for two database copies.
@@ -94,40 +94,31 @@ illustrates a TVDB offset of 12; it is not a live API result.
 
 The AniDB episode can differ from the IMDb/TVDB episode. When no safe AniDB
 mapping exists, `anime` is `null`; the matcher does not invent an ASID.
-For accurate multi-season anime mapping, import the AniDB/TVDB episode crosswalk
-as well as IMDb↔AniDB identities. This PR does not yet implement the full
+The local refresh automatically downloads IMDb/AniDB identities from animeApi\nand AniDB/TVDB episode maps from Anime-Lists. This PR does not yet implement the full
 PostgreSQL split-season/Trakt mapping semantics.
 
-## Import the PostgreSQL anime crosswalk (required for both numbering systems)
 
-The public anime-offline-database is **not** sufficient for accurate absolute
-episode conversion. Export your StremThru tables on the Oracle server:
+## Autonomous metadata sources (no StremThru database required)
 
-```bash
-mkdir -p data/crosswalk
-sudo docker exec -i postgres_stremthru psql -U postgres -d postgres -c \
-  "COPY (SELECT imdb,anidb,tvdb,trakt_season FROM public.anime_id_map WHERE imdb IS NOT NULL AND anidb IS NOT NULL) TO STDOUT WITH (FORMAT csv, HEADER true, DELIMITER E'\\t')" \
-  > data/crosswalk/anime_id_map.tsv
+The application downloads and imports all three source families itself:
 
-sudo docker exec -i postgres_stremthru psql -U postgres -d postgres -c \
-  "COPY (SELECT anidb_id,tvdb_id,anidb_season,tvdb_season,start,\"end\",\"offset\",map FROM public.anidb_tvdb_episode_map) TO STDOUT WITH (FORMAT csv, HEADER true, DELIMITER E'\\t')" \
-  > data/crosswalk/episode_map.tsv
+- IMDb official non-commercial TSV: `title.basics`, `title.akas`, `title.episode`.
+- `nattadasu/animeApi` v3 `animeapi.tsv`: IMDb, AniDB, TVDB, Trakt season and other anime identities.
+- `Anime-Lists/anime-lists` `anime-list.xml`: AniDB/TVDB episode crosswalks, season and offset mappings.
 
-uv run media-match --db data/metadata.sqlite3 import-crosswalk \
-  data/crosswalk/anime_id_map.tsv data/crosswalk/episode_map.tsv
-```
+These are the same public anime source families used by StremThru's
+`sync-animeapi` and `sync-anidb-tvdb-episode-map` workers. No PostgreSQL
+export or user-provided metadata is required. The older `import-crosswalk`
+command is optional for manual troubleshooting, **not** part of setup.
 
-The importer expects **tab-separated** exports with a header. For fields that
-contain tabs, use PostgreSQL's CSV quoting. Run the command after the initial
-metadata refresh; subsequent local refreshes preserve the crosswalk tables.
+A weekly cron schedule invokes `refresh-local` on the server. All downloaded
+tables are rebuilt in a staging SQLite copy and swapped atomically after
+the refresh finishes. If any source fails, the old database remains in place.
 
-The resolver supports both `One Piece Episode 1067` (absolute AniDB numbering)
-and `One Piece S23E02` (season-based numbering). It translates through the
-actual imported episode crosswalk and returns the same `sid`/`asid` only
-**when the data explicitly establishes that equivalence**. It does not assume
-these two particular numbers are equivalent.
+### Known parity gaps
 
-Split Trakt seasons are supported where two AniDB identities share a TVDB
-series/season and have different positive `trakt_season` values. This is a
-focused port of the SQL mapping rules, not yet a complete parity guarantee
-for every fallback in the original PostgreSQL functions.
+StremThru also ships an embedded Anime-Lists override XML and handles explicit
+mapping expressions and additional anime-title datasets. Those are not yet
+fully ported. The downloaded animeApi and Anime-Lists datasets do not guarantee
+that every IMDb title has an AniDB crosswalk. An unresolved episode must return
+`null` rather than a fabricated mapping.
