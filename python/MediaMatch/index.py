@@ -20,7 +20,7 @@ def clean_title(value: str) -> str:
     value = value.casefold().replace("æ", "ae").replace("ø", "o").replace("œ", "oe").replace("ß", "ss")
     value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode()
     # PostgreSQL V4 removes the standalone word "and" before punctuation.
-    value = re.sub(r"\\band\\b", "", value)
+    value = re.sub(r"\band\b", "", value)
     return re.sub(r"[^a-z0-9]+", "", value)
 
 
