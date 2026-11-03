@@ -149,10 +149,27 @@ class MetadataIndex:
                     (prefix, prefix + "\uffff"), allowed,
                 ))
 
+            # Country-qualified series: SQL V4 checks exact country aliases
+            # before generic prefix matching, preventing a different national
+            # edition of an identically named programme from winning.
+            country_rows = []
+            if series and release_title:
+                from .country_aliases import country_title_candidates
+                for candidate in country_title_candidates(release_title):
+                    country_rows.extend(valid(select("clean_title=?", (candidate,), _SERIES)))
+            if country_rows:
+                rows = country_rows
+                stage = "country_exact"
+                LOG.debug("imdb_match stage=country_exact key=%s candidates=%d",
+                          key, len(rows))
+            else:
+                rows = []
+                stage = "forward_prefix"
+
             # 1. Exact/forward prefix: V4 prefers exact, then the longest
             # candidate title found in the original release.
-            rows = prefix_rows(key)
-            stage = "forward_prefix"
+            if not rows:
+                rows = prefix_rows(key)
             if not rows:
                 # 2. V4 can also match IMDb titles that are shorter than the
                 # parsed title. Test progressively shorter exact prefixes.
@@ -199,7 +216,7 @@ class MetadataIndex:
                 (0 if r["clean_title"] == key else 1, -len(r["clean_title"]))
                 for r in rows
             )
-            if stage in {"forward_prefix", "half_prefix"}:
+            if stage in {"forward_prefix", "half_prefix", "country_exact"}:
                 rows = [r for r in rows if (
                     0 if r["clean_title"] == key else 1, -len(r["clean_title"])
                 ) == best_shape]
