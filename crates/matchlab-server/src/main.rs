@@ -2,6 +2,7 @@
 //! Runs against the same SQLite schema as the Python implementation.
 //! This is a parallel implementation, not yet a drop-in replacement.
 mod imdb_v4;
+mod metadata_import;
 mod anime_resolver;
 mod anime_title;
 mod country_aliases;
@@ -352,6 +353,17 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_env_filter(
         tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_|"matchlab_server=info".into())).init();
+    let args:Vec<String>=env::args().collect();
+    if args.get(1).is_some_and(|arg|arg=="import-imdb") {
+        if args.len()!=6 {
+            return Err("usage: matchlab-server import-imdb <database.sqlite3> <title.basics.tsv.gz> <title.akas.tsv.gz> <title.episode.tsv.gz>".into());
+        }
+        let count=metadata_import::import_imdb(
+            std::path::Path::new(&args[2]),std::path::Path::new(&args[3]),
+            std::path::Path::new(&args[4]),std::path::Path::new(&args[5]))?;
+        tracing::info!("IMDb metadata imported: {count} supported titles");
+        return Ok(());
+    }
     let db = env::var("MATCHLAB_DB").unwrap_or_else(|_|"/data/metadata.sqlite3".into());
     let host = env::var("MATCHLAB_HOST").unwrap_or_else(|_|"127.0.0.1:8766".into());
     let app = Router::new().route("/health",get(health))
