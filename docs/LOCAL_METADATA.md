@@ -97,3 +97,37 @@ mapping exists, `anime` is `null`; the matcher does not invent an ASID.
 For accurate multi-season anime mapping, import the AniDB/TVDB episode crosswalk
 as well as IMDb↔AniDB identities. This PR does not yet implement the full
 PostgreSQL split-season/Trakt mapping semantics.
+
+## Import the PostgreSQL anime crosswalk (required for both numbering systems)
+
+The public anime-offline-database is **not** sufficient for accurate absolute
+episode conversion. Export your StremThru tables on the Oracle server:
+
+```bash
+mkdir -p data/crosswalk
+sudo docker exec -i postgres_stremthru psql -U postgres -d postgres -c \
+  "COPY (SELECT imdb,anidb,tvdb,trakt_season FROM public.anime_id_map WHERE imdb IS NOT NULL AND anidb IS NOT NULL) TO STDOUT WITH (FORMAT csv, HEADER true, DELIMITER E'\\t')" \
+  > data/crosswalk/anime_id_map.tsv
+
+sudo docker exec -i postgres_stremthru psql -U postgres -d postgres -c \
+  'COPY (SELECT anidb_id,tvdb_id,anidb_season,tvdb_season,start,"end","offset",map FROM public.anidb_tvdb_episode_map) TO STDOUT WITH (FORMAT csv, HEADER true, DELIMITER E'\\''\\t'\\'')' \
+  > data/crosswalk/episode_map.tsv
+
+uv run media-match --db data/metadata.sqlite3 import-crosswalk \
+  data/crosswalk/anime_id_map.tsv data/crosswalk/episode_map.tsv
+```
+
+The importer expects **tab-separated** exports with a header. For fields that
+contain tabs, use PostgreSQL's CSV quoting. Run the command after the initial
+metadata refresh; subsequent local refreshes preserve the crosswalk tables.
+
+The resolver supports both `One Piece Episode 1067` (absolute AniDB numbering)
+and `One Piece S23E02` (season-based numbering). It translates through the
+actual imported episode crosswalk and returns the same `sid`/`asid` only
+**when the data explicitly establishes that equivalence**. It does not assume
+these two particular numbers are equivalent.
+
+Split Trakt seasons are supported where two AniDB identities share a TVDB
+series/season and have different positive `trakt_season` values. This is a
+focused port of the SQL mapping rules, not yet a complete parity guarantee
+for every fallback in the original PostgreSQL functions.
