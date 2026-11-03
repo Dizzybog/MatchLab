@@ -63,7 +63,9 @@ class MetadataIndex:
                 );
                 CREATE INDEX IF NOT EXISTS anime_series_by_anidb ON anime_series_map(anidb_id);
                 CREATE INDEX IF NOT EXISTS anime_series_by_imdb ON anime_series_map(imdb_id);
-                CREATE INDEX IF NOT EXISTS anime_lookup_idx ON anime_ids(type, value);\n                CREATE INDEX IF NOT EXISTS episode_lookup_idx ON episode_map(anidb_id, anidb_season, start, end);\n                CREATE TABLE IF NOT EXISTS metadata_state (
+                CREATE INDEX IF NOT EXISTS anime_lookup_idx ON anime_ids(type, value);
+                CREATE INDEX IF NOT EXISTS episode_lookup_idx ON episode_map(anidb_id, anidb_season, start, end);
+                CREATE TABLE IF NOT EXISTS metadata_state (
                     source TEXT PRIMARY KEY, updated_at TEXT NOT NULL, row_count INTEGER NOT NULL
                 );
             """)
