@@ -56,6 +56,13 @@ class MetadataIndex:
                     tvdb_season INTEGER NOT NULL, start INTEGER NOT NULL, end INTEGER NOT NULL,
                     offset INTEGER NOT NULL DEFAULT 0, map TEXT NOT NULL DEFAULT ''
                 );
+                CREATE TABLE IF NOT EXISTS anime_series_map (
+                    imdb_id TEXT NOT NULL, anidb_id TEXT NOT NULL,
+                    tvdb_id TEXT NOT NULL DEFAULT '', trakt_season INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (imdb_id, anidb_id, tvdb_id, trakt_season)
+                );
+                CREATE INDEX IF NOT EXISTS anime_series_by_anidb ON anime_series_map(anidb_id);
+                CREATE INDEX IF NOT EXISTS anime_series_by_imdb ON anime_series_map(imdb_id);
                 CREATE INDEX IF NOT EXISTS anime_lookup_idx ON anime_ids(type, value);\n                CREATE INDEX IF NOT EXISTS episode_lookup_idx ON episode_map(anidb_id, anidb_season, start, end);\n                CREATE TABLE IF NOT EXISTS metadata_state (
                     source TEXT PRIMARY KEY, updated_at TEXT NOT NULL, row_count INTEGER NOT NULL
                 );
@@ -121,45 +128,17 @@ class MetadataIndex:
             return matches[:limit]
 
     def resolve_anime_episode(self, imdb_id: str, season: int, episode: int) -> tuple[str, int] | None:
-        """Resolve IMDb/TVDB season + episode to AniDB coordinates.
+        """IMDb/TVDB S/E -> AniDB episode, including split Trakt seasons."""
+        from .anime_resolver import resolve_season_episode
 
-        Prefer the SQL resolver's direct TVDB mapping: highest applicable
-        offset, then latest start. Without a crosswalk, fall back to the
-        AniDB episode number only if there is exactly one AniDB identity
-        for the IMDb title and the season is not beyond known TVDB coverage.
-        """
-        if season < 0 or episode <= 0:
-            return None
-        with self.connect() as db:
-            ids = [r[0] for r in db.execute(
-                "SELECT DISTINCT value FROM anime_ids WHERE group_id=? AND type='anidb'",
-                (imdb_id,),
-            )]
-            if not ids:
-                return None
-            placeholders = ",".join("?" for _ in ids)
-            mappings = db.execute(
-                f"SELECT * FROM episode_map WHERE anidb_id IN ({placeholders}) "
-                "AND anidb_season>0 AND tvdb_season>0",
-                ids,
-            ).fetchall()
-            candidates = [
-                r for r in mappings
-                if r["tvdb_season"] == season
-                and episode - r["offset"] >= max(r["start"], 1)
-                and (r["end"] <= 0 or episode - r["offset"] <= r["end"])
-            ]
-            if candidates:
-                candidates.sort(key=lambda r: (
-                    -r["offset"], -r["start"], int(r["anidb_id"]) if r["anidb_id"].isdigit() else 2147483647,
-                ))
-                winner = candidates[0]
-                return winner["anidb_id"], episode - winner["offset"]
-            # Never fabricate an episode when a crosswalk exists but
-            # does not cover the requested episode/season.
-            if mappings or len(ids) != 1:
-                return None
-            return ids[0], episode
+        result = resolve_season_episode(self, imdb_id, season, episode)
+        return (result["anidb_id"], result["anidb_episode"]) if result else None
+
+    def resolve_anime_absolute(self, imdb_id: str, episode: int) -> dict | None:
+        """Absolute AniDB episode -> IMDb/TVDB S/E."""
+        from .anime_resolver import resolve_absolute_episode
+
+        return resolve_absolute_episode(self, imdb_id, episode)
 
     def anime_lookup(self, source: str, value: str) -> dict[str, str] | None:
         with self.connect() as db:
