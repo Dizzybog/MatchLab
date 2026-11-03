@@ -5,7 +5,7 @@ COPY . .
 RUN cargo build --locked --release -p matchlab-server
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini curl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --create-home app \
     && mkdir -p /data && chown app:app /data
@@ -15,6 +15,6 @@ ENV MATCHLAB_DB=/data/metadata.sqlite3 MATCHLAB_HOST=0.0.0.0:8766
 VOLUME ["/data"]
 EXPOSE 8766
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD ["/usr/local/bin/matchlab-server", "--healthcheck"]
+    CMD ["curl", "--fail", "--silent", "http://127.0.0.1:8766/health"]
 ENTRYPOINT ["/usr/bin/tini", "-g", "--"]
 CMD ["/usr/local/bin/matchlab-server"]
