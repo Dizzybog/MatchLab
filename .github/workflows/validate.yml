@@ -23,5 +23,7 @@ jobs:
         run: cargo test -p matchlab-server --locked || cargo test -p matchlab-server
       - name: Build Docker image
         run: docker build -t torrent-parse-match:test .
+      - name: Validate parity comparison utility
+        run: python -m py_compile scripts/compare_python_rust.py
       - name: Build native Rust Docker image
         run: docker build -f Dockerfile.rust -t torrent-parse-match:rust-test .
