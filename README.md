@@ -1,114 +1,103 @@
 # Torrent Parse Match
 
-**Torrent Parse Match** is a small, self-hosted service that identifies movies and TV shows from torrent release names.
+**Torrent Parse Match** is a self-hosted service that identifies movies, TV shows and anime from torrent release names. It reads the complete filename, extracts details such as the title, year, season and episode, and returns the matching **IMDb ID**. For anime, it can also return an **AniDB ID** and the correct episode numbering.
 
-Give it a name such as `Dune.2021.2160p.WEB-DL` or `Breaking.Bad.S02E03.1080p`. It extracts the title, year, season and episode, then searches a local database to find the corresponding **IMDb ID**. For anime, it can also return an **AniDB ID and episode number** when a reliable episode mapping exists.
+For example, `Breaking.Bad.S02E03.1080p.WEB-DL` is recognized as *Breaking Bad*, season 2, episode 3.
 
-You do not need to set up a database, download metadata manually, configure a scheduler, or know anything about other projects. Everything runs inside one Docker container.
+The service provides a simple HTTP API and a web dashboard for testing matches. It runs in a single Docker container and stores its metadata in a local SQLite database.
 
-## What it does
+## Features
 
-- Reads complete torrent release names, including quality and encoding tags.
-- Matches movies and TV series to IMDb titles and alternate names using ordered exact, prefix, reverse-suffix and half-prefix matching stages.
-- Recognizes release years and season/episode numbers.
-- Supports anime aliases and conversions between different episode-numbering systems.
-- Returns **one match** in JSON, or `null` if it cannot determine a reliable match.
-- Downloads the metadata it needs and updates it automatically.
-- Runs on standard x86-64 and ARM64 Docker hosts, including compatible cloud servers.
+- **Torrent title parsing:** Reads release names containing years, seasons, episodes, video quality, codecs and other release tags.
+- **IMDb matching:** Searches movie and TV titles, including alternate titles and country-specific names. Uses exact-title, prefix and suffix matching, plus year and title-type ranking.
+- **Anime matching:** Searches anime titles separately from IMDb. When an anime match has a valid episode mapping, it takes priority over ordinary IMDb candidates. Supports anime parts, alternate titles and conversion between AniDB and TVDB-style episode numbering.
+- **Reliable results:** Returns one matching title or `null` when a reliable match cannot be established.
+- **Local metadata:** Downloads IMDb and anime metadata, builds a SQLite database and checks for updates automatically.
+- **Web dashboard:** Enter a release name and inspect the parsed information, IMDb candidates, anime candidate and selected result.
+- **Docker support:** Runs on x86-64 and ARM64 machines, with persistent data and detailed logs.
 
-This is a **metadata matching API**, not a torrent downloader, torrent search engine or streaming service. It does not download torrents.
+This is a **metadata identification service**. It does not search for, download or stream torrents. It does not require an AI model.
 
-## Install with Docker
+## Getting started
 
-You need Docker installed and an Internet connection.
+You need Docker and Docker Compose installed.
 
-### Option A: Docker Compose (recommended)
-
-Create a file named `compose.yaml`:
+Create a file called `compose.yaml`:
 
 ```yaml
 services:
   torrent-parse-match:
     image: ghcr.io/dizzybog/torrent-parse-match:latest
-    pull_policy: always
-    environment:
-      LOG_LEVEL: DEBUG
     container_name: torrent-parse-match
     restart: unless-stopped
+    environment:
+      LOG_LEVEL: INFO
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
       - metadata:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   metadata:
 ```
 
-Start it:
+Start the service:
 
 ```bash
 docker compose up -d
 ```
 
-To update the application image later:
+On its first start, the service downloads IMDb and anime metadata and creates its database. This can take some time, depending on your connection and hardware. The database is kept in the `metadata` Docker volume, so it survives container restarts and updates.
+
+Check the logs:
+
+```bash
+docker compose logs -f
+```
+
+To update the application later:
 
 ```bash
 docker compose pull
 docker compose up -d
 ```
 
-### Option B: Docker commands
+The Docker image is published from GitHub Actions. If the image is not publicly accessible yet, you may need to build it from source or authenticate with GitHub Container Registry.
+
+## Web dashboard
+
+Open **http://127.0.0.1:8765/dashboard** in a browser on the machine running Docker.
+
+Enter a torrent release name and select **Analyze**. The dashboard displays:
+
+- The extracted title, year, season and episode.
+- IMDb candidates and their matching titles.
+- The anime candidate and its episode mapping, when available.
+- The selected IMDb ID, season/episode ID (`SID`) and anime ID (`ASID`).
+- Processing time and detailed JSON diagnostics.
+
+You can optionally override the detected year or choose whether the release is a movie or TV series.
+
+If Docker runs on another server, `127.0.0.1` refers to **that server**, not your own computer. Use an SSH tunnel or an authenticated HTTPS reverse proxy to access the dashboard remotely.
+
+## API
+
+The API listens on port **8765**.
+
+### Check status
 
 ```bash
-docker pull ghcr.io/dizzybog/torrent-parse-match:latest
-docker volume create torrent-parse-match-data
-docker run -d \
-  --name torrent-parse-match \
-  --restart unless-stopped \
-  -p 127.0.0.1:8765:8765 \
-  -v torrent-parse-match-data:/data \
-  ghcr.io/dizzybog/torrent-parse-match:latest
+curl http://127.0.0.1:8765/health
 ```
 
-**Note:** The image is published by the repository's GitHub Actions workflow when changes reach `main`. It will be pullable after that workflow succeeds and the GitHub package is made public. If the package is private, GitHub authentication is required.
+The service returns HTTP `200` when the metadata is ready and `503` while it is initializing.
 
-### First start
-
-The container downloads IMDb and anime metadata and builds its own SQLite database. The first download can take a while and needs free disk space. Follow progress with:
-
-```bash
-docker logs -f torrent-parse-match
-```
-
-The database is stored in the Docker volume, so restarting or updating the container does not delete it.
-
-### Logs and shutdown
-
-The container uses **tini** as PID 1 to forward signals and reap child processes. The API handles SIGTERM/SIGINT and stops accepting requests cleanly.
-
-By default, `LOG_LEVEL=DEBUG` prints timestamps and detailed diagnostics to standard output. View them with:
-
-```bash
-docker logs -f --timestamps torrent-parse-match
-```
-
-Logs include incoming HTTP method, path, remote IP and request body, each response status and JSON body, title parsing, IMDb candidate/matching stage, metadata freshness checks, download URLs and HTTP status, import counts, errors with stack traces, and startup/shutdown. Metadata checks run at startup and then daily; downloads occur when data is missing or at least seven days old. Set `LOG_LEVEL=INFO` to reduce per-candidate debug output.
-
-**Privacy:** Request titles and complete JSON request/response bodies appear in logs. Avoid putting secrets in request bodies or query strings, and restrict access to Docker logs. Metadata downloads are logged by URL and HTTP status; large metadata file contents are not logged.
-
-## Use the API
-
-The service listens on port **8765**.
-
-### Check whether it is ready
-
-```bash
-curl -i http://127.0.0.1:8765/health
-```
-
-Before the first metadata download finishes, the service returns HTTP `503`. After the database is ready, it returns HTTP `200`.
-
-### Match a torrent title
+### Match a title
 
 ```bash
 curl -X POST http://127.0.0.1:8765/match \
@@ -116,7 +105,7 @@ curl -X POST http://127.0.0.1:8765/match \
   -d '{"t_title":"Dune.2021.2160p.WEB-DL"}'
 ```
 
-A match contains fields like:
+Example response (selected fields):
 
 ```json
 {
@@ -127,42 +116,51 @@ A match contains fields like:
   "anime": null,
   "title": "Dune",
   "year": 2021,
-  "category": "movie",
-  "matched_title": "Dune"
+  "category": "movie"
 }
 ```
 
-The actual response also includes parsed title information and available anime IDs. If a series episode is recognized, `sid` uses the format `tt1234567:season:episode`. When anime episode mapping succeeds, `anime.asid` uses the format `AniDB_ID:episode`.
+For TV episodes, `sid` uses the format `tt1234567:season:episode`. For anime with a verified episode mapping, `anime.asid` uses `anidb_id:episode`. Responses also include matching and parsing details.
 
-You can also use:
+The API returns JSON `null` when it cannot identify a reliable match. Invalid input returns HTTP `400`.
+
+To inspect the candidate lists programmatically, use the diagnostic endpoint:
 
 ```bash
-curl -G http://127.0.0.1:8765/match \
-  --data-urlencode "title=Breaking.Bad.S02E03.1080p"
+curl -X POST http://127.0.0.1:8765/debug/match \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Breaking.Bad.S02E03.1080p"}'
 ```
 
-An unknown or ambiguous title returns JSON `null`. Invalid requests return HTTP `400`.
+### Matching process
 
-## Automatic metadata updates
+1. The parser extracts the title and release information.
+2. The service searches IMDb metadata for movie and TV candidates.
+3. For episodic releases, it also searches anime metadata independently.
+4. A verified anime match takes priority; otherwise, the best eligible IMDb candidate is considered.
+5. The service returns the selected ID and episode information, or `null` if the match is uncertain.
 
-The container checks the last successful update:
+Anime episode conversion depends on the available mappings. Some unusual titles or episode-numbering formats may not resolve.
 
-1. When it starts.
-2. Every 24 hours while running.
-3. If the data is **7 days old or older**, it downloads fresh metadata.
-4. If updating fails, it keeps the previous working database and retries after one hour.
+## Metadata and updates
 
-You do not need to set up cron or manually update any tables.
+The service uses public IMDb datasets and anime title/episode mapping sources. Metadata is downloaded and indexed locally; release titles are not sent to an external matching API.
 
-Metadata comes from IMDb's publicly available datasets and public anime title/episode mapping sources. Only IMDb entries with supported movie or TV-series types are stored. Unsupported entries such as video games and individual episode titles are excluded to reduce storage.
+The service checks metadata on startup and every 24 hours. When the local data is at least seven days old, it attempts a refresh. If an update fails, the previous database remains available and the service retries later.
 
-## Privacy and security
+## Configuration
 
-All matching happens locally against the downloaded database. The container needs Internet access for metadata updates but does not send each title to an external matching API.
+| Setting | Description |
+| --- | --- |
+| `LOG_LEVEL` | `INFO` for normal logs or `DEBUG` for detailed matching diagnostics. |
+| `/data` | Persistent storage location for the SQLite metadata database. |
+| `8765` | HTTP port for the API and dashboard. |
 
-The included Docker configuration only exposes the API on `127.0.0.1` (your own server). **The API has no built-in authentication.** Use an authenticated HTTPS reverse proxy before making it publicly accessible.
+Logs include requests, matching decisions and metadata update activity. At `DEBUG` level, they contain detailed candidate information. Request titles and JSON payloads may appear in logs.
 
-## Build from source (optional)
+**Security:** The API and dashboard have no built-in authentication. The Compose example binds port 8765 to localhost. If you make the service available over a network, protect it with authentication and HTTPS.
+
+## Build from source
 
 ```bash
 git clone https://github.com/Dizzybog/torrent-parse-match.git
@@ -170,69 +168,13 @@ cd torrent-parse-match
 docker build -t torrent-parse-match:local .
 ```
 
-To run the tests locally, install Python 3.11+, Rust and the package dependencies, then run:
+To run the Python tests, install Python 3.11+, Rust and the project dependencies:
 
 ```bash
 python -m pip install . pytest
 python -m pytest -q tests/
 ```
 
-## Matching behavior
-
-The IMDb matcher uses ordered matching stages inspired by its PostgreSQL V4 implementation: forward/exact prefix, shorter prefix, indexed reverse suffix, and half-prefix fallback. Candidate selection also uses year proximity, original title, US aliases, title type and alias counts. Season limits are checked for TV series. Matching runs entirely against local SQLite metadata; no PostgreSQL instance is needed.
-
-The implementation is not yet a byte-for-byte port of every PostgreSQL V4 branch. In particular, country-specific alias expansion and some existing-ID validation rules still differ. The source has regression tests for the core prefix and suffix cases.
-
-## Current limitations
-
-- Matching is deterministic; no AI model is required or included.
-- Some uncommon anime episode mappings may not resolve.
-- If several titles are equally plausible, the service may return `null` rather than guess.
-- Real-world accuracy depends on metadata coverage and the release name.
-- The first full metadata import and ARM64 deployment need verification with real data.
-
 ## License
 
-GPL-3.0-or-later. Metadata providers have their own terms of use.
-
-
-### Country-qualified IMDb titles and anime part titles
-
-The V4 IMDb matcher includes a small built-in country-alias table
-(`python/MediaMatch/country_aliases.py`). An explicit trailing country
-suffix in a TV-series release (e.g. `The.Office.UK.S01E01`) is expanded
-to equivalent IMDb AKA names before the generic prefix stage. Only actual
-IMDb AKA rows are eligible; the country dictionary does not invent IDs.
-
-For anime, `python/MediaMatch/anime_title_matcher.py` uses local AniDB
-title aliases and the StremThru-derived `anime_series_map` and
-`episode_map` SQLite tables. A generic series title treats `SxxExx`
-as a global TVDB season; a specific arc/part title interprets `S01`
-relative to that AniDB part. Responses return the mapped canonical
-IMDb/TVDB season/episode as well as the AniDB `asid`. If a specific
-part is recognized but its requested episode cannot be mapped, the
-API returns no match rather than silently using an unrelated global
-season. Detailed matching stages appear at `LOG_LEVEL=DEBUG`.
-
-This is a targeted port of the older `torrent_stream` anime resolver.
-Exact parity for all split Trakt seasons and exceptional Anime-Lists
-mapping expressions still requires fixture-based verification.
-
-
-### Independent IMDb and anime candidate pools
-
-The matcher searches both metadata sources for every eligible episodic
-release. IMDb V4 title matching supplies ordinary movie/TV candidates.
-Separately, AniDB aliases and animeApi/Anime-Lists supply anime candidates,
-including their IMDb IDs and verified season/episode crosswalks.
-
-When a unique anime candidate has a valid episode mapping, it takes
-priority over ordinary IMDb candidates (including similarly named films).
-If anime mapping is missing or ambiguous, that anime candidate is
-rejected and the best valid IMDb candidate may be selected instead.
-Anime-derived IDs do not require an IMDb title/AKA row.
-
-Logs identify both candidate pools and the selected source as
-`match_source: "anime_priority"` for anime. The anime candidate's
-`title` and `year` fields are parsed from the release, not verified
-against IMDb title metadata.
+GPL-3.0-or-later. Metadata sources have their own terms of use.
