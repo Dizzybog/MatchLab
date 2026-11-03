@@ -87,7 +87,7 @@ pub fn resolve_season(db:&Connection,imdb:&str,season:i64,episode:i64)->rusqlite
     }}
     candidates.sort_by(|a,b|b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
     let Some(best)=candidates.first()else{return Ok(None)};
-    if candidates.get(1).is_some_and(|second|second.0==best.0&&second.1==best.1&&second.2..!=best.2..){
+    if candidates.get(1).is_some_and(|second|second.0==best.0&&second.1==best.1&&(second.2!=best.2||second.3!=best.3)){
         return Ok(None);
     }
     Ok(Some(Episode{imdb_id:imdb.into(),season,episode,anidb_id:best.2.clone(),anidb_episode:best.3}))
