@@ -165,7 +165,7 @@ def match_title(index: MetadataIndex, title: str, year: int | None = None,
                     LOG.info("anime_unresolved imdb=%s title=%r season=%d episode=%d",
                              best.imdb_id, parsed_title, imdb_season, imdb_episode)
                     return None
-                anidb_id, anidb_episode = mapped
+                anidb_id, anidb_episode = mapped["anidb_id"], mapped["anidb_episode"]
         anime = {
             "anidb_id": anidb_id,
             "episode": anidb_episode,
