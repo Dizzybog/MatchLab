@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/ptt-core",
+  "crates/matchlab-server",
   "python/torrent_match_native",
 ]
 resolver = "2"
