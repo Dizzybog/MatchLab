@@ -69,3 +69,31 @@ trigger. Complex country variants, the full reverse-suffix logic, and AniDB
 episode-to-ASID selection still require parity tests against the original
 SQL functions. The current API returns `anime_ids` when a crosswalk exists,
 but does not promise an `asid` field. No match is preferable to a false ID.
+
+## Anime response fields
+
+For an episode torrent, the single-match JSON contains IMDb coordinates and
+an AniDB mapping when it can be resolved:
+
+```json
+{
+  "imdb_id": "tt2250192",
+  "season": 4,
+  "episode": 15,
+  "sid": "tt2250192:4:15",
+  "anime": {
+    "anidb_id": "15146",
+    "episode": 3,
+    "asid": "15146:3"
+  }
+}
+```
+
+The response also contains title/category/parser metadata. This example
+illustrates a TVDB offset of 12; it is not a live API result.
+
+The AniDB episode can differ from the IMDb/TVDB episode. When no safe AniDB
+mapping exists, `anime` is `null`; the matcher does not invent an ASID.
+For accurate multi-season anime mapping, import the AniDB/TVDB episode crosswalk
+as well as IMDb↔AniDB identities. This PR does not yet implement the full
+PostgreSQL split-season/Trakt mapping semantics.
