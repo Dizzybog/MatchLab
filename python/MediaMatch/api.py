@@ -106,6 +106,13 @@ def serve(index: MetadataIndex, host: str = "127.0.0.1", port: int = 8765) -> No
 
         def do_GET(self) -> None:
             request = urlparse(self.path)
+            if request.path == "/health":
+                from .service import metadata_due
+                self._respond(200, {
+                    "status": "ready" if not metadata_due(index.path) else "updating",
+                    "metadata_current": not metadata_due(index.path),
+                })
+                return
             if request.path != "/match":
                 self.send_error(404)
                 return
