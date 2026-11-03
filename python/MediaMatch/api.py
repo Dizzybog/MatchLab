@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -17,11 +18,21 @@ def match_title(index: MetadataIndex, title: str, year: int | None = None,
     if not isinstance(title, str) or not title.strip():
         raise ValueError("title must be a non-empty string")
     parsed = parse(title)
-    inferred_series = bool(parsed.seasons or parsed.episodes) if series is None else series
+    # RTN handles normal SxxExx / E numbering. Explicit "Episode 1067"
+    # is treated as absolute only when no season was provided.
+    absolute = re.search(r"(?i)\\b(?:episode|ep)\\s*[. _-]*([0-9]{1,5})\\b", title)
+    parsed_seasons = list(parsed.seasons or [])
+    parsed_episodes = list(parsed.episodes or [])
+    if absolute and not parsed_episodes:
+        parsed_episodes = [int(absolute.group(1))]
+    parsed_title = parsed.parsed_title
+    if absolute and not parsed_seasons:
+        parsed_title = re.sub(r"(?i)\\b(?:episode|ep)\\s*[. _-]*[0-9]{1,5}\\b", "", parsed_title).strip(" ._-")
+    inferred_series = bool(parsed_seasons or parsed_episodes) if series is None else series
     target_year = year if year is not None else parsed.year
     matches = index.search(
-        parsed.parsed_title, target_year, series=inferred_series,
-        required_max_season=max(parsed.seasons, default=0), limit=20,
+        parsed_title, target_year, series=inferred_series,
+        required_max_season=max(parsed_seasons, default=0), limit=20,
     )
     if not matches:
         return None
@@ -31,19 +42,27 @@ def match_title(index: MetadataIndex, title: str, year: int | None = None,
         other = matches[1]
         if not target_year or abs(best.year - target_year) == abs(other.year - target_year):
             return None
-    imdb_season = min(parsed.seasons) if parsed.seasons else None
-    imdb_episode = min(parsed.episodes) if parsed.episodes else None
+    imdb_season = min(parsed_seasons) if parsed_seasons else None
+    imdb_episode = min(parsed_episodes) if parsed_episodes else None
     anime = None
-    if imdb_episode is not None and best.anime_ids.get("anidb"):
-        resolved = index.resolve_anime_episode(
-            best.imdb_id, imdb_season if imdb_season is not None else 1, imdb_episode,
-        )
-        if resolved:
-            anime = {
-                "anidb_id": resolved[0],
-                "episode": resolved[1],
-                "asid": f"{resolved[0]}:{resolved[1]}",
-            }
+    is_anime = bool(best.anime_ids.get("anidb"))
+    if imdb_episode is not None and is_anime:
+        if imdb_season is None:
+            mapped = index.resolve_anime_absolute(best.imdb_id, imdb_episode)
+            if mapped is None:
+                return None
+            imdb_season, imdb_episode = mapped["season"], mapped["episode"]
+            anidb_id, anidb_episode = mapped["anidb_id"], mapped["anidb_episode"]
+        else:
+            mapped = index.resolve_anime_episode(best.imdb_id, imdb_season, imdb_episode)
+            if mapped is None:
+                return None
+            anidb_id, anidb_episode = mapped
+        anime = {
+            "anidb_id": anidb_id,
+            "episode": anidb_episode,
+            "asid": f"{anidb_id}:{anidb_episode}",
+        }
     return {
         "imdb_id": best.imdb_id,
         "season": imdb_season,
