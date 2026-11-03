@@ -56,6 +56,13 @@ class MetadataIndex:
                     tvdb_season INTEGER NOT NULL, start INTEGER NOT NULL, end INTEGER NOT NULL,
                     offset INTEGER NOT NULL DEFAULT 0, map TEXT NOT NULL DEFAULT ''
                 );
+                CREATE TABLE IF NOT EXISTS anidb_titles (
+                    anidb_id TEXT NOT NULL, title TEXT NOT NULL,
+                    clean_title TEXT NOT NULL, title_type TEXT NOT NULL,
+                    language TEXT NOT NULL,
+                    PRIMARY KEY(anidb_id, clean_title, title_type, language)
+                );
+                CREATE INDEX IF NOT EXISTS anidb_title_lookup ON anidb_titles(clean_title);
                 CREATE TABLE IF NOT EXISTS anime_series_map (
                     imdb_id TEXT NOT NULL, anidb_id TEXT NOT NULL,
                     tvdb_id TEXT NOT NULL DEFAULT '', trakt_season INTEGER NOT NULL DEFAULT 0,
@@ -94,6 +101,17 @@ class MetadataIndex:
                     ).fetchall()
                     if rows:
                         break
+            if not rows and series:
+                # StremThru AniDB main/official/synonyms for Japanese and
+                # romanized aliases that IMDb AKAs may not contain.
+                rows = db.execute(
+                    "SELECT t.* FROM anidb_titles a "
+                    "JOIN anime_series_map l ON l.anidb_id=a.anidb_id "
+                    "JOIN titles t ON t.imdb_id=l.imdb_id "
+                    "WHERE a.clean_title=? AND t.year>0 "
+                    "GROUP BY t.imdb_id,t.clean_title,t.year,t.region,t.ordering",
+                    (key,),
+                ).fetchall()
             grouped: dict[str, list[sqlite3.Row]] = {}
             for row in rows:
                 if row["type"] in allowed:
