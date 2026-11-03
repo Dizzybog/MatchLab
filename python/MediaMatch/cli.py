@@ -4,7 +4,7 @@ import argparse
 import json
 
 from .api import match_title, serve
-from .importers import import_anime_mappings, import_imdb, update_anime, update_imdb
+from .importers import import_anime_mappings, import_imdb, import_sql_crosswalk, update_anime, update_imdb
 from .refresh import refresh_local
 from .index import MetadataIndex
 
@@ -23,6 +23,9 @@ def main() -> None:
     commands.add_parser("refresh-local")
     anime = commands.add_parser("import-anime")
     anime.add_argument("file")
+    crosswalk = commands.add_parser("import-crosswalk")
+    crosswalk.add_argument("series_tsv")
+    crosswalk.add_argument("episodes_tsv")
     match = commands.add_parser("match")
     match.add_argument("title")
     match.add_argument("--year", type=int)
@@ -45,6 +48,9 @@ def main() -> None:
         print(f"Imported {update_anime(index)} anime ID records")
     elif args.command == "import-anime":
         print(f"Imported {import_anime_mappings(index, args.file)} anime ID records")
+    elif args.command == "import-crosswalk":
+        links, maps = import_sql_crosswalk(index, args.series_tsv, args.episodes_tsv)
+        print(f"Imported {links} anime series links and {maps} episode mappings")
     elif args.command == "match":
         print(json.dumps(match_title(index, args.title, args.year, series=args.series), ensure_ascii=False, indent=2))
     else:
