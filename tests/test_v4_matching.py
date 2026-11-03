@@ -27,14 +27,14 @@ def test_v4_shorter_prefix_title_in_release(tmp_path):
 
 def test_v4_reverse_suffix_with_full_release_containment(tmp_path):
     index = MetadataIndex(tmp_path / "metadata.sqlite")
-    _put(index, [("tt1234567", "Lord Of The Rings The Hobbit",
-                  "lordoftheringsthehobbit", 2012, "series", "US", 1, 1, "tvSeries")],
+    _put(index, [("tt1234567", "Lord Of The Rings The Hobbit Unexpected",
+                  "lordoftheringsthehobbitunexpected", 2012, "series", "US", 1, 1, "tvSeries")],
          [("tt1234567", 3)])
-    results = index.search("The Hobbit", 2012, series=True, required_max_season=1,
-                           release_title="Lord.Of.The.Rings.The.Hobbit.S01E01")
+    results = index.search("The Hobbit Unexpected", 2012, series=True, required_max_season=1,
+                           release_title="Lord.Of.The.Rings.The.Hobbit.Unexpected.S01E01")
     assert results[0].imdb_id == "tt1234567"
-    assert not index.search("The Hobbit", 2012, series=True,
-                            release_title="The.Hobbit.S01E01")
+    assert not index.search("The Hobbit Unexpected", 2012, series=True,
+                            release_title="The.Hobbit.Unexpected.S01E01")
 
 
 def test_v4_original_title_tiebreak(tmp_path):
