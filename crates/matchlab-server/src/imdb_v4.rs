@@ -150,4 +150,28 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
 mod tests{
     use super::*;
     #[test] fn normalization(){assert_eq!(clean_title("Pokémon and Ægir"),"pokemonaegir");}
+    #[test] fn v4_exact_year_and_series_cap() {
+        let db=Connection::open_in_memory().unwrap();
+        db.create_scalar_function("reverse",1,
+            rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC|rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            |ctx|{let s:String=ctx.get(0)?;Ok(s.chars().rev().collect::<String>())}).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
+            region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_season INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
+            INSERT INTO titles VALUES('tt1','Dune','dune',1984,'movie','US',1,0,'movie');
+            INSERT INTO titles VALUES('tt2','Dune','dune',2021,'movie','US',1,0,'movie');
+            INSERT INTO titles VALUES('tt3','Breaking Bad','breakingbad',2008,'series','US',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt3',5);").unwrap();
+        let movies=search(&db,"Dune",Some(2021),false,0,"Dune.2021.1080p",false,20).unwrap();
+        assert_eq!(movies[0].imdb_id,"tt2");
+        let series=search(&db,"Breaking Bad",None,true,4,"Breaking.Bad.S04E02",true,20).unwrap();
+        assert_eq!(series[0].imdb_id,"tt3");
+        let rejected=search(&db,"Breaking Bad",None,true,9,"Breaking.Bad.S09E02",true,20).unwrap();
+        assert!(rejected.is_empty());
+    }
 }
