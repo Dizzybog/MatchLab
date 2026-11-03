@@ -159,13 +159,90 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
             "anime":{"anidb_id":anidb_id,"episode":ani_episode,"asid":format!("{anidb_id}:{ani_episode}")},
             "match_source":"anime_priority"}))
     } else {
-        imdb.first().map(|c|json!({"imdb_id":c.imdb_id,"title":c.title,"year":c.year,
-            "category":if series {"series"} else {"movie"},
-            "season":seasons.first(),"episode":episodes.first(),
-            "sid":if let (Some(s),Some(e))=(seasons.first(),episodes.first()) {
-                format!("{}:{s}:{e}",c.imdb_id)
-            } else {c.imdb_id.clone()},
-            "anime":null,"match_source":"imdb"}))
+        // Python match_title refuses ambiguous IMDb identities rather than
+        // silently returning the first equally plausible candidate.
+        let mut chosen=imdb.first();
+        if let (Some(first),Some(second))=(imdb.first(),imdb.get(1)) {
+            let ambiguous=year.is_none() || (first.year-year.unwrap_or_default()).abs()
+                ==(second.year-year.unwrap_or_default()).abs();
+            if ambiguous {
+                // With episode coordinates, a single verified anime crosswalk
+                // can disambiguate otherwise identically named IMDb titles.
+                let mut verified=Vec::new();
+                if let Some(ep)=episodes.first() {
+                    for candidate in &imdb {
+                        let mapped=match seasons.first().copied() {
+                            Some(season) => {
+                                let titled=anime_title::resolve(&db,&candidate.imdb_id,title,season,*ep)
+                                    .map_err(|e|e.to_string())?;
+                                if titled.is_some(){titled}
+                                else if anime_title::has_specific_alias(&db,&candidate.imdb_id,title)
+                                    .map_err(|e|e.to_string())? {None}
+                                else {anime_resolver::resolve_season(&db,&candidate.imdb_id,season,*ep)
+                                    .map_err(|e|e.to_string())?}
+                            }
+                            None => anime_resolver::resolve_absolute(&db,&candidate.imdb_id,*ep)
+                                .map_err(|e|e.to_string())?,
+                        };
+                        if let Some(mapped)=mapped{verified.push((candidate,mapped));}
+                    }
+                }
+                if verified.len()==1 {
+                    let (candidate,mapped)=&verified[0];
+                    let imdb_id=&candidate.imdb_id;
+                    let aid=&mapped.anidb_id;
+                    let ae=mapped.anidb_episode;
+                    let se=mapped.season;
+                    let ep=mapped.episode;
+                    return Ok(Diagnostic{parsed:Value::Object(parsed),normalized_title:key,
+                        imdb_candidates:imdb,anime_candidate:None,
+                        selected:Some(json!({"imdb_id":imdb_id,"season":se,"episode":ep,
+                            "sid":format!("{imdb_id}:{se}:{ep}"),
+                            "anime":{"anidb_id":aid,"episode":ae,"asid":format!("{aid}:{ae}")},
+                            "match_source":"imdb_verified_anime"})),
+                        reason:"Unique verified anime crosswalk among IMDb candidates".into()});
+                }
+                chosen=None;
+            }
+        }
+        if let Some(c)=chosen {
+            let mut selected_season=seasons.first().copied();
+            let mut selected_episode=episodes.first().copied();
+            let mut anime_result=Value::Null;
+            if let Some(ep)=selected_episode {
+                let mapped=if let Some(season)=selected_season {
+                    let titled=anime_title::resolve(&db,&c.imdb_id,title,season,ep)
+                        .map_err(|e|e.to_string())?;
+                    if titled.is_some(){titled}
+                    else if anime_title::has_specific_alias(&db,&c.imdb_id,title)
+                        .map_err(|e|e.to_string())? {None}
+                    else {anime_resolver::resolve_season(&db,&c.imdb_id,season,ep)
+                        .map_err(|e|e.to_string())?}
+                }else{
+                    anime_resolver::resolve_absolute(&db,&c.imdb_id,ep)
+                        .map_err(|e|e.to_string())?
+                };
+                if let Some(mapped)=mapped{
+                    selected_season=Some(mapped.season);
+                    selected_episode=Some(mapped.episode);
+                    anime_result=json!({"anidb_id":mapped.anidb_id,
+                        "episode":mapped.anidb_episode,
+                        "asid":format!("{}:{}",mapped.anidb_id,mapped.anidb_episode)});
+                } else if anime_title::has_specific_alias(&db,&c.imdb_id,title)
+                    .map_err(|e|e.to_string())? {
+                    chosen=None;
+                }
+            }
+            if chosen.is_some(){
+                Some(json!({"imdb_id":c.imdb_id,"title":c.title,"year":c.year,
+                    "category":if series {"series"} else {"movie"},
+                    "season":selected_season,"episode":selected_episode,
+                    "sid":if let (Some(se),Some(ep))=(selected_season,selected_episode){
+                        format!("{}:{se}:{ep}",c.imdb_id)
+                    }else{c.imdb_id.clone()},
+                    "anime":anime_result,"match_source":"imdb"}))
+            }else{None}
+        }else{None}
     };
     let reason = if anime.is_some() {"Verified anime crosswalk"} else if selected.is_some() {
         "IMDb title candidate (experimental matching rules)"
