@@ -7,9 +7,20 @@ Only explicit crosswalk rows can translate absolute episode numbering.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+import re
 
 if TYPE_CHECKING:
     from .index import MetadataIndex
+
+
+def _explicit_pairs(value: str) -> list[tuple[int, int]]:
+    """Anime-Lists ';anidb-episode;tvdb-episode;' map expressions."""
+    pairs = []
+    for part in value.strip(";").split(";"):
+        found = re.fullmatch(r"(\\d+)-(\\d+)", part.strip())
+        if found:
+            pairs.append((int(found[1]), int(found[2])))
+    return pairs
 
 
 def _links(db, imdb_id: str):
@@ -80,6 +91,12 @@ def resolve_season_episode(index: MetadataIndex, imdb_id: str,
                 else:
                     if m["tvdb_season"] != season:
                         continue
+                    explicit = _explicit_pairs(m["map"])
+                    if explicit:
+                        hits = [ani for ani, tv in explicit if tv == episode]
+                        for ani in hits:
+                            candidates.append((m["offset"], m["start"], link["anidb_id"], ani))
+                        continue
                     ep = episode - m["offset"]
                 if ep < max(m["start"], 1) or (m["end"] > 0 and ep > m["end"]):
                     continue
@@ -117,7 +134,17 @@ def resolve_absolute_episode(index: MetadataIndex, imdb_id: str,
                     continue
                 split = _split(db, imdb_id, link, m, links, mappings)
                 season = link["trakt_season"] if split else m["tvdb_season"]
-                ep = episode - max(m["start"], 1) + 1 if split else episode + m["offset"]
+                if split:
+                    ep = episode - max(m["start"], 1) + 1
+                else:
+                    explicit = _explicit_pairs(m["map"])
+                    if explicit:
+                        hits = [tv for ani, tv in explicit if ani == episode]
+                        for tv in hits:
+                            if season > 0 and tv > 0:
+                                candidates.append((m["start"], m["offset"], link["anidb_id"], season, tv))
+                        continue
+                    ep = episode + m["offset"]
                 if season > 0 and ep > 0:
                     candidates.append((m["start"], m["offset"], link["anidb_id"], season, ep))
         if not candidates:
