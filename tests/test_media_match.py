@@ -279,3 +279,8 @@ def test_same_title_anime_beats_live_action_when_episode_crosswalk_exists(tmp_pa
     assert result is not None
     assert result["imdb_id"] == "tt0388629"
     assert result["anime"]["asid"] == "69:2"
+
+
+def test_anime_lists_explicit_one_to_many_map():
+    from MediaMatch.anime_resolver import _explicit_pairs
+    assert _explicit_pairs(";1-5+6;2-7;") == [(1, 5), (1, 6), (2, 7)]
