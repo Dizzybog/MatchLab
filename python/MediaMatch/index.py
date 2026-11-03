@@ -139,7 +139,7 @@ class MetadataIndex:
                     r["ordering"] or 0,
                 ))
                 if series and required_max_season > 0 and (
-                    max_season is None or max_season[0] < max(1, required_max_season - 1)
+                    max_season is None or max_season[0] < required_max_season
                 ):
                     # SQL crosswalk may contain a season not present in IMDb's
                     # episode export (especially split anime seasons).
