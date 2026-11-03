@@ -76,11 +76,13 @@ def match_title(index: MetadataIndex, title: str, year: int | None = None,
             if not candidate.anime_ids.get("anidb"):
                 continue
             if season_number is not None:
-                from .anime_title_matcher import resolve_titled_anime
+                from .anime_title_matcher import resolve_titled_anime, has_specific_anime_alias
                 result = (resolve_titled_anime(index, candidate.imdb_id,
                                                parsed_title, season_number, episode_number)
-                          or index.resolve_anime_episode(candidate.imdb_id,
-                                                        season_number, episode_number))
+                          or (None if has_specific_anime_alias(index, candidate.imdb_id,
+                                                              parsed_title)
+                              else index.resolve_anime_episode(candidate.imdb_id,
+                                                              season_number, episode_number)))
             else:
                 result = index.resolve_anime_absolute(candidate.imdb_id, episode_number)
             if result is not None:
@@ -114,6 +116,10 @@ def match_title(index: MetadataIndex, title: str, year: int | None = None,
                 anidb_id, anidb_episode = titled["anidb_id"], titled["anidb_episode"]
                 imdb_season, imdb_episode = titled["season"], titled["episode"]
             else:
+                if has_specific_anime_alias(index, best.imdb_id, parsed_title):
+                    LOG.warning("anime_specific_title_unresolved imdb=%s title=%r season=%d episode=%d",
+                                best.imdb_id, parsed_title, imdb_season, imdb_episode)
+                    return None
                 mapped = index.resolve_anime_episode(best.imdb_id, imdb_season, imdb_episode)
                 if mapped is None:
                     LOG.info("anime_unresolved imdb=%s title=%r season=%d episode=%d",
