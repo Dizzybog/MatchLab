@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 FROM rust:1-bookworm AS builder
-RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-dev python3-pip python3-venv pkg-config build-essential && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-dev python3-pip python3-venv pkg-config build-essential patchelf && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY . .
 RUN python3 -m venv /venv && /venv/bin/pip install --no-cache-dir maturin
