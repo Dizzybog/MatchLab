@@ -1,0 +1,227 @@
+//! Experimental native Rust matching service.
+//! Runs against the same SQLite schema as the Python implementation.
+//! This is a parallel implementation, not yet a drop-in replacement.
+use axum::{extract::State, http::StatusCode, routing::{get, post}, Json, Router};
+use rusqlite::{params, Connection, OpenFlags};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::{env, net::SocketAddr, path::PathBuf, sync::Arc};
+use unicode_normalization::UnicodeNormalization;
+
+#[derive(Clone)]
+struct AppState { db: Arc<PathBuf> }
+
+#[derive(Debug, Deserialize)]
+struct MatchRequest {
+    #[serde(alias = "t_title")]
+    title: String,
+    year: Option<i32>,
+    series: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct Candidate {
+    imdb_id: String,
+    title: String,
+    year: i32,
+    media_type: String,
+    matched_title: String,
+    source: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct Diagnostic {
+    parsed: Value,
+    normalized_title: String,
+    imdb_candidates: Vec<Candidate>,
+    anime_candidate: Option<Value>,
+    selected: Option<Value>,
+    reason: String,
+}
+
+fn normalize(input: &str) -> String {
+    let lowered = input.to_lowercase()
+        .replace('æ', "ae").replace('ø', "o").replace('œ', "oe").replace('ß', "ss");
+    let ascii: String = lowered.nfkd().filter(|c| c.is_ascii()).collect();
+    let words = ascii.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty() && *part != "and");
+    words.collect()
+}
+
+fn numbers(v: Option<&Value>) -> Vec<i64> {
+    match v {
+        Some(Value::Number(n)) => n.as_i64().into_iter().collect(),
+        Some(Value::Array(a)) => a.iter().filter_map(Value::as_i64).collect(),
+        _ => vec![],
+    }
+}
+
+fn open_db(path: &PathBuf) -> rusqlite::Result<Connection> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.create_scalar_function("reverse", 1, rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC | rusqlite::functions::FunctionFlags::SQLITE_UTF8, |ctx| {
+        let value: String = ctx.get(0)?;
+        Ok(value.chars().rev().collect::<String>())
+    })?;
+    Ok(conn)
+}
+
+fn candidates(db: &Connection, key: &str, year: Option<i32>, series: bool) -> rusqlite::Result<Vec<Candidate>> {
+    let mut stmt = db.prepare(
+        "SELECT imdb_id,title,year,type,clean_title FROM titles
+         WHERE (clean_title=?1 OR (?1 LIKE clean_title || '%' AND length(clean_title)>=6))
+         AND year>0 AND type IN ('movie','tvMovie','short','tvShort','tvSpecial','tvSeries','tvMiniSeries')
+         ORDER BY CASE WHEN clean_title=?1 THEN 0 ELSE 1 END,
+                  length(clean_title) DESC, abs(year-coalesce(?2,year)),
+                  CASE type WHEN 'movie' THEN 0 WHEN 'tvMovie' THEN 1 WHEN 'short' THEN 2 ELSE 3 END,
+                  ordering ASC LIMIT 60"
+    )?;
+    let rows = stmt.query_map(params![key,year], |r| {
+        Ok(Candidate {imdb_id:r.get(0)?,title:r.get(1)?,year:r.get(2)?,
+            media_type:r.get(3)?,matched_title:r.get(4)?,source:"imdb"})
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        let c = row?;
+        let is_series = c.media_type == "tvSeries" || c.media_type == "tvMiniSeries";
+        if is_series == series && !result.iter().any(|x: &Candidate| x.imdb_id == c.imdb_id) {
+            result.push(c);
+        }
+        if result.len() >= 20 { break; }
+    }
+    Ok(result)
+}
+
+fn anime_candidate(db: &Connection, key: &str, season: Option<i64>, episode: i64) -> rusqlite::Result<Option<Value>> {
+    if key.len() < 4 || episode <= 0 { return Ok(None); }
+    let mut stmt = db.prepare(
+        "SELECT DISTINCT a.anidb_id,a.clean_title,l.imdb_id
+         FROM anidb_titles a JOIN anime_series_map l ON l.anidb_id=a.anidb_id
+         WHERE a.clean_title=?1 OR (length(a.clean_title)>=6 AND ?1 LIKE a.clean_title||'%')
+         ORDER BY CASE WHEN a.clean_title=?1 THEN 0 ELSE 1 END,
+                  length(a.clean_title) DESC LIMIT 40"
+    )?;
+    let rows = stmt.query_map([key], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?;
+    let mut matches = Vec::new();
+    for row in rows { matches.push(row?); }
+    if matches.is_empty() { return Ok(None); }
+    let exact = matches[0].1 == key;
+    let best_len = matches[0].1.len();
+    let best: Vec<_> = matches.iter().filter(|(_, alias, _)| (alias == key) == exact && alias.len() == best_len).collect();
+    if best.iter().any(|(_,_,imdb)| imdb != &best[0].2) { return Ok(None); }
+    let imdb = &best[0].2;
+    // Only accept a unique verified crosswalk; no fabricated season or episode.
+    let Some(season) = season else { return Ok(None); };
+    if season <= 0 { return Ok(None); }
+    let mut stmt = db.prepare(
+        "SELECT DISTINCT m.anidb_id, ?2 - m.offset AS anime_episode
+         FROM episode_map m JOIN anime_series_map a ON a.anidb_id=m.anidb_id
+         WHERE a.imdb_id=?1 AND m.tvdb_season=?3 AND m.anidb_season>0
+           AND m.map='' AND ?2-m.offset >= max(m.start,1)
+           AND (m.end<=0 OR ?2-m.offset<=m.end)
+         LIMIT 3"
+    )?;
+    let rows = stmt.query_map(params![imdb,episode,season], |r| Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?)))?;
+    let mapped: Vec<_> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    if mapped.len() != 1 { return Ok(None); }
+    Ok(Some(json!({"imdb_id":imdb,"season":season,"episode":episode,
+        "anidb_id":mapped[0].0,"anidb_episode":mapped[0].1})))
+}
+
+fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> {
+    if req.title.trim().is_empty() || req.title.len() > 4096 { return Err("title must be 1–4096 bytes".into()); }
+    let parsed = ptt_core::parse_title(&req.title,false).map_err(|e|e.to_string())?;
+    let title = parsed.get("title").and_then(Value::as_str).unwrap_or("");
+    let key = normalize(title);
+    let seasons = numbers(parsed.get("seasons"));
+    let episodes = numbers(parsed.get("episodes"));
+    let series = req.series.unwrap_or(!seasons.is_empty() || !episodes.is_empty());
+    let year = req.year.or_else(||parsed.get("year").and_then(Value::as_i64).map(|n|n as i32));
+    let db = open_db(db_path).map_err(|e|e.to_string())?;
+    let imdb = candidates(&db,&key,year,series).map_err(|e|e.to_string())?;
+    let anime = if series {
+        episodes.first().map(|ep|anime_candidate(&db,&key,seasons.first().copied(),*ep))
+            .transpose().map_err(|e|e.to_string())?.flatten()
+    } else { None };
+    let selected = if let Some(a) = &anime {
+        let imdb_id = a["imdb_id"].as_str().unwrap_or_default();
+        let season = a["season"].as_i64().unwrap_or(0);
+        let episode = a["episode"].as_i64().unwrap_or(0);
+        let anidb_id = a["anidb_id"].as_str().unwrap_or_default();
+        let ani_episode = a["anidb_episode"].as_i64().unwrap_or(0);
+        Some(json!({"imdb_id":imdb_id,"season":season,"episode":episode,
+            "sid":format!("{imdb_id}:{season}:{episode}"),
+            "anime":{"anidb_id":anidb_id,"episode":ani_episode,"asid":format!("{anidb_id}:{ani_episode}")},
+            "match_source":"anime_priority"}))
+    } else {
+        imdb.first().map(|c|json!({"imdb_id":c.imdb_id,"title":c.title,"year":c.year,
+            "category":if series {"series"} else {"movie"},
+            "season":seasons.first(),"episode":episodes.first(),
+            "sid":if let (Some(s),Some(e))=(seasons.first(),episodes.first()) {
+                format!("{}:{s}:{e}",c.imdb_id)
+            } else {c.imdb_id.clone()},
+            "anime":null,"match_source":"imdb"}))
+    };
+    let reason = if anime.is_some() {"Verified anime crosswalk"} else if selected.is_some() {
+        "IMDb title candidate (experimental matching rules)"
+    } else {"No eligible candidate"};
+    Ok(Diagnostic{parsed,normalized_title:key,imdb_candidates:imdb,anime_candidate:anime,
+        selected,reason:reason.into()})
+}
+
+async fn health(State(state):State<AppState>) -> (StatusCode,Json<Value>) {
+    let ready = open_db(&state.db).and_then(|db|db.query_row(
+        "SELECT count(*) FROM metadata_state WHERE source='full_refresh'",[],|r|r.get::<_,i64>(0)))
+        .map(|n|n>0).unwrap_or(false);
+    (if ready {StatusCode::OK} else {StatusCode::SERVICE_UNAVAILABLE},
+        Json(json!({"status":if ready {"ready"} else {"initializing"}})))
+}
+
+async fn match_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
+    -> (StatusCode,Json<Value>) {
+    let db = Arc::clone(&state.db);
+    match tokio::task::spawn_blocking(move ||diagnose(&db,&req)).await {
+        Ok(Ok(d)) => (StatusCode::OK,Json(d.selected.unwrap_or(Value::Null))),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST,Json(json!({"error":e}))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":e.to_string()}))),
+    }
+}
+
+async fn debug_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
+    -> (StatusCode,Json<Value>) {
+    let db = Arc::clone(&state.db);
+    match tokio::task::spawn_blocking(move ||diagnose(&db,&req)).await {
+        Ok(Ok(d)) => (StatusCode::OK,Json(serde_json::to_value(d).unwrap_or(Value::Null))),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST,Json(json!({"error":e}))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":e.to_string()}))),
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(),Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt().with_env_filter(
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_|"matchlab_server=info".into())).init();
+    let db = env::var("MATCHLAB_DB").unwrap_or_else(|_|"/data/metadata.sqlite3".into());
+    let host = env::var("MATCHLAB_HOST").unwrap_or_else(|_|"127.0.0.1:8766".into());
+    let app = Router::new().route("/health",get(health))
+        .route("/match",post(match_request))
+        .route("/debug/match",post(debug_request))
+        .with_state(AppState{db:Arc::new(PathBuf::from(db))});
+    let listener = tokio::net::TcpListener::bind(&host).await?;
+    tracing::info!("experimental Rust API listening on {host}");
+    axum::serve(listener,app).await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn normalization_handles_accents_and_and_word() {
+        assert_eq!(normalize("Bjørn & Ægir"),"bjorn aegir".replace(' ',""));
+        assert_eq!(normalize("Rock and Roll"),"rockroll");
+        assert_eq!(normalize("Pokémon"),"pokemon");
+    }
+    #[test]
+    fn empty_number_array() { assert!(numbers(None).is_empty()); }
+}
