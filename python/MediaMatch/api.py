@@ -235,6 +235,19 @@ def serve(index: MetadataIndex, host: str = "127.0.0.1", port: int = 8765) -> No
         def do_GET(self) -> None:
             self._start_request()
             request = urlparse(self.path)
+            if request.path in ("/", "/dashboard"):
+                from .dashboard import HTML
+                body = HTML.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                LOG.info("dashboard_served id=%s bytes=%d", self.request_id, len(body))
+                return
             if request.path == "/health":
                 from .service import metadata_due
                 import sqlite3
@@ -261,7 +274,8 @@ def serve(index: MetadataIndex, host: str = "127.0.0.1", port: int = 8765) -> No
 
         def do_POST(self) -> None:
             self._start_request()
-            if urlparse(self.path).path != "/match":
+            route = urlparse(self.path).path
+            if route not in ("/match", "/debug/match"):
                 self.send_error(404)
                 return
             try:
@@ -273,8 +287,28 @@ def serve(index: MetadataIndex, host: str = "127.0.0.1", port: int = 8765) -> No
                 data = json.loads(raw)
                 if not isinstance(data, dict):
                     raise ValueError("request body must be an object")
-                self._match(data.get("t_title", data.get("title")),
-                            data.get("year"), data.get("series"))
+                if route == "/debug/match":
+                    with index.connect() as db:
+                        ready = db.execute(
+                            "SELECT 1 FROM metadata_state WHERE source='full_refresh'"
+                        ).fetchone() is not None
+                    if not ready:
+                        self._respond(503, {"error": "Metadata is still initializing. Try again after the initial download."})
+                        return
+                    title = data.get("t_title", data.get("title"))
+                    if not isinstance(title, str) or not title.strip() or len(title) > 4096:
+                        raise ValueError("title must contain between 1 and 4096 characters")
+                    series = data.get("series")
+                    if series is not None and not isinstance(series, bool):
+                        raise ValueError("series must be boolean")
+                    year = data.get("year")
+                    if year is not None:
+                        year = int(year)
+                    from .dashboard import diagnose
+                    self._respond(200, diagnose(index, title, year, series))
+                else:
+                    self._match(data.get("t_title", data.get("title")),
+                                data.get("year"), data.get("series"))
             except (ValueError, TypeError, UnicodeDecodeError) as exc:
                 LOG.warning("http_bad_request id=%s error=%s", self.request_id, exc, exc_info=True)
                 self._respond(400, {"error": str(exc)})
