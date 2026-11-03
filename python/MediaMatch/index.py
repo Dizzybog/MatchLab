@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
+LOG = logging.getLogger(__name__)
 _SERIES = {"tvSeries", "tvMiniSeries"}
 _MOVIES = {"movie", "tvMovie", "short", "tvShort", "tvSpecial"}
 _MOVIE_TYPE_RANK = {"movie": 0, "tvMovie": 1, "short": 2,
@@ -47,6 +49,7 @@ class MetadataIndex:
                 );
                 CREATE INDEX IF NOT EXISTS title_lookup ON titles(clean_title, year);
                 CREATE INDEX IF NOT EXISTS title_suffix ON titles(clean_title);
+                CREATE INDEX IF NOT EXISTS title_reverse_suffix ON titles(reverse(clean_title), type);
                 CREATE TABLE IF NOT EXISTS seasons (
                     imdb_id TEXT PRIMARY KEY, max_season INTEGER NOT NULL
                 );
@@ -83,95 +86,181 @@ class MetadataIndex:
     def connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path)
         db.row_factory = sqlite3.Row
+        db.create_function("reverse", 1, lambda text: text[::-1] if text else "", deterministic=True)
         return db
 
     def search(self, title: str, year: int | None = None, *, series: bool = False,
-               required_max_season: int = 0, limit: int = 10) -> list[Match]:
-        """Match cleaned IMDb titles with V4 duplicate, year and US/original tie breaks."""
+               required_max_season: int = 0, limit: int = 10,
+               release_title: str | None = None, has_episode: bool = False) -> list[Match]:
+        """Ordered IMDb V4 matching stages, with indexed prefix and reverse-suffix.
+
+        The raw release name is optional for direct library users; API calls
+        always supply it so a candidate must actually occur in the release.
+        """
         key = clean_title(title)
+        release = clean_title(release_title if release_title is not None else title)
         if not key:
             return []
-        allowed = _SERIES if series else _MOVIES
-        types = tuple(sorted(allowed))
-        placeholders = ",".join("?" for _ in types)
+        count_first = not year and not required_max_season and not has_episode
         with self.connect() as db:
-            rows = db.execute(
-                f"SELECT * FROM titles WHERE clean_title=? AND type IN ({placeholders})",
-                (key, *types),
-            ).fetchall()
-            if not rows and len(key) >= 12:
-                # Bounded longest-prefix fallback using the existing B-tree index.
-                # Never use LIKE '%suffix': it scans the entire IMDb AKA table.
-                for size in range(len(key) - 1, max(9, len(key) // 2) - 1, -1):
-                    rows = db.execute(
-                        f"SELECT * FROM titles WHERE clean_title=? AND type IN ({placeholders})",
-                        (key[:size], *types),
-                    ).fetchall()
+            def select(where: str, params: tuple, allowed: set[str]) -> list[sqlite3.Row]:
+                types = tuple(sorted(allowed))
+                placeholders = ",".join("?" for _ in types)
+                return db.execute(
+                    f"SELECT * FROM titles WHERE {where} AND type IN ({placeholders}) AND year>0",
+                    (*params, *types),
+                ).fetchall()
+
+            def eligible(row: sqlite3.Row) -> bool:
+                if row["type"] in _SERIES and required_max_season:
+                    # V4 accepts a one-season tolerance for missing IMDb metadata.
+                    minimum = max(1, required_max_season - 1)
+                    maximum = db.execute(
+                        "SELECT max_season FROM seasons WHERE imdb_id=?",
+                        (row["imdb_id"],),
+                    ).fetchone()
+                    if maximum is None or maximum[0] < minimum:
+                        mapped = db.execute(
+                            "SELECT 1 FROM anime_series_map l JOIN episode_map m "
+                            "ON m.anidb_id=l.anidb_id "
+                            "WHERE l.imdb_id=? AND (m.tvdb_season=? OR l.trakt_season=?) LIMIT 1",
+                            (row["imdb_id"], required_max_season, required_max_season),
+                        ).fetchone()
+                        if mapped is None:
+                            return False
+                return True
+
+            def present(row: sqlite3.Row) -> bool:
+                return row["clean_title"] in release
+
+            # Movie titles can fall back to series when the release has no year,
+            # as in V4. Year-based movie fallback is intentionally conservative.
+            allowed = _SERIES if series else (_MOVIES | _SERIES if not year else _MOVIES)
+
+            def valid(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
+                return [r for r in rows if eligible(r) and present(r)]
+
+            def prefix_rows(prefix: str) -> list[sqlite3.Row]:
+                return valid(select(
+                    "clean_title>=? AND clean_title<?",
+                    (prefix, prefix + "\uffff"), allowed,
+                ))
+
+            # 1. Exact/forward prefix: V4 prefers exact, then the longest
+            # candidate title found in the original release.
+            rows = prefix_rows(key)
+            stage = "forward_prefix"
+            if not rows:
+                # 2. V4 can also match IMDb titles that are shorter than the
+                # parsed title. Test progressively shorter exact prefixes.
+                for size in range(len(key) - 1, max(2, len(key) // 2) - 1, -1):
+                    rows = valid(select("clean_title=?", (key[:size],), allowed))
                     if rows:
+                        stage = "shorter_prefix"
                         break
+            if not rows and len(key) >= 12:
+                # 3. Reverse suffix: IMDb AKA may have an extra leading phrase.
+                # Indexed reversed clean titles avoid a full IMDb table scan.
+                rev = key[::-1]
+                rows = valid(select(
+                    "reverse(clean_title)>=? AND reverse(clean_title)<? "
+                    "AND length(clean_title)>?",
+                    (rev, rev + "\uffff", len(key)), allowed,
+                ))
+                if rows:
+                    stage = "reverse_suffix"
+            if not rows and len(key) >= 6:
+                # 4. Half-prefix fallback, with full release containment.
+                half = key[:(len(key) + 1) // 2]
+                rows = prefix_rows(half)
+                if rows:
+                    stage = "half_prefix"
             if not rows and series:
-                # StremThru AniDB main/official/synonyms for Japanese and
-                # romanized aliases that IMDb AKAs may not contain.
-                rows = db.execute(
+                rows = valid(db.execute(
                     "SELECT t.* FROM anidb_titles a "
                     "JOIN anime_series_map l ON l.anidb_id=a.anidb_id "
                     "JOIN titles t ON t.imdb_id=l.imdb_id "
-                    "WHERE a.clean_title=? "
-                    "AND t.type IN ('tvSeries','tvMiniSeries')",
+                    "WHERE a.clean_title=? AND t.type IN ('tvSeries','tvMiniSeries')",
                     (key,),
-                ).fetchall()
+                ).fetchall())
+                if rows:
+                    stage = "anime_alias"
+            if not rows:
+                LOG.debug("imdb_match stage=none key=%s year=%s series=%s release=%s",
+                          key, year, series, release_title)
+                return []
+
+            # Exact match first, then longest IMDb AKA. Ranking follows the
+            # original V4 year/original/US/type/AKA-count ordering.
+            best_shape = min(
+                (0 if r["clean_title"] == key else 1, -len(r["clean_title"]))
+                for r in rows
+            )
+            if stage in {"forward_prefix", "half_prefix"}:
+                rows = [r for r in rows if (
+                    0 if r["clean_title"] == key else 1, -len(r["clean_title"])
+                ) == best_shape]
+            elif stage == "reverse_suffix":
+                longest = max(len(r["clean_title"]) for r in rows)
+                rows = [r for r in rows if len(r["clean_title"]) == longest]
+
             grouped: dict[str, list[sqlite3.Row]] = {}
             for row in rows:
-                if row["type"] in allowed:
-                    grouped.setdefault(row["imdb_id"], []).append(row)
-            duplicate = len({r["imdb_id"] for r in db.execute(
-                f"SELECT DISTINCT imdb_id FROM titles WHERE clean_title=? AND type IN ({placeholders})",
-                (key, *types)
-            )}) > 1
+                grouped.setdefault(row["imdb_id"], []).append(row)
+            duplicate_titles = {r["clean_title"] for r in rows}
+            duplicates = set()
+            for cleaned in duplicate_titles:
+                found = db.execute(
+                    "SELECT COUNT(DISTINCT imdb_id) FROM titles WHERE clean_title=? AND year>0",
+                    (cleaned,),
+                ).fetchone()[0]
+                if found > 1:
+                    duplicates.add(cleaned)
+            aka_counts: dict[str, int] = {}
+            for imdb_id in grouped:
+                aka_counts[imdb_id] = db.execute(
+                    "SELECT COUNT(*) FROM titles WHERE imdb_id=?", (imdb_id,),
+                ).fetchone()[0]
+
+            def rank(row: sqlite3.Row) -> tuple:
+                duplicate = row["clean_title"] in duplicates
+                original = 0 if not duplicate or row["original"] else 1
+                us = 0 if not duplicate or row["region"] == "US" else 1
+                year_rank = (abs(row["year"] - year), original, row["year"]) if year else (
+                    original, row["year"], 0
+                )
+                media_type = _MOVIE_TYPE_RANK.get(row["type"], 5 if row["type"] == "tvSeries" else 6)
+                return (
+                    -aka_counts[row["imdb_id"]] if count_first else 0,
+                    year_rank, media_type if not series else 0, us,
+                    -aka_counts[row["imdb_id"]] if not count_first else 0,
+                    row["ordering"], row["imdb_id"],
+                )
+
             matches = []
             for imdb_id, aliases in grouped.items():
-                max_season = db.execute("SELECT max_season FROM seasons WHERE imdb_id=?", (imdb_id,)).fetchone()
-                best = min(aliases, key=lambda r: (
-                    abs(r["year"] - year) if year and r["year"] else 9999 if year else 0,
-                    0 if not duplicate or r["original"] else 1,
-                    r["year"] or 9999,
-                    0 if not duplicate or r["region"] == "US" else 1,
-                    r["ordering"] or 0,
-                ))
-                if series and required_max_season > 0 and (
-                    max_season is None or max_season[0] < required_max_season
-                ):
-                    # SQL crosswalk may contain a season not present in IMDb's
-                    # episode export (especially split anime seasons).
-                    mapped = db.execute(
-                        "SELECT 1 FROM anime_series_map l JOIN episode_map m "
-                        "ON m.anidb_id=l.anidb_id "
-                        "WHERE l.imdb_id=? AND (m.tvdb_season=? OR l.trakt_season=?) LIMIT 1",
-                        (imdb_id, required_max_season, required_max_season),
-                    ).fetchone()
-                    if mapped is None:
-                        continue
-                types = {r["type"]: r["value"] for r in db.execute(
-                    "SELECT type,value FROM anime_ids WHERE group_id=?", (imdb_id,)
+                best = min(aliases, key=rank)
+                anime_ids = {r["type"]: r["value"] for r in db.execute(
+                    "SELECT type,value FROM anime_ids WHERE group_id=?", (imdb_id,),
                 )}
-                if "anidb" not in types:
-                    link = db.execute(
+                if "anidb" not in anime_ids:
+                    linked = db.execute(
                         "SELECT DISTINCT anidb_id FROM anime_series_map WHERE imdb_id=?",
                         (imdb_id,),
                     ).fetchall()
-                    if len(link) == 1:
-                        types["anidb"] = link[0][0]
-                matches.append(Match(imdb_id, best["title"], best["year"], best["category"],
-                                     best["title"], types, best["type"]))
-            matches.sort(key=lambda m: (
-                abs(m.year - year) if year and m.year else 9999 if year else 0,
-                min((0 if not duplicate or r["original"] else 1) for r in grouped[m.imdb_id]),
-                m.year or 9999,
-                _MOVIE_TYPE_RANK.get(m.media_type, 0),
-                min((0 if not duplicate or r["region"] == "US" else 1) for r in grouped[m.imdb_id]),
-                -len(grouped[m.imdb_id]), m.imdb_id,
-            ))
-            return matches[:limit]
+                    if len(linked) == 1:
+                        anime_ids["anidb"] = linked[0][0]
+                matches.append((rank(best), Match(
+                    imdb_id, best["title"], best["year"], best["category"],
+                    best["title"], anime_ids, best["type"],
+                )))
+            matches.sort(key=lambda item: item[0])
+            LOG.debug(
+                "imdb_match stage=%s key=%s year=%s series=%s candidates=%d selected=%s",
+                stage, key, year, series, len(matches),
+                matches[0][1].imdb_id if matches else None,
+            )
+            return [match for _, match in matches[:limit]]
 
     def resolve_anime_episode(self, imdb_id: str, season: int, episode: int) -> tuple[str, int] | None:
         """IMDb/TVDB S/E -> AniDB episode, including split Trakt seasons."""
