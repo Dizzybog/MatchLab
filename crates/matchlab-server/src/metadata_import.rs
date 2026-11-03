@@ -349,6 +349,25 @@ pub fn refresh_from_files(
 mod tests {
     use super::*;
     #[test]
+    fn failed_refresh_preserves_existing_database() {
+        let folder=std::env::temp_dir().join(format!(
+            "matchlab-refresh-test-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&folder).unwrap();
+        let target=folder.join("live.sqlite3");
+        fs::write(&target,b"original database bytes").unwrap();
+        let missing=folder.join("missing.tsv.gz");
+        let result=refresh_from_files(&target,&missing,&missing,&missing,
+            &missing,&missing,&missing);
+        assert!(result.is_err());
+        assert_eq!(fs::read(&target).unwrap(),b"original database bytes");
+        let names:Vec<_>=fs::read_dir(&folder).unwrap()
+            .map(|entry|entry.unwrap().file_name()).collect();
+        assert_eq!(names.len(),1,"failed refresh must remove staging database");
+        fs::remove_dir_all(&folder).unwrap();
+    }
+    #[test]
     fn normalization(){
         assert_eq!(clean("Pokémon and Friends!"),"pokemonfriends");
         assert_eq!(clean("Bobs Burgers"),"bobsburgers");
