@@ -14,3 +14,6 @@ serde_json.workspace = true
 unicode-normalization.workspace = true
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+csv = "1.3"
+flate2 = "1.1"
