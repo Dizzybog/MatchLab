@@ -160,6 +160,25 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
 mod tests{
     use super::*;
     #[test] fn normalization(){assert_eq!(clean_title("Pokémon and Ægir"),"pokemonaegir");}
+    #[test] fn country_specific_series_beats_generic_alias() {
+        let db=Connection::open_in_memory().unwrap();
+        db.create_scalar_function("reverse",1,
+            rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC|rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            |ctx|{let s:String=ctx.get(0)?;Ok(s.chars().rev().collect::<String>())}).unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_season INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
+            INSERT INTO titles VALUES('tt100','The Voice US','thevoiceus',2011,'series','US',1,0,'tvSeries');
+            INSERT INTO titles VALUES('tt200','The Voice','thevoice',2010,'series','US',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt100',10);
+            INSERT INTO seasons VALUES('tt200',10);").unwrap();
+        let found=search(&db,"The Voice US",None,true,3,"The.Voice.US.S03E02.1080p",true,10).unwrap();
+        assert_eq!(found[0].imdb_id,"tt100");
+    }
     #[test] fn v4_exact_year_and_series_cap() {
         let db=Connection::open_in_memory().unwrap();
         db.create_scalar_function("reverse",1,
