@@ -84,6 +84,7 @@ fn open_db(path: &PathBuf) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
+#[cfg(test)]
 fn candidates(db: &Connection, key: &str, year: Option<i32>, series: bool) -> rusqlite::Result<Vec<Candidate>> {
     let mut stmt = db.prepare(
         "SELECT imdb_id,title,year,type,clean_title FROM titles
