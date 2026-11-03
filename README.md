@@ -219,22 +219,20 @@ Exact parity for all split Trakt seasons and exceptional Anime-Lists
 mapping expressions still requires fixture-based verification.
 
 
-### Anime-only matching (no IMDb title lookup)
+### Independent IMDb and anime candidate pools
 
-For recognized anime releases with an episode number, the API now first
-matches the parsed title against **AniDB titles** and follows identities from
-**animeApi / Anime-Lists** (`anime_series_map`). It derives the IMDb ID
-from these anime-specific mappings, not from IMDb's `titles` or `seasons`
-tables. Canonical season/episode and AniDB episode are resolved from the
-Anime-Lists `episode_map`, including title-relative anime parts.
+The matcher searches both metadata sources for every eligible episodic
+release. IMDb V4 title matching supplies ordinary movie/TV candidates.
+Separately, AniDB aliases and animeApi/Anime-Lists supply anime candidates,
+including their IMDb IDs and verified season/episode crosswalks.
 
-If an anime alias is recognized but its identity or episode mapping is
-ambiguous or invalid, the API returns `null` rather than guessing using
-IMDb title matches. Non-anime releases still use the IMDb matcher. The
-`match_source: "anime_only"` field identifies responses from this path.
-The `title` and `year` fields on that path are parsed from the torrent,
-not verified IMDb metadata.
+When a unique anime candidate has a valid episode mapping, it takes
+priority over ordinary IMDb candidates (including similarly named films).
+If anime mapping is missing or ambiguous, that anime candidate is
+rejected and the best valid IMDb candidate may be selected instead.
+Anime-derived IDs do not require an IMDb title/AKA row.
 
-Anime titles without an episode number continue through the ordinary IMDb
-path; this limitation is intentional until identity-only ambiguity rules
-are fully verified.
+Logs identify both candidate pools and the selected source as
+`match_source: "anime_priority"` for anime. The anime candidate's
+`title` and `year` fields are parsed from the release, not verified
+against IMDb title metadata.
