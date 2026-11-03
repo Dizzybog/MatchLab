@@ -120,6 +120,47 @@ class MetadataIndex:
             ))
             return matches[:limit]
 
+    def resolve_anime_episode(self, imdb_id: str, season: int, episode: int) -> tuple[str, int] | None:
+        """Resolve IMDb/TVDB season + episode to AniDB coordinates.
+
+        Prefer the SQL resolver's direct TVDB mapping: highest applicable
+        offset, then latest start. Without a crosswalk, fall back to the
+        AniDB episode number only if there is exactly one AniDB identity
+        for the IMDb title and the season is not beyond known TVDB coverage.
+        """
+        if season < 0 or episode <= 0:
+            return None
+        with self.connect() as db:
+            ids = [r[0] for r in db.execute(
+                "SELECT DISTINCT value FROM anime_ids WHERE group_id=? AND type='anidb'",
+                (imdb_id,),
+            )]
+            if not ids:
+                return None
+            placeholders = ",".join("?" for _ in ids)
+            mappings = db.execute(
+                f"SELECT * FROM episode_map WHERE anidb_id IN ({placeholders}) "
+                "AND anidb_season>0 AND tvdb_season>0",
+                ids,
+            ).fetchall()
+            candidates = [
+                r for r in mappings
+                if r["tvdb_season"] == season
+                and episode - r["offset"] >= max(r["start"], 1)
+                and (r["end"] <= 0 or episode - r["offset"] <= r["end"])
+            ]
+            if candidates:
+                candidates.sort(key=lambda r: (
+                    -r["offset"], -r["start"], int(r["anidb_id"]) if r["anidb_id"].isdigit() else 2147483647,
+                ))
+                winner = candidates[0]
+                return winner["anidb_id"], episode - winner["offset"]
+            # Never fabricate an episode when a crosswalk exists but
+            # does not cover the requested episode/season.
+            if mappings or len(ids) != 1:
+                return None
+            return ids[0], episode
+
     def anime_lookup(self, source: str, value: str) -> dict[str, str] | None:
         with self.connect() as db:
             row = db.execute("SELECT group_id FROM anime_ids WHERE type=? AND value=? LIMIT 1", (source, value)).fetchone()
