@@ -194,3 +194,45 @@ The implementation is not yet a byte-for-byte port of every PostgreSQL V4 branch
 ## License
 
 GPL-3.0-or-later. Metadata providers have their own terms of use.
+
+
+### Country-qualified IMDb titles and anime part titles
+
+The V4 IMDb matcher includes a small built-in country-alias table
+(`python/MediaMatch/country_aliases.py`). An explicit trailing country
+suffix in a TV-series release (e.g. `The.Office.UK.S01E01`) is expanded
+to equivalent IMDb AKA names before the generic prefix stage. Only actual
+IMDb AKA rows are eligible; the country dictionary does not invent IDs.
+
+For anime, `python/MediaMatch/anime_title_matcher.py` uses local AniDB
+title aliases and the StremThru-derived `anime_series_map` and
+`episode_map` SQLite tables. A generic series title treats `SxxExx`
+as a global TVDB season; a specific arc/part title interprets `S01`
+relative to that AniDB part. Responses return the mapped canonical
+IMDb/TVDB season/episode as well as the AniDB `asid`. If a specific
+part is recognized but its requested episode cannot be mapped, the
+API returns no match rather than silently using an unrelated global
+season. Detailed matching stages appear at `LOG_LEVEL=DEBUG`.
+
+This is a targeted port of the older `torrent_stream` anime resolver.
+Exact parity for all split Trakt seasons and exceptional Anime-Lists
+mapping expressions still requires fixture-based verification.
+
+
+### Independent IMDb and anime candidate pools
+
+The matcher searches both metadata sources for every eligible episodic
+release. IMDb V4 title matching supplies ordinary movie/TV candidates.
+Separately, AniDB aliases and animeApi/Anime-Lists supply anime candidates,
+including their IMDb IDs and verified season/episode crosswalks.
+
+When a unique anime candidate has a valid episode mapping, it takes
+priority over ordinary IMDb candidates (including similarly named films).
+If anime mapping is missing or ambiguous, that anime candidate is
+rejected and the best valid IMDb candidate may be selected instead.
+Anime-derived IDs do not require an IMDb title/AKA row.
+
+Logs identify both candidate pools and the selected source as
+`match_source: "anime_priority"` for anime. The anime candidate's
+`title` and `year` fields are parsed from the release, not verified
+against IMDb title metadata.

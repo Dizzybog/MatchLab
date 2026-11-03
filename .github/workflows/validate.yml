@@ -17,7 +17,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install . pytest
-          python -m pytest -q tests/test_media_match.py tests/test_v4_matching.py
+          python -m pytest -q tests/test_media_match.py tests/test_v4_matching.py tests/test_country_anime_matching.py tests/test_anime_only.py
           python -m pytest -q -s tests/test_100_titles.py
       - name: Build Docker image
         run: docker build -t torrent-parse-match:test .
