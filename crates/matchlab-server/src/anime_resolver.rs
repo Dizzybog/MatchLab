@@ -1,13 +1,13 @@
 //! Port of the episode-map rules in MediaMatch/anime_resolver.py.
 //! Only mapping tables establish episode identity; never infer it from IMDb AKAs.
-use rusqlite::{params,Connection,OptionalExtension};
+use rusqlite::{Connection};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
 #[derive(Clone,Debug)]
 struct Link {anidb:String,tvdb:String,trakt:i64}
 #[derive(Clone,Debug)]
-struct Mapping {anidb:String,tvdb:String,ani_season:i64,tv_season:i64,start:i64,end:i64,offset:i64,map:String}
+struct Mapping {anidb:String,tvdb:String,tv_season:i64,start:i64,end:i64,offset:i64,map:String}
 #[derive(Clone,Debug,PartialEq,Eq,Serialize)]
 pub struct Episode {pub imdb_id:String,pub season:i64,pub episode:i64,pub anidb_id:String,pub anidb_episode:i64}
 fn links(db:&Connection,imdb:&str)->rusqlite::Result<Vec<Link>>{
@@ -39,7 +39,7 @@ fn mappings(db:&Connection,links:&[Link],include_absolute:bool)->rusqlite::Resul
         FROM episode_map WHERE anidb_id=?1 AND anidb_season>0")?;
     for id in ids {
         for row in stmt.query_map([id],|r|Ok(Mapping{anidb:r.get(0)?,tvdb:r.get(1)?,
-            ani_season:r.get(2)?,tv_season:r.get(3)?,start:r.get(4)?,end:r.get(5)?,
+            tv_season:r.get(3)?,start:r.get(4)?,end:r.get(5)?,
             offset:r.get(6)?,map:r.get(7)?}))?{
             let m=row?;
             if include_absolute||m.tv_season>0{out.push(m);}
