@@ -2,6 +2,9 @@ services:
   torrent-parse-match:
     image: ghcr.io/dizzybog/torrent-parse-match:latest
     pull_policy: always
+    init: false
+    environment:
+      LOG_LEVEL: DEBUG
     container_name: torrent-parse-match
     restart: unless-stopped
     ports:
