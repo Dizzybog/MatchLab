@@ -5,7 +5,7 @@ mod imdb_v4;
 mod anime_resolver;
 mod anime_title;
 mod country_aliases;
-use axum::{extract::{Query, State}, http::StatusCode, routing::get, Json, Router};
+use axum::{extract::{Query, State}, http::StatusCode, routing::{get,post}, Json, Router};
 use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -82,6 +82,32 @@ fn open_db(path: &PathBuf) -> rusqlite::Result<Connection> {
         Ok(value.chars().rev().collect::<String>())
     })?;
     Ok(conn)
+}
+
+fn candidates(db: &Connection, key: &str, year: Option<i32>, series: bool) -> rusqlite::Result<Vec<Candidate>> {
+    let mut stmt = db.prepare(
+        "SELECT imdb_id,title,year,type,clean_title FROM titles
+         WHERE (clean_title=?1 OR (?1 LIKE clean_title || '%' AND length(clean_title)>=6))
+         AND year>0 AND type IN ('movie','tvMovie','short','tvShort','tvSpecial','tvSeries','tvMiniSeries')
+         ORDER BY CASE WHEN clean_title=?1 THEN 0 ELSE 1 END,
+                  length(clean_title) DESC, abs(year-coalesce(?2,year)),
+                  CASE type WHEN 'movie' THEN 0 WHEN 'tvMovie' THEN 1 WHEN 'short' THEN 2 ELSE 3 END,
+                  ordering ASC LIMIT 60"
+    )?;
+    let rows = stmt.query_map(params![key,year], |r| {
+        Ok(Candidate {imdb_id:r.get(0)?,title:r.get(1)?,year:r.get(2)?,
+            media_type:r.get(3)?,matched_title:r.get(4)?,anime_ids:Default::default(),source:"imdb"})
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        let c = row?;
+        let is_series = c.media_type == "tvSeries" || c.media_type == "tvMiniSeries";
+        if is_series == series && !result.iter().any(|x: &Candidate| x.imdb_id == c.imdb_id) {
+            result.push(c);
+        }
+        if result.len() >= 20 { break; }
+    }
+    Ok(result)
 }
 
 fn anime_candidate(db: &Connection, key: &str, season: Option<i64>, episode: i64) -> rusqlite::Result<Option<Value>> {
