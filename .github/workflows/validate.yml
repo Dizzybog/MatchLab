@@ -26,4 +26,4 @@ jobs:
       - name: Validate parity comparison utility
         run: python -m py_compile scripts/compare_python_rust.py
       - name: Build native Rust Docker image
-        run: docker build -f Dockerfile.rust -t torrent-parse-match:rust-test .
+        run: docker build --build-arg RUSTFLAGS="-D warnings" -f Dockerfile.rust -t torrent-parse-match:rust-test .
