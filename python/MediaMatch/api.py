@@ -116,6 +116,15 @@ def serve(index: MetadataIndex, host: str = "127.0.0.1", port: int = 8765) -> No
                 self._respond(400, {"error": "title is required"})
                 return
             try:
+                # Distinguish "no match" from "metadata still downloading".
+                import sqlite3
+                with index.connect() as db:
+                    ready = db.execute(
+                        "SELECT 1 FROM metadata_state WHERE source='full_refresh'"
+                    ).fetchone() is not None
+                if not ready:
+                    self._respond(503, {"error": "metadata_initializing"})
+                    return
                 parsed_year = int(year) if year is not None else None
                 if series is not None and not isinstance(series, bool):
                     raise ValueError("series must be boolean")
