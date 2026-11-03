@@ -354,6 +354,18 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     #[test]
+    fn anime_identity_without_episode_is_unambiguous(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
+            CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT);
+            INSERT INTO anidb_titles VALUES('100','frieren');
+            INSERT INTO anime_series_map VALUES('100','tt1234567');").unwrap();
+        assert_eq!(anime_identity(&db,"frieren").unwrap().as_deref(),Some("tt1234567"));
+        db.execute_batch("INSERT INTO anidb_titles VALUES('200','frieren');
+            INSERT INTO anime_series_map VALUES('200','tt7654321');").unwrap();
+        assert!(anime_identity(&db,"frieren").unwrap().is_none());
+    }
+    #[test]
     fn three_hundred_end_to_end_matches() {
         // These exercise the actual /match decision path, not just the parser.
         // Synthetic metadata makes expected IDs and episodes deterministic.
