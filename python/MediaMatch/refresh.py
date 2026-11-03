@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .importers import update_imdb
@@ -31,6 +32,15 @@ def refresh_local(path: str | Path) -> tuple[int, int]:
         imdb_count = update_imdb(index)
         anime_links, anime_episodes = update_stremthru_anime(index)
         anime_count = anime_links + anime_episodes
+        if imdb_count <= 0 or anime_links <= 0 or anime_episodes <= 0:
+            raise ValueError("Metadata import incomplete; refusing to replace live database")
+        with index.connect() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO metadata_state(source,updated_at,row_count) "
+                "VALUES(?,?,?)",
+                ("full_refresh", datetime.now(UTC).isoformat(), imdb_count + anime_count),
+            )
+            db.commit()
         # All connections are closed before the atomic replacement.
         os.replace(staging, target)
         return imdb_count, anime_count
