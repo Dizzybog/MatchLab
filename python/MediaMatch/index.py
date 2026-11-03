@@ -112,7 +112,16 @@ class MetadataIndex:
                 if series and required_max_season > 0 and (
                     max_season is None or max_season[0] < max(1, required_max_season - 1)
                 ):
-                    continue
+                    # SQL crosswalk may contain a season not present in IMDb's
+                    # episode export (especially split anime seasons).
+                    mapped = db.execute(
+                        "SELECT 1 FROM anime_series_map l JOIN episode_map m "
+                        "ON m.anidb_id=l.anidb_id "
+                        "WHERE l.imdb_id=? AND (m.tvdb_season=? OR l.trakt_season=?) LIMIT 1",
+                        (imdb_id, required_max_season, required_max_season),
+                    ).fetchone()
+                    if mapped is None:
+                        continue
                 types = {r["type"]: r["value"] for r in db.execute(
                     "SELECT type,value FROM anime_ids WHERE group_id=?", (imdb_id,)
                 )}
