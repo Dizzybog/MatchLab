@@ -224,4 +224,37 @@ mod tests {
     }
     #[test]
     fn empty_number_array() { assert!(numbers(None).is_empty()); }
+    #[test]
+    fn imdb_candidates_are_filtered_by_media_type() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles (
+            imdb_id TEXT, title TEXT, year INTEGER, type TEXT,
+            clean_title TEXT, ordering INTEGER
+        );").unwrap();
+        db.execute("INSERT INTO titles VALUES ('tt1','Example',2020,'movie','example',1)",[]).unwrap();
+        db.execute("INSERT INTO titles VALUES ('tt2','Example',2021,'tvSeries','example',1)",[]).unwrap();
+        let movies = candidates(&db,"example",Some(2020),false).unwrap();
+        let shows = candidates(&db,"example",Some(2021),true).unwrap();
+        assert_eq!(movies.len(),1);
+        assert_eq!(movies[0].imdb_id,"tt1");
+        assert_eq!(shows.len(),1);
+        assert_eq!(shows[0].imdb_id,"tt2");
+    }
+    #[test]
+    fn anime_requires_unique_verified_crosswalk() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
+            CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_season INTEGER,
+                anidb_season INTEGER,map TEXT,offset INTEGER,start INTEGER,end INTEGER);
+            INSERT INTO anidb_titles VALUES('123','exampleanime');
+            INSERT INTO anime_series_map VALUES('123','tt999');
+            INSERT INTO episode_map VALUES('123',1,1,'',0,1,12);").unwrap();
+        let found = anime_candidate(&db,"exampleanime",Some(1),4).unwrap().unwrap();
+        assert_eq!(found["imdb_id"],"tt999");
+        assert_eq!(found["anidb_episode"],4);
+        assert!(anime_candidate(&db,"exampleanime",Some(2),4).unwrap().is_none());
+        db.execute("INSERT INTO episode_map VALUES('123',1,1,'',1,1,12)",[]).unwrap();
+        assert!(anime_candidate(&db,"exampleanime",Some(1),4).unwrap().is_none());
+    }
 }
