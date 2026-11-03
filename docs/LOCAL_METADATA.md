@@ -110,7 +110,7 @@ sudo docker exec -i postgres_stremthru psql -U postgres -d postgres -c \
   > data/crosswalk/anime_id_map.tsv
 
 sudo docker exec -i postgres_stremthru psql -U postgres -d postgres -c \
-  'COPY (SELECT anidb_id,tvdb_id,anidb_season,tvdb_season,start,"end","offset",map FROM public.anidb_tvdb_episode_map) TO STDOUT WITH (FORMAT csv, HEADER true, DELIMITER E'\\''\\t'\\'')' \
+  "COPY (SELECT anidb_id,tvdb_id,anidb_season,tvdb_season,start,\"end\",\"offset\",map FROM public.anidb_tvdb_episode_map) TO STDOUT WITH (FORMAT csv, HEADER true, DELIMITER E'\\t')" \
   > data/crosswalk/episode_map.tsv
 
 uv run media-match --db data/metadata.sqlite3 import-crosswalk \
