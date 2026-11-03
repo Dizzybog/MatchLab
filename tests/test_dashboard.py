@@ -12,7 +12,8 @@ def test_dashboard_contains_form_and_result_panels():
     assert 'id="imdbcandidates"' in HTML
     assert 'id="animecandidate"' in HTML
     assert "/debug/match" in HTML
-    assert "innerHTML=d." not in HTML
+    assert "const esc=v=>" in HTML
+    assert "esc(c.title)" in HTML
 
 
 def test_diagnostics_no_match_without_imdb_metadata(tmp_path, monkeypatch):
