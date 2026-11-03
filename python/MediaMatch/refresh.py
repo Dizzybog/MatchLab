@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import sqlite3
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,9 +25,9 @@ def refresh_local(path: str | Path) -> tuple[int, int]:
     os.close(fd)
     staging = Path(name)
     try:
-        if target.exists():
-            with sqlite3.connect(target) as source, sqlite3.connect(staging) as dest:
-                source.backup(dest)
+        # Rebuild from an empty staging database. Copying the previous
+        # SQLite file would retain unused pages and stale imported aliases.
+        # The old database remains untouched until the new import succeeds.
         index = MetadataIndex(staging)
         imdb_count = update_imdb(index)
         anime_links, anime_episodes = update_stremthru_anime(index)
@@ -44,6 +43,9 @@ def refresh_local(path: str | Path) -> tuple[int, int]:
             )
             db.commit()
         # All connections are closed before the atomic replacement.
+        with index.connect() as db:
+            db.execute("PRAGMA journal_mode=DELETE")
+            db.execute("VACUUM")
         os.replace(staging, target)
         return imdb_count, anime_count
     finally:
