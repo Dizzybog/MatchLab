@@ -6,7 +6,9 @@ mod anime_resolver;
 mod anime_title;
 mod country_aliases;
 use axum::{extract::{Query, State}, http::StatusCode, routing::{get,post}, Json, Router};
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags};
+#[cfg(test)]
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{env, path::PathBuf, sync::Arc};
