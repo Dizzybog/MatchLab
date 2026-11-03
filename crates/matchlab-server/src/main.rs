@@ -60,6 +60,20 @@ fn numbers(v: Option<&Value>) -> Vec<i64> {
     }
 }
 
+/// Explicit absolute episode notation used by the Python matcher.
+fn explicit_absolute_episode(raw:&str)->Option<i64>{
+    let words:Vec<_>=raw.split(|c:char|!c.is_ascii_alphanumeric())
+        .filter(|x|!x.is_empty()).collect();
+    for pair in words.windows(2) {
+        if (pair[0].eq_ignore_ascii_case("episode")||pair[0].eq_ignore_ascii_case("ep"))
+            && pair[1].len()<=5 && pair[1].bytes().all(|b|b.is_ascii_digit()) {
+            let n=pair[1].parse::<i64>().ok()?;
+            if n>0{return Some(n);}
+        }
+    }
+    None
+}
+
 fn open_db(path: &PathBuf) -> rusqlite::Result<Connection> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     conn.create_scalar_function("reverse", 1, rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC | rusqlite::functions::FunctionFlags::SQLITE_UTF8, |ctx| {
@@ -132,10 +146,25 @@ fn anime_candidate(db: &Connection, key: &str, season: Option<i64>, episode: i64
 fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> {
     if req.title.trim().is_empty() || req.title.len() > 4096 { return Err("title must be 1–4096 bytes".into()); }
     let parsed = ptt_core::parse_title(&req.title,false).map_err(|e|e.to_string())?;
-    let title = parsed.get("title").and_then(Value::as_str).unwrap_or("");
+    let parsed_title = parsed.get("title").and_then(Value::as_str).unwrap_or("");
+    let title_owned = if explicit_absolute_episode(&req.title).is_some() && numbers(parsed.get("seasons")).is_empty() {
+        let parts:Vec<_>=parsed_title.split(|c:char|!c.is_ascii_alphanumeric()).filter(|x|!x.is_empty()).collect();
+        let mut filtered=Vec::new();
+        let mut i=0;
+        while i<parts.len(){
+            if i+1<parts.len()&&(parts[i].eq_ignore_ascii_case("episode")||parts[i].eq_ignore_ascii_case("ep"))
+                &&parts[i+1].len()<=5&&parts[i+1].bytes().all(|b|b.is_ascii_digit()) {i+=2;}
+            else {filtered.push(parts[i]);i+=1;}
+        }
+        filtered.join(" ")
+    }else{parsed_title.to_string()};
+    let title=title_owned.as_str();
     let key = normalize(title);
     let seasons = numbers(parsed.get("seasons"));
-    let episodes = numbers(parsed.get("episodes"));
+    let mut episodes = numbers(parsed.get("episodes"));
+    if episodes.is_empty() {
+        if let Some(ep)=explicit_absolute_episode(&req.title){episodes.push(ep);}
+    }
     let series = req.series.unwrap_or(!seasons.is_empty() || !episodes.is_empty());
     let year = req.year.or_else(||parsed.get("year").and_then(Value::as_i64).map(|n|n as i32));
     let db = open_db(db_path).map_err(|e|e.to_string())?;
@@ -359,6 +388,12 @@ mod tests {
         assert_eq!(normalize("Bjørn & Ægir"),"bjorn aegir".replace(' ',""));
         assert_eq!(normalize("Rock and Roll"),"rockroll");
         assert_eq!(normalize("Pokémon"),"pokemon");
+    }
+    #[test]
+    fn absolute_episode_notation(){
+        assert_eq!(explicit_absolute_episode("One Piece Episode 1067 1080p"),Some(1067));
+        assert_eq!(explicit_absolute_episode("One.Piece.EP.1067.WEB-DL"),Some(1067));
+        assert_eq!(explicit_absolute_episode("One Piece S01E02"),None);
     }
     #[test]
     fn empty_number_array() { assert!(numbers(None).is_empty()); }
