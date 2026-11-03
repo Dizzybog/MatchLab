@@ -129,9 +129,19 @@ def serve(index: MetadataIndex, host: str = "127.0.0.1", port: int = 8765) -> No
             request = urlparse(self.path)
             if request.path == "/health":
                 from .service import metadata_due
-                self._respond(200, {
-                    "status": "ready" if not metadata_due(index.path) else "updating",
-                    "metadata_current": not metadata_due(index.path),
+                import sqlite3
+                current = not metadata_due(index.path)
+                try:
+                    with sqlite3.connect(index.path) as db:
+                        has_data = db.execute(
+                            "SELECT 1 FROM metadata_state "
+                            "WHERE source='full_refresh' LIMIT 1"
+                        ).fetchone() is not None
+                except sqlite3.Error:
+                    has_data = False
+                self._respond(200 if has_data else 503, {
+                    "status": "ready" if current else ("stale" if has_data else "initializing"),
+                    "metadata_current": current,
                 })
                 return
             if request.path != "/match":
