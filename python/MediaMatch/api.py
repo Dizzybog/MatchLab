@@ -57,6 +57,39 @@ def match_title(index: MetadataIndex, title: str, year: int | None = None,
         parsed_title = re.sub(r"(?i)\b(?:episode|ep)\s*[. _-]*[0-9]{1,5}\b", "", parsed_title).strip(" ._-")
     inferred_series = bool(parsed_seasons or parsed_episodes) if series is None else series
     target_year = year if year is not None else parsed.year
+    # Anime-first: derive IMDb ID, canonical S/E and AniDB ID exclusively
+    # from animeApi, AniDB titles and Anime-Lists mappings. IMDb tables are
+    # deliberately not consulted on this path.
+    if inferred_series and parsed_episodes:
+        from .anime_only import resolve_anime_title
+        anime_match = resolve_anime_title(
+            index, parsed_title,
+            min(parsed_seasons) if parsed_seasons else None,
+            min(parsed_episodes),
+        )
+        if anime_match is not None:
+            anime_id = anime_match["anidb_id"]
+            anime_episode = anime_match["anidb_episode"]
+            canonical_season = anime_match["season"]
+            canonical_episode = anime_match["episode"]
+            imdb_id = anime_match["imdb_id"]
+            LOG.info("match_selected source=anime_only imdb=%s season=%s episode=%s anidb=%s anidb_episode=%s",
+                     imdb_id, canonical_season, canonical_episode, anime_id, anime_episode)
+            return {
+                "imdb_id": imdb_id, "season": canonical_season,
+                "episode": canonical_episode,
+                "sid": (f"{imdb_id}:{canonical_season}:{canonical_episode}"
+                        if canonical_season is not None and canonical_episode is not None
+                        else imdb_id),
+                "anime": ({"anidb_id": anime_id, "episode": anime_episode,
+                           "asid": f"{anime_id}:{anime_episode}"}
+                          if anime_id and anime_episode else None),
+                "title": parsed_title, "year": target_year or 0,
+                "category": "series", "matched_title": parsed_title,
+                "anime_ids": ({"anidb": anime_id} if anime_id else {}),
+                "parsed": parsed.model_dump(mode="json"),
+                "match_source": "anime_only",
+            }
     matches = index.search(
         parsed_title, target_year, series=inferred_series,
         required_max_season=max(parsed_seasons, default=0), limit=20,
