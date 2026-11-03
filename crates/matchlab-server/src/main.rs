@@ -243,17 +243,17 @@ mod tests {
     fn anime_requires_unique_verified_crosswalk() {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
-            CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT);
-            CREATE TABLE episode_map(anidb_id TEXT,tvdb_season INTEGER,
+            CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT,tvdb_id TEXT DEFAULT '',trakt_season INTEGER DEFAULT 0);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT DEFAULT '',tvdb_season INTEGER,
                 anidb_season INTEGER,map TEXT,offset INTEGER,start INTEGER,end INTEGER);
             INSERT INTO anidb_titles VALUES('123','exampleanime');
             INSERT INTO anime_series_map VALUES('123','tt999');
-            INSERT INTO episode_map VALUES('123',1,1,'',0,1,12);").unwrap();
+            INSERT INTO episode_map(anidb_id,tvdb_season,anidb_season,map,offset,start,end) VALUES('123',1,1,'',0,1,12);").unwrap();
         let found = anime_candidate(&db,"exampleanime",Some(1),4).unwrap().unwrap();
         assert_eq!(found["imdb_id"],"tt999");
         assert_eq!(found["anidb_episode"],4);
         assert!(anime_candidate(&db,"exampleanime",Some(2),4).unwrap().is_none());
-        db.execute("INSERT INTO episode_map VALUES('123',1,1,'',1,1,12)",[]).unwrap();
+        db.execute("INSERT INTO episode_map(anidb_id,tvdb_season,anidb_season,map,offset,start,end) VALUES('123',1,1,'',1,1,12)",[]).unwrap();
         assert!(anime_candidate(&db,"exampleanime",Some(1),4).unwrap().is_none());
     }
 }
