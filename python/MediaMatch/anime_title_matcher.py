@@ -49,17 +49,6 @@ def _alias_candidates(db, links: list[dict], title: str) -> list[tuple]:
         else:
             priority = 1
         scored.add((priority, -len(alias), row["anidb_id"], alias))
-    # Anime-Planet title slugs from animeApi are also useful when present.
-    for row in db.execute(
-        f"SELECT value,group_id FROM anime_ids WHERE type='animeplanet' "
-        f"AND group_id=?",
-        (links[0]["imdb_id"],),
-    ):
-        alias = clean_title(row["value"].replace("-", " "))
-        if len(alias) >= 4 and (alias == key or key.startswith(alias)):
-            for link in links:
-                scored.add((0 if alias == key else 1, -len(alias),
-                            link["anidb_id"], alias))
     return sorted(scored)
 
 
