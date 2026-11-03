@@ -233,3 +233,22 @@ def test_global_absolute_episodeoffset_for_multiple_anidb_parts(tmp_path):
     assert absolute is not None
     assert (absolute["season"], absolute["episode"]) == (5, 2)
     assert (absolute["anidb_id"], absolute["anidb_episode"]) == ("9980", 2)
+
+
+def test_anidb_title_alias_import_and_index(tmp_path):
+    import gzip
+    from MediaMatch.anidb_titles import import_anidb_titles
+    index = MetadataIndex(tmp_path / "metadata.sqlite3")
+    titles = "".join(
+        f'<anime aid="{i}"><title type="main" xml:lang="x-jat">'
+        f'Sousou no Frieren {i}</title></anime>' for i in range(101)
+    )
+    assert import_anidb_titles(index, gzip.compress(
+        ("<animetitles>" + titles + "</animetitles>").encode(),
+    )) >= 100
+    with index.connect() as db:
+        row = db.execute(
+            "SELECT anidb_id FROM anidb_titles WHERE clean_title=?",
+            ("sousounofrieren1",),
+        ).fetchone()
+    assert row[0] == "1"
