@@ -2,6 +2,7 @@
 //! Runs against the same SQLite schema as the Python implementation.
 //! This is a parallel implementation, not yet a drop-in replacement.
 mod imdb_v4;
+mod anime_resolver;
 use axum::{extract::State, http::StatusCode, routing::{get, post}, Json, Router};
 use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
@@ -110,22 +111,15 @@ fn anime_candidate(db: &Connection, key: &str, season: Option<i64>, episode: i64
     let best: Vec<_> = matches.iter().filter(|(_, alias, _)| (alias == key) == exact && alias.len() == best_len).collect();
     if best.iter().any(|(_,_,imdb)| imdb != &best[0].2) { return Ok(None); }
     let imdb = &best[0].2;
-    // Only accept a unique verified crosswalk; no fabricated season or episode.
-    let Some(season) = season else { return Ok(None); };
-    if season <= 0 { return Ok(None); }
-    let mut stmt = db.prepare(
-        "SELECT DISTINCT m.anidb_id, ?2 - m.offset AS anime_episode
-         FROM episode_map m JOIN anime_series_map a ON a.anidb_id=m.anidb_id
-         WHERE a.imdb_id=?1 AND m.tvdb_season=?3 AND m.anidb_season>0
-           AND m.map='' AND ?2-m.offset >= max(m.start,1)
-           AND (m.end<=0 OR ?2-m.offset<=m.end)
-         LIMIT 3"
-    )?;
-    let rows = stmt.query_map(params![imdb,episode,season], |r| Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?)))?;
-    let mapped: Vec<_> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-    if mapped.len() != 1 { return Ok(None); }
-    Ok(Some(json!({"imdb_id":imdb,"season":season,"episode":episode,
-        "anidb_id":mapped[0].0,"anidb_episode":mapped[0].1})))
+    // Resolve only through verified anime crosswalk tables, including explicit
+    // mappings, split seasons and absolute numbering.
+    let mapped = match season {
+        Some(season) if season > 0 => anime_resolver::resolve_season(db,imdb,season,episode)?,
+        None => anime_resolver::resolve_absolute(db,imdb,episode)?,
+        _ => None,
+    };
+    Ok(mapped.map(|m|json!({"imdb_id":m.imdb_id,"season":m.season,
+        "episode":m.episode,"anidb_id":m.anidb_id,"anidb_episode":m.anidb_episode})))
 }
 
 fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> {
