@@ -92,15 +92,20 @@ class MetadataIndex:
         if not key:
             return []
         allowed = _SERIES if series else _MOVIES
+        types = tuple(sorted(allowed))
+        placeholders = ",".join("?" for _ in types)
         with self.connect() as db:
-            rows = db.execute("SELECT * FROM titles WHERE clean_title=? AND type IN ('movie','tvMovie','short','tvShort','tvSpecial','tvSeries','tvMiniSeries')", (key,)).fetchall()
+            rows = db.execute(
+                f"SELECT * FROM titles WHERE clean_title=? AND type IN ({placeholders})",
+                (key, *types),
+            ).fetchall()
             if not rows and len(key) >= 12:
                 # Bounded longest-prefix fallback using the existing B-tree index.
                 # Never use LIKE '%suffix': it scans the entire IMDb AKA table.
                 for size in range(len(key) - 1, max(9, len(key) // 2) - 1, -1):
                     rows = db.execute(
-                        "SELECT * FROM titles WHERE clean_title=? AND year>0",
-                        (key[:size],),
+                        f"SELECT * FROM titles WHERE clean_title=? AND type IN ({placeholders})",
+                        (key[:size], *types),
                     ).fetchall()
                     if rows:
                         break
@@ -120,7 +125,8 @@ class MetadataIndex:
                 if row["type"] in allowed:
                     grouped.setdefault(row["imdb_id"], []).append(row)
             duplicate = len({r["imdb_id"] for r in db.execute(
-                "SELECT DISTINCT imdb_id FROM titles WHERE clean_title=? AND year>0", (key,)
+                f"SELECT DISTINCT imdb_id FROM titles WHERE clean_title=? AND type IN ({placeholders})",
+                (key, *types)
             )}) > 1
             matches = []
             for imdb_id, aliases in grouped.items():
