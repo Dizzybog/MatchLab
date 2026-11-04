@@ -104,7 +104,20 @@ pub fn resolve_absolute(db:&Connection,imdb:&str,episode:i64)->rusqlite::Result<
         let local=episode-offset;
         if local<=0||absolutes.first().is_some_and(|m|m.end>0&&local>m.end){continue;}
         for m in &associated{
-            if m.tv_season<=0||local<m.start.max(1)||(m.end>0&&local>m.end){continue;}
+            if m.tv_season<=0{continue;}
+            // Explicit episode pairs are authoritative even when the range
+            // describes a different numbering domain.
+            let explicit=explicit_pairs(&m.map);
+            if !explicit.is_empty(){
+                for (ani,tv) in explicit {
+                    if ani==local&&tv>0 {
+                        let season=if split(link,m,&links,&maps){link.trakt}else{m.tv_season};
+                        if season>0{candidates.insert((link.anidb.clone(),local,season,tv));}
+                    }
+                }
+                continue;
+            }
+            if local<m.start.max(1)||(m.end>0&&local>m.end){continue;}
             let is_split=split(link,m,&links,&maps);
             let season=if is_split{link.trakt}else{m.tv_season};
             if is_split{
