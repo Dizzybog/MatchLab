@@ -459,6 +459,32 @@ mod tests {
         fs::remove_dir_all(&folder).unwrap();
     }
     #[test]
+    fn malformed_animelists_rolls_back_all_rows_and_metadata_state() {
+        let folder=std::env::temp_dir().join(format!("matchlab-rollback-test-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&folder).unwrap();
+        let db_path=folder.join("test.sqlite3");
+        let xml_path=folder.join("anime-list.xml");
+        fs::write(&xml_path,br#"<anime-list><anime anidbid="123" tvdbid="456" defaulttvdbseason="1" episodeoffset="0"/></anime-list><broken"#).unwrap();
+        let db=Connection::open(&db_path).unwrap();
+        db.execute_batch("CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER,start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER,PRIMARY KEY(imdb_id,anidb_id,tvdb_id,trakt_season));
+            CREATE TABLE metadata_state(source TEXT PRIMARY KEY,updated_at TEXT,row_count INTEGER);
+            INSERT INTO episode_map VALUES('existing','999',1,1,1,10,0,'');").unwrap();
+        drop(db);
+        assert!(import_animelists(&db_path,&xml_path).is_err());
+        let db=Connection::open(&db_path).unwrap();
+        let rows:i64=db.query_row("SELECT count(*) FROM episode_map",[],|r|r.get(0)).unwrap();
+        assert_eq!(rows,1,"failed XML import must not publish partial mappings");
+        let old:String=db.query_row("SELECT anidb_id FROM episode_map",[],|r|r.get(0)).unwrap();
+        assert_eq!(old,"existing");
+        let state:i64=db.query_row("SELECT count(*) FROM metadata_state",[],|r|r.get(0)).unwrap();
+        assert_eq!(state,0);
+        drop(db);
+        fs::remove_dir_all(&folder).unwrap();
+    }
+    #[test]
     fn failed_refresh_preserves_existing_database() {
         let folder=std::env::temp_dir().join(format!(
             "matchlab-refresh-test-{}-{}",
