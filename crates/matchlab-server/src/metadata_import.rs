@@ -582,15 +582,18 @@ mod tests {
             std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
         fs::create_dir_all(&folder).unwrap();
         let path=folder.join("quotes.tsv");
-        fs::write(&path,"id\\ttitle\\tregion\\n1\\tThe \\"Great\\" Escape\\tUS\\n2\\tA \\"Quoted\\" Movie\\tNO\\n").unwrap();
+        fs::write(&path,r#"id	title	region
+1	The "Great" Escape	US
+2	A "Quoted" Movie	NO
+"#).unwrap();
         let mut input=reader(&path).unwrap();
         let h=input.headers().unwrap().clone();
         assert_eq!(h.len(),3);
         let rows=input.records().collect::<Result<Vec<_>,_>>().unwrap();
         assert_eq!(rows.len(),2);
         assert_eq!(rows[0].len(),3);
-        assert_eq!(rows[0].get(1),Some("The \\"Great\\" Escape"));
-        assert_eq!(rows[1].get(1),Some("A \\"Quoted\\" Movie"));
+        assert_eq!(rows[0].get(1),Some("The \"Great\" Escape"));
+        assert_eq!(rows[1].get(1),Some("A \"Quoted\" Movie"));
         fs::remove_dir_all(folder).unwrap();
     }
     #[test]
