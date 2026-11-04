@@ -1,6 +1,6 @@
-# Torrent Parse Match
+# MatchLab
 
-**Torrent Parse Match** is a self-hosted service that identifies movies, TV shows and anime from torrent release names. It reads the complete filename, extracts details such as the title, year, season and episode, and returns the matching **IMDb ID**. For anime, it can also return an **AniDB ID** and the correct episode numbering.
+**MatchLab** is a self-hosted service that identifies movies, TV shows and anime from torrent release names. It reads the complete filename, extracts details such as the title, year, season and episode, and returns the matching **IMDb ID**. For anime, it can also return an **AniDB ID** and the correct episode numbering.
 
 For example, `Breaking.Bad.S02E03.1080p.WEB-DL` is recognized as *Breaking Bad*, season 2, episode 3.
 
@@ -26,9 +26,9 @@ Create a file called `compose.yaml`:
 
 ```yaml
 services:
-  torrent-parse-match:
-    image: ghcr.io/dizzybog/torrent-parse-match:latest
-    container_name: torrent-parse-match
+  matchlab:
+    image: ghcr.io/dizzybog/matchlab:latest
+    container_name: matchlab
     restart: unless-stopped
     environment:
       RUST_LOG: matchlab_server=info
@@ -71,7 +71,7 @@ The Docker image is published from GitHub Actions. If the image is not publicly 
 
 ## Diagnostics
 
-The Rust API exposes `POST /debug/match` for structured parsing and matching diagnostics. No dashboard is included in the production image.
+The Rust API exposes `POST /debug/match` for structured parsing and matching diagnostics. The production service also serves the MatchLab dashboard.
 
 ## API
 
@@ -132,7 +132,7 @@ Anime episode conversion depends on the available mappings. Some unusual titles 
 
 ## Metadata and updates
 
-The native Rust backend supports `refresh-metadata` for six local metadata files and `refresh-metadata-urls` for six HTTPS sources (IMDb basics, AKAs, episodes, animeApi, Anime-Lists, AniDB titles). Automatic initialization and periodic refresh use six built-in public HTTPS URLs. `MATCHLAB_METADATA_URLS` can optionally override all six URLs. `MATCHLAB_METADATA_REFRESH_HOURS` defaults to 24 and accepts values from 1 to 720. Each complete refresh is validated in a staging SQLite database before atomic publication; failures preserve the existing database.
+The native Rust backend supports `refresh-metadata` for six local metadata files and `refresh-metadata-urls` for six HTTPS sources (IMDb basics, AKAs, episodes, animeApi, Anime-Lists, AniDB titles). Automatic initialization and periodic refresh use six built-in public HTTPS URLs. `MATCHLAB_METADATA_URLS` can optionally override all six URLs. `MATCHLAB_METADATA_REFRESH_HOURS` defaults to 168 and accepts values from 1 to 720. Each complete refresh is validated in a staging SQLite database before atomic publication; failures preserve the existing database.
 
 ## Configuration
 
@@ -143,7 +143,7 @@ The native Rust backend supports `refresh-metadata` for six local metadata files
 | `MATCHLAB_DB` | SQLite path (default `/data/metadata.sqlite3`). |
 | `MATCHLAB_HOST` | HTTP listen address (Docker default `0.0.0.0:8765`). |
 | `MATCHLAB_METADATA_URLS` | Optional override of six built-in HTTPS metadata source URLs. |
-| `MATCHLAB_METADATA_REFRESH_HOURS` | Refresh interval, default 24 hours, allowed 1–720. |
+| `MATCHLAB_METADATA_REFRESH_HOURS` | Refresh interval, default 168 hours, allowed 1–720. |
 | `8765` | HTTP port for the Rust API. |
 
 Logs include Rust service and matching activity. At `DEBUG` level, they contain detailed candidate information. Request titles and JSON payloads may appear in logs.
@@ -153,9 +153,9 @@ Logs include Rust service and matching activity. At `DEBUG` level, they contain 
 ## Build from source
 
 ```bash
-git clone https://github.com/Dizzybog/torrent-parse-match.git
-cd torrent-parse-match
-docker build -t torrent-parse-match:local .
+git clone https://github.com/Dizzybog/MatchLab.git
+cd matchlab
+docker build -t matchlab:local .
 ```
 
 Run the native Rust tests:
