@@ -27,13 +27,13 @@ function rankResults(d){
     imdb_id:selected.imdb_id,title:selected.title||selected.matched_title||d.parsed?.title,
     season:selected.season,episode:selected.episode,
     anime_id:selected.anime?.anidb_id||selected.anime_ids?.anidb,
-    anime_episode:selected.anime?.episode,source:selected.match_source,winner:true
+    anime_episode:selected.anime?.episode,source:selected.match_source,year:selected.year,type:selected.category||'—',winner:true
   });
   for(const c of candidates){
     if(rows.some(x=>x.imdb_id===c.imdb_id))continue;
     rows.push({imdb_id:c.imdb_id,title:c.title||c.matched_title,
       season:Array.isArray(d.parsed?.seasons)&&d.parsed.seasons.length===1?d.parsed.seasons[0]:null,episode:Array.isArray(d.parsed?.episodes)&&d.parsed.episodes.length===1?d.parsed.episodes[0]:null,anime_id:c.anime_ids?.anidb,
-      anime_episode:null,source:c.source,winner:false});
+      anime_episode:null,source:c.source,year:c.year,type:c.media_type,winner:false});
     if(rows.length===5)break;
   }
   if(!rows.length)return '<div class="empty">No matching candidates found.</div>';
@@ -45,7 +45,7 @@ function rankResults(d){
     (r.winner?'WINNER':'RANK '+(i+1))+'</span></div><div class="rank-fields">'+
     field('IMDb ID',r.imdb_id)+field(r.winner?'IMDb season':'Parsed season',r.season)+field(r.winner?'IMDb episode':'Parsed episode',r.episode)+
     field('AniDB ID',r.anime_id)+field('Anime episode',r.anime_episode)+
-    field('Source',r.source)+'</div></article>').join('')+'</div>';
+    field('Source',r.source)+'</div><div class="rank-meta">'+val(r.year)+' · '+val(r.type)+'</div></article>').join('')+'</div>';
 }
 async function stats(){try{const s=await json('/api/dashboard/stats');for(const k of ['total','matched','unmatched','errors'])$(k).textContent=Number(s[k]).toLocaleString();$('latency').textContent='Average latency: '+Math.round(s.average_duration_ms)+' ms';const days=[...(s.daily||[])].reverse();const max=Math.max(1,...days.map(d=>d.total));$('chart').innerHTML=days.length?days.map(d=>'<div class="bar" title="'+esc(d.day+': '+d.total+' requests')+'" style="height:'+Math.max(4,100*d.total/max)+'%"></div>').join(''):'<div class="empty">No activity yet</div>'}catch(e){$('latency').textContent='Statistics unavailable: '+e.message}}
 async function history(){try{const data=await json('/api/dashboard/history?limit=25&offset='+offset);current=data.items;$('rows').innerHTML=current.length?current.map((r,i)=>'<tr data-id="'+i+'"><td>'+esc(r.created_at.replace('T',' ').slice(0,19))+'</td><td class="title">'+esc(r.title)+'</td><td class="'+(r.status==='matched'?'good':r.status==='error'?'bad':'')+'">'+esc(r.status)+'</td><td>'+esc(r.imdb_id||'—')+'</td><td>'+esc(r.match_source||'—')+'</td><td>'+esc(r.duration_ms)+'</td></tr>').join(''):'<tr><td colspan="6" class="muted">No recorded requests</td></tr>';$('prev').disabled=offset===0;$('next').disabled=current.length<25;$('rows').querySelectorAll('tr[data-id]').forEach(tr=>tr.onclick=()=>{const r=current[Number(tr.dataset.id)];$('history-details').hidden=false;$('history-details').innerHTML=rankResults(r.details)})}catch(e){$('rows').innerHTML='<tr><td colspan="6">'+esc(e.message)+'</td></tr>'}}
