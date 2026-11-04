@@ -217,7 +217,9 @@ fn mapped_absolute_range(db:&Connection,imdb:&str,start:i64,end:i64)->Result<Val
 /// that an episode exists.
 fn candidate_has_episode(db:&Connection,imdb:&str,season:i64,episode:i64)->Result<bool,String>{
     if season<=0||episode<=0{return Ok(true);}
-    Ok(season_episode_end(db,imdb,season)?.is_some_and(|max|episode<=max))
+    // Unknown bounds cannot prove the episode is invalid. Only reject when
+    // IMDb metadata explicitly establishes a lower maximum episode number.
+    Ok(season_episode_end(db,imdb,season)?.is_none_or(|max|episode<=max))
 }
 
 fn season_episode_end(db:&Connection,imdb:&str,season:i64)->Result<Option<i64>,String>{
@@ -739,7 +741,7 @@ mod tests {
             INSERT INTO season_episodes VALUES('ttshort',1,20,20);").unwrap();
         assert!(candidate_has_episode(&db,"tt0460681",1,22).unwrap());
         assert!(!candidate_has_episode(&db,"ttshort",1,22).unwrap());
-        assert!(!candidate_has_episode(&db,"ttmissing",1,22).unwrap());
+        assert!(candidate_has_episode(&db,"ttmissing",1,22).unwrap());
     }
 
     #[test]
