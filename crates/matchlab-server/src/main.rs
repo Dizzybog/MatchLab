@@ -204,8 +204,13 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
                 .map_err(|e|e.to_string())?
         }else{
             anime_identity(&db,&key).map_err(|e|e.to_string())?
-                .map(|id|json!({"imdb_id":id,"season":seasons.first(),
-                    "episode":null,"anidb_id":null,"anidb_episode":null}))
+                .map(|id|{
+                    let inferred=if seasons.is_empty() {
+                        anime_title::season_from_title(&db,&id,title).ok().flatten()
+                    } else {None};
+                    json!({"imdb_id":id,"season":seasons.first().copied().or(inferred),
+                        "episode":null,"anidb_id":null,"anidb_episode":null})
+                })
         }
     } else { None };
     let selected = if let Some(a) = &anime {
@@ -260,6 +265,10 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
         let chosen=imdb.get(chosen_index);
         if let Some(c)=chosen {
             let mut selected_season=seasons.first().copied();
+            if series && selected_season.is_none() && episodes.is_empty() {
+                selected_season=anime_title::season_from_title(&db,&c.imdb_id,title)
+                    .map_err(|e|e.to_string())?;
+            }
             let mut selected_episode=episodes.first().copied();
             let mut anime_result=Value::Null;
 
