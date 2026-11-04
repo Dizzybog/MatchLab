@@ -1,6 +1,6 @@
 //! Download source archives into a temporary workspace, then publish only after
 //! the complete native importer validates the new SQLite database.
-use std::{error::Error,fs::{self,File},io::{self,Write},path::{Path,PathBuf},time::{SystemTime,UNIX_EPOCH}};
+use std::{error::Error,fs::{self,File},io::{self,Read,Write},path::{Path,PathBuf},time::{SystemTime,UNIX_EPOCH}};
 const MAX_DOWNLOAD_BYTES:u64=2_000_000_000;
 fn download(client:&reqwest::blocking::Client,url:&str,path:&Path)->Result<(),Box<dyn Error>>{
     let parsed=reqwest::Url::parse(url)?;
