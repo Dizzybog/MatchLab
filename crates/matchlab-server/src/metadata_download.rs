@@ -1,6 +1,6 @@
 //! Download source archives into a temporary workspace, then publish only after
 //! the complete native importer validates the new SQLite database.
-use std::{error::Error,fs::{self,File},io::{self,Read,Write},path::{Path,PathBuf},time::{SystemTime,UNIX_EPOCH}};
+use std::{error::Error,fs::{self,File},io::{Read,Write},path::{Path,PathBuf},time::{SystemTime,UNIX_EPOCH,Instant}};
 const MAX_DOWNLOAD_BYTES:u64=2_000_000_000;
 const DEFAULT_METADATA_URLS:[&str;6]=[
     "https://datasets.imdbws.com/title.basics.tsv.gz",
@@ -35,9 +35,31 @@ fn download(client:&reqwest::blocking::Client,url:&str,path:&Path)->Result<(),Bo
     if response.content_length().is_some_and(|n|n>MAX_DOWNLOAD_BYTES){
         return Err("metadata archive exceeds download limit".into());
     }
+    let total=response.content_length();
+    let started=Instant::now();
     let mut file=File::create(path)?;
-    let copied=io::copy(&mut response.take(MAX_DOWNLOAD_BYTES+1),&mut file)?;
-    if copied==0||copied>MAX_DOWNLOAD_BYTES{return Err("empty or oversized metadata archive".into());}
+    let mut stream=response.take(MAX_DOWNLOAD_BYTES+1);
+    let mut copied=0u64;
+    let mut next_log=25_000_000u64;
+    let mut buffer=[0u8;64*1024];
+    tracing::info!(file=%path.display(),total_bytes=?total,"metadata download started");
+    loop {
+        let read=stream.read(&mut buffer)?;
+        if read==0{break;}
+        file.write_all(&buffer[..read])?;
+        copied+=read as u64;
+        if copied>MAX_DOWNLOAD_BYTES{return Err("empty or oversized metadata archive".into());}
+        if copied>=next_log{
+            let elapsed=started.elapsed().as_secs_f64().max(0.001);
+            tracing::info!(file=%path.display(),downloaded_mb=copied/1_000_000,
+                total_mb=total.map(|n|n/1_000_000),mb_per_second=(copied as f64/1_000_000.0/elapsed),
+                "metadata download progress");
+            next_log=((copied/25_000_000)+1)*25_000_000;
+        }
+    }
+    if copied==0{return Err("empty or oversized metadata archive".into());}
+    tracing::info!(file=%path.display(),downloaded_mb=copied/1_000_000,
+        elapsed_seconds=started.elapsed().as_secs(),"metadata download completed");
     file.flush()?;
     file.sync_all()?;
     Ok(())
