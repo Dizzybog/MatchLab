@@ -210,6 +210,18 @@ fn mapped_absolute_range(db:&Connection,imdb:&str,start:i64,end:i64)->Result<Val
         "complete":missing==0}))
 }
 
+/// Use the highest observed episode number, not the count: IMDb
+/// episode numbers can contain gaps. Only applies to season-only releases.
+fn season_episode_end(db:&Connection,imdb:&str,season:i64)->Result<Option<i64>,String>{
+    match db.query_row("SELECT max_episode FROM season_episodes
+        WHERE imdb_id=?1 AND season=?2",rusqlite::params![imdb,season],
+        |row|row.get::<_,i64>(0)){
+        Ok(n) if n>0=>Ok(Some(n)),
+        Ok(_)|Err(rusqlite::Error::QueryReturnedNoRows)=>Ok(None),
+        Err(e)=>Err(e.to_string())
+    }
+}
+
 fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> {
     if req.title.trim().is_empty() || req.title.len() > 4096 { return Err("title must be 1–4096 bytes".into()); }
     let parsed = ptt_core::parse_title(&req.title,false).map_err(|e|e.to_string())?;
@@ -371,6 +383,25 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
                     "parsed":parsed}))
         }else{None}
     };
+    // A season pack such as Supernatural.S02 covers the season's episodes.
+    // A specific S02E01 must never be expanded to the entire season.
+    if episodes.is_empty() && seasons.len()==1 {
+        if let Some(winner)=selected.as_mut(){
+            if let Some(imdb_id)=winner["imdb_id"].as_str().map(str::to_owned){
+                let season=seasons[0];
+                if let Some(end)=season_episode_end(&db,&imdb_id,season)?{
+                    winner["season"]=json!(season);
+                    winner["episode"]=json!(1);
+                    winner["season_end"]=json!(season);
+                    winner["episode_end"]=json!(end);
+                    winner["episode_range"]=json!({"start_season":season,"start_episode":1,
+                        "end_season":season,"end_episode":end,
+                        "source":"imdb_season_episodes"});
+                    winner["sid"]=json!(format!("{imdb_id}:{season}:1"));
+                }
+            }
+        }
+    }
     if let (Some(start),Some(end),Some(winner))=(
         parsed.get("episode_start").and_then(Value::as_i64),
         parsed.get("episode_end").and_then(Value::as_i64),
