@@ -15,7 +15,7 @@ fn reader(path:&Path)->Result<csv::Reader<Box<dyn Read>>,Box<dyn Error>>{
     let input:Box<dyn Read>=if path.extension().is_some_and(|e|e=="gz"){
         Box::new(flate2::read::GzDecoder::new(BufReader::new(file)))
     }else{Box::new(BufReader::new(file))};
-    Ok(csv::ReaderBuilder::new().delimiter(b'\t').from_reader(input))
+    Ok(csv::ReaderBuilder::new().delimiter(b'\t').flexible(true).from_reader(input))
 }
 fn col(headers:&csv::StringRecord,name:&str)->Result<usize,Box<dyn Error>>{
     headers.iter().position(|h|h==name).ok_or_else(||format!("missing TSV header: {name}").into())
@@ -68,6 +68,10 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
             let mut insert=tx.prepare_cached("INSERT OR IGNORE INTO titles VALUES(?1,?2,?3,?4,?5,'',?6,0,?7)")?;
             for row in input.records(){
                 let r=row?;
+                if r.len()!=h.len() {
+                    tracing::warn!(record=r.position().map(|p|p.record()), expected=h.len(), actual=r.len(), "skipping malformed metadata TSV record");
+                    continue;
+                }
                 let t=r.get(kind).unwrap_or("");
                 if !matches!(t,"movie"|"tvMovie"|"short"|"tvShort"|"tvSpecial"|"tvSeries"|"tvMiniSeries"){continue}
                 let id=r.get(id).unwrap_or("");
@@ -93,6 +97,10 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
                 WHERE imdb_id=?1 AND ordering=0 AND region='' LIMIT 1")?;
             for row in input.records(){
                 let r=row?;
+                if r.len()!=h.len() {
+                    tracing::warn!(record=r.position().map(|p|p.record()), expected=h.len(), actual=r.len(), "skipping malformed metadata TSV record");
+                    continue;
+                }
                 let title=r.get(title).unwrap_or("");
                 let key=clean(title);
                 if key.is_empty(){continue}
@@ -113,6 +121,10 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
                 ON CONFLICT(imdb_id) DO UPDATE SET max_season=max(max_season,excluded.max_season)")?;
             for row in input.records(){
                 let r=row?;
+                if r.len()!=h.len() {
+                    tracing::warn!(record=r.position().map(|p|p.record()), expected=h.len(), actual=r.len(), "skipping malformed metadata TSV record");
+                    continue;
+                }
                 let se=r.get(season).unwrap_or("").parse::<i64>().unwrap_or(0);
                 if se>0{insert.execute(params![r.get(parent).unwrap_or(""),se])?;}
             }
@@ -145,6 +157,10 @@ pub fn import_animeapi(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>{
     let mut count=0u64;
     for row in input.records(){
         let r=row?;
+                if r.len()!=headers.len() {
+                    tracing::warn!(record=r.position().map(|p|p.record()), expected=headers.len(), actual=r.len(), "skipping malformed metadata TSV record");
+                    continue;
+                }
         let id=r.get(imdb).unwrap_or("").trim();
         let aid=r.get(anidb).unwrap_or("").trim();
         if !id.starts_with("tt") || !id[2..].bytes().all(|b|b.is_ascii_digit())
@@ -533,6 +549,24 @@ mod tests {
         assert_eq!(state,0);
         drop(db);
         fs::remove_dir_all(&folder).unwrap();
+    }
+    #[test]
+    fn malformed_tsv_rows_are_skipped_without_shifting_columns(){
+        let folder=std::env::temp_dir().join(format!("matchlab-tsv-{}-{}",
+            std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&folder).unwrap();
+        let path=folder.join("records.tsv");
+        fs::write(&path,b"first\tsecond\tthird\nvalid\ta\tb\nmissing\tfield\nvalid2\tc\td\n").unwrap();
+        let mut input=reader(&path).unwrap();
+        let h=input.headers().unwrap().clone();
+        let mut valid=Vec::new();
+        for row in input.records(){
+            let r=row.unwrap();
+            if r.len()!=h.len(){continue;}
+            valid.push(r.get(0).unwrap().to_owned());
+        }
+        assert_eq!(valid,vec!["valid","valid2"]);
+        fs::remove_dir_all(folder).unwrap();
     }
     #[test]
     fn normalization(){
