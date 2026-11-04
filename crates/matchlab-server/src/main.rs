@@ -415,6 +415,38 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
     }
     let db = env::var("MATCHLAB_DB").unwrap_or_else(|_|"/data/metadata.sqlite3".into());
     let host = env::var("MATCHLAB_HOST").unwrap_or_else(|_|"127.0.0.1:8766".into());
+    // Optional native metadata scheduler. Set six HTTPS URLs (comma-separated)
+    // and an interval in hours. A single task serializes refreshes; failed
+    // downloads/imports leave the previously published SQLite image intact.
+    if let Ok(config)=env::var("MATCHLAB_METADATA_URLS") {
+        let urls:Vec<String>=config.split(',').map(|s|s.trim().to_owned()).collect();
+        if urls.len()!=6 || urls.iter().any(|s|s.is_empty()) {
+            return Err("MATCHLAB_METADATA_URLS requires six comma-separated HTTPS URLs".into());
+        }
+        let hours=env::var("MATCHLAB_METADATA_REFRESH_HOURS")
+            .unwrap_or_else(|_|"24".into()).parse::<u64>()?;
+        if !(1..=24*30).contains(&hours) {
+            return Err("MATCHLAB_METADATA_REFRESH_HOURS must be between 1 and 720".into());
+        }
+        let target=PathBuf::from(&db);
+        tokio::spawn(async move {
+            let mut interval=tokio::time::interval(std::time::Duration::from_secs(hours*3600));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let target=target.clone();
+                let urls=urls.clone();
+                match tokio::task::spawn_blocking(move ||
+                    metadata_download::refresh_from_urls(&target,&urls)
+                        .map_err(|error|error.to_string())).await {
+                    Ok(Ok((imdb,links,mappings,aliases))) =>
+                        tracing::info!(imdb,links,mappings,aliases,"scheduled metadata refresh completed"),
+                    Ok(Err(error)) => tracing::error!(%error,"scheduled metadata refresh failed; existing database preserved"),
+                    Err(error) => tracing::error!(%error,"scheduled metadata refresh task failed"),
+                }
+            }
+        });
+    }
     let app = Router::new().route("/health",get(health))
         .route("/match",get(get_match_request).post(match_request))
         .route("/debug/match",post(debug_request))
