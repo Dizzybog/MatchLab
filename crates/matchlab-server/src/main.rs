@@ -500,6 +500,7 @@ fn public_match_response(selected: Option<Value>) -> Value {
         "imdbid": winner.get("imdb_id").cloned().unwrap_or(Value::Null),
         "season": winner.get("season").cloned().unwrap_or(Value::Null),
         "episode": winner.get("episode").cloned().unwrap_or(Value::Null),
+        "episode_start": winner.get("episode").cloned().unwrap_or(Value::Null),
         "sid": winner.get("sid").cloned().unwrap_or(Value::Null),
         "season_end": winner.get("season_end").cloned().unwrap_or(Value::Null),
         "episode_end": winner.get("episode_end").cloned().unwrap_or(Value::Null),
