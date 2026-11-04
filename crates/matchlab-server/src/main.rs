@@ -3,6 +3,7 @@
 //! This is a parallel implementation, not yet a drop-in replacement.
 mod imdb_v4;
 mod metadata_import;
+mod metadata_download;
 mod anime_resolver;
 mod anime_title;
 mod country_aliases;
@@ -401,6 +402,15 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
             std::path::Path::new(&args[6]),std::path::Path::new(&args[7]),
             std::path::Path::new(&args[8]))?;
         tracing::info!("metadata refresh completed: imdb={imdb} anime_links={links} episode_maps={mappings} aliases={aliases}");
+        return Ok(());
+    }
+    if args.get(1).is_some_and(|arg|arg=="refresh-metadata-urls") {
+        if args.len()!=9 {
+            return Err("usage: matchlab-server refresh-metadata-urls <database.sqlite3> <basics_url> <akas_url> <episodes_url> <animeapi_url> <animelists_url> <anidb_titles_url>".into());
+        }
+        let (imdb,links,mappings,aliases)=metadata_download::refresh_from_urls(
+            std::path::Path::new(&args[2]),&args[3..])?;
+        tracing::info!("downloaded metadata refresh completed: imdb={imdb} anime_links={links} episode_maps={mappings} aliases={aliases}");
         return Ok(());
     }
     let db = env::var("MATCHLAB_DB").unwrap_or_else(|_|"/data/metadata.sqlite3".into());
