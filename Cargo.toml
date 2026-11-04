@@ -10,9 +10,9 @@ version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 authors = ["Dizzybog"]
-description = "A high-performance Rust implementation of The Best Damn Filename Parser You've Ever Used!"
-homepage = "https://github.com/Dizzybog/torrent-parse-match"
-repository = "https://github.com/Dizzybog/torrent-parse-match"
+description = "MatchLab: Rust torrent title parsing, IMDb and anime matching, and metadata services."
+homepage = "https://github.com/Dizzybog/MatchLab"
+repository = "https://github.com/Dizzybog/MatchLab"
 
 [workspace.dependencies]
 aho-corasick = "1.1.4"

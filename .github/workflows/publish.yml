@@ -21,7 +21,7 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: ghcr.io/dizzybog/torrent-parse-match
+          images: ghcr.io/dizzybog/matchlab
           tags: |
             type=raw,value=latest
             type=sha
