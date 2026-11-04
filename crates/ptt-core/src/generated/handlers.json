@@ -879,7 +879,7 @@
         "remove": true
       },
       "kind": "regex",
-      "pattern": "[^SE][([]?(?!^)(?<!\\d|Cap[. ]?)((?:19\\d|20[012])\\d)(?!\\d|kbps)[)\\]]?",
+      "pattern": "[^SE][([]?(?!^)(?<!\\d)(?<!Cap)(?<!Cap[. ])((?:19\\d|20[012])\\d)(?!\\d|kbps)[)\\]]?",
       "flags": 2,
       "transform": "integer"
     },
