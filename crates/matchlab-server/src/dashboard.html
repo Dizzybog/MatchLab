@@ -18,6 +18,18 @@ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 async function json(url,options){const r=await fetch(url,options);const body=await r.json();if(!r.ok)throw Error(body.error||r.statusText);return body}
 // Diagnostic candidates are already ranked by the Rust matcher. The selected
 // winner is shown first, even when anime priority overrides IMDb ranking.
+function displayRange(start,end){
+  if(start===null||start===undefined||start==='')return '—';
+  return end!==null&&end!==undefined&&end!==''&&String(end)!==String(start)
+    ?String(start)+'–'+String(end):String(start);
+}
+function seasonEpisodeDisplay(row){
+  const seasons=displayRange(row.season,row.season_end);
+  const multiple=row.season!==null&&row.season!==undefined&&
+    row.season_end!==null&&row.season_end!==undefined&&
+    Number(row.season)!==Number(row.season_end);
+  return {seasons,episodes:multiple?'Season packs':displayRange(row.episode,row.episode_end)};
+}
 function rankResults(d){
   if(!d||typeof d!=='object')return '<div class="empty">No diagnostic data available.</div>';
   const selected=d.selected&&typeof d.selected==='object'?d.selected:null;
@@ -25,14 +37,18 @@ function rankResults(d){
   const rows=[];
   if(selected)rows.push({
     imdb_id:selected.imdb_id,title:selected.title||selected.matched_title||d.parsed?.title,
-    season:selected.season,episode:selected.episode,
+    season:selected.season,season_end:selected.season_end??selected.episode_range?.end_season,
+    episode:selected.episode,episode_end:selected.episode_end??selected.episode_range?.end_episode,
     anime_id:selected.anime?.anidb_id||selected.anime_ids?.anidb,
     anime_episode:selected.anime?.episode,source:selected.match_source,year:selected.year,type:selected.category||'—',winner:true
   });
   for(const c of candidates){
     if(rows.some(x=>x.imdb_id===c.imdb_id))continue;
     rows.push({imdb_id:c.imdb_id,title:c.title||c.matched_title,
-      season:Array.isArray(d.parsed?.seasons)&&d.parsed.seasons.length===1?d.parsed.seasons[0]:null,episode:Array.isArray(d.parsed?.episodes)&&d.parsed.episodes.length===1?d.parsed.episodes[0]:null,anime_id:c.anime_ids?.anidb,
+      season:Array.isArray(d.parsed?.seasons)&&d.parsed.seasons.length?d.parsed.seasons[0]:null,
+      season_end:Array.isArray(d.parsed?.seasons)&&d.parsed.seasons.length>1?d.parsed.seasons[d.parsed.seasons.length-1]:null,
+      episode:Array.isArray(d.parsed?.episodes)&&d.parsed.episodes.length===1?d.parsed.episodes[0]:null,
+      episode_end:null,anime_id:c.anime_ids?.anidb,
       anime_episode:null,source:c.source,year:c.year,type:c.media_type,winner:false});
     if(rows.length===5)break;
   }
@@ -43,7 +59,7 @@ function rankResults(d){
     '<article class="rank-card'+(r.winner?' winner':'')+'"><div class="rank-top"><div class="rank-name">'+
     '#'+(i+1)+' · '+val(r.title)+'</div><span class="rank-tag">'+
     (r.winner?'WINNER':'RANK '+(i+1))+'</span></div><div class="rank-fields">'+
-    field('IMDb ID',r.imdb_id)+field(r.winner?'IMDb season':'Parsed season',r.season)+field(r.winner?'IMDb episode':'Parsed episode',r.episode)+
+    field('IMDb ID',r.imdb_id)+field(r.winner?'IMDb season':'Parsed season',seasonEpisodeDisplay(r).seasons)+field(r.winner?'IMDb episode':'Parsed episode',seasonEpisodeDisplay(r).episodes)+
     field('AniDB ID',r.anime_id)+field('Anime episode',r.anime_episode)+
     field('Source',r.source)+'</div><div class="rank-meta">'+val(r.year)+' · '+val(r.type)+'</div></article>').join('')+'</div>';
 }

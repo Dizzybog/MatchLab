@@ -210,6 +210,28 @@ fn mapped_absolute_range(db:&Connection,imdb:&str,start:i64,end:i64)->Result<Val
         "complete":missing==0}))
 }
 
+/// Use the highest observed episode number, not the count: IMDb
+/// episode numbers can contain gaps. Only applies to season-only releases.
+/// Reject candidates whose imported IMDb season cannot contain the
+/// explicitly requested episode. Missing season metadata is not evidence
+/// that an episode exists.
+fn candidate_has_episode(db:&Connection,imdb:&str,season:i64,episode:i64)->Result<bool,String>{
+    if season<=0||episode<=0{return Ok(true);}
+    // Unknown bounds cannot prove the episode is invalid. Only reject when
+    // IMDb metadata explicitly establishes a lower maximum episode number.
+    Ok(season_episode_end(db,imdb,season)?.is_none_or(|max|episode<=max))
+}
+
+fn season_episode_end(db:&Connection,imdb:&str,season:i64)->Result<Option<i64>,String>{
+    match db.query_row("SELECT max_episode FROM season_episodes
+        WHERE imdb_id=?1 AND season=?2",rusqlite::params![imdb,season],
+        |row|row.get::<_,i64>(0)){
+        Ok(n) if n>0=>Ok(Some(n)),
+        Ok(_)|Err(rusqlite::Error::QueryReturnedNoRows)=>Ok(None),
+        Err(e)=>Err(e.to_string())
+    }
+}
+
 fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> {
     if req.title.trim().is_empty() || req.title.len() > 4096 { return Err("title must be 1–4096 bytes".into()); }
     let parsed = ptt_core::parse_title(&req.title,false).map_err(|e|e.to_string())?;
@@ -244,6 +266,21 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
     };
     let imdb = imdb_v4::search(&db,title,year,series,seasons.iter().copied().max().unwrap_or(0),&req.title,!episodes.is_empty(),20)
         .map_err(|e|e.to_string())?;
+    let imdb=if seasons.len()==1 && episodes.len()==1 {
+        let season=seasons[0];
+        let episode=episodes[0];
+        imdb.into_iter().filter_map(|candidate|
+            match candidate_has_episode(&db,&candidate.imdb_id,season,episode) {
+                Ok(true)=>Some(candidate),
+                Ok(false)=>None,
+                Err(error)=>{
+                    tracing::warn!(imdb_id=%candidate.imdb_id,%error,
+                        "season episode metadata unavailable for candidate");
+                    None
+                }
+            }
+        ).collect::<Vec<_>>()
+    }else{imdb};
     let imdb: Vec<Candidate> = imdb.into_iter().map(|m|Candidate{
         imdb_id:m.imdb_id,title:m.title,year:m.year,media_type:m.media_type,
         matched_title:m.matched_title,anime_ids:m.anime_ids,source:"imdb"}).collect();
@@ -371,6 +408,25 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
                     "parsed":parsed}))
         }else{None}
     };
+    // A season pack such as Supernatural.S02 covers the season's episodes.
+    // A specific S02E01 must never be expanded to the entire season.
+    if episodes.is_empty() && seasons.len()==1 {
+        if let Some(winner)=selected.as_mut(){
+            if let Some(imdb_id)=winner["imdb_id"].as_str().map(str::to_owned){
+                let season=seasons[0];
+                if let Some(end)=season_episode_end(&db,&imdb_id,season)?{
+                    winner["season"]=json!(season);
+                    winner["episode"]=json!(1);
+                    winner["season_end"]=json!(season);
+                    winner["episode_end"]=json!(end);
+                    winner["episode_range"]=json!({"start_season":season,"start_episode":1,
+                        "end_season":season,"end_episode":end,
+                        "source":"imdb_season_episodes"});
+                    winner["sid"]=json!(format!("{imdb_id}:{season}:1"));
+                }
+            }
+        }
+    }
     if let (Some(start),Some(end),Some(winner))=(
         parsed.get("episode_start").and_then(Value::as_i64),
         parsed.get("episode_end").and_then(Value::as_i64),
@@ -469,6 +525,7 @@ fn public_match_response(selected: Option<Value>) -> Value {
         "imdbid": winner.get("imdb_id").cloned().unwrap_or(Value::Null),
         "season": winner.get("season").cloned().unwrap_or(Value::Null),
         "episode": winner.get("episode").cloned().unwrap_or(Value::Null),
+        "episode_start": winner.get("episode").cloned().unwrap_or(Value::Null),
         "sid": winner.get("sid").cloned().unwrap_or(Value::Null),
         "season_end": winner.get("season_end").cloned().unwrap_or(Value::Null),
         "episode_end": winner.get("episode_end").cloned().unwrap_or(Value::Null),
@@ -676,6 +733,28 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
     }
     #[test]
+    fn requested_episode_must_exist_within_known_season_bounds() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+            episode_count INTEGER,max_episode INTEGER);
+            INSERT INTO season_episodes VALUES('tt0460681',1,22,22);
+            INSERT INTO season_episodes VALUES('ttshort',1,20,20);").unwrap();
+        assert!(candidate_has_episode(&db,"tt0460681",1,22).unwrap());
+        assert!(!candidate_has_episode(&db,"ttshort",1,22).unwrap());
+        assert!(candidate_has_episode(&db,"ttmissing",1,22).unwrap());
+    }
+
+    #[test]
+    fn season_episode_bounds_use_maximum_episode_not_row_count() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+            episode_count INTEGER,max_episode INTEGER);
+            INSERT INTO season_episodes VALUES('tt0460681',2,21,22);").unwrap();
+        assert_eq!(season_episode_end(&db,"tt0460681",2).unwrap(),Some(22));
+        assert_eq!(season_episode_end(&db,"tt0460681",3).unwrap(),None);
+    }
+
+    #[test]
     fn absolute_episode_range_crosses_seasons_and_keeps_gaps() {
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
@@ -766,6 +845,7 @@ mod tests {
             imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
             region TEXT,original INTEGER,ordering INTEGER,type TEXT);
             CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
             CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
             CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,
                 tvdb_season INTEGER,start INTEGER,end INTEGER,offset INTEGER,map TEXT);

@@ -166,6 +166,14 @@ curl -X POST http://127.0.0.1:8765/debug/match \
   -d '{"title":"Breaking.Bad.S02E03.1080p"}'
 ```
 
+### Complete season packs
+
+MatchLab imports IMDb `title.episode.tsv.gz` into a per-season `season_episodes` table, keyed by IMDb series ID and season number. Each row stores `episode_count` (number of numbered episode rows) and `max_episode` (highest observed episode number). The matcher uses **max_episode**, because episode numbering may have gaps.
+
+For a season-only release such as `Supernatural.S02`, the selected match receives `season=2`, `episode=1`, `season_end=2`, and `episode_end=22` **if** the imported IMDb metadata reports episode 22 as the maximum. A concrete episode such as `Supernatural.S02E01` remains a single episode and is not expanded. When season metadata is missing, MatchLab does not invent an endpoint.
+
+The season table uses IMDb season numbering; anime crosswalk mappings may use different TVDB-style season conventions.
+
 ## Metadata and updates
 
 The native Rust backend supports `refresh-metadata` for six local metadata files and `refresh-metadata-urls` for six HTTPS sources (IMDb basics, AKAs, episodes, animeApi, Anime-Lists, AniDB titles). Automatic initialization and periodic refresh use six built-in public HTTPS URLs. `MATCHLAB_METADATA_URLS` can optionally override all six URLs. `MATCHLAB_METADATA_REFRESH_HOURS` defaults to 168 and accepts values from 1 to 720. Each complete refresh is validated in a staging SQLite database before atomic publication; failures preserve the existing database.

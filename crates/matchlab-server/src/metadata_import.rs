@@ -41,6 +41,9 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
                 type TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY(imdb_id,clean_title,year,region,ordering));
             CREATE TABLE seasons(imdb_id TEXT PRIMARY KEY,max_season INTEGER NOT NULL);
+            CREATE TABLE season_episodes(imdb_id TEXT NOT NULL,season INTEGER NOT NULL,
+                episode_count INTEGER NOT NULL,max_episode INTEGER NOT NULL,
+                PRIMARY KEY(imdb_id,season));
             CREATE TABLE anime_ids(group_id TEXT NOT NULL,type TEXT NOT NULL,value TEXT NOT NULL,
                 PRIMARY KEY(group_id,type,value));
             CREATE TABLE anime_series_map(imdb_id TEXT NOT NULL,anidb_id TEXT NOT NULL,
@@ -135,11 +138,17 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
             let mut input=reader(episodes)?;
             let h=input.headers()?.clone();
             let mut malformed_rows=0u64;
-            let (parent,season)=(col(&h,"parentTconst")?,col(&h,"seasonNumber")?);
+            let (parent,season,episode)=(col(&h,"parentTconst")?,col(&h,"seasonNumber")?,col(&h,"episodeNumber")?);
             let mut insert=tx.prepare_cached("INSERT INTO seasons(imdb_id,max_season)
                 SELECT ?1,?2 WHERE EXISTS(SELECT 1 FROM titles
                 WHERE imdb_id=?1 AND type IN ('tvSeries','tvMiniSeries'))
                 ON CONFLICT(imdb_id) DO UPDATE SET max_season=max(max_season,excluded.max_season)")?;
+            let mut insert_episode=tx.prepare_cached("INSERT INTO season_episodes(imdb_id,season,episode_count,max_episode)
+                SELECT ?1,?2,1,?3 WHERE EXISTS(SELECT 1 FROM titles
+                WHERE imdb_id=?1 AND type IN ('tvSeries','tvMiniSeries'))
+                ON CONFLICT(imdb_id,season) DO UPDATE SET
+                    episode_count=episode_count+1,
+                    max_episode=max(max_episode,excluded.max_episode)")?;
             let started=Instant::now();
             let mut processed=0u64;
             tracing::info!(source="imdb_episodes","metadata import started");
@@ -152,7 +161,12 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
                     continue;
                 }
                 let se=r.get(season).unwrap_or("").parse::<i64>().unwrap_or(0);
-                if se>0{insert.execute(params![r.get(parent).unwrap_or(""),se])?;}
+                if se>0{
+                    let parent_id=r.get(parent).unwrap_or("");
+                    insert.execute(params![parent_id,se])?;
+                    let ep=r.get(episode).unwrap_or("").parse::<i64>().unwrap_or(0);
+                    if ep>0{insert_episode.execute(params![parent_id,se,ep])?;}
+                }
             }
             if malformed_rows>0 {tracing::warn!(source="imdb_episodes",malformed_rows,"skipped malformed metadata TSV records");}
             log_progress("imdb_episodes",processed,started);
