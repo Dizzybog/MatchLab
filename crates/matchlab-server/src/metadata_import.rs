@@ -257,6 +257,7 @@ pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>
     let mut links=tx.prepare_cached("INSERT OR IGNORE INTO anime_series_map VALUES(?1,?2,?3,0)")?;
     let mut buf=Vec::new();
     let (mut aid,mut tvdb,mut imdb)=(String::new(),String::new(),String::new());
+    let mut last_parts:std::collections::HashMap<(String,i64),(String,i64)>=std::collections::HashMap::new();
     let mut valid=false;
     let mut pending:Option<(i64,i64,i64,i64,i64,String)>=None;
     let mut count=0u64;
@@ -283,8 +284,22 @@ pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>
                 if valid{
                     if imdb.starts_with("tt"){links.execute(params![imdb,aid,tvdb])?;}
                     if let Some(season)=default_season{
-                        insert.execute(params![aid,tvdb,1,season,
-                            if season == -1{1}else{0},0,default_offset,""])?;
+                        let mut start=if season == -1{1}else{0};
+                        if season>0 {
+                            let key=(tvdb.clone(),season);
+                            if let Some((previous_aid,previous_offset))=last_parts.get(&key){
+                                // A second AniDB entry in the same TVDB season starts a new part.
+                                // Bound the preceding part by the difference in absolute offsets.
+                                tx.execute("UPDATE episode_map SET start=CASE WHEN start=0 THEN 1 ELSE start END,
+                                    end=CASE WHEN end=0 THEN max(0,?1-offset) ELSE end END
+                                    WHERE anidb_id=?2 AND tvdb_id=?3 AND anidb_season=1 AND tvdb_season=?4",
+                                    params![default_offset,previous_aid,tvdb,season])?;
+                                let _=previous_offset;
+                                start=1;
+                            }
+                            last_parts.insert(key,(aid.clone(),default_offset));
+                        }
+                        insert.execute(params![aid,tvdb,1,season,start,0,default_offset,""])?;
                         count+=1;
                     }
                 }
