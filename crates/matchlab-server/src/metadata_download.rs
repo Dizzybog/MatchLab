@@ -6,6 +6,7 @@ fn download(client:&reqwest::blocking::Client,url:&str,path:&Path)->Result<(),Bo
     let parsed=reqwest::Url::parse(url)?;
     if parsed.scheme()!="https"{return Err("metadata source must use HTTPS".into());}
     let response=client.get(parsed).send()?.error_for_status()?;
+    if response.url().scheme()!="https"{return Err("metadata redirect must remain HTTPS".into());}
     if response.content_length().is_some_and(|n|n>MAX_DOWNLOAD_BYTES){
         return Err("metadata archive exceeds download limit".into());
     }
@@ -22,6 +23,12 @@ impl Drop for Workspace{fn drop(&mut self){let _=fs::remove_dir_all(&self.0);}}
 /// Anime-Lists, AniDB titles. Sources are explicit to avoid silent feed changes.
 pub fn refresh_from_urls(target:&Path,urls:&[String])->Result<(u64,u64,u64,u64),Box<dyn Error>>{
     if urls.len()!=6{return Err("expected exactly six metadata URLs".into());}
+    // Reject every invalid source before starting network I/O or creating a workspace.
+    for url in urls {
+        if reqwest::Url::parse(url)?.scheme()!="https" {
+            return Err("metadata source must use HTTPS".into());
+        }
+    }
     let parent=target.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(parent)?;
     let nonce=SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
@@ -41,6 +48,20 @@ pub fn refresh_from_urls(target:&Path,urls:&[String])->Result<(u64,u64,u64,u64),
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn reject_insecure_url_set_before_creating_workspace(){
+        let folder=std::env::temp_dir().join(format!("matchlab-url-validation-{}-{}",
+            std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        let target=folder.join("live.sqlite3");
+        let urls=vec!["https://example.org/file".to_string(),
+            "http://example.org/insecure".to_string(),
+            "https://example.org/file".to_string(),
+            "https://example.org/file".to_string(),
+            "https://example.org/file".to_string(),
+            "https://example.org/file".to_string()];
+        assert!(refresh_from_urls(&target,&urls).is_err());
+        assert!(!folder.exists(),"invalid URL set must not create a workspace");
+    }
     #[test]
     fn reject_non_https_sources_without_creating_a_file(){
         let path=std::env::temp_dir().join(format!("matchlab-insecure-{}",std::process::id()));
