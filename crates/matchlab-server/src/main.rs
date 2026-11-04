@@ -267,8 +267,16 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
     let imdb=if seasons.len()==1 && episodes.len()==1 {
         let season=seasons[0];
         let episode=episodes[0];
-        imdb.into_iter().filter(|candidate|
-            candidate_has_episode(&db,&candidate.imdb_id,season,episode).unwrap_or(false)
+        imdb.into_iter().filter_map(|candidate|
+            match candidate_has_episode(&db,&candidate.imdb_id,season,episode) {
+                Ok(true)=>Some(candidate),
+                Ok(false)=>None,
+                Err(error)=>{
+                    tracing::warn!(imdb_id=%candidate.imdb_id,%error,
+                        "season episode metadata unavailable for candidate");
+                    None
+                }
+            }
         ).collect::<Vec<_>>()
     }else{imdb};
     let imdb: Vec<Candidate> = imdb.into_iter().map(|m|Candidate{
@@ -722,6 +730,18 @@ mod tests {
         assert_eq!(winner["category"],"series");
         std::fs::remove_file(&path).unwrap();
     }
+    #[test]
+    fn requested_episode_must_exist_within_known_season_bounds() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+            episode_count INTEGER,max_episode INTEGER);
+            INSERT INTO season_episodes VALUES('tt0460681',1,22,22);
+            INSERT INTO season_episodes VALUES('ttshort',1,20,20);").unwrap();
+        assert!(candidate_has_episode(&db,"tt0460681",1,22).unwrap());
+        assert!(!candidate_has_episode(&db,"ttshort",1,22).unwrap());
+        assert!(!candidate_has_episode(&db,"ttmissing",1,22).unwrap());
+    }
+
     #[test]
     fn season_episode_bounds_use_maximum_episode_not_row_count() {
         let db=Connection::open_in_memory().unwrap();
