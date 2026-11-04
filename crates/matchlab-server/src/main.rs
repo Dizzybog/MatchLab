@@ -707,6 +707,16 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
     }
     #[test]
+    fn season_episode_bounds_use_maximum_episode_not_row_count() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+            episode_count INTEGER,max_episode INTEGER);
+            INSERT INTO season_episodes VALUES('tt0460681',2,21,22);").unwrap();
+        assert_eq!(season_episode_end(&db,"tt0460681",2).unwrap(),Some(22));
+        assert_eq!(season_episode_end(&db,"tt0460681",3).unwrap(),None);
+    }
+
+    #[test]
     fn absolute_episode_range_crosses_seasons_and_keeps_gaps() {
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
