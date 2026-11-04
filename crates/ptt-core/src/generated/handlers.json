@@ -2449,7 +2449,7 @@
         "remove": true
       },
       "kind": "regex",
-      "pattern": "(?<!A.?|The.?)\\bComplete\\b",
+      "pattern": "(?<!A)(?<!A.)(?<!The)(?<!The.)\\bComplete\\b",
       "flags": 2,
       "transform": "boolean"
     },
@@ -3216,7 +3216,7 @@
         "remove": false
       },
       "kind": "regex",
-      "pattern": "(?<=\\D|^)(\\d{1,3})[. ]?(?:of|из|iz)[. ]?\\d{1,3}(?=\\D|$)",
+      "pattern": "(?:(?<=\\D)|\\A)(\\d{1,3})[. ]?(?:of|из|iz)[. ]?\\d{1,3}(?=\\D|$)",
       "flags": 2,
       "transform": "array(integer)"
     },
@@ -3565,7 +3565,7 @@
         "remove": false
       },
       "kind": "regex",
-      "pattern": "(?<!shang-?)\\bCH(?:I|T)\\b",
+      "pattern": "(?<!shang)(?<!shang-)\\bCH(?:I|T)\\b",
       "flags": 2,
       "transform": "uniq_concat(value('zh'))"
     },
