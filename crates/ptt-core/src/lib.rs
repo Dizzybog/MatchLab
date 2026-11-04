@@ -1575,8 +1575,39 @@ pub fn parse_title(
     raw_title: &str,
     translate_languages: bool,
 ) -> Result<Map<String, Value>, ParseError> {
-    let mut result=ENGINE.parse(raw_title, translate_languages)?;
-    if let Some((start,end))=absolute_episode_range(raw_title){
+    // A path represents a single file in its parent collection. Parse the
+    // leaf first; parent folders supply a missing series title, not their
+    // season packs or episode ranges.
+    let components:Vec<&str>=raw_title.split(&['/','\\'][..])
+        .filter(|part|!part.is_empty() && *part!="." && *part!="..").collect();
+    let leaf=components.last().copied().unwrap_or(raw_title);
+    let mut result=ENGINE.parse(leaf, translate_languages)?;
+    if components.len()>1 {
+        let leaf_title=result.get("title").and_then(Value::as_str).unwrap_or("").trim().to_owned();
+        // Only inherit a folder title when the leaf contains episode/season
+        // coordinates but no meaningful show title of its own.
+        let has_coordinates=result.contains_key("episodes")||result.contains_key("seasons");
+        let generic=leaf_title.is_empty()
+            ||leaf_title.eq_ignore_ascii_case("episode")
+            ||leaf_title.eq_ignore_ascii_case("ep");
+        if has_coordinates && generic {
+            for parent in components[..components.len()-1].iter().rev() {
+                let parent_result=ENGINE.parse(parent,translate_languages)?;
+                let parent_title=parent_result.get("title").and_then(Value::as_str).unwrap_or("").trim();
+                if parent_title.is_empty(){continue;}
+                // Reparse with inherited series name, retaining the leaf's
+                // specific episode coordinates as authoritative.
+                let combined=format!("{parent_title} {leaf}");
+                let enriched=ENGINE.parse(&combined,translate_languages)?;
+                if enriched.get("title").and_then(Value::as_str)
+                    .is_some_and(|title|!title.trim().is_empty()) {
+                    result=enriched;
+                    break;
+                }
+            }
+        }
+    }
+    if let Some((start,end))=absolute_episode_range(leaf){
         result.insert("episode_start".into(),json!(start));
         result.insert("episode_end".into(),json!(end));
         result.insert("episode_count".into(),json!(end-start+1));
@@ -1950,6 +1981,14 @@ mod tests {
                 "{title:?}"
             );
         }
+    }
+
+    #[test]
+    fn folder_season_pack_does_not_override_leaf_episode() {
+        let parsed=parse_title("Supernatural S01-S12/S02E01",false).unwrap();
+        assert_eq!(parsed["seasons"],json!([2]));
+        assert_eq!(parsed["episodes"],json!([1]));
+        assert!(parsed["title"].as_str().unwrap_or("").to_lowercase().contains("supernatural"));
     }
 
     #[test]
