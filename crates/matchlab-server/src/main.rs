@@ -168,6 +168,48 @@ fn anime_identity(db:&Connection,key:&str)->rusqlite::Result<Option<String>>{
     Ok(Some(best_imdb.clone()))
 }
 
+/// Resolve every absolute episode independently: an anime range may span
+/// several IMDb seasons. Never interpolate across missing crosswalk entries.
+fn mapped_absolute_range(db:&Connection,imdb:&str,start:i64,end:i64)->Result<Value,String>{
+    let mut segments:Vec<Value>=Vec::new();
+    let mut missing=0i64;
+    let mut first:Option<anime_resolver::Episode>=None;
+    let mut last:Option<anime_resolver::Episode>=None;
+    for absolute in start..=end {
+        let mapped=anime_resolver::resolve_absolute(db,imdb,absolute)
+            .map_err(|e|e.to_string())?;
+        if let Some(ep)=mapped {
+            if absolute==start{first=Some(ep.clone());}
+            if absolute==end{last=Some(ep.clone());}
+            let continues=segments.last().is_some_and(|seg|
+                seg["season"].as_i64()==Some(ep.season)
+                &&seg["end_absolute"].as_i64()==Some(absolute-1)
+                &&seg["end_episode"].as_i64()==Some(ep.episode-1)
+                &&seg["anidb_id"].as_str()==Some(ep.anidb_id.as_str())
+                &&seg["end_anime_episode"].as_i64()==Some(ep.anidb_episode-1));
+            if continues {
+                let tail=segments.last_mut().expect("checked above");
+                tail["end_absolute"]=json!(absolute);
+                tail["end_episode"]=json!(ep.episode);
+                tail["end_anime_episode"]=json!(ep.anidb_episode);
+            }else{
+                segments.push(json!({"season":ep.season,"start_absolute":absolute,
+                    "end_absolute":absolute,"start_episode":ep.episode,
+                    "end_episode":ep.episode,"anidb_id":ep.anidb_id,
+                    "start_anime_episode":ep.anidb_episode,
+                    "end_anime_episode":ep.anidb_episode}));
+            }
+        }else{missing+=1;}
+    }
+    Ok(json!({"absolute_start":start,"absolute_end":end,
+        "start_season":first.as_ref().map(|e|e.season),
+        "start_episode":first.as_ref().map(|e|e.episode),
+        "end_season":last.as_ref().map(|e|e.season),
+        "end_episode":last.as_ref().map(|e|e.episode),
+        "segments":segments,"unmapped_count":missing,
+        "complete":missing==0}))
+}
+
 fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> {
     if req.title.trim().is_empty() || req.title.len() > 4096 { return Err("title must be 1–4096 bytes".into()); }
     let parsed = ptt_core::parse_title(&req.title,false).map_err(|e|e.to_string())?;
@@ -231,7 +273,7 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
                 && normalize(&c.matched_title)==key && c.imdb_id!=anime_id
         })
     });
-    let selected = if let Some(a) = &anime {
+    let mut selected = if let Some(a) = &anime {
         let imdb_id = a["imdb_id"].as_str().unwrap_or_default();
         let season = a["season"].as_i64();
         let episode = a["episode"].as_i64();
@@ -329,6 +371,29 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
                     "parsed":parsed}))
         }else{None}
     };
+    if let (Some(start),Some(end),Some(winner))=(
+        parsed.get("episode_start").and_then(Value::as_i64),
+        parsed.get("episode_end").and_then(Value::as_i64),
+        selected.as_mut()
+    ){
+        if let Some(imdb_id)=winner["imdb_id"].as_str().map(str::to_owned){
+            let range=mapped_absolute_range(&db,&imdb_id,start,end)?;
+            // Keep the raw absolute endpoints even when the metadata mapping
+            // is incomplete; never claim inferred IMDb season coordinates.
+            winner["episode_range"]=range.clone();
+            winner["season"]=range["start_season"].clone();
+            winner["episode"]=range["start_episode"].clone();
+            winner["season_end"]=range["end_season"].clone();
+            winner["episode_end"]=range["end_episode"].clone();
+            winner["sid"]=if let (Some(se),Some(ep))=(
+                range["start_season"].as_i64(),range["start_episode"].as_i64()){
+                json!(format!("{imdb_id}:{se}:{ep}"))
+            }else{json!(imdb_id)};
+            // An absolute range can span seasons; a single ASID is not an
+            // adequate representation of the entire release.
+            winner["anime"]=Value::Null;
+        }
+    }
     let reason = if anime.is_some() {"Verified anime crosswalk"} else if selected.is_some() {
         "IMDb title candidate (experimental matching rules)"
     } else {"No eligible candidate"};
@@ -405,6 +470,9 @@ fn public_match_response(selected: Option<Value>) -> Value {
         "season": winner.get("season").cloned().unwrap_or(Value::Null),
         "episode": winner.get("episode").cloned().unwrap_or(Value::Null),
         "sid": winner.get("sid").cloned().unwrap_or(Value::Null),
+        "season_end": winner.get("season_end").cloned().unwrap_or(Value::Null),
+        "episode_end": winner.get("episode_end").cloned().unwrap_or(Value::Null),
+        "episode_range": winner.get("episode_range").cloned().unwrap_or(Value::Null),
         "anime_id": anime_id,
         "asid": asid,
         "type": if is_anime { "anime" } else if winner.get("category").and_then(Value::as_str) == Some("series") { "series" } else { "movie" },
@@ -606,6 +674,28 @@ mod tests {
         assert_eq!(winner["match_source"],"imdb");
         assert_eq!(winner["category"],"series");
         std::fs::remove_file(&path).unwrap();
+    }
+    #[test]
+    fn absolute_episode_range_crosses_seasons_and_keeps_gaps() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER,start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO anime_series_map VALUES('ttonepiece','123','456',0);
+            INSERT INTO episode_map VALUES('123','456',1,-1,1,4,0,'');
+            INSERT INTO episode_map VALUES('123','456',1,10,1,2,0,'');
+            INSERT INTO episode_map VALUES('123','456',1,11,3,4,-2,'');").unwrap();
+        let range=mapped_absolute_range(&db,"ttonepiece",1,4).unwrap();
+        assert_eq!(range["start_season"],10);
+        assert_eq!(range["end_season"],11);
+        assert_eq!(range["start_episode"],1);
+        assert_eq!(range["end_episode"],2);
+        assert_eq!(range["unmapped_count"],0);
+        assert_eq!(range["segments"].as_array().unwrap().len(),2);
+        let gap=mapped_absolute_range(&db,"ttonepiece",1,5).unwrap();
+        assert_eq!(gap["unmapped_count"],1);
+        assert_eq!(gap["complete"],false);
+        assert!(gap["end_season"].is_null());
     }
     #[test]
     fn public_response_movie_series_and_anime() {
