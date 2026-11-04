@@ -5,17 +5,18 @@ mod metadata_download;
 mod anime_resolver;
 mod anime_title;
 mod country_aliases;
-use axum::{extract::{Query, State}, http::StatusCode, routing::{get,post}, Json, Router};
+mod dashboard_history;
+use axum::{extract::{Query, State}, http::{StatusCode,header}, routing::{get,post}, Json, Router};
 use rusqlite::{Connection, OpenFlags};
 #[cfg(test)]
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{env, path::PathBuf, sync::Arc};
+use std::{env, path::PathBuf, sync::Arc, time::Instant};
 use unicode_normalization::UnicodeNormalization;
 
 #[derive(Clone)]
-struct AppState { db: Arc<PathBuf> }
+struct AppState { db: Arc<PathBuf>, history: Arc<PathBuf> }
 
 #[derive(Debug, Deserialize)]
 struct MatchRequest {
@@ -308,6 +309,48 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
         selected,reason:reason.into()})
 }
 
+fn diagnose_logged(state:&AppState,req:&MatchRequest)->Result<Diagnostic,String>{
+    let start=Instant::now();
+    let result=diagnose(&state.db,req);
+    let elapsed=start.elapsed().as_millis() as u64;
+    match &result {
+        Ok(d)=>{
+            let status=if d.selected.is_some(){"matched"}else{"unmatched"};
+            let details=serde_json::to_value(d).unwrap_or(Value::Null);
+            dashboard_history::record(&state.history,&req.title,status,d.selected.as_ref(),&details,elapsed);
+        }
+        Err(error)=>dashboard_history::record(&state.history,&req.title,"error",None,&json!({"error":error}),elapsed),
+    }
+    result
+}
+
+async fn dashboard()->([(header::HeaderName,&'static str);1],&'static str){
+    ([(header::CONTENT_TYPE,"text/html; charset=utf-8")],include_str!("dashboard.html"))
+}
+
+#[derive(Deserialize)]
+struct HistoryQuery {limit:Option<usize>,offset:Option<usize>}
+
+async fn dashboard_history_request(State(state):State<AppState>,Query(q):Query<HistoryQuery>)
+    -> (StatusCode,Json<Value>){
+    let result=tokio::task::spawn_blocking(move||
+        dashboard_history::history(&state.history,q.limit.unwrap_or(25),q.offset.unwrap_or(0))).await;
+    match result {
+        Ok(Ok(v))=>(StatusCode::OK,Json(v)),
+        Ok(Err(e))=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":e}))),
+        Err(e)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":e.to_string()}))),
+    }
+}
+async fn dashboard_stats_request(State(state):State<AppState>)
+    -> (StatusCode,Json<Value>){
+    let result=tokio::task::spawn_blocking(move||dashboard_history::stats(&state.history)).await;
+    match result {
+        Ok(Ok(v))=>(StatusCode::OK,Json(v)),
+        Ok(Err(e))=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":e}))),
+        Err(e)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":e.to_string()}))),
+    }
+}
+
 async fn health(State(state):State<AppState>) -> (StatusCode,Json<Value>) {
     let ready = open_db(&state.db).and_then(|db|db.query_row(
         "SELECT count(*) FROM metadata_state WHERE source='full_refresh'",[],|r|r.get::<_,i64>(0)))
@@ -318,8 +361,7 @@ async fn health(State(state):State<AppState>) -> (StatusCode,Json<Value>) {
 
 async fn match_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
     -> (StatusCode,Json<Value>) {
-    let db = Arc::clone(&state.db);
-    match tokio::task::spawn_blocking(move ||diagnose(&db,&req)).await {
+    match tokio::task::spawn_blocking(move ||diagnose_logged(&state,&req)).await {
         Ok(Ok(d)) => (StatusCode::OK,Json(d.selected.unwrap_or(Value::Null))),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST,Json(json!({"error":e}))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":e.to_string()}))),
@@ -329,8 +371,7 @@ async fn match_request(State(state):State<AppState>,Json(req):Json<MatchRequest>
 /// GET /match?title=...&year=...
 async fn get_match_request(State(state):State<AppState>,Query(req):Query<MatchRequest>)
     -> (StatusCode,Json<Value>) {
-    let db=Arc::clone(&state.db);
-    match tokio::task::spawn_blocking(move ||diagnose(&db,&req)).await {
+    match tokio::task::spawn_blocking(move ||diagnose_logged(&state,&req)).await {
         Ok(Ok(d))=>(StatusCode::OK,Json(d.selected.unwrap_or(Value::Null))),
         Ok(Err(e))=>(StatusCode::BAD_REQUEST,Json(json!({"error":e}))),
         Err(e)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":e.to_string()}))),
@@ -339,8 +380,7 @@ async fn get_match_request(State(state):State<AppState>,Query(req):Query<MatchRe
 
 async fn debug_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
     -> (StatusCode,Json<Value>) {
-    let db = Arc::clone(&state.db);
-    match tokio::task::spawn_blocking(move ||diagnose(&db,&req)).await {
+    match tokio::task::spawn_blocking(move ||diagnose_logged(&state,&req)).await {
         Ok(Ok(d)) => (StatusCode::OK,Json(serde_json::to_value(d).unwrap_or(Value::Null))),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST,Json(json!({"error":e}))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":e.to_string()}))),
@@ -441,10 +481,14 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
             }
         });
     }
-    let app = Router::new().route("/health",get(health))
+    let history_db=env::var("MATCHLAB_HISTORY_DB").unwrap_or_else(|_|"/data/history.sqlite3".into());
+    let app = Router::new().route("/",get(dashboard))
+        .route("/api/dashboard/history",get(dashboard_history_request))
+        .route("/api/dashboard/stats",get(dashboard_stats_request))
+        .route("/health",get(health))
         .route("/match",get(get_match_request).post(match_request))
         .route("/debug/match",post(debug_request))
-        .with_state(AppState{db:Arc::new(PathBuf::from(db))});
+        .with_state(AppState{db:Arc::new(PathBuf::from(db)),history:Arc::new(PathBuf::from(history_db))});
     let listener = tokio::net::TcpListener::bind(&host).await?;
     tracing::info!("Rust API listening on {host}");
     axum::serve(listener,app).await?;
