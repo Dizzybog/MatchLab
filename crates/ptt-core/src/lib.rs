@@ -1558,11 +1558,32 @@ fn strip_non_english_parens(input: &str) -> String {
     out
 }
 
+/// Explicit absolute anime episode range, e.g. E768-E1064 or EP768-EP1064.
+/// Keep the endpoints rather than allocating hundreds of episode numbers.
+fn absolute_episode_range(raw: &str) -> Option<(i64,i64)> {
+    static RANGE: Lazy<Regex> = Lazy::new(|| Regex::new(
+        r"(?i)(?:^|[^a-z0-9])(?:e|ep|episode)[ ._-]*([0-9]{1,5})[ ]*[-–][ ]*(?:e|ep|episode)?[ ._-]*([0-9]{1,5})(?:$|[^a-z0-9])"
+    ).expect("valid absolute episode range regex"));
+    let caps=RANGE.captures(raw).ok()??;
+    let start=caps.get(1)?.as_str().parse::<i64>().ok()?;
+    let end=caps.get(2)?.as_str().parse::<i64>().ok()?;
+    if start==0||end<start||end-start>9999{return None;}
+    Some((start,end))
+}
+
 pub fn parse_title(
     raw_title: &str,
     translate_languages: bool,
 ) -> Result<Map<String, Value>, ParseError> {
-    ENGINE.parse(raw_title, translate_languages)
+    let mut result=ENGINE.parse(raw_title, translate_languages)?;
+    if let Some((start,end))=absolute_episode_range(raw_title){
+        result.insert("episode_start".into(),json!(start));
+        result.insert("episode_end".into(),json!(end));
+        result.insert("episode_count".into(),json!(end-start+1));
+        // The existing episodes field is deliberately not expanded.
+        // Consumers must use episode_start/episode_end for range semantics.
+    }
+    Ok(result)
 }
 
 pub fn parse_title_context(
@@ -1929,6 +1950,16 @@ mod tests {
                 "{title:?}"
             );
         }
+    }
+
+    #[test]
+    fn absolute_anime_episode_ranges_keep_both_endpoints() {
+        let p=parse_title("One.piece.E768-E1064",false).unwrap();
+        assert_eq!(p["episode_start"],768);
+        assert_eq!(p["episode_end"],1064);
+        assert_eq!(p["episode_count"],297);
+        assert!(absolute_episode_range("One.Piece.E1064-E768").is_none());
+        assert!(absolute_episode_range("One.Piece.E0-E1064").is_none());
     }
 
     #[test]
