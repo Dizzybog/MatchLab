@@ -13,4 +13,4 @@ jobs:
       - name: Test native Rust backend
         run: RUSTFLAGS="-D warnings" cargo test -p matchlab-server
       - name: Build production Docker image
-        run: docker build -t torrent-parse-match:test .
+        run: docker build -t matchlab:test .
