@@ -1,6 +1,4 @@
-//! Experimental native Rust matching service.
-//! Runs against the same SQLite schema as the Python implementation.
-//! This is a parallel implementation, not yet a drop-in replacement.
+//! Native Rust matching service backed by validated SQLite metadata.
 mod imdb_v4;
 mod metadata_import;
 mod metadata_download;
@@ -328,7 +326,7 @@ async fn match_request(State(state):State<AppState>,Json(req):Json<MatchRequest>
     }
 }
 
-/// Python API compatibility: GET /match?title=...&year=...
+/// GET /match?title=...&year=...
 async fn get_match_request(State(state):State<AppState>,Query(req):Query<MatchRequest>)
     -> (StatusCode,Json<Value>) {
     let db=Arc::clone(&state.db);
@@ -452,7 +450,7 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         .route("/debug/match",post(debug_request))
         .with_state(AppState{db:Arc::new(PathBuf::from(db))});
     let listener = tokio::net::TcpListener::bind(&host).await?;
-    tracing::info!("experimental Rust API listening on {host}");
+    tracing::info!("Rust API listening on {host}");
     axum::serve(listener,app).await?;
     Ok(())
 }

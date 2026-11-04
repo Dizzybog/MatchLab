@@ -4,7 +4,7 @@
 
 For example, `Breaking.Bad.S02E03.1080p.WEB-DL` is recognized as *Breaking Bad*, season 2, episode 3.
 
-The native Rust service provides an HTTP matching API backed by a local SQLite metadata database. The legacy Python metadata importer and dashboard remain in the repository but are not started by the default Rust container.
+The native Rust service provides an HTTP matching API backed by a local SQLite metadata database. The production image runs the native Rust service, including its metadata importer and optional scheduled refresh.
 
 ## Features
 
@@ -12,7 +12,7 @@ The native Rust service provides an HTTP matching API backed by a local SQLite m
 - **IMDb matching:** Searches movie and TV titles, including alternate titles and country-specific names. Uses exact-title, prefix and suffix matching, plus year and title-type ranking.
 - **Anime matching:** Searches anime titles separately from IMDb. When an anime match has a valid episode mapping, it takes priority over ordinary IMDb candidates. Supports anime parts, alternate titles and conversion between AniDB and TVDB-style episode numbering.
 - **Reliable results:** Returns one matching title or `null` when a reliable match cannot be established.
-- **Local metadata:** Reads an existing SQLite database. Automatic metadata downloads and refresh are not yet implemented in the Rust container.
+- **Local metadata:** Reads an existing SQLite database. Automatic metadata downloads and refresh are available when six HTTPS metadata sources are configured.
 - **Diagnostics:** Use `POST /debug/match` to inspect parsing, candidates and selection.
 - **Docker support:** Runs on x86-64 and ARM64 machines, with persistent data and detailed logs.
 
@@ -52,7 +52,7 @@ Start the service:
 docker compose up -d
 ```
 
-**Important:** The Rust container does not yet download or initialize metadata. Supply a populated, compatible `/data/metadata.sqlite3` using the mounted volume. Until that exists, `/health` returns HTTP 503. The legacy Python importer is retained in source control for metadata preparation, but it is not part of the Rust image.
+**Important:** Configure `MATCHLAB_METADATA_URLS` with six comma-separated HTTPS source URLs to initialize and periodically refresh metadata, or supply a populated compatible `/data/metadata.sqlite3`. Until a complete import succeeds, `/health` returns HTTP 503.
 
 Check the logs:
 
@@ -71,7 +71,7 @@ The Docker image is published from GitHub Actions. If the image is not publicly 
 
 ## Diagnostics
 
-The Rust API exposes `POST /debug/match` for structured parsing and matching diagnostics. The legacy Python dashboard is not served by the Rust production image.
+The Rust API exposes `POST /debug/match` for structured parsing and matching diagnostics. No dashboard is included in the production image.
 
 ## API
 
@@ -132,15 +132,19 @@ Anime episode conversion depends on the available mappings. Some unusual titles 
 
 ## Metadata and updates
 
-The Rust backend reads SQLite metadata but does not currently import or refresh it. The legacy Python metadata code remains in the repository as a reference and possible preparation tool. A Rust-native metadata lifecycle is future work.
+The native Rust backend supports `refresh-metadata` for six local metadata files and `refresh-metadata-urls` for six HTTPS sources (IMDb basics, AKAs, episodes, animeApi, Anime-Lists, AniDB titles). To enable automatic startup initialization and periodic refresh, set `MATCHLAB_METADATA_URLS` to six comma-separated HTTPS URLs. `MATCHLAB_METADATA_REFRESH_HOURS` defaults to 24 and accepts values from 1 to 720. Each complete refresh is validated in a staging SQLite database before atomic publication; failures preserve the existing database.
 
 ## Configuration
 
 | Setting | Description |
 | --- | --- |
-| `LOG_LEVEL` | `INFO` for normal logs or `DEBUG` for detailed matching diagnostics. |
+| `RUST_LOG` | Rust tracing filter, e.g. `matchlab_server=info`. |
 | `/data` | Persistent storage location for the SQLite metadata database. |
-| `8765` | HTTP port for the API and dashboard. |
+| `MATCHLAB_DB` | SQLite path (default `/data/metadata.sqlite3`). |
+| `MATCHLAB_HOST` | HTTP listen address (Docker default `0.0.0.0:8765`). |
+| `MATCHLAB_METADATA_URLS` | Six comma-separated HTTPS source URLs; enables automatic refresh. |
+| `MATCHLAB_METADATA_REFRESH_HOURS` | Refresh interval, default 24 hours, allowed 1–720. |
+| `8765` | HTTP port for the Rust API. |
 
 Logs include Rust service and matching activity. At `DEBUG` level, they contain detailed candidate information. Request titles and JSON payloads may appear in logs.
 
@@ -154,11 +158,10 @@ cd torrent-parse-match
 docker build -t torrent-parse-match:local .
 ```
 
-To run the Python tests, install Python 3.11+, Rust and the project dependencies:
+Run the native Rust tests:
 
 ```bash
-python -m pip install . pytest
-python -m pytest -q tests/
+RUSTFLAGS='-D warnings' cargo test -p matchlab-server
 ```
 
 ## License
