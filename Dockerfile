@@ -17,6 +17,6 @@ ENV MATCHLAB_DB=/data/metadata.sqlite3 MATCHLAB_HOST=0.0.0.0:8765
 VOLUME ["/data"]
 EXPOSE 8765
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD ["curl", "--fail", "--silent", "http://127.0.0.1:8765/health"]
+    CMD ["curl", "--fail", "--silent", "http://127.0.0.1:8765/health/live"]
 ENTRYPOINT ["/usr/bin/tini", "-g", "--"]
 CMD ["/usr/local/bin/matchlab-server"]
