@@ -2,6 +2,31 @@
 //! the complete native importer validates the new SQLite database.
 use std::{error::Error,fs::{self,File},io::{self,Read,Write},path::{Path,PathBuf},time::{SystemTime,UNIX_EPOCH}};
 const MAX_DOWNLOAD_BYTES:u64=2_000_000_000;
+const DEFAULT_METADATA_URLS:[&str;6]=[
+    "https://datasets.imdbws.com/title.basics.tsv.gz",
+    "https://datasets.imdbws.com/title.akas.tsv.gz",
+    "https://datasets.imdbws.com/title.episode.tsv.gz",
+    "https://raw.githubusercontent.com/nattadasu/animeApi/refs/heads/v3/database/animeapi.tsv",
+    "https://raw.githubusercontent.com/Anime-Lists/anime-lists/refs/heads/master/anime-list.xml",
+    "https://anidb.net/api/anime-titles.xml.gz",
+];
+
+pub fn configured_urls(override_urls:Option<&str>)->Result<Vec<String>,Box<dyn Error>>{
+    let urls:Vec<String>=match override_urls {
+        Some(value)=>value.split(',').map(|s|s.trim().to_owned()).collect(),
+        None=>DEFAULT_METADATA_URLS.iter().map(|s|(*s).to_owned()).collect(),
+    };
+    if urls.len()!=6 || urls.iter().any(|url|url.is_empty()) {
+        return Err("MATCHLAB_METADATA_URLS requires six comma-separated HTTPS URLs".into());
+    }
+    for url in &urls {
+        if reqwest::Url::parse(url)?.scheme()!="https" {
+            return Err("metadata source must use HTTPS".into());
+        }
+    }
+    Ok(urls)
+}
+
 fn download(client:&reqwest::blocking::Client,url:&str,path:&Path)->Result<(),Box<dyn Error>>{
     let parsed=reqwest::Url::parse(url)?;
     if parsed.scheme()!="https"{return Err("metadata source must use HTTPS".into());}
@@ -48,6 +73,22 @@ pub fn refresh_from_urls(target:&Path,urls:&[String])->Result<(u64,u64,u64,u64),
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn defaults_enable_zero_config_startup(){
+        let urls=configured_urls(None).unwrap();
+        assert_eq!(urls.len(),6);
+        assert!(urls.iter().all(|url|url.starts_with("https://")));
+        assert!(urls[0].ends_with("title.basics.tsv.gz"));
+        assert!(urls[5].ends_with("anime-titles.xml.gz"));
+    }
+    #[test]
+    fn overrides_are_validated(){
+        assert!(configured_urls(Some("")).is_err());
+        assert!(configured_urls(Some("https://example.org/only-one")).is_err());
+        let urls=configured_urls(None).unwrap().join(",");
+        assert_eq!(configured_urls(Some(&urls)).unwrap().len(),6);
+        assert!(configured_urls(Some(&urls.replacen("https://","http://",1))).is_err());
+    }
     #[test]
     fn reject_insecure_url_set_before_creating_workspace(){
         let folder=std::env::temp_dir().join(format!("matchlab-url-validation-{}-{}",

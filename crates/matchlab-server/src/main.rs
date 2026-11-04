@@ -413,14 +413,10 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
     }
     let db = env::var("MATCHLAB_DB").unwrap_or_else(|_|"/data/metadata.sqlite3".into());
     let host = env::var("MATCHLAB_HOST").unwrap_or_else(|_|"127.0.0.1:8766".into());
-    // Optional native metadata scheduler. Set six HTTPS URLs (comma-separated)
-    // and an interval in hours. A single task serializes refreshes; failed
-    // downloads/imports leave the previously published SQLite image intact.
-    if let Ok(config)=env::var("MATCHLAB_METADATA_URLS") {
-        let urls:Vec<String>=config.split(',').map(|s|s.trim().to_owned()).collect();
-        if urls.len()!=6 || urls.iter().any(|s|s.is_empty()) {
-            return Err("MATCHLAB_METADATA_URLS requires six comma-separated HTTPS URLs".into());
-        }
+    // Built-in HTTPS metadata feeds initialize a fresh Docker volume automatically.
+    // MATCHLAB_METADATA_URLS can override all six feeds.
+    {
+        let urls=metadata_download::configured_urls(env::var("MATCHLAB_METADATA_URLS").ok().as_deref())?;
         let hours=env::var("MATCHLAB_METADATA_REFRESH_HOURS")
             .unwrap_or_else(|_|"24".into()).parse::<u64>()?;
         if !(1..=24*30).contains(&hours) {
