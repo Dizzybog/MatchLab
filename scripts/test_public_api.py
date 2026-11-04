@@ -5,6 +5,7 @@ Run: python3 scripts/test_public_api.py --url https://matchlab.notprod.fyi --out
 This script sends 150 sequential POST requests; it does not modify server data.
 """
 import argparse
+from collections import deque
 import json
 import statistics
 import time
@@ -59,8 +60,16 @@ def main():
     args = parser.parse_args()
     base = args.url.rstrip("/")
     records = []
+    # Sliding-window limiter: at most four request starts in any 10-second window.
+    request_starts = deque()
     for index, case in enumerate(cases(), 1):
+        while len(request_starts) >= 4:
+            wait = 10.01 - (time.monotonic() - request_starts[0])
+            if wait > 0:
+                time.sleep(wait)
+            request_starts.popleft()
         started = time.monotonic()
+        request_starts.append(started)
         req = urllib.request.Request(base + "/match", data=json.dumps({"t_title": case["title"]}).encode(), headers={"Content-Type": "application/json", "Accept": "application/json"}, method="POST")
         status = None
         result = None
