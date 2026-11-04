@@ -93,3 +93,26 @@ pub fn has_specific_alias(db:&Connection,imdb:&str,title:&str)->rusqlite::Result
         ORDER BY tvdb_season,offset,start LIMIT 1",[tvdb],|r|r.get(0)).optional()?;
     Ok(base.as_deref()!=Some(&best.0))
 }
+
+/// Infer an IMDb/TVDB season from a title-specific AniDB alias without an episode.
+/// Only publish a season when one uniquely identified AniDB work maps to exactly
+/// one positive TVDB season. Never manufacture an episode or an ASID.
+pub fn season_from_title(db:&Connection,imdb:&str,title:&str)->rusqlite::Result<Option<i64>>{
+    let key=imdb_v4::clean_title(title);
+    if key.len()<4{return Ok(None);}
+    let mut stmt=db.prepare("SELECT DISTINCT a.anidb_id,a.clean_title
+        FROM anidb_titles a JOIN anime_series_map l ON l.anidb_id=a.anidb_id
+        WHERE l.imdb_id=?1 AND a.clean_title=?2")?;
+    let ids=stmt.query_map(params![imdb,key],|r|
+        Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let unique:BTreeSet<_>=ids.into_iter().map(|(id,_)|id).collect();
+    if unique.len()!=1{return Ok(None);}
+    let selected=unique.iter().next().unwrap();
+    let mut stmt=db.prepare("SELECT DISTINCT tvdb_season FROM episode_map
+        WHERE anidb_id=?1 AND anidb_season>0 AND tvdb_season>0")?;
+    let seasons=stmt.query_map([selected],|r|r.get::<_,i64>(0))?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+    if seasons.len()!=1{return Ok(None);}
+    Ok(seasons.iter().next().copied())
+}
