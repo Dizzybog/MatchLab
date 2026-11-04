@@ -261,6 +261,9 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
     let series = match req.series {
         Some(value) => value,
         None if !seasons.is_empty() || !episodes.is_empty() => true,
+        // A release with an explicit production year and no episode/season
+        // coordinates is a movie candidate, even if an anime alias exists.
+        None if year.is_some() => false,
         None => anime_title::season_from_any_exact_title(&db,&key)
             .map_err(|e|e.to_string())?.is_some(),
     };
@@ -447,6 +450,10 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
             }else{json!(imdb_id)};
             // An absolute range can span seasons; a single ASID is not an
             // adequate representation of the entire release.
+            // Absolute episode numbers are meaningful to anime viewers even
+            // when the AniDB/TVDB mapping crosses parts or seasons.
+            winner["anime_episode_start"]=json!(start);
+            winner["anime_episode_end"]=json!(end);
             winner["anime"]=Value::Null;
         }
     }
@@ -530,6 +537,12 @@ fn public_match_response(selected: Option<Value>) -> Value {
         "season_end": winner.get("season_end").cloned().unwrap_or(Value::Null),
         "episode_end": winner.get("episode_end").cloned().unwrap_or(Value::Null),
         "episode_range": winner.get("episode_range").cloned().unwrap_or(Value::Null),
+        "anime_episode_start": winner.get("anime_episode_start")
+            .cloned().or_else(||anime.and_then(|a|a.get("episode")).cloned())
+            .unwrap_or(Value::Null),
+        "anime_episode_end": winner.get("anime_episode_end")
+            .cloned().or_else(||anime.and_then(|a|a.get("episode")).cloned())
+            .unwrap_or(Value::Null),
         "anime_id": anime_id,
         "asid": asid,
         "type": if is_anime { "anime" } else if winner.get("category").and_then(Value::as_str) == Some("series") { "series" } else { "movie" },
@@ -807,6 +820,21 @@ mod tests {
         assert_eq!(anime["asid"],"123:4");
         assert_eq!(anime["parsed"]["languages"][0],"Norwegian");
         assert!(public_match_response(None).is_null());
+    }
+    #[test]
+    fn public_response_exposes_absolute_anime_range_without_inventing_asid() {
+        let result=public_match_response(Some(json!({
+            "imdb_id":"tt0388629","category":"series",
+            "anime_ids":{"anidb":"69"},
+            "anime":null,
+            "anime_episode_start":700,"anime_episode_end":800,
+            "episode_range":{"absolute_start":700,"absolute_end":800},
+            "season":null,"episode":null
+        })));
+        assert_eq!(result["type"],"anime");
+        assert_eq!(result["anime_episode_start"],700);
+        assert_eq!(result["anime_episode_end"],800);
+        assert!(result["asid"].is_null());
     }
     #[test]
     fn anime_without_verified_episode_does_not_invent_coordinates() {

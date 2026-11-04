@@ -40,7 +40,9 @@ function rankResults(d){
     season:selected.season,season_end:selected.season_end??selected.episode_range?.end_season,
     episode:selected.episode,episode_end:selected.episode_end??selected.episode_range?.end_episode,
     anime_id:selected.anime?.anidb_id||selected.anime_ids?.anidb,
-    anime_episode:selected.anime?.episode,source:selected.match_source,year:selected.year,type:selected.category||'—',winner:true
+    anime_episode:selected.anime_episode_start??selected.episode_range?.absolute_start??selected.anime?.episode,
+    anime_episode_end:selected.anime_episode_end??selected.episode_range?.absolute_end,
+    source:selected.match_source,year:selected.year,type:selected.category||'—',winner:true
   });
   for(const c of candidates){
     if(rows.some(x=>x.imdb_id===c.imdb_id))continue;
@@ -60,7 +62,7 @@ function rankResults(d){
     '#'+(i+1)+' · '+val(r.title)+'</div><span class="rank-tag">'+
     (r.winner?'WINNER':'RANK '+(i+1))+'</span></div><div class="rank-fields">'+
     field('IMDb ID',r.imdb_id)+field(r.winner?'IMDb season':'Parsed season',seasonEpisodeDisplay(r).seasons)+field(r.winner?'IMDb episode':'Parsed episode',seasonEpisodeDisplay(r).episodes)+
-    field('AniDB ID',r.anime_id)+field('Anime episode',r.anime_episode)+
+    field('AniDB ID',r.anime_id)+field('Anime episode',displayRange(r.anime_episode,r.anime_episode_end))+
     field('Source',r.source)+'</div><div class="rank-meta">'+val(r.year)+' · '+val(r.type)+'</div></article>').join('')+'</div>';
 }
 async function stats(){try{const s=await json('/api/dashboard/stats');for(const k of ['total','matched','unmatched','errors'])$(k).textContent=Number(s[k]).toLocaleString();$('latency').textContent='Average latency: '+Math.round(s.average_duration_ms)+' ms';const days=[...(s.daily||[])].reverse();const max=Math.max(1,...days.map(d=>d.total));$('chart').innerHTML=days.length?days.map(d=>'<div class="bar" title="'+esc(d.day+': '+d.total+' requests')+'" style="height:'+Math.max(4,100*d.total/max)+'%"></div>').join(''):'<div class="empty">No activity yet</div>'}catch(e){$('latency').textContent='Statistics unavailable: '+e.message}}
