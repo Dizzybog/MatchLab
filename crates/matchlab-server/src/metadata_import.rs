@@ -556,7 +556,7 @@ mod tests {
             std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
         fs::create_dir_all(&folder).unwrap();
         let path=folder.join("records.tsv");
-        fs::write(&path,b"first\\tsecond\\tthird\\nvalid\\ta\\tb\\nmissing\\tfield\\nvalid2\\tc\\td\\n").unwrap();
+        fs::write(&path,b"first\tsecond\tthird\nvalid\ta\tb\nmissing\tfield\nvalid2\tc\td\n").unwrap();
         let mut input=reader(&path).unwrap();
         let h=input.headers().unwrap().clone();
         let mut valid=Vec::new();
