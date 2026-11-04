@@ -3216,7 +3216,7 @@
         "remove": false
       },
       "kind": "regex",
-      "pattern": "(?<=\\D|\\A)(\\d{1,3})[. ]?(?:of|из|iz)[. ]?\\d{1,3}(?=\\D|$)",
+      "pattern": "(?:(?<=\\D)|\\A)(\\d{1,3})[. ]?(?:of|из|iz)[. ]?\\d{1,3}(?=\\D|$)",
       "flags": 2,
       "transform": "array(integer)"
     },
