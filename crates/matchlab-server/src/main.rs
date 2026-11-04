@@ -549,6 +549,50 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     #[test]
+    fn public_response_movie_series_and_anime() {
+        let parsed=json!({"title":"Example","resolution":"1080p","languages":["Norwegian"],"year":2024});
+        let movie=public_match_response(Some(json!({
+            "imdb_id":"tt1234567","category":"movie","sid":"tt1234567",
+            "season":null,"episode":null,"anime":null,"anime_ids":{},"parsed":parsed
+        })));
+        assert_eq!(movie["type"],"movie");
+        assert_eq!(movie["imdbid"],"tt1234567");
+        assert_eq!(movie["parsed"]["resolution"],"1080p");
+        assert!(movie.get("imdb_candidates").is_none());
+        assert!(movie.get("matched_title").is_none());
+        let series=public_match_response(Some(json!({
+            "imdb_id":"tt7654321","category":"series","sid":"tt7654321:2:5",
+            "season":2,"episode":5,"anime":null,"anime_ids":{},"parsed":parsed
+        })));
+        assert_eq!(series["type"],"series");
+        assert_eq!(series["sid"],"tt7654321:2:5");
+        assert_eq!(series["season"],2);
+        assert_eq!(series["episode"],5);
+        let anime=public_match_response(Some(json!({
+            "imdb_id":"tt9999999","category":"series","sid":"tt9999999:1:4",
+            "season":1,"episode":4,
+            "anime":{"anidb_id":"123","episode":4,"asid":"123:4"},
+            "anime_ids":{"anidb":"123"},"parsed":parsed
+        })));
+        assert_eq!(anime["type"],"anime");
+        assert_eq!(anime["anime_id"],"123");
+        assert_eq!(anime["asid"],"123:4");
+        assert_eq!(anime["parsed"]["languages"][0],"Norwegian");
+        assert!(public_match_response(None).is_null());
+    }
+    #[test]
+    fn anime_without_verified_episode_does_not_invent_coordinates() {
+        let result=public_match_response(Some(json!({
+            "imdb_id":"tt1111111","category":"series","sid":"tt1111111",
+            "season":null,"episode":null,"anime":null,
+            "anime_ids":{"anidb":"456"},"parsed":{"title":"Example Anime"}
+        })));
+        assert_eq!(result["type"],"anime");
+        assert!(result["season"].is_null());
+        assert!(result["episode"].is_null());
+        assert!(result["asid"].is_null());
+    }
+    #[test]
     fn anime_identity_without_episode_is_unambiguous(){
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
