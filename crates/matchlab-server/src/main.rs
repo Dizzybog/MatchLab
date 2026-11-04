@@ -676,6 +676,28 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
     }
     #[test]
+    fn absolute_episode_range_crosses_seasons_and_keeps_gaps() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER,start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO anime_series_map VALUES('ttonepiece','123','456',0);
+            INSERT INTO episode_map VALUES('123','456',1,-1,1,4,0,'');
+            INSERT INTO episode_map VALUES('123','456',1,10,1,2,0,'');
+            INSERT INTO episode_map VALUES('123','456',1,11,3,4,-2,'');").unwrap();
+        let range=mapped_absolute_range(&db,"ttonepiece",1,4).unwrap();
+        assert_eq!(range["start_season"],10);
+        assert_eq!(range["end_season"],11);
+        assert_eq!(range["start_episode"],1);
+        assert_eq!(range["end_episode"],2);
+        assert_eq!(range["unmapped_count"],0);
+        assert_eq!(range["segments"].as_array().unwrap().len(),2);
+        let gap=mapped_absolute_range(&db,"ttonepiece",1,5).unwrap();
+        assert_eq!(gap["unmapped_count"],1);
+        assert_eq!(gap["complete"],false);
+        assert!(gap["end_season"].is_null());
+    }
+    #[test]
     fn public_response_movie_series_and_anime() {
         let parsed=json!({"title":"Example","resolution":"1080p","languages":["Norwegian"],"year":2024});
         let movie=public_match_response(Some(json!({
