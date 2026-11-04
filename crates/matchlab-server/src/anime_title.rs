@@ -116,3 +116,36 @@ pub fn season_from_title(db:&Connection,imdb:&str,title:&str)->rusqlite::Result<
     if seasons.len()!=1{return Ok(None);}
     Ok(seasons.iter().next().copied())
 }
+
+/// Recognize a title-only anime part only when an exact alias has a unique
+/// IMDb identity and a uniquely mapped positive season.
+pub fn season_from_any_exact_title(db:&Connection,key:&str)->rusqlite::Result<Option<i64>>{
+    if key.len()<4{return Ok(None);}
+    let mut stmt=db.prepare("SELECT DISTINCT l.imdb_id FROM anidb_titles a
+        JOIN anime_series_map l ON l.anidb_id=a.anidb_id WHERE a.clean_title=?1")?;
+    let ids=stmt.query_map([key],|r|r.get::<_,String>(0))?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+    if ids.len()!=1{return Ok(None);}
+    let imdb=ids.iter().next().unwrap();
+    season_from_title(db,imdb,key)
+}
+
+#[cfg(test)]
+mod title_only_season_tests {
+    use super::*;
+    #[test]
+    fn exact_part_alias_infers_season_but_ambiguous_alias_does_not() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
+            CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT);
+            CREATE TABLE episode_map(anidb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER);
+            INSERT INTO anidb_titles VALUES('101','swordartonlinealicization');
+            INSERT INTO anime_series_map VALUES('101','tt0300001');
+            INSERT INTO episode_map VALUES('101',1,3);").unwrap();
+        assert_eq!(season_from_any_exact_title(&db,"swordartonlinealicization").unwrap(),Some(3));
+        assert_eq!(season_from_title(&db,"tt0300001","Sword Art Online Alicization").unwrap(),Some(3));
+        assert_eq!(season_from_any_exact_title(&db,"swordartonline").unwrap(),None);
+        db.execute_batch("INSERT INTO episode_map VALUES('101',1,4);").unwrap();
+        assert_eq!(season_from_any_exact_title(&db,"swordartonlinealicization").unwrap(),None);
+    }
+}
