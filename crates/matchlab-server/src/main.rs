@@ -363,10 +363,32 @@ async fn readiness(State(state):State<AppState>) -> (StatusCode,Json<Value>) {
         Json(json!({"status":if ready {"ready"} else {"initializing"}})))
 }
 
+/// Public response: winner coordinates plus the complete parser output.
+/// Keep full candidates and ranking diagnostics exclusive to /debug.
+fn public_match_response(selected: Option<Value>) -> Value {
+    let Some(winner) = selected else { return Value::Null; };
+    let anime = winner.get("anime").filter(|v|v.is_object());
+    let anime_id = anime.and_then(|v|v.get("anidb_id")).cloned().unwrap_or(Value::Null);
+    let asid = anime.and_then(|v|v.get("asid")).cloned().unwrap_or(Value::Null);
+    let is_anime = anime.is_some()
+        || winner.get("match_source").and_then(Value::as_str) == Some("anime_priority")
+        || winner.get("anime_ids").and_then(Value::as_object).is_some_and(|ids| !ids.is_empty());
+    json!({
+        "imdbid": winner.get("imdb_id").cloned().unwrap_or(Value::Null),
+        "season": winner.get("season").cloned().unwrap_or(Value::Null),
+        "episode": winner.get("episode").cloned().unwrap_or(Value::Null),
+        "sid": winner.get("sid").cloned().unwrap_or(Value::Null),
+        "anime_id": anime_id,
+        "asid": asid,
+        "type": if is_anime { "anime" } else if winner.get("category").and_then(Value::as_str) == Some("series") { "series" } else { "movie" },
+        "parsed": winner.get("parsed").cloned().unwrap_or(Value::Null)
+    })
+}
+
 async fn match_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
     -> (StatusCode,Json<Value>) {
     match tokio::task::spawn_blocking(move ||diagnose_logged(&state,&req)).await {
-        Ok(Ok(d)) => (StatusCode::OK,Json(d.selected.unwrap_or(Value::Null))),
+        Ok(Ok(d)) => (StatusCode::OK,Json(public_match_response(d.selected))),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST,Json(json!({"error":e}))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":e.to_string()}))),
     }
@@ -376,7 +398,7 @@ async fn match_request(State(state):State<AppState>,Json(req):Json<MatchRequest>
 async fn get_match_request(State(state):State<AppState>,Query(req):Query<MatchRequest>)
     -> (StatusCode,Json<Value>) {
     match tokio::task::spawn_blocking(move ||diagnose_logged(&state,&req)).await {
-        Ok(Ok(d))=>(StatusCode::OK,Json(d.selected.unwrap_or(Value::Null))),
+        Ok(Ok(d))=>(StatusCode::OK,Json(public_match_response(d.selected))),
         Ok(Err(e))=>(StatusCode::BAD_REQUEST,Json(json!({"error":e}))),
         Err(e)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":e.to_string()}))),
     }
