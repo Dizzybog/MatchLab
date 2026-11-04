@@ -1,80 +1,32 @@
-# Docker: autonomous metadata API
+# Native Rust metadata lifecycle
 
-The container downloads and maintains all IMDb and anime metadata **on the machine
-running Docker**. No PostgreSQL, cron, manually exported files or API keys are required.
+The production Docker image contains only the Rust HTTP API and native metadata importer. No Python runtime is required.
 
-## Run
+## Setup
 
-```bash
-docker compose up -d --build
-docker compose logs -f torrent-imdb-ai
-```
+Run `docker compose up -d`. The service uses a persistent volume at `/data` and listens on localhost port 8765. Without a populated SQLite database, `/health` returns 503.
 
-A persistent Docker named volume `metadata` stores `/data/metadata.sqlite3`.
-The image runs as an unprivileged user (UID 10001) and listens on port 8765.
-The example Compose file binds to `127.0.0.1:8765`; configure your own
-authenticated reverse proxy if public access is needed.
+To enable automatic initialization and refresh, configure `MATCHLAB_METADATA_URLS` with exactly six comma-separated HTTPS URLs, in this order:
 
-## Automatic refresh lifecycle
+1. IMDb `title.basics.tsv.gz`
+2. IMDb `title.akas.tsv.gz`
+3. IMDb `title.episode.tsv.gz`
+4. animeApi TSV
+5. Anime-Lists XML
+6. AniDB titles XML gzip
 
-- At **every startup**, inspect `metadata_state.full_refresh` in SQLite.
-- If the database is missing, incomplete, or the last successful full update
-  is **7 days old or older**, download and rebuild all metadata immediately.
-- While running, recheck every **24 hours**. Refresh only if at least 7 days old.
-- After a failed download/import, keep the last good database and retry in 1 hour.
-- A full successful refresh timestamp is written **only after** all required
-  sources were imported. A temporary SQLite database is atomically swapped
-  into place. Data survives restarts through the Docker volume.
-- The API starts while the first import runs. `GET /health` responds
-  with HTTP 503 until the initial import succeeds; `POST /match` also
-  responds with HTTP 503 rather than incorrectly returning `null`.
-  Stale but previously successful metadata remains available.
+`MATCHLAB_METADATA_REFRESH_HOURS` defaults to 24 and supports 1–720 hours. The Rust service starts the first refresh on startup when URLs are configured, then repeats at the interval. Refreshes are serialized; failures are logged and the last published SQLite database is preserved. The metadata importer builds a staging database, validates integrity and atomically replaces the published database after successful import.
 
-## Public metadata sources
+Alternatively, import six local files using `matchlab-server refresh-metadata <database.sqlite3> <basics.tsv.gz> <akas.tsv.gz> <episodes.tsv.gz> <animeapi.tsv> <anime-list.xml> <anidb-titles.xml.gz>`.
 
-- IMDb official non-commercial bulk TSV files: `title.basics`,
-  `title.akas`, and `title.episode`.
-- StremThru's animeApi v3 source:
-  `https://raw.githubusercontent.com/nattadasu/animeApi/refs/heads/v3/database/animeapi.tsv`
-  for IMDb/AniDB/TVDB/Trakt identities.
-- StremThru's AniDB title source:
-  `https://anidb.net/api/anime-titles.xml.gz`
-  for Japanese/romaji/English aliases.
-- StremThru's Anime-Lists source:
-  `https://raw.githubusercontent.com/Anime-Lists/anime-lists/refs/heads/master/anime-list.xml`
-  for AniDB/TVDB season, absolute episode and offset mappings.
+The historical curated Anime-Lists overrides are preserved as `data/anime-list.override.xml` for reference. **They are not automatically applied by the current Rust refresh pipeline.** The default import consumes the supplied Anime-Lists XML only; integrate these overrides explicitly before relying on their special-case mappings.
 
-Only supported IMDb `titleType` values are persisted: `movie`, `tvMovie`,
-`short`, `tvShort`, `tvSpecial`, `tvSeries`, and `tvMiniSeries`.
-Episodes, games and all other types are excluded from title/alias storage.
-An otherwise valid title with an unknown release year is retained as year 0.
-
-Each full refresh rebuilds a **new SQLite database from scratch** to reclaim
-space and eliminate stale imported aliases. Custom data manually inserted into
-the old SQLite file is not carried forward. The previous live database is
-preserved if the new build fails.
-
-SQLite tables are `titles`, `seasons`, `anime_ids`,
-`anime_series_map`, `episode_map`, `anidb_titles`, `metadata_state`.
-
-## API
+## Verification
 
 ```bash
+RUSTFLAGS='-D warnings' cargo test -p matchlab-server
+docker build -t torrent-parse-match:local .
 curl http://127.0.0.1:8765/health
-curl -X POST http://127.0.0.1:8765/match \
-  -H 'Content-Type: application/json' \
-  -d '{"t_title":"One Piece S23E02"}'
 ```
 
-Returns one IMDb match with season/episode and AniDB mapping, or JSON
-`null` if the mapping is unavailable or ambiguous. Both `Episode 1067`
-and `S23E02` are supported through the imported crosswalk; the two are
-**not presumed equivalent** without matching metadata.
-
-## Known limitations
-
-StremThru's embedded XML override rules, direct episode offsets, inferred
-TVDB season boundaries, and explicit episode maps have been ported. Some
-special episode-before semantics and additional StremThru title-ranking
-heuristics still need parity testing. The Docker build and complete IMDb
-bulk refresh have not been validated on Oracle ARM in this PR.
+The container has no built-in authentication. Keep the localhost port binding or use an authenticated HTTPS reverse proxy.
