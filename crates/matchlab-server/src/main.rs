@@ -190,9 +190,16 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
     if episodes.is_empty() {
         if let Some(ep)=explicit_absolute_episode(&req.title){episodes.push(ep);}
     }
-    let series = req.series.unwrap_or(!seasons.is_empty() || !episodes.is_empty());
     let year = req.year.or_else(||parsed.get("year").and_then(Value::as_i64).map(|n|n as i32));
     let db = open_db(db_path).map_err(|e|e.to_string())?;
+    // An exact anime alias can identify a series even without SxxExx tokens.
+    // Respect an explicitly supplied series=false override.
+    let series = match req.series {
+        Some(value) => value,
+        None if !seasons.is_empty() || !episodes.is_empty() => true,
+        None => anime_title::season_from_any_exact_title(&db,&key)
+            .map_err(|e|e.to_string())?.is_some(),
+    };
     let imdb = imdb_v4::search(&db,title,year,series,seasons.iter().copied().max().unwrap_or(0),&req.title,!episodes.is_empty(),20)
         .map_err(|e|e.to_string())?;
     let imdb: Vec<Candidate> = imdb.into_iter().map(|m|Candidate{
@@ -204,8 +211,13 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
                 .map_err(|e|e.to_string())?
         }else{
             anime_identity(&db,&key).map_err(|e|e.to_string())?
-                .map(|id|json!({"imdb_id":id,"season":seasons.first(),
-                    "episode":null,"anidb_id":null,"anidb_episode":null}))
+                .map(|id|{
+                    let inferred=if seasons.is_empty() {
+                        anime_title::season_from_title(&db,&id,title).ok().flatten()
+                    } else {None};
+                    json!({"imdb_id":id,"season":seasons.first().copied().or(inferred),
+                        "episode":null,"anidb_id":null,"anidb_episode":null})
+                })
         }
     } else { None };
     let selected = if let Some(a) = &anime {
@@ -260,6 +272,10 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
         let chosen=imdb.get(chosen_index);
         if let Some(c)=chosen {
             let mut selected_season=seasons.first().copied();
+            if series && selected_season.is_none() && episodes.is_empty() {
+                selected_season=anime_title::season_from_title(&db,&c.imdb_id,title)
+                    .map_err(|e|e.to_string())?;
+            }
             let mut selected_episode=episodes.first().copied();
             let mut anime_result=Value::Null;
 
@@ -363,10 +379,32 @@ async fn readiness(State(state):State<AppState>) -> (StatusCode,Json<Value>) {
         Json(json!({"status":if ready {"ready"} else {"initializing"}})))
 }
 
+/// Public response: winner coordinates plus the complete parser output.
+/// Keep full candidates and ranking diagnostics exclusive to /debug.
+fn public_match_response(selected: Option<Value>) -> Value {
+    let Some(winner) = selected else { return Value::Null; };
+    let anime = winner.get("anime").filter(|v|v.is_object());
+    let anime_id = anime.and_then(|v|v.get("anidb_id")).cloned().unwrap_or(Value::Null);
+    let asid = anime.and_then(|v|v.get("asid")).cloned().unwrap_or(Value::Null);
+    let is_anime = anime.is_some()
+        || winner.get("match_source").and_then(Value::as_str) == Some("anime_priority")
+        || winner.get("anime_ids").and_then(Value::as_object).is_some_and(|ids| !ids.is_empty());
+    json!({
+        "imdbid": winner.get("imdb_id").cloned().unwrap_or(Value::Null),
+        "season": winner.get("season").cloned().unwrap_or(Value::Null),
+        "episode": winner.get("episode").cloned().unwrap_or(Value::Null),
+        "sid": winner.get("sid").cloned().unwrap_or(Value::Null),
+        "anime_id": anime_id,
+        "asid": asid,
+        "type": if is_anime { "anime" } else if winner.get("category").and_then(Value::as_str) == Some("series") { "series" } else { "movie" },
+        "parsed": winner.get("parsed").cloned().unwrap_or(Value::Null)
+    })
+}
+
 async fn match_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
     -> (StatusCode,Json<Value>) {
     match tokio::task::spawn_blocking(move ||diagnose_logged(&state,&req)).await {
-        Ok(Ok(d)) => (StatusCode::OK,Json(d.selected.unwrap_or(Value::Null))),
+        Ok(Ok(d)) => (StatusCode::OK,Json(public_match_response(d.selected))),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST,Json(json!({"error":e}))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":e.to_string()}))),
     }
@@ -376,7 +414,7 @@ async fn match_request(State(state):State<AppState>,Json(req):Json<MatchRequest>
 async fn get_match_request(State(state):State<AppState>,Query(req):Query<MatchRequest>)
     -> (StatusCode,Json<Value>) {
     match tokio::task::spawn_blocking(move ||diagnose_logged(&state,&req)).await {
-        Ok(Ok(d))=>(StatusCode::OK,Json(d.selected.unwrap_or(Value::Null))),
+        Ok(Ok(d))=>(StatusCode::OK,Json(public_match_response(d.selected))),
         Ok(Err(e))=>(StatusCode::BAD_REQUEST,Json(json!({"error":e}))),
         Err(e)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":e.to_string()}))),
     }
@@ -526,6 +564,50 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn public_response_movie_series_and_anime() {
+        let parsed=json!({"title":"Example","resolution":"1080p","languages":["Norwegian"],"year":2024});
+        let movie=public_match_response(Some(json!({
+            "imdb_id":"tt1234567","category":"movie","sid":"tt1234567",
+            "season":null,"episode":null,"anime":null,"anime_ids":{},"parsed":parsed
+        })));
+        assert_eq!(movie["type"],"movie");
+        assert_eq!(movie["imdbid"],"tt1234567");
+        assert_eq!(movie["parsed"]["resolution"],"1080p");
+        assert!(movie.get("imdb_candidates").is_none());
+        assert!(movie.get("matched_title").is_none());
+        let series=public_match_response(Some(json!({
+            "imdb_id":"tt7654321","category":"series","sid":"tt7654321:2:5",
+            "season":2,"episode":5,"anime":null,"anime_ids":{},"parsed":parsed
+        })));
+        assert_eq!(series["type"],"series");
+        assert_eq!(series["sid"],"tt7654321:2:5");
+        assert_eq!(series["season"],2);
+        assert_eq!(series["episode"],5);
+        let anime=public_match_response(Some(json!({
+            "imdb_id":"tt9999999","category":"series","sid":"tt9999999:1:4",
+            "season":1,"episode":4,
+            "anime":{"anidb_id":"123","episode":4,"asid":"123:4"},
+            "anime_ids":{"anidb":"123"},"parsed":parsed
+        })));
+        assert_eq!(anime["type"],"anime");
+        assert_eq!(anime["anime_id"],"123");
+        assert_eq!(anime["asid"],"123:4");
+        assert_eq!(anime["parsed"]["languages"][0],"Norwegian");
+        assert!(public_match_response(None).is_null());
+    }
+    #[test]
+    fn anime_without_verified_episode_does_not_invent_coordinates() {
+        let result=public_match_response(Some(json!({
+            "imdb_id":"tt1111111","category":"series","sid":"tt1111111",
+            "season":null,"episode":null,"anime":null,
+            "anime_ids":{"anidb":"456"},"parsed":{"title":"Example Anime"}
+        })));
+        assert_eq!(result["type"],"anime");
+        assert!(result["season"].is_null());
+        assert!(result["episode"].is_null());
+        assert!(result["asid"].is_null());
+    }
     #[test]
     fn anime_identity_without_episode_is_unambiguous(){
         let db=Connection::open_in_memory().unwrap();
