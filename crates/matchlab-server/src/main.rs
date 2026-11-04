@@ -351,7 +351,11 @@ async fn dashboard_stats_request(State(state):State<AppState>)
     }
 }
 
-async fn health(State(state):State<AppState>) -> (StatusCode,Json<Value>) {
+async fn liveness() -> (StatusCode,Json<Value>) {
+    (StatusCode::OK,Json(json!({"status":"alive"})))
+}
+
+async fn readiness(State(state):State<AppState>) -> (StatusCode,Json<Value>) {
     let ready = open_db(&state.db).and_then(|db|db.query_row(
         "SELECT count(*) FROM metadata_state WHERE source='full_refresh'",[],|r|r.get::<_,i64>(0)))
         .map(|n|n>0).unwrap_or(false);
@@ -485,7 +489,9 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
     let app = Router::new().route("/",get(dashboard))
         .route("/api/dashboard/history",get(dashboard_history_request))
         .route("/api/dashboard/stats",get(dashboard_stats_request))
-        .route("/health",get(health))
+        .route("/health",get(readiness))
+        .route("/health/ready",get(readiness))
+        .route("/health/live",get(liveness))
         .route("/match",get(get_match_request).post(match_request))
         .route("/debug/match",post(debug_request))
         .with_state(AppState{db:Arc::new(PathBuf::from(db)),history:Arc::new(PathBuf::from(history_db))});
