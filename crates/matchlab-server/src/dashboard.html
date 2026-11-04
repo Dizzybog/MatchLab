@@ -28,7 +28,7 @@ function seasonEpisodeDisplay(row){
   const multiple=row.season!==null&&row.season!==undefined&&
     row.season_end!==null&&row.season_end!==undefined&&
     Number(row.season)!==Number(row.season_end);
-  return {seasons,episodes:multiple?'Season pack':displayRange(row.episode,row.episode_end)};
+  return {seasons,episodes:multiple?'Season packs':displayRange(row.episode,row.episode_end)};
 }
 function rankResults(d){
   if(!d||typeof d!=='object')return '<div class="empty">No diagnostic data available.</div>';
