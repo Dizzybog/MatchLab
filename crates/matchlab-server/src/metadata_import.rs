@@ -356,7 +356,16 @@ pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>
                     count+=1;
                 }
             },
-            Event::Eof=>break,
+            Event::Eof=>{
+                if valid || pending.is_some() {
+                    return Err("truncated Anime-Lists XML: unclosed anime or mapping".into());
+                }
+                break;
+            },
+            Event::End(ref e) if e.name().as_ref()==b"anime"=>{
+                if pending.is_some(){return Err("unclosed Anime-Lists mapping".into());}
+                valid=false;
+            },
             _=>{}
         }
         buf.clear();
@@ -501,6 +510,28 @@ mod tests {
         let names:Vec<_>=fs::read_dir(&folder).unwrap()
             .map(|entry|entry.unwrap().file_name()).collect();
         assert_eq!(names.len(),1,"failed refresh must remove staging database");
+        fs::remove_dir_all(&folder).unwrap();
+    }
+    #[test]
+    fn truncated_animelists_does_not_publish_partial_rows(){
+        let folder=std::env::temp_dir().join(format!("matchlab-truncated-{}-{}",
+            std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&folder).unwrap();
+        let path=folder.join("metadata.sqlite3");
+        let xml=folder.join("anime-list.xml");
+        fs::write(&xml,br#"<anime-list><anime anidbid="123" tvdbid="456" defaulttvdbseason="1">"#).unwrap();
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER,start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER,PRIMARY KEY(imdb_id,anidb_id,tvdb_id,trakt_season));
+            CREATE TABLE metadata_state(source TEXT PRIMARY KEY,updated_at TEXT,row_count INTEGER);").unwrap();
+        drop(db);
+        assert!(import_animelists(&path,&xml).is_err());
+        let db=Connection::open(&path).unwrap();
+        let rows:i64=db.query_row("SELECT count(*) FROM episode_map",[],|r|r.get(0)).unwrap();
+        assert_eq!(rows,0);
+        let state:i64=db.query_row("SELECT count(*) FROM metadata_state",[],|r|r.get(0)).unwrap();
+        assert_eq!(state,0);
+        drop(db);
         fs::remove_dir_all(&folder).unwrap();
     }
     #[test]

@@ -145,6 +145,19 @@ mod tests{
     use super::*;
     #[test]fn explicit(){assert_eq!(explicit_pairs(";1-2+3;4-7;"),vec![(1,2),(1,3),(4,7)]);}
     #[test]
+    fn explicit_season_mapping_uses_exact_pairs(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER,start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO anime_series_map VALUES('tt1234567','123','456',0);
+            INSERT INTO episode_map VALUES('123','456',1,2,1,5,0,'10-3;11-4');").unwrap();
+        let mapped=resolve_season(&db,"tt1234567",2,3).unwrap().unwrap();
+        assert_eq!(mapped.anidb_episode,10);
+        assert!(resolve_season(&db,"tt1234567",2,5).unwrap().is_none());
+    }
+
+    #[test]
     fn explicit_absolute_pairs_override_inferred_bounds(){
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
