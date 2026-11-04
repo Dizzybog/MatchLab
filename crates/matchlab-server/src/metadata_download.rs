@@ -5,7 +5,7 @@ const MAX_DOWNLOAD_BYTES:u64=2_000_000_000;
 fn download(client:&reqwest::blocking::Client,url:&str,path:&Path)->Result<(),Box<dyn Error>>{
     let parsed=reqwest::Url::parse(url)?;
     if parsed.scheme()!="https"{return Err("metadata source must use HTTPS".into());}
-    let mut response=client.get(parsed).send()?.error_for_status()?;
+    let response=client.get(parsed).send()?.error_for_status()?;
     if response.content_length().is_some_and(|n|n>MAX_DOWNLOAD_BYTES){
         return Err("metadata archive exceeds download limit".into());
     }
