@@ -8,9 +8,9 @@ services:
       RUST_LOG: matchlab_server=info
       MATCHLAB_DB: /data/metadata.sqlite3
       MATCHLAB_HOST: 0.0.0.0:8765
-      # Optional: set six comma-separated HTTPS URLs to initialize and refresh metadata.
+      # Optional overrides; public sources and 24-hour refresh are built in.
       # MATCHLAB_METADATA_URLS: https://...,...
-      MATCHLAB_METADATA_REFRESH_HOURS: "24"
+      # MATCHLAB_METADATA_REFRESH_HOURS: "24"
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
