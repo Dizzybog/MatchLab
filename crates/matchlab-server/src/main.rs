@@ -462,26 +462,48 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
     {
         let urls=metadata_download::configured_urls(env::var("MATCHLAB_METADATA_URLS").ok().as_deref())?;
         let hours=env::var("MATCHLAB_METADATA_REFRESH_HOURS")
-            .unwrap_or_else(|_|"24".into()).parse::<u64>()?;
+            .unwrap_or_else(|_|"168".into()).parse::<u64>()?;
         if !(1..=24*30).contains(&hours) {
             return Err("MATCHLAB_METADATA_REFRESH_HOURS must be between 1 and 720".into());
         }
         let target=PathBuf::from(&db);
         tokio::spawn(async move {
-            let mut interval=tokio::time::interval(std::time::Duration::from_secs(hours*3600));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let refresh_seconds=hours*3600;
             loop {
-                interval.tick().await;
-                let target=target.clone();
-                let urls=urls.clone();
+                let check_target=target.clone();
+                let last_refresh=tokio::task::spawn_blocking(move || {
+                    let db=rusqlite::Connection::open_with_flags(
+                        &check_target,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+                    let value:String=db.query_row(
+                        "SELECT updated_at FROM metadata_state WHERE source='full_refresh'",
+                        [],|row|row.get(0)).ok()?;
+                    value.parse::<u64>().ok()
+                }).await.ok().flatten();
+                let now=std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default().as_secs();
+                if let Some(last)=last_refresh {
+                    let remaining=last.saturating_add(refresh_seconds).saturating_sub(now);
+                    if remaining>0 {
+                        tracing::info!(remaining_seconds=remaining,
+                            "metadata refresh not due; keeping existing database");
+                        tokio::time::sleep(std::time::Duration::from_secs(remaining.min(3600))).await;
+                        continue;
+                    }
+                }
+                let refresh_target=target.clone();
+                let refresh_urls=urls.clone();
                 match tokio::task::spawn_blocking(move ||
-                    metadata_download::refresh_from_urls(&target,&urls)
+                    metadata_download::refresh_from_urls(&refresh_target,&refresh_urls)
                         .map_err(|error|error.to_string())).await {
                     Ok(Ok((imdb,links,mappings,aliases))) =>
                         tracing::info!(imdb,links,mappings,aliases,"scheduled metadata refresh completed"),
                     Ok(Err(error)) => tracing::error!(%error,"scheduled metadata refresh failed; existing database preserved"),
                     Err(error) => tracing::error!(%error,"scheduled metadata refresh task failed"),
                 }
+                // On failure retry after one hour; successful imports persist
+                // their completion timestamp in metadata_state/full_refresh.
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
             }
         });
     }
