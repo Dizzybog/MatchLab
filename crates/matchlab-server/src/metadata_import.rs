@@ -261,7 +261,9 @@ pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>
     let mut pending:Option<(i64,i64,i64,i64,i64,String)>=None;
     let mut count=0u64;
     loop{
-        match xml.read_event_into(&mut buf)?{
+        let event=xml.read_event_into(&mut buf)?;
+        let empty_mapping=matches!(&event,Event::Empty(e) if e.name().as_ref()==b"mapping");
+        match event{
             Event::Start(ref e) if e.name().as_ref()==b"anime"=>{
                 aid.clear();tvdb.clear();imdb.clear();
                 let (mut default_season,mut default_offset)=(None,0i64);
@@ -319,7 +321,7 @@ pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>
                             if !has_offset{offset=old_offset;}
                             count=count.saturating_sub(1);
                         }
-                        if e.is_empty(){
+                        if empty_mapping{
                             insert.execute(params![aid,tvdb,ani,tv,start,end,offset,""])?;
                             count+=1;
                         }else{
