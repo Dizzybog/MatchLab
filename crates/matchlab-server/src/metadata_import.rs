@@ -393,8 +393,18 @@ pub fn refresh_from_files(
             let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
             db.execute("INSERT OR REPLACE INTO metadata_state VALUES('full_refresh',?1,?2)",
                 params![now,imdb+links+episodes_count+aliases])?;
+            // Verify the complete SQLite image before publishing it.
+            let integrity:String=db.query_row("PRAGMA integrity_check",[],|row|row.get(0))?;
+            if integrity!="ok"{
+                return Err(format!("staging SQLite integrity check failed: {integrity}").into());
+            }
         }
+        // Persist the completed staging file before atomically publishing it.
+        File::open(&stage)?.sync_all()?;
         fs::rename(&stage,target)?;
+        // The rename is atomic on the same filesystem. Sync the directory as
+        // well so the new directory entry survives a sudden power loss.
+        File::open(parent)?.sync_all()?;
         Ok((imdb,links,episodes_count,aliases))
     })();
     if result.is_err(){let _=fs::remove_file(&stage);}
