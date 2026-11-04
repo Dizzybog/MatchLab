@@ -32,7 +32,7 @@ function rankResults(d){
   for(const c of candidates){
     if(rows.some(x=>x.imdb_id===c.imdb_id))continue;
     rows.push({imdb_id:c.imdb_id,title:c.title||c.matched_title,
-      season:null,episode:null,anime_id:c.anime_ids?.anidb,
+      season:Array.isArray(d.parsed?.seasons)&&d.parsed.seasons.length===1?d.parsed.seasons[0]:null,episode:Array.isArray(d.parsed?.episodes)&&d.parsed.episodes.length===1?d.parsed.episodes[0]:null,anime_id:c.anime_ids?.anidb,
       anime_episode:null,source:c.source,winner:false});
     if(rows.length===5)break;
   }
@@ -43,7 +43,7 @@ function rankResults(d){
     '<article class="rank-card'+(r.winner?' winner':'')+'"><div class="rank-top"><div class="rank-name">'+
     '#'+(i+1)+' · '+val(r.title)+'</div><span class="rank-tag">'+
     (r.winner?'WINNER':'RANK '+(i+1))+'</span></div><div class="rank-fields">'+
-    field('IMDb ID',r.imdb_id)+field('IMDb season',r.season)+field('IMDb episode',r.episode)+
+    field('IMDb ID',r.imdb_id)+field(r.winner?'IMDb season':'Parsed season',r.season)+field(r.winner?'IMDb episode':'Parsed episode',r.episode)+
     field('AniDB ID',r.anime_id)+field('Anime episode',r.anime_episode)+
     field('Source',r.source)+'</div></article>').join('')+'</div>';
 }
