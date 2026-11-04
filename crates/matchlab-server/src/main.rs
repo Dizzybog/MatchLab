@@ -822,6 +822,21 @@ mod tests {
         assert!(public_match_response(None).is_null());
     }
     #[test]
+    fn public_response_exposes_absolute_anime_range_without_inventing_asid() {
+        let result=public_match_response(Some(json!({
+            "imdb_id":"tt0388629","category":"series",
+            "anime_ids":{"anidb":"69"},
+            "anime":null,
+            "anime_episode_start":700,"anime_episode_end":800,
+            "episode_range":{"absolute_start":700,"absolute_end":800},
+            "season":null,"episode":null
+        })));
+        assert_eq!(result["type"],"anime");
+        assert_eq!(result["anime_episode_start"],700);
+        assert_eq!(result["anime_episode_end"],800);
+        assert!(result["asid"].is_null());
+    }
+    #[test]
     fn anime_without_verified_episode_does_not_invent_coordinates() {
         let result=public_match_response(Some(json!({
             "imdb_id":"tt1111111","category":"series","sid":"tt1111111",
