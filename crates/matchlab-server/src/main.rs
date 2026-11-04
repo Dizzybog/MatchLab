@@ -1,7 +1,7 @@
-//! Experimental native Rust matching service.
-//! Runs against the same SQLite schema as the Python implementation.
-//! This is a parallel implementation, not yet a drop-in replacement.
+//! Native Rust matching service backed by validated SQLite metadata.
 mod imdb_v4;
+mod metadata_import;
+mod metadata_download;
 mod anime_resolver;
 mod anime_title;
 mod country_aliases;
@@ -326,7 +326,7 @@ async fn match_request(State(state):State<AppState>,Json(req):Json<MatchRequest>
     }
 }
 
-/// Python API compatibility: GET /match?title=...&year=...
+/// GET /match?title=...&year=...
 async fn get_match_request(State(state):State<AppState>,Query(req):Query<MatchRequest>)
     -> (StatusCode,Json<Value>) {
     let db=Arc::clone(&state.db);
@@ -352,14 +352,105 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_env_filter(
         tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_|"matchlab_server=info".into())).init();
+    let args:Vec<String>=env::args().collect();
+    if args.get(1).is_some_and(|arg|arg=="import-imdb") {
+        if args.len()!=6 {
+            return Err("usage: matchlab-server import-imdb <database.sqlite3> <title.basics.tsv.gz> <title.akas.tsv.gz> <title.episode.tsv.gz>".into());
+        }
+        let count=metadata_import::import_imdb(
+            std::path::Path::new(&args[2]),std::path::Path::new(&args[3]),
+            std::path::Path::new(&args[4]),std::path::Path::new(&args[5]))?;
+        tracing::info!("IMDb metadata imported: {count} supported titles");
+        return Ok(());
+    }
+    if args.get(1).is_some_and(|arg|arg=="import-animeapi") {
+        if args.len()!=4 {
+            return Err("usage: matchlab-server import-animeapi <database.sqlite3> <animeapi.tsv>".into());
+        }
+        let count=metadata_import::import_animeapi(
+            std::path::Path::new(&args[2]),std::path::Path::new(&args[3]))?;
+        tracing::info!("animeApi imported: {count} valid IMDb/AniDB links");
+        return Ok(());
+    }
+    if args.get(1).is_some_and(|arg|arg=="import-anidb-titles") {
+        if args.len()!=4 {
+            return Err("usage: matchlab-server import-anidb-titles <database.sqlite3> <anime-titles.xml.gz>".into());
+        }
+        let count=metadata_import::import_anidb_titles(
+            std::path::Path::new(&args[2]),std::path::Path::new(&args[3]))?;
+        tracing::info!("AniDB aliases imported: {count}");
+        return Ok(());
+    }
+    if args.get(1).is_some_and(|arg|arg=="import-animelists") {
+        if args.len()!=4 {
+            return Err("usage: matchlab-server import-animelists <database.sqlite3> <anime-list.xml>".into());
+        }
+        let count=metadata_import::import_animelists(
+            std::path::Path::new(&args[2]),std::path::Path::new(&args[3]))?;
+        tracing::info!("Anime-Lists mappings imported: {count}");
+        return Ok(());
+    }
+    if args.get(1).is_some_and(|arg|arg=="refresh-metadata") {
+        if args.len()!=9 {
+            return Err("usage: matchlab-server refresh-metadata <database.sqlite3> <title.basics.tsv.gz> <title.akas.tsv.gz> <title.episode.tsv.gz> <animeapi.tsv> <anime-list.xml> <anime-titles.xml.gz>".into());
+        }
+        let (imdb,links,mappings,aliases)=metadata_import::refresh_from_files(
+            std::path::Path::new(&args[2]),std::path::Path::new(&args[3]),
+            std::path::Path::new(&args[4]),std::path::Path::new(&args[5]),
+            std::path::Path::new(&args[6]),std::path::Path::new(&args[7]),
+            std::path::Path::new(&args[8]))?;
+        tracing::info!("metadata refresh completed: imdb={imdb} anime_links={links} episode_maps={mappings} aliases={aliases}");
+        return Ok(());
+    }
+    if args.get(1).is_some_and(|arg|arg=="refresh-metadata-urls") {
+        if args.len()!=9 {
+            return Err("usage: matchlab-server refresh-metadata-urls <database.sqlite3> <basics_url> <akas_url> <episodes_url> <animeapi_url> <animelists_url> <anidb_titles_url>".into());
+        }
+        let (imdb,links,mappings,aliases)=metadata_download::refresh_from_urls(
+            std::path::Path::new(&args[2]),&args[3..])?;
+        tracing::info!("downloaded metadata refresh completed: imdb={imdb} anime_links={links} episode_maps={mappings} aliases={aliases}");
+        return Ok(());
+    }
     let db = env::var("MATCHLAB_DB").unwrap_or_else(|_|"/data/metadata.sqlite3".into());
     let host = env::var("MATCHLAB_HOST").unwrap_or_else(|_|"127.0.0.1:8766".into());
+    // Optional native metadata scheduler. Set six HTTPS URLs (comma-separated)
+    // and an interval in hours. A single task serializes refreshes; failed
+    // downloads/imports leave the previously published SQLite image intact.
+    if let Ok(config)=env::var("MATCHLAB_METADATA_URLS") {
+        let urls:Vec<String>=config.split(',').map(|s|s.trim().to_owned()).collect();
+        if urls.len()!=6 || urls.iter().any(|s|s.is_empty()) {
+            return Err("MATCHLAB_METADATA_URLS requires six comma-separated HTTPS URLs".into());
+        }
+        let hours=env::var("MATCHLAB_METADATA_REFRESH_HOURS")
+            .unwrap_or_else(|_|"24".into()).parse::<u64>()?;
+        if !(1..=24*30).contains(&hours) {
+            return Err("MATCHLAB_METADATA_REFRESH_HOURS must be between 1 and 720".into());
+        }
+        let target=PathBuf::from(&db);
+        tokio::spawn(async move {
+            let mut interval=tokio::time::interval(std::time::Duration::from_secs(hours*3600));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let target=target.clone();
+                let urls=urls.clone();
+                match tokio::task::spawn_blocking(move ||
+                    metadata_download::refresh_from_urls(&target,&urls)
+                        .map_err(|error|error.to_string())).await {
+                    Ok(Ok((imdb,links,mappings,aliases))) =>
+                        tracing::info!(imdb,links,mappings,aliases,"scheduled metadata refresh completed"),
+                    Ok(Err(error)) => tracing::error!(%error,"scheduled metadata refresh failed; existing database preserved"),
+                    Err(error) => tracing::error!(%error,"scheduled metadata refresh task failed"),
+                }
+            }
+        });
+    }
     let app = Router::new().route("/health",get(health))
         .route("/match",get(get_match_request).post(match_request))
         .route("/debug/match",post(debug_request))
         .with_state(AppState{db:Arc::new(PathBuf::from(db))});
     let listener = tokio::net::TcpListener::bind(&host).await?;
-    tracing::info!("experimental Rust API listening on {host}");
+    tracing::info!("Rust API listening on {host}");
     axum::serve(listener,app).await?;
     Ok(())
 }
