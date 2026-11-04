@@ -190,9 +190,16 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
     if episodes.is_empty() {
         if let Some(ep)=explicit_absolute_episode(&req.title){episodes.push(ep);}
     }
-    let series = req.series.unwrap_or(!seasons.is_empty() || !episodes.is_empty());
     let year = req.year.or_else(||parsed.get("year").and_then(Value::as_i64).map(|n|n as i32));
     let db = open_db(db_path).map_err(|e|e.to_string())?;
+    // An exact anime alias can identify a series even without SxxExx tokens.
+    // Respect an explicitly supplied series=false override.
+    let series = match req.series {
+        Some(value) => value,
+        None if !seasons.is_empty() || !episodes.is_empty() => true,
+        None => anime_title::season_from_any_exact_title(&db,&key)
+            .map_err(|e|e.to_string())?.is_some(),
+    };
     let imdb = imdb_v4::search(&db,title,year,series,seasons.iter().copied().max().unwrap_or(0),&req.title,!episodes.is_empty(),20)
         .map_err(|e|e.to_string())?;
     let imdb: Vec<Candidate> = imdb.into_iter().map(|m|Candidate{
