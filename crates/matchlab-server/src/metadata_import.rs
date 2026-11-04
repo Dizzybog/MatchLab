@@ -423,6 +423,14 @@ pub fn refresh_from_files(
         }
         {
             let db=Connection::open(&stage)?;
+            // Expression index title_reverse_suffix uses reverse(clean_title).
+            // SQLite functions are connection-local, including for integrity_check.
+            db.create_scalar_function("reverse",1,
+                rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC
+                    | rusqlite::functions::FunctionFlags::SQLITE_UTF8,|ctx|{
+                    let value:String=ctx.get(0)?;
+                    Ok(value.chars().rev().collect::<String>())
+                })?;
             let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
             db.execute("INSERT OR REPLACE INTO metadata_state VALUES('full_refresh',?1,?2)",
                 params![now,imdb+links+episodes_count+aliases])?;
