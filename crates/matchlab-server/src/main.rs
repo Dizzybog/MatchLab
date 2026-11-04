@@ -845,6 +845,7 @@ mod tests {
             imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
             region TEXT,original INTEGER,ordering INTEGER,type TEXT);
             CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
             CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
             CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,
                 tvdb_season INTEGER,start INTEGER,end INTEGER,offset INTEGER,map TEXT);
