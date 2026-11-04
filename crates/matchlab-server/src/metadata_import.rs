@@ -1,6 +1,6 @@
 //! Native IMDb metadata ingestion. Accepts locally downloaded IMDb TSV/TSV.GZ files.
 //! Builds a staging SQLite database and publishes it only after a complete import.
-use std::{error::Error,fs::{self,File},io::{Read,BufReader},path::Path,time::{SystemTime,UNIX_EPOCH}};
+use std::{error::Error,fs::{self,File},io::{Read,BufReader},path::Path,time::{SystemTime,UNIX_EPOCH,Instant}};
 use rusqlite::{params,Connection};
 use unicode_normalization::UnicodeNormalization;
 
@@ -16,6 +16,10 @@ fn reader(path:&Path)->Result<csv::Reader<Box<dyn Read>>,Box<dyn Error>>{
         Box::new(flate2::read::GzDecoder::new(BufReader::new(file)))
     }else{Box::new(BufReader::new(file))};
     Ok(csv::ReaderBuilder::new().delimiter(b'\t').quoting(false).flexible(true).from_reader(input))
+}
+fn log_progress(source:&str,processed:u64,started:Instant){
+    let elapsed=started.elapsed().as_secs_f64().max(0.001);
+    tracing::info!(source,processed,elapsed_seconds=elapsed,rows_per_second=(processed as f64/elapsed).round() as u64,"metadata import progress");
 }
 fn col(headers:&csv::StringRecord,name:&str)->Result<usize,Box<dyn Error>>{
     headers.iter().position(|h|h==name).ok_or_else(||format!("missing TSV header: {name}").into())
@@ -67,7 +71,12 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
             let (id,kind,primary,original,year)=(col(&h,"tconst")?,col(&h,"titleType")?,
                 col(&h,"primaryTitle")?,col(&h,"originalTitle")?,col(&h,"startYear")?);
             let mut insert=tx.prepare_cached("INSERT OR IGNORE INTO titles VALUES(?1,?2,?3,?4,?5,'',?6,0,?7)")?;
+            let started=Instant::now();
+            let mut processed=0u64;
+            tracing::info!(source="imdb_basics","metadata import started");
             for row in input.records(){
+                processed+=1;
+                if processed%1_000_000==0{log_progress("imdb_basics",processed,started);}
                 let r=row?;
                 if r.len()!=h.len() {
                     malformed_rows+=1;
@@ -87,6 +96,7 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
                 count+=1;
             }
             if malformed_rows>0 {tracing::warn!(source="imdb_basics",malformed_rows,"skipped malformed metadata TSV records");}
+            log_progress("imdb_basics",processed,started);
         }
         if count==0{return Err("IMDb basics contained no supported titles".into())}
         {
@@ -98,7 +108,12 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
             let mut insert=tx.prepare_cached("INSERT OR IGNORE INTO titles
                 SELECT imdb_id,?2,?3,year,category,?4,?5,?6,type FROM titles
                 WHERE imdb_id=?1 AND ordering=0 AND region='' LIMIT 1")?;
+            let started=Instant::now();
+            let mut processed=0u64;
+            tracing::info!(source="imdb_akas","metadata import started");
             for row in input.records(){
+                processed+=1;
+                if processed%1_000_000==0{log_progress("imdb_akas",processed,started);}
                 let r=row?;
                 if r.len()!=h.len() {
                     malformed_rows+=1;
@@ -114,6 +129,7 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
                     r.get(ordering).unwrap_or("0").parse::<i64>().unwrap_or(0)])?;
             }
             if malformed_rows>0 {tracing::warn!(source="imdb_akas",malformed_rows,"skipped malformed metadata TSV records");}
+            log_progress("imdb_akas",processed,started);
         }
         {
             let mut input=reader(episodes)?;
@@ -124,7 +140,12 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
                 SELECT ?1,?2 WHERE EXISTS(SELECT 1 FROM titles
                 WHERE imdb_id=?1 AND type IN ('tvSeries','tvMiniSeries'))
                 ON CONFLICT(imdb_id) DO UPDATE SET max_season=max(max_season,excluded.max_season)")?;
+            let started=Instant::now();
+            let mut processed=0u64;
+            tracing::info!(source="imdb_episodes","metadata import started");
             for row in input.records(){
+                processed+=1;
+                if processed%1_000_000==0{log_progress("imdb_episodes",processed,started);}
                 let r=row?;
                 if r.len()!=h.len() {
                     malformed_rows+=1;
@@ -134,6 +155,7 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
                 if se>0{insert.execute(params![r.get(parent).unwrap_or(""),se])?;}
             }
             if malformed_rows>0 {tracing::warn!(source="imdb_episodes",malformed_rows,"skipped malformed metadata TSV records");}
+            log_progress("imdb_episodes",processed,started);
         }
         let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
         tx.execute("INSERT INTO metadata_state VALUES('imdb',?1,?2)",params![now,count])?;
@@ -162,7 +184,12 @@ pub fn import_animeapi(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>{
     let mut links=tx.prepare_cached("INSERT OR IGNORE INTO anime_series_map VALUES(?1,?2,?3,?4)")?;
     let mut identities=tx.prepare_cached("INSERT OR IGNORE INTO anime_ids VALUES(?1,?2,?3)")?;
     let mut count=0u64;
-    for row in input.records(){
+    let started=Instant::now();
+            let mut processed=0u64;
+            tracing::info!(source="animeapi","metadata import started");
+            for row in input.records(){
+                processed+=1;
+                if processed%1_000_000==0{log_progress("animeapi",processed,started);}
         let r=row?;
                 if r.len()!=headers.len() {
                     malformed_rows+=1;
@@ -193,6 +220,7 @@ pub fn import_animeapi(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>{
     drop(links);
     drop(identities);
     if malformed_rows>0 {tracing::warn!(source="animeapi",malformed_rows,"skipped malformed metadata TSV records");}
+            log_progress("animeapi",processed,started);
     if count==0{return Err("animeApi contained no valid IMDb/AniDB links".into());}
     let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
     tx.execute("INSERT OR REPLACE INTO metadata_state VALUES('animeapi',?1,?2)",
@@ -220,6 +248,8 @@ pub fn import_anidb_titles(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error
     let mut language=String::new();
     let mut inside_title=false;
     let mut count=0u64;
+    let started=Instant::now();
+    tracing::info!(source="anidb_titles","metadata import started");
     loop {
         match xml.read_event_into(&mut buf)? {
             Event::Start(ref e) if e.name().as_ref()==b"anime"=>{
@@ -248,6 +278,7 @@ pub fn import_anidb_titles(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error
                 if !key.is_empty() && matches!(title_type.as_str(),"main"|"official"|"syn"|"synonym"|"short"){
                     insert.execute(params![anime_id,title,key,title_type,language])?;
                     count+=1;
+                    if count%100_000==0{log_progress("anidb_titles",count,started);}
                 }
             },
             Event::End(ref e) if e.name().as_ref()==b"title"=>inside_title=false,
@@ -257,6 +288,7 @@ pub fn import_anidb_titles(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error
         }
         buf.clear();
     }
+    log_progress("anidb_titles",count,started);
     drop(insert);
     if count==0{return Err("AniDB titles contained no usable aliases".into());}
     let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
@@ -285,6 +317,9 @@ pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>
     let mut valid=false;
     let mut pending:Option<(i64,i64,i64,i64,i64,String)>=None;
     let mut count=0u64;
+    let started=Instant::now();
+    let mut last_logged=0u64;
+    tracing::info!(source="animelists","metadata import started");
     loop{
         let event=xml.read_event_into(&mut buf)?;
         let empty_mapping=matches!(&event,Event::Empty(e) if e.name().as_ref()==b"mapping");
@@ -392,8 +427,13 @@ pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>
             },
             _=>{}
         }
+        if count>0 && count/100_000>last_logged/100_000 {
+            log_progress("animelists",count,started);
+            last_logged=count;
+        }
         buf.clear();
     }
+    log_progress("animelists",count,started);
     drop(insert);drop(links);
     if count==0{return Err("Anime-Lists contained no episode mappings".into());}
     let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
@@ -414,9 +454,13 @@ pub fn refresh_from_files(
     let stamp=SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let stage=parent.join(format!(".matchlab-full-{}-{stamp}.sqlite3",std::process::id()));
     let result=(||{
+        tracing::info!("metadata refresh: importing IMDb datasets");
         let imdb=import_imdb(&stage,basics,akas,episodes)?;
+        tracing::info!("metadata refresh: importing animeApi");
         let links=import_animeapi(&stage,animeapi)?;
+        tracing::info!("metadata refresh: importing Anime-Lists");
         let episodes_count=import_animelists(&stage,animelists)?;
+        tracing::info!("metadata refresh: importing AniDB titles");
         let aliases=import_anidb_titles(&stage,anidb_titles)?;
         if imdb==0||links==0||episodes_count==0||aliases==0{
             return Err("incomplete metadata: refusing to replace live database".into());
@@ -435,6 +479,7 @@ pub fn refresh_from_files(
             db.execute("INSERT OR REPLACE INTO metadata_state VALUES('full_refresh',?1,?2)",
                 params![now,imdb+links+episodes_count+aliases])?;
             // Verify the complete SQLite image before publishing it.
+            tracing::info!("metadata refresh: verifying SQLite integrity");
             let integrity:String=db.query_row("PRAGMA integrity_check",[],|row|row.get(0))?;
             if integrity!="ok"{
                 return Err(format!("staging SQLite integrity check failed: {integrity}").into());
@@ -443,6 +488,7 @@ pub fn refresh_from_files(
         // Persist the completed staging file before atomically publishing it.
         File::open(&stage)?.sync_all()?;
         fs::rename(&stage,target)?;
+        tracing::info!("metadata refresh: staging database published");
         // The rename is atomic on the same filesystem. Sync the directory as
         // well so the new directory entry survives a sudden power loss.
         File::open(parent)?.sync_all()?;
