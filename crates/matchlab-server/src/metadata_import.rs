@@ -15,7 +15,7 @@ fn reader(path:&Path)->Result<csv::Reader<Box<dyn Read>>,Box<dyn Error>>{
     let input:Box<dyn Read>=if path.extension().is_some_and(|e|e=="gz"){
         Box::new(flate2::read::GzDecoder::new(BufReader::new(file)))
     }else{Box::new(BufReader::new(file))};
-    Ok(csv::ReaderBuilder::new().delimiter(b'\t').flexible(true).from_reader(input))
+    Ok(csv::ReaderBuilder::new().delimiter(b'\t').quoting(false).flexible(true).from_reader(input))
 }
 fn col(headers:&csv::StringRecord,name:&str)->Result<usize,Box<dyn Error>>{
     headers.iter().position(|h|h==name).ok_or_else(||format!("missing TSV header: {name}").into())
@@ -63,13 +63,14 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
         {
             let mut input=reader(basics)?;
             let h=input.headers()?.clone();
+            let mut malformed_rows=0u64;
             let (id,kind,primary,original,year)=(col(&h,"tconst")?,col(&h,"titleType")?,
                 col(&h,"primaryTitle")?,col(&h,"originalTitle")?,col(&h,"startYear")?);
             let mut insert=tx.prepare_cached("INSERT OR IGNORE INTO titles VALUES(?1,?2,?3,?4,?5,'',?6,0,?7)")?;
             for row in input.records(){
                 let r=row?;
                 if r.len()!=h.len() {
-                    tracing::warn!(record=r.position().map(|p|p.record()), expected=h.len(), actual=r.len(), "skipping malformed metadata TSV record");
+                    malformed_rows+=1;
                     continue;
                 }
                 let t=r.get(kind).unwrap_or("");
@@ -85,11 +86,13 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
                 }
                 count+=1;
             }
+            if malformed_rows>0 {tracing::warn!(source="imdb_basics",malformed_rows,"skipped malformed metadata TSV records");}
         }
         if count==0{return Err("IMDb basics contained no supported titles".into())}
         {
             let mut input=reader(akas)?;
             let h=input.headers()?.clone();
+            let mut malformed_rows=0u64;
             let (id,ordering,title,region,original)=(col(&h,"titleId")?,col(&h,"ordering")?,
                 col(&h,"title")?,col(&h,"region")?,col(&h,"isOriginalTitle")?);
             let mut insert=tx.prepare_cached("INSERT OR IGNORE INTO titles
@@ -98,7 +101,7 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
             for row in input.records(){
                 let r=row?;
                 if r.len()!=h.len() {
-                    tracing::warn!(record=r.position().map(|p|p.record()), expected=h.len(), actual=r.len(), "skipping malformed metadata TSV record");
+                    malformed_rows+=1;
                     continue;
                 }
                 let title=r.get(title).unwrap_or("");
@@ -110,10 +113,12 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
                     i32::from(r.get(original)==Some("1")),
                     r.get(ordering).unwrap_or("0").parse::<i64>().unwrap_or(0)])?;
             }
+            if malformed_rows>0 {tracing::warn!(source="imdb_akas",malformed_rows,"skipped malformed metadata TSV records");}
         }
         {
             let mut input=reader(episodes)?;
             let h=input.headers()?.clone();
+            let mut malformed_rows=0u64;
             let (parent,season)=(col(&h,"parentTconst")?,col(&h,"seasonNumber")?);
             let mut insert=tx.prepare_cached("INSERT INTO seasons(imdb_id,max_season)
                 SELECT ?1,?2 WHERE EXISTS(SELECT 1 FROM titles
@@ -122,12 +127,13 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
             for row in input.records(){
                 let r=row?;
                 if r.len()!=h.len() {
-                    tracing::warn!(record=r.position().map(|p|p.record()), expected=h.len(), actual=r.len(), "skipping malformed metadata TSV record");
+                    malformed_rows+=1;
                     continue;
                 }
                 let se=r.get(season).unwrap_or("").parse::<i64>().unwrap_or(0);
                 if se>0{insert.execute(params![r.get(parent).unwrap_or(""),se])?;}
             }
+            if malformed_rows>0 {tracing::warn!(source="imdb_episodes",malformed_rows,"skipped malformed metadata TSV records");}
         }
         let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
         tx.execute("INSERT INTO metadata_state VALUES('imdb',?1,?2)",params![now,count])?;
@@ -148,6 +154,7 @@ pub fn import_animeapi(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>{
     let tx=db.transaction()?;
     let mut input=reader(source)?;
     let headers=input.headers()?.clone();
+            let mut malformed_rows=0u64;
     let imdb=col(&headers,"imdb")?;
     let anidb=col(&headers,"anidb")?;
     let tvdb=col(&headers,"thetvdb")?;
@@ -158,7 +165,7 @@ pub fn import_animeapi(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>{
     for row in input.records(){
         let r=row?;
                 if r.len()!=headers.len() {
-                    tracing::warn!(record=r.position().map(|p|p.record()), expected=headers.len(), actual=r.len(), "skipping malformed metadata TSV record");
+                    malformed_rows+=1;
                     continue;
                 }
         let id=r.get(imdb).unwrap_or("").trim();
@@ -185,6 +192,7 @@ pub fn import_animeapi(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>{
     }
     drop(links);
     drop(identities);
+    if malformed_rows>0 {tracing::warn!(source="animeapi",malformed_rows,"skipped malformed metadata TSV records");}
     if count==0{return Err("animeApi contained no valid IMDb/AniDB links".into());}
     let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
     tx.execute("INSERT OR REPLACE INTO metadata_state VALUES('animeapi',?1,?2)",
@@ -566,6 +574,26 @@ mod tests {
             valid.push(r.get(0).unwrap().to_owned());
         }
         assert_eq!(valid,vec!["valid","valid2"]);
+        fs::remove_dir_all(folder).unwrap();
+    }
+    #[test]
+    fn imdb_tsv_preserves_literal_quotes_and_tabs(){
+        let folder=std::env::temp_dir().join(format!("matchlab-quotes-{}-{}",
+            std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&folder).unwrap();
+        let path=folder.join("quotes.tsv");
+        fs::write(&path,r#"id	title	region
+1	The "Great" Escape	US
+2	A "Quoted" Movie	NO
+"#).unwrap();
+        let mut input=reader(&path).unwrap();
+        let h=input.headers().unwrap().clone();
+        assert_eq!(h.len(),3);
+        let rows=input.records().collect::<Result<Vec<_>,_>>().unwrap();
+        assert_eq!(rows.len(),2);
+        assert_eq!(rows[0].len(),3);
+        assert_eq!(rows[0].get(1),Some("The \"Great\" Escape"));
+        assert_eq!(rows[1].get(1),Some("A \"Quoted\" Movie"));
         fs::remove_dir_all(folder).unwrap();
     }
     #[test]
