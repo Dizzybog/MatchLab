@@ -220,6 +220,17 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
                 })
         }
     } else { None };
+    // An unrelated anime with the same alias must not override an exact
+    // IMDb TV-series title. Only a matching IMDb identity can take priority.
+    // A different anime identity is still eligible when IMDb has no exact
+    // series-title candidate (e.g. a distinct anime part title).
+    let anime = anime.filter(|a| {
+        let anime_id=a["imdb_id"].as_str().unwrap_or_default();
+        !imdb.iter().any(|c| {
+            (c.media_type=="tvSeries" || c.media_type=="tvMiniSeries")
+                && normalize(&c.matched_title)==key && c.imdb_id!=anime_id
+        })
+    });
     let selected = if let Some(a) = &anime {
         let imdb_id = a["imdb_id"].as_str().unwrap_or_default();
         let season = a["season"].as_i64();
@@ -564,6 +575,38 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exact_supernatural_series_beats_unrelated_anime_alias() {
+        let path=std::env::temp_dir().join(format!(
+            "matchlab_supernatural_{}.sqlite3",std::process::id()));
+        let _=std::fs::remove_file(&path);
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
+            region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,
+                tvdb_season INTEGER,start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES('tt0460681','Supernatural','supernatural',2005,
+                'series','US',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt0460681',15);
+            INSERT INTO anime_series_map VALUES('tt1679482','999','999',0);
+            INSERT INTO anidb_titles VALUES('999','Supernatural','supernatural','main','en');
+            INSERT INTO episode_map VALUES('999','999',1,1,1,12,0,'');").unwrap();
+        drop(db);
+        let result=diagnose(&path,&MatchRequest{
+            title:"Supernatural.S01-s12.hdr".into(),year:None,series:None
+        }).unwrap();
+        let winner=result.selected.unwrap();
+        assert_eq!(winner["imdb_id"],"tt0460681");
+        assert_eq!(winner["match_source"],"imdb");
+        assert_eq!(winner["category"],"series");
+        std::fs::remove_file(&path).unwrap();
+    }
     #[test]
     fn public_response_movie_series_and_anime() {
         let parsed=json!({"title":"Example","resolution":"1080p","languages":["Norwegian"],"year":2024});
