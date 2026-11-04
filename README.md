@@ -10,7 +10,9 @@ The native Rust service provides an HTTP matching API backed by a local SQLite m
 
 - **Torrent title parsing:** Reads release names containing years, seasons, episodes, video quality, codecs and other release tags.
 - **IMDb matching:** Searches movie and TV titles, including alternate titles and country-specific names. Uses exact-title, prefix and suffix matching, plus year and title-type ranking.
-- **Anime matching:** Searches anime titles separately from IMDb. When an anime match has a valid episode mapping, it takes priority over ordinary IMDb candidates. Supports anime parts, alternate titles and conversion between AniDB and TVDB-style episode numbering.
+- **Anime matching:** Resolves anime titles and aliases using AniDB, animeApi and Anime-Lists crosswalks. Verified episode mappings can take priority over IMDb ranking, while exact unrelated IMDb TV-series titles are protected from anime alias collisions. Supports anime parts, absolute episode numbering and ranges that cross mapped seasons.
+- **Hierarchical file paths:** Reads a specific file or episode from the final path component and can inherit a missing series title from parent folders. Parent season-pack ranges do not override the file's own season/episode.
+- **Absolute episode ranges:** Preserves both endpoints (e.g. `E768-E1064`) and resolves episodes individually across mapped TVDB-style seasons, reporting unmapped gaps instead of guessing.
 - **Reliable results:** Returns one matching title or `null` when a reliable match cannot be established.
 - **Local metadata:** Reads an existing SQLite database. Automatically downloads six public metadata sources on first startup and refreshes them periodically; custom URLs are optional.
 - **Diagnostics:** Use `POST /debug/match` to inspect parsing, candidates and selection.
@@ -69,9 +71,9 @@ docker compose up -d
 
 The Docker image is published from GitHub Actions. If the image is not publicly accessible yet, you may need to build it from source or authenticate with GitHub Container Registry.
 
-## Diagnostics
+## Dashboard and diagnostics
 
-The Rust API exposes `POST /debug/match` for structured parsing and matching diagnostics. The production service also serves the MatchLab dashboard.
+The Rust API exposes `POST /debug/match` for structured parsing and matching diagnostics. The production service also serves the MatchLab dashboard at `/`, with request statistics and history. The dashboard presents up to five ranked candidates as readable cards, showing IMDb ID, title, year, media type, season/episode and available AniDB details. The selected match is highlighted. The raw JSON diagnostics remain available through the API.
 
 ## API
 
@@ -93,22 +95,66 @@ curl -X POST http://127.0.0.1:8765/match \
   -d '{"t_title":"Dune.2021.2160p.WEB-DL"}'
 ```
 
-Example response (selected fields):
+Example response (selected fields; the public endpoint uses `imdbid`, not `imdb_id`):
 
 ```json
 {
-  "imdb_id": "tt1160419",
+  "imdbid": "tt1160419",
   "season": null,
   "episode": null,
   "sid": "tt1160419",
-  "anime": null,
-  "title": "Dune",
-  "year": 2021,
-  "category": "movie"
+  "anime_id": null,
+  "asid": null,
+  "type": "movie",
+  "parsed": {
+    "title": "Dune",
+    "year": 2021
+  }
 }
 ```
 
-For TV episodes, `sid` uses the format `tt1234567:season:episode`. For anime with a verified episode mapping, `anime.asid` uses `anidb_id:episode`. Responses also include matching and parsing details.
+For TV episodes, `sid` uses `tt1234567:season:episode` when the season and episode are known. For anime with verified AniDB episode coordinates, `asid` uses `anidb_id:episode`. `parsed` contains the parser output (which can include more fields than shown here). `GET /match?title=...` is also supported. The full selected record and ranked IMDb candidates are available through `POST /debug/match`.
+
+### Hierarchical paths and folder inheritance
+
+Pass a full relative path as the `title` or `t_title` value. Forward slashes and backslashes separate path components. MatchLab parses the **leaf** (last component) first. If the leaf supplies season/episode coordinates but lacks a meaningful series title, it looks for a title in the nearest suitable parent folder. Folder names supply missing context, **not** a replacement for the leaf's explicit episode information.
+
+| Input | Intended interpretation |
+| --- | --- |
+| `Supernatural S01-S12/S02E01` | Series `Supernatural`, season 2, episode 1; `S01-S12` is collection context. |
+| `Supernatural S01-S12/S02E01.mkv` | Same episode, with a filename extension. |
+| `One.piece.E768-E1064` | Absolute episode interval 768–1064 (297 episodes), potentially crossing season boundaries. |
+
+A parent folder does not automatically assign its season range to a child file. Explicit child coordinates take precedence. This is title inheritance, not a filesystem crawler: MatchLab parses the path **string supplied in the request** and does not inspect directories on disk.
+
+### Anime identity and episode mapping
+
+Anime matching uses the same local metadata snapshot as IMDb matching, supplemented by **AniDB titles**, **animeApi** identity links and **Anime-Lists** episode mappings. It does not rely on AI inference or fabricate an IMDb/AniDB relationship.
+
+1. The Rust parser extracts a title, optional season/episode and any absolute episode interval.
+2. IMDb matching searches original and alternate titles (including country-specific aliases) and ranks eligible movie or TV-series identities.
+3. Anime title matching independently checks AniDB aliases and linked IMDb identities. Exact anime aliases and anime-part titles can be relevant even when the release lacks explicit season tokens.
+4. Where an episode is supplied, the resolver uses the imported crosswalk tables to translate between absolute anime numbering, AniDB numbering and mapped TVDB-style season/episode coordinates. Explicit mappings and split-season rules are respected.
+5. A verified anime match can outrank an ordinary IMDb title candidate. An unrelated anime sharing an alias must not override an exact IMDb TV-series title.
+6. If a required episode mapping is missing or ambiguous, the service does not invent canonical episode coordinates. The selected IMDb identity may still be available without a verified anime episode.
+
+**Important:** Episode mappings in this project are **TVDB-style** coordinates from Anime-Lists, not independently verified IMDb season assignments. Do not assume the returned season number always equals IMDb's own season numbering.
+
+#### Absolute episode intervals across seasons
+
+For `One.piece.E768-E1064`, the parser preserves:
+
+```json
+{
+  "episode_start": 768,
+  "episode_end": 1064,
+  "episode_count": 297
+}
+```
+
+The matcher resolves each episode independently. The `episode_range` response contains `absolute_start`, `absolute_end`, `start_season`, `start_episode`, `end_season`, `end_episode`, `segments`, `unmapped_count` and `complete`. Each segment groups consecutive, verified episodes within a mapped season. A range can span multiple seasons. `complete` is `true` only if every episode has a mapping; missing endpoints remain `null`, and unmapped episodes are counted rather than interpolated. Top-level `season_end` and `episode_end` are also exposed. The ordinary `sid` refers to the mapped start episode when available; it is **not** a representation of the entire range.
+
+The availability and correctness of conversions depend on the imported metadata and its season conventions.
 
 The API returns JSON `null` when it cannot identify a reliable match. Invalid input returns HTTP `400`.
 
@@ -119,16 +165,6 @@ curl -X POST http://127.0.0.1:8765/debug/match \
   -H "Content-Type: application/json" \
   -d '{"title":"Breaking.Bad.S02E03.1080p"}'
 ```
-
-### Matching process
-
-1. The parser extracts the title and release information.
-2. The service searches IMDb metadata for movie and TV candidates.
-3. For episodic releases, it also searches anime metadata independently.
-4. A verified anime match takes priority; otherwise, the best eligible IMDb candidate is considered.
-5. The service returns the selected ID and episode information, or `null` if the match is uncertain.
-
-Anime episode conversion depends on the available mappings. Some unusual titles or episode-numbering formats may not resolve.
 
 ## Metadata and updates
 
