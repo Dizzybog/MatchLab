@@ -86,8 +86,8 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
                 }
                 count+=1;
             }
+            if malformed_rows>0 {tracing::warn!(source="imdb_basics",malformed_rows,"skipped malformed metadata TSV records");}
         }
-        if malformed_rows>0 {tracing::warn!(source="imdb_basics",malformed_rows,"skipped malformed metadata TSV records");}
         if count==0{return Err("IMDb basics contained no supported titles".into())}
         {
             let mut input=reader(akas)?;
@@ -113,8 +113,8 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
                     i32::from(r.get(original)==Some("1")),
                     r.get(ordering).unwrap_or("0").parse::<i64>().unwrap_or(0)])?;
             }
+            if malformed_rows>0 {tracing::warn!(source="imdb_akas",malformed_rows,"skipped malformed metadata TSV records");}
         }
-        if malformed_rows>0 {tracing::warn!(source="imdb_akas",malformed_rows,"skipped malformed metadata TSV records");}
         {
             let mut input=reader(episodes)?;
             let h=input.headers()?.clone();
@@ -133,8 +133,8 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
                 let se=r.get(season).unwrap_or("").parse::<i64>().unwrap_or(0);
                 if se>0{insert.execute(params![r.get(parent).unwrap_or(""),se])?;}
             }
+            if malformed_rows>0 {tracing::warn!(source="imdb_episodes",malformed_rows,"skipped malformed metadata TSV records");}
         }
-        if malformed_rows>0 {tracing::warn!(source="imdb_episodes",malformed_rows,"skipped malformed metadata TSV records");}
         let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
         tx.execute("INSERT INTO metadata_state VALUES('imdb',?1,?2)",params![now,count])?;
         // Do not mark full_refresh: anime datasets must also be imported and validated.
