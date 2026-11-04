@@ -212,6 +212,14 @@ fn mapped_absolute_range(db:&Connection,imdb:&str,start:i64,end:i64)->Result<Val
 
 /// Use the highest observed episode number, not the count: IMDb
 /// episode numbers can contain gaps. Only applies to season-only releases.
+/// Reject candidates whose imported IMDb season cannot contain the
+/// explicitly requested episode. Missing season metadata is not evidence
+/// that an episode exists.
+fn candidate_has_episode(db:&Connection,imdb:&str,season:i64,episode:i64)->Result<bool,String>{
+    if season<=0||episode<=0{return Ok(true);}
+    Ok(season_episode_end(db,imdb,season)?.is_some_and(|max|episode<=max))
+}
+
 fn season_episode_end(db:&Connection,imdb:&str,season:i64)->Result<Option<i64>,String>{
     match db.query_row("SELECT max_episode FROM season_episodes
         WHERE imdb_id=?1 AND season=?2",rusqlite::params![imdb,season],
@@ -256,6 +264,13 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
     };
     let imdb = imdb_v4::search(&db,title,year,series,seasons.iter().copied().max().unwrap_or(0),&req.title,!episodes.is_empty(),20)
         .map_err(|e|e.to_string())?;
+    let imdb=if seasons.len()==1 && episodes.len()==1 {
+        let season=seasons[0];
+        let episode=episodes[0];
+        imdb.into_iter().filter(|candidate|
+            candidate_has_episode(&db,&candidate.imdb_id,season,episode).unwrap_or(false)
+        ).collect::<Vec<_>>()
+    }else{imdb};
     let imdb: Vec<Candidate> = imdb.into_iter().map(|m|Candidate{
         imdb_id:m.imdb_id,title:m.title,year:m.year,media_type:m.media_type,
         matched_title:m.matched_title,anime_ids:m.anime_ids,source:"imdb"}).collect();
