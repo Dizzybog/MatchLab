@@ -4,8 +4,12 @@ services:
     pull_policy: always
     container_name: matchlab
     restart: unless-stopped
+    cpus: 2.0
+    mem_limit: 8g
+    pids_limit: 256
     environment:
       RUST_LOG: matchlab_server=info
+      MATCHLAB_MAX_CONCURRENT_MATCHES: "4"
       MATCHLAB_DB: /data/metadata.sqlite3
       MATCHLAB_HOST: 0.0.0.0:8765
       # Optional overrides; public sources and seven-day refresh are built in.
