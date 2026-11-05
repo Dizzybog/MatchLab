@@ -19,6 +19,7 @@ fn open(path:&Path)->rusqlite::Result<Connection>{
           details TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS requests_recent ON requests(id DESC);
+        CREATE INDEX IF NOT EXISTS requests_created_at ON requests(created_at);
         CREATE INDEX IF NOT EXISTS requests_status ON requests(status);")?;
     Ok(db)
 }
@@ -35,13 +36,26 @@ pub fn record(path:&Path,title:&str,status:&str,selected:Option<&Value>,details:
     if let Err(error)=result {tracing::warn!(%error,"could not persist matching history");}
 }
 
+/// Physically delete rows outside the rolling 24-hour window. Called by the
+/// background maintenance worker (including once immediately at startup).
+/// SQLite reuses freed pages; a manual VACUUM can reclaim old file size.
+pub fn prune(path:&Path)->Result<usize,String>{
+    let db=open(path).map_err(|e|e.to_string())?;
+    db.execute("DELETE FROM requests
+        WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-24 hours')",[])
+        .map_err(|e|e.to_string())
+}
+
 pub fn history(path:&Path,limit:usize,offset:usize,status:Option<&str>)->Result<Value,String>{
     if status.is_some_and(|s|!matches!(s,"matched"|"unmatched"|"error")){
         return Err("invalid history status filter".into());
     }
     let db=open(path).map_err(|e|e.to_string())?;
     let mut stmt=db.prepare("SELECT id,created_at,title,status,imdb_id,match_source,duration_ms,details
-        FROM requests WHERE (?1 IS NULL OR status=?1) ORDER BY id DESC LIMIT ?2 OFFSET ?3").map_err(|e|e.to_string())?;
+        FROM requests
+        WHERE created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-24 hours')
+          AND (?1 IS NULL OR status=?1)
+        ORDER BY id DESC LIMIT ?2 OFFSET ?3").map_err(|e|e.to_string())?;
     let rows=stmt.query_map(params![status,limit.min(100) as i64,offset.min(100_000) as i64],|r|{
         let details:String=r.get(7)?;
         Ok(json!({"id":r.get::<_,i64>(0)?,"created_at":r.get::<_,String>(1)?,
@@ -59,12 +73,15 @@ pub fn stats(path:&Path)->Result<Value,String>{
     let (total,matched,unmatched,errors,avg_ms):(i64,i64,i64,i64,f64)=db.query_row(
         "SELECT count(*),coalesce(sum(status='matched'),0),
          coalesce(sum(status='unmatched'),0),coalesce(sum(status='error'),0),
-         coalesce(avg(duration_ms),0) FROM requests",[],|r|
+         coalesce(avg(duration_ms),0) FROM requests
+         WHERE created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-24 hours')",[],|r|
         Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))
     ).map_err(|e|e.to_string())?;
     let mut stmt=db.prepare("SELECT substr(created_at,1,10) day,count(*) total,
         sum(status='matched') matched,sum(status='error') errors
-        FROM requests GROUP BY day ORDER BY day DESC LIMIT 14").map_err(|e|e.to_string())?;
+        FROM requests
+        WHERE created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-24 hours')
+        GROUP BY day ORDER BY day DESC LIMIT 2").map_err(|e|e.to_string())?;
     let days=stmt.query_map([],|r|Ok(json!({"day":r.get::<_,String>(0)?,
         "total":r.get::<_,i64>(1)?,"matched":r.get::<_,i64>(2)?,
         "errors":r.get::<_,i64>(3)?}))).map_err(|e|e.to_string())?
@@ -90,6 +107,37 @@ mod tests{
         assert_eq!(history(&path,10,0,Some("unmatched")).unwrap()["items"].as_array().unwrap().len(),0);
         assert_eq!(history(&path,10,0,Some("error")).unwrap()["items"][0]["title"],"broken");
         assert!(history(&path,10,0,Some("unknown")).is_err());
+        let _=std::fs::remove_file(&path);
+        let _=std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _=std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
+    fn retention_limits_visibility_and_reclaims_old_rows(){
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-history-retention-{}.sqlite3",std::process::id()));
+        let _=std::fs::remove_file(&path);
+        {
+            let db=open(&path).unwrap();
+            db.execute_batch("
+                INSERT INTO requests(created_at,title,status,duration_ms,details)
+                VALUES(strftime('%Y-%m-%dT%H:%M:%fZ','now','-25 hours'),'expired','matched',10,'{}');
+                INSERT INTO requests(created_at,title,status,duration_ms,details)
+                VALUES(strftime('%Y-%m-%dT%H:%M:%fZ','now','-23 hours'),'recent','unmatched',30,'{}');
+            ").unwrap();
+        }
+        // The dashboard must never display an expired request even before
+        // the periodic physical cleanup has run.
+        assert_eq!(history(&path,10,0,None).unwrap()["items"].as_array().unwrap().len(),1);
+        assert_eq!(history(&path,10,0,None).unwrap()["items"][0]["title"],"recent");
+        let before=stats(&path).unwrap();
+        assert_eq!(before["total"],1);
+        assert_eq!(before["unmatched"],1);
+        assert_eq!(prune(&path).unwrap(),1);
+        assert_eq!(prune(&path).unwrap(),0);
+        let db=open(&path).unwrap();
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM requests",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        drop(db);
         let _=std::fs::remove_file(&path);
         let _=std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _=std::fs::remove_file(path.with_extension("sqlite3-shm"));
