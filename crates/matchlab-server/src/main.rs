@@ -15,7 +15,7 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{env, path::PathBuf, sync::{Arc,Mutex,OnceLock}, time::{Instant,Duration}, collections::HashMap};
-use unicode_normalization::UnicodeNormalization;
+
 
 #[derive(Clone)]
 struct AppState { db: Arc<PathBuf>, history: Arc<PathBuf> }
@@ -72,12 +72,7 @@ fn parse_cached(title:&str)->Result<Value,String>{
 }
 
 fn normalize(input: &str) -> String {
-    let lowered = input.to_lowercase()
-        .replace('æ', "ae").replace('ø', "o").replace('œ', "oe").replace('ß', "ss");
-    let ascii: String = lowered.nfkd().filter(|c| c.is_ascii()).collect();
-    let words = ascii.split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|part| !part.is_empty() && *part != "and");
-    words.collect()
+    imdb_v4::clean_title(input)
 }
 
 fn numbers(v: Option<&Value>) -> Vec<i64> {
@@ -155,16 +150,10 @@ fn candidates(db: &Connection, key: &str, year: Option<i32>, series: bool) -> ru
 
 fn anime_candidate(db: &Connection, key: &str, season: Option<i64>, episode: i64) -> rusqlite::Result<Option<Value>> {
     if key.len() < 4 || episode <= 0 { return Ok(None); }
-    let mut stmt = db.prepare(
-        "SELECT DISTINCT a.anidb_id,a.clean_title,l.imdb_id
-         FROM anidb_titles a JOIN anime_series_map l ON l.anidb_id=a.anidb_id
-         WHERE a.clean_title IN (WITH RECURSIVE prefixes(n) AS (SELECT 6 WHERE length(?1)>=6 UNION ALL SELECT n+1 FROM prefixes WHERE n<length(?1)) SELECT substr(?1,1,n) FROM prefixes UNION SELECT ?1)
-         ORDER BY CASE WHEN a.clean_title=?1 THEN 0 ELSE 1 END,
-                  length(a.clean_title) DESC LIMIT 40"
-    )?;
-    let rows = stmt.query_map([key], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?;
-    let mut matches = Vec::new();
-    for row in rows { matches.push(row?); }
+    let matches:Vec<_>=tantivy_search::anime_aliases(db,key,6)
+        .map_err(|error|rusqlite::Error::ToSqlConversionFailure(
+            Box::new(std::io::Error::other(error))))?
+        .into_iter().map(|alias|(alias.anidb_id,alias.clean_title,alias.imdb_id)).collect();
     if matches.is_empty() { return Ok(None); }
     let exact = matches[0].1 == key;
     let best_len = matches[0].1.len();
@@ -191,13 +180,10 @@ fn anime_candidate(db: &Connection, key: &str, season: Option<i64>, episode: i64
 /// season or episode coordinates. Exact aliases precede longest prefixes.
 fn anime_identity(db:&Connection,key:&str)->rusqlite::Result<Option<String>>{
     if key.len()<4{return Ok(None);}
-    let mut stmt=db.prepare("SELECT DISTINCT a.clean_title,l.imdb_id
-        FROM anidb_titles a JOIN anime_series_map l ON l.anidb_id=a.anidb_id
-        WHERE a.clean_title IN (WITH RECURSIVE prefixes(n) AS (SELECT 6 WHERE length(?1)>=6 UNION ALL SELECT n+1 FROM prefixes WHERE n<length(?1)) SELECT substr(?1,1,n) FROM prefixes UNION SELECT ?1)
-        ORDER BY CASE WHEN a.clean_title=?1 THEN 0 ELSE 1 END,
-                 length(a.clean_title) DESC,l.imdb_id LIMIT 100")?;
-    let rows=stmt.query_map([key],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows:Vec<_>=tantivy_search::anime_aliases(db,key,6)
+        .map_err(|error|rusqlite::Error::ToSqlConversionFailure(
+            Box::new(std::io::Error::other(error))))?
+        .into_iter().map(|alias|(alias.clean_title,alias.imdb_id)).collect();
     let Some((best_alias,best_imdb))=rows.first()else{return Ok(None)};
     let exact=best_alias==key;
     let size=best_alias.len();

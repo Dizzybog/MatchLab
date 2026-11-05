@@ -2,10 +2,13 @@
 //! A disk-backed index is opened or built for the current SQLite generation.
 use std::{collections::HashMap,fs::File,path::{Path,PathBuf},sync::{Mutex,OnceLock},time::{Duration,SystemTime,UNIX_EPOCH}};
 use rusqlite::{Connection,OptionalExtension};
-use tantivy::{collector::DocSetCollector,doc,query::RegexQuery,schema::{Schema,STORED,STRING,Value},Index,IndexReader,ReloadPolicy};
+use tantivy::{collector::DocSetCollector,doc,query::{RegexQuery,TermQuery},schema::{Schema,STORED,STRING,Value,IndexRecordOption},Index,IndexReader,ReloadPolicy,Term};
 
 #[derive(Clone)]
-struct SearchIndex { reader:IndexReader, forward:tantivy::schema::Field, backward:tantivy::schema::Field, id:tantivy::schema::Field, anime:tantivy::schema::Field }
+struct SearchIndex { reader:IndexReader, forward:tantivy::schema::Field, backward:tantivy::schema::Field, id:tantivy::schema::Field, anime:tantivy::schema::Field, anime_id:tantivy::schema::Field }
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct AnimeAlias {pub anidb_id:String,pub clean_title:String,pub imdb_id:String}
+
 static CACHE:OnceLock<Mutex<HashMap<String,SearchIndex>>>=OnceLock::new();
 
 fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
@@ -13,7 +16,8 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
     let forward=builder.add_text_field("forward",STRING|STORED);
     let backward=builder.add_text_field("backward",STRING);
     let id=builder.add_text_field("imdb_id",STRING|STORED);
-    let anime=builder.add_text_field("anime_alias",STRING);
+    let anime=builder.add_text_field("anime_alias",STRING|STORED);
+    let anime_id=builder.add_text_field("anime_anidb_id",STORED);
     let year=builder.add_i64_field("year",tantivy::schema::INDEXED|STORED);
     let schema=builder.build();
     // Only a completed generation may be opened. Build in a sibling staging
@@ -52,14 +56,14 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('anidb_titles','anime_series_map')",
                 [],|r|r.get(0)).map_err(|e|e.to_string())?;
             if has_alias_tables==2 {
-                let mut aliases=db.prepare("SELECT DISTINCT l.imdb_id,a.clean_title
+                let mut aliases=db.prepare("SELECT DISTINCT l.imdb_id,a.anidb_id,a.clean_title
                     FROM anidb_titles a JOIN anime_series_map l ON l.anidb_id=a.anidb_id
                     WHERE a.clean_title<>''").map_err(|e|e.to_string())?;
-                let mapped=aliases.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))
+                let mapped=aliases.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))
                     .map_err(|e|e.to_string())?;
                 for item in mapped {
-                    let (imdb,alias)=item.map_err(|e|e.to_string())?;
-                    writer.add_document(doc!(anime=>alias,id=>imdb)).map_err(|e|e.to_string())?;
+                    let (imdb,anidb,alias)=item.map_err(|e|e.to_string())?;
+                    writer.add_document(doc!(anime=>alias,anime_id=>anidb,id=>imdb)).map_err(|e|e.to_string())?;
                     count+=1;
                 }
             }
@@ -97,7 +101,7 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
     if reader.searcher().num_docs()!=expected{
         return Err(format!("Tantivy index corrupted: expected {expected} documents, found {}",reader.searcher().num_docs()));
     }
-    Ok(SearchIndex{reader,forward,backward,id,anime})
+    Ok(SearchIndex{reader,forward,backward,id,anime,anime_id})
 }
 
 /// Each staged SQLite image contains a unique index-generation identifier.
@@ -130,7 +134,7 @@ fn generation(db:&Connection)->Result<String,String>{
 }
 
 fn index_dir(source:&Path,gen:&str)->PathBuf{
-    PathBuf::from(format!("{}.tantivy",source.display())).join(gen)
+    PathBuf::from(format!("{}.tantivy",source.display())).join(format!("schema4-{gen}"))
 }
 
 /// Build and verify the *final* Tantivy generation before publishing SQLite.
@@ -144,14 +148,14 @@ pub fn prepare(db:&Connection,target:&Path)->Result<(),String>{
 /// Reclaim old published generations conservatively. Never remove a recent
 /// generation or the one currently referenced by the published database.
 pub fn prune(db:&Connection,target:&Path)->Result<(),String>{
-    let active=generation(db)?;
+    let active=format!("schema4-{}",generation(db)?);
     let root=PathBuf::from(format!("{}.tantivy",target.display()));
     if !root.exists(){return Ok(());}
     let mut old=Vec::new();
     for entry in std::fs::read_dir(&root).map_err(|e|e.to_string())?{
         let entry=entry.map_err(|e|e.to_string())?;
         let name=entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with("v3-")||name==active||!entry.path().is_dir()
+        if !name.starts_with("schema4-v3-")||name==active||!entry.path().is_dir()
             ||!entry.path().join(".matchlab-complete").is_file(){continue;}
         let modified=entry.metadata().and_then(|m|m.modified()).map_err(|e|e.to_string())?;
         old.push((modified,entry.path()));
@@ -187,6 +191,38 @@ fn open_search(db:&Connection)->Result<(SearchIndex,Option<PathBuf>),String>{
         guard.get(&path).ok_or("index missing")?.clone()
     };
     Ok((search,memory_dir))
+}
+
+/// Resolve AniDB aliases through exact Tantivy term lookups, including aliases
+/// that are prefixes of a release. SQLite is only used later for mapping data.
+pub fn anime_aliases(db:&Connection,key:&str,min_prefix:usize)->Result<Vec<AnimeAlias>,String>{
+    if key.len()<4{return Ok(Vec::new());}
+    let (search,memory_dir)=open_search(db)?;
+    let reader=search.reader.searcher();
+    let mut matches=Vec::new();
+    let mut seen=std::collections::HashSet::new();
+    for len in (4..=key.len()).rev(){
+        if !key.is_char_boundary(len)||len<min_prefix&&len!=key.len(){continue;}
+        let token=&key[..len];
+        let query=TermQuery::new(Term::from_field_text(search.anime,token),IndexRecordOption::Basic);
+        let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
+        for addr in hits {
+            let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
+            let Some(imdb)=doc.get_first(search.id).and_then(|v|v.as_str()) else {continue};
+            let Some(anidb)=doc.get_first(search.anime_id).and_then(|v|v.as_str()) else {continue};
+            let result=AnimeAlias{anidb_id:anidb.to_string(),
+                clean_title:token.to_owned(),imdb_id:imdb.to_owned()};
+            if seen.insert((result.anidb_id.clone(),result.clean_title.clone(),result.imdb_id.clone())){
+                matches.push(result);
+            }
+        }
+    }
+    drop(reader);
+    drop(search);
+    if let Some(dir)=memory_dir {let _=std::fs::remove_dir_all(dir);}
+    matches.sort_by(|a,b|b.clean_title.len().cmp(&a.clean_title.len())
+        .then(a.anidb_id.cmp(&b.anidb_id)).then(a.imdb_id.cmp(&b.imdb_id)));
+    Ok(matches)
 }
 
 /// Returns candidate IMDb IDs; the deterministic IMDb V4 ranker remains authoritative.
@@ -306,6 +342,8 @@ mod persistence_tests {
             INSERT INTO anidb_titles VALUES('123','alternate anime');
             INSERT INTO anime_series_map VALUES('123','tt1234567');").unwrap();
         assert_eq!(anime_candidates(&db,"alternate anime").unwrap(),vec!["tt1234567"]);
+        assert_eq!(anime_aliases(&db,"alternate anime extra",6).unwrap(),vec![AnimeAlias{
+            anidb_id:"123".into(),clean_title:"alternate anime".into(),imdb_id:"tt1234567".into()}]);
         assert!(anime_candidates(&db,"alternate").unwrap().is_empty());
         assert!(candidates(&db,"alternate",None,false,1).unwrap().is_empty());
     }
