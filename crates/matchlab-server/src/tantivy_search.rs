@@ -107,7 +107,7 @@ fn open_search(db:&Connection)->Result<(SearchIndex,Option<PathBuf>),String>{
         let mut guard=cache.lock().map_err(|e|e.to_string())?;
         guard.retain(|key,_|!key.starts_with(&format!("anime-v1:{source}:"))||key==&path);
         if !guard.contains_key(&path){
-            let directory=if source==":memory:" {std::env::temp_dir().join(format!("matchlab-tantivy-{}",std::process::id()))} else {PathBuf::from(format!("{source}.tantivy"))};
+            let directory=PathBuf::from(format!("{source}.tantivy"));
             let generation=format!("anime-v1-{:?}",version).replace(|c:char|!c.is_ascii_alphanumeric(),"_");
             let directory=directory.join(generation);
             guard.insert(path.clone(),build(db,&directory)?);
