@@ -882,63 +882,36 @@ mod tests {
         assert_eq!(explicit_season_range("Supernatural S01-S12/S02E01"),None);
     }
     #[test]
-    fn public_response_movie_series_and_anime() {
-        let parsed=json!({"title":"Example","resolution":"1080p","languages":["Norwegian"],"year":2024});
-        let movie=public_match_response(Some(json!({
-            "imdb_id":"tt1234567","category":"movie","sid":"tt1234567",
-            "season":null,"episode":null,"anime":null,"anime_ids":{},"parsed":parsed
-        })));
-        assert_eq!(movie["type"],"movie");
-        assert_eq!(movie["imdbid"],"tt1234567");
-        assert_eq!(movie["parsed"]["resolution"],"1080p");
-        assert!(movie.get("imdb_candidates").is_none());
-        assert!(movie.get("matched_title").is_none());
-        let series=public_match_response(Some(json!({
-            "imdb_id":"tt7654321","category":"series","sid":"tt7654321:2:5",
-            "season":2,"episode":5,"anime":null,"anime_ids":{},"parsed":parsed
-        })));
-        assert_eq!(series["type"],"series");
-        assert_eq!(series["sid"],"tt7654321:2:5");
-        assert_eq!(series["season"],2);
-        assert_eq!(series["episode"],5);
-        let anime=public_match_response(Some(json!({
-            "imdb_id":"tt9999999","category":"series","sid":"tt9999999:1:4",
-            "season":1,"episode":4,
-            "anime":{"anidb_id":"123","episode":4,"asid":"123:4"},
-            "anime_ids":{"anidb":"123"},"parsed":parsed
-        })));
-        assert_eq!(anime["type"],"anime");
-        assert_eq!(anime["anime_id"],"123");
-        assert_eq!(anime["asid"],"123:4");
-        assert_eq!(anime["parsed"]["languages"][0],"Norwegian");
-        assert!(public_match_response(None).is_null());
+    fn match_response_has_only_four_fields() {
+        let movie=public_match_response(Some(json!({"imdb_id":"tt1234567",
+            "category":"movie","season":null,"episode":null})));
+        assert_eq!(movie,json!({"sid_start":"tt1234567","sid_end":"tt1234567",
+            "asid_start":null,"asid_end":null}));
+        let season=public_match_response(Some(json!({"imdb_id":"tt7654321",
+            "season":1,"season_end":2,"episode":1,"episode_end":22})));
+        assert_eq!(season["sid_start"],"tt7654321:1:1");
+        assert_eq!(season["sid_end"],"tt7654321:2:22");
+        let anime=public_match_response(Some(json!({"imdb_id":"tt9999999",
+            "season":1,"episode":4,"anime":{"asid":"123:4"}})));
+        assert_eq!(anime["asid_start"],"123:4");
+        assert_eq!(anime["asid_end"],"123:4");
+        let range=public_match_response(Some(json!({"imdb_id":"tt0388629",
+            "episode_range":{"complete":true,"segments":[
+                {"anidb_id":"69","start_anime_episode":700,"end_anime_episode":750},
+                {"anidb_id":"70","start_anime_episode":1,"end_anime_episode":50}
+            ]}})));
+        assert_eq!(range["asid_start"],"69:700");
+        assert_eq!(range["asid_end"],"70:50");
+        assert_eq!(public_match_response(None),
+            json!({"sid_start":null,"sid_end":null,"asid_start":null,"asid_end":null}));
     }
     #[test]
-    fn public_response_exposes_absolute_anime_range_without_inventing_asid() {
-        let result=public_match_response(Some(json!({
-            "imdb_id":"tt0388629","category":"series",
-            "anime_ids":{"anidb":"69"},
-            "anime":null,
-            "anime_episode_start":700,"anime_episode_end":800,
-            "episode_range":{"absolute_start":700,"absolute_end":800},
-            "season":null,"episode":null
-        })));
-        assert_eq!(result["type"],"anime");
-        assert_eq!(result["anime_episode_start"],700);
-        assert_eq!(result["anime_episode_end"],800);
-        assert!(result["asid"].is_null());
-    }
-    #[test]
-    fn anime_without_verified_episode_does_not_invent_coordinates() {
-        let result=public_match_response(Some(json!({
-            "imdb_id":"tt1111111","category":"series","sid":"tt1111111",
-            "season":null,"episode":null,"anime":null,
-            "anime_ids":{"anidb":"456"},"parsed":{"title":"Example Anime"}
-        })));
-        assert_eq!(result["type"],"anime");
-        assert!(result["season"].is_null());
-        assert!(result["episode"].is_null());
-        assert!(result["asid"].is_null());
+    fn parse_cache_returns_full_parser_fields() {
+        let first=parse_cached("Supernatural.S02E01.1080p.WEB-DL").unwrap();
+        let second=parse_cached("Supernatural.S02E01.1080p.WEB-DL").unwrap();
+        assert_eq!(first,second);
+        assert_eq!(first["title"],"Supernatural");
+        assert!(first.get("resolution").is_some());
     }
     #[test]
     fn anime_identity_without_episode_is_unambiguous(){
