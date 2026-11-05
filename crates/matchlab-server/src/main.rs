@@ -12,7 +12,7 @@ use rusqlite::{Connection, OpenFlags};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{env, path::PathBuf, sync::Arc, time::Instant};
+use std::{env, path::PathBuf, sync::{Arc,Mutex,OnceLock}, time::{Instant,Duration}, collections::HashMap};
 use unicode_normalization::UnicodeNormalization;
 
 #[derive(Clone)]
@@ -45,6 +45,28 @@ struct Diagnostic {
     anime_candidate: Option<Value>,
     selected: Option<Value>,
     reason: String,
+}
+
+// Shared, bounded 30-second parser cache for /parse and /match.
+const PARSE_TTL:Duration=Duration::from_secs(30);
+static PARSE_CACHE:OnceLock<Mutex<HashMap<String,(Instant,Value)>>>=OnceLock::new();
+fn parse_cached(title:&str)->Result<Value,String>{
+    if title.trim().is_empty()||title.len()>4096 {
+        return Err("title must be 1–4096 bytes".into());
+    }
+    let cache=PARSE_CACHE.get_or_init(||Mutex::new(HashMap::new()));
+    if let Ok(guard)=cache.lock(){
+        if let Some((at,value))=guard.get(title){
+            if at.elapsed()<PARSE_TTL{return Ok(value.clone());}
+        }
+    }
+    let value=Value::Object(ptt_core::parse_title(title,false).map_err(|e|e.to_string())?);
+    if let Ok(mut guard)=cache.lock(){
+        guard.retain(|_,(at,_)|at.elapsed()<PARSE_TTL);
+        if guard.len()>=1024{guard.clear();}
+        guard.insert(title.to_string(),(Instant::now(),value.clone()));
+    }
+    Ok(value)
 }
 
 fn normalize(input: &str) -> String {
@@ -249,7 +271,8 @@ fn season_episode_end(db:&Connection,imdb:&str,season:i64)->Result<Option<i64>,S
 
 fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> {
     if req.title.trim().is_empty() || req.title.len() > 4096 { return Err("title must be 1–4096 bytes".into()); }
-    let parsed = ptt_core::parse_title(&req.title,false).map_err(|e|e.to_string())?;
+    let parsed_value=parse_cached(&req.title)?;
+    let parsed=parsed_value.as_object().ok_or("parser returned no object")?;
     let parsed_title = parsed.get("title").and_then(Value::as_str).unwrap_or("");
     let title_owned = if explicit_absolute_episode(&req.title).is_some() && numbers(parsed.get("seasons")).is_empty() {
         let parts:Vec<_>=parsed_title.split(|c:char|!c.is_ascii_alphanumeric()).filter(|x|!x.is_empty()).collect();
@@ -365,7 +388,7 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
             "sid":sid,"anime":anime_details,
             "match_source":"anime_priority","title":title,"year":year.unwrap_or(0),
             "category":"series","matched_title":title,
-            "anime_ids":anime_ids,"parsed":parsed.clone()}))
+            "anime_ids":anime_ids,"parsed":parsed_value.clone()}))
     } else {
         // Python match_title refuses ambiguous IMDb identities rather than
         // silently returning the first equally plausible candidate.
@@ -441,7 +464,7 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
                     }else{c.imdb_id.clone()},
                     "anime":anime_result,"match_source":"imdb",
                     "matched_title":c.matched_title,"anime_ids":c.anime_ids,
-                    "parsed":parsed}))
+                    "parsed":parsed_value.clone()}))
         }else{None}
     };
     // A season pack such as Supernatural.S02 covers the season's episodes.
@@ -501,7 +524,7 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
     let reason = if anime.is_some() {"Verified anime crosswalk"} else if selected.is_some() {
         "IMDb title candidate (experimental matching rules)"
     } else {"No eligible candidate"};
-    Ok(Diagnostic{parsed: Value::Object(parsed),normalized_title:key,imdb_candidates:imdb,anime_candidate:anime,
+    Ok(Diagnostic{parsed: parsed_value,normalized_title:key,imdb_candidates:imdb,anime_candidate:anime,
         selected,reason:reason.into()})
 }
 
