@@ -69,10 +69,12 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
 }
 
 /// Returns candidate IMDb IDs; the deterministic IMDb V4 ranker remains authoritative.
-/// Uses exhaustive document collection before year filtering and ID deduplication.
+/// Uses exhaustive document collection before ID deduplication.
+/// Year is intentionally not a hard filter: V4 ranks year proximity and
+/// permits matches outside a one-year window.
 /// The limit parameter is retained for API compatibility; V4 ranking must
 /// receive the complete matching set, so it does not truncate this result.
-pub fn candidates(db:&Connection,key:&str,year:Option<i32>,suffix:bool,limit:usize)->Result<Vec<String>,String>{
+pub fn candidates(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,limit:usize)->Result<Vec<String>,String>{
     if key.is_empty()||limit==0{return Ok(Vec::new());}
     let source=db.path().unwrap_or(":memory:");
     let version=std::fs::metadata(source).ok().and_then(|m|m.modified().ok());
@@ -104,8 +106,6 @@ pub fn candidates(db:&Connection,key:&str,year:Option<i32>,suffix:bool,limit:usi
     let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
     for addr in hits {
         let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
-        let yr=doc.get_first(search.year).and_then(|v|v.as_i64()).unwrap_or(0);
-        if year.is_some_and(|y|(yr-i64::from(y)).abs()>1){continue;}
         if let Some(imdb)=doc.get_first(search.id).and_then(|v|v.as_str()){
             if seen.insert(imdb.to_string()){ids.push(imdb.to_string());}
         }
