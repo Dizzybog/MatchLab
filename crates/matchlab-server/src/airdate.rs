@@ -24,7 +24,7 @@ pub fn extract(input:&str)->Option<(String,String)> {
         let max=[31,if leap{29}else{28},31,30,31,30,31,31,30,31,30,31][m as usize-1];
         if d==0||d>max{continue;}
         let title=leaf[..offset].trim_end_matches(|c:char|!c.is_ascii_alphanumeric())
-            .replace(['.','_','-'],' ');
+            .replace(['.','_','-']," ");
         if title.trim().is_empty(){continue;}
         return Some((title,format!("{y:04}-{m:02}-{d:02}")));
     }
