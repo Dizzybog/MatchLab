@@ -1,6 +1,6 @@
 //! Tantivy inverted index for normalized IMDb title prefixes and reversed suffixes.
 //! The index is rebuilt from the currently published SQLite image on first use.
-use std::{collections::HashMap,path::Path,sync::{Mutex,OnceLock}};
+use std::{collections::HashMap,sync::{Mutex,OnceLock}};
 use rusqlite::Connection;
 use tantivy::{collector::TopDocs,doc,query::RegexQuery,schema::{Schema,STORED,STRING,Value},Index,IndexReader,ReloadPolicy};
 
