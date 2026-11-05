@@ -157,7 +157,7 @@ fn anime_candidate(db: &Connection, key: &str, season: Option<i64>, episode: i64
     let mut stmt = db.prepare(
         "SELECT DISTINCT a.anidb_id,a.clean_title,l.imdb_id
          FROM anidb_titles a JOIN anime_series_map l ON l.anidb_id=a.anidb_id
-         WHERE a.clean_title=?1 OR (length(a.clean_title)>=6 AND ?1 LIKE a.clean_title||'%')
+         WHERE a.clean_title IN (WITH RECURSIVE prefixes(n) AS (SELECT 6 WHERE length(?1)>=6 UNION ALL SELECT n+1 FROM prefixes WHERE n<length(?1)) SELECT substr(?1,1,n) FROM prefixes UNION SELECT ?1)
          ORDER BY CASE WHEN a.clean_title=?1 THEN 0 ELSE 1 END,
                   length(a.clean_title) DESC LIMIT 40"
     )?;
@@ -192,7 +192,7 @@ fn anime_identity(db:&Connection,key:&str)->rusqlite::Result<Option<String>>{
     if key.len()<4{return Ok(None);}
     let mut stmt=db.prepare("SELECT DISTINCT a.clean_title,l.imdb_id
         FROM anidb_titles a JOIN anime_series_map l ON l.anidb_id=a.anidb_id
-        WHERE a.clean_title=?1 OR (length(a.clean_title)>=6 AND ?1 LIKE a.clean_title||'%')
+        WHERE a.clean_title IN (WITH RECURSIVE prefixes(n) AS (SELECT 6 WHERE length(?1)>=6 UNION ALL SELECT n+1 FROM prefixes WHERE n<length(?1)) SELECT substr(?1,1,n) FROM prefixes UNION SELECT ?1)
         ORDER BY CASE WHEN a.clean_title=?1 THEN 0 ELSE 1 END,
                  length(a.clean_title) DESC,l.imdb_id LIMIT 100")?;
     let rows=stmt.query_map([key],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
