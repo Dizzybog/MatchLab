@@ -585,33 +585,49 @@ async fn readiness(State(state):State<AppState>) -> (StatusCode,Json<Value>) {
 /// Public response: winner coordinates plus the complete parser output.
 /// Keep full candidates and ranking diagnostics exclusive to /debug.
 fn public_match_response(selected: Option<Value>) -> Value {
-    let Some(winner) = selected else { return Value::Null; };
-    let anime = winner.get("anime").filter(|v|v.is_object());
-    let anime_id = anime.and_then(|v|v.get("anidb_id")).cloned().unwrap_or(Value::Null);
-    let asid = anime.and_then(|v|v.get("asid")).cloned().unwrap_or(Value::Null);
-    let is_anime = anime.is_some()
-        || winner.get("match_source").and_then(Value::as_str) == Some("anime_priority")
-        || winner.get("anime_ids").and_then(Value::as_object).is_some_and(|ids| !ids.is_empty());
-    json!({
-        "imdbid": winner.get("imdb_id").cloned().unwrap_or(Value::Null),
-        "season": winner.get("season").cloned().unwrap_or(Value::Null),
-        "episode": winner.get("episode").cloned().unwrap_or(Value::Null),
-        "episode_start": winner.get("episode").cloned().unwrap_or(Value::Null),
-        "sid": winner.get("sid").cloned().unwrap_or(Value::Null),
-        "season_end": winner.get("season_end").cloned().unwrap_or(Value::Null),
-        "episode_end": winner.get("episode_end").cloned().unwrap_or(Value::Null),
-        "episode_range": winner.get("episode_range").cloned().unwrap_or(Value::Null),
-        "anime_episode_start": winner.get("anime_episode_start")
-            .cloned().or_else(||anime.and_then(|a|a.get("episode")).cloned())
-            .unwrap_or(Value::Null),
-        "anime_episode_end": winner.get("anime_episode_end")
-            .cloned().or_else(||anime.and_then(|a|a.get("episode")).cloned())
-            .unwrap_or(Value::Null),
-        "anime_id": anime_id,
-        "asid": asid,
-        "type": if is_anime { "anime" } else if winner.get("category").and_then(Value::as_str) == Some("series") { "series" } else { "movie" },
-        "parsed": winner.get("parsed").cloned().unwrap_or(Value::Null)
-    })
+    let Some(winner)=selected else {
+        return json!({"sid_start":null,"sid_end":null,"asid_start":null,"asid_end":null});
+    };
+    let imdb=winner["imdb_id"].as_str().unwrap_or_default();
+    let start_season=winner["season"].as_i64();
+    let start_episode=winner["episode"].as_i64();
+    let end_season=winner["season_end"].as_i64().or(start_season);
+    let end_episode=winner["episode_end"].as_i64().or(start_episode);
+    let sid_start=if imdb.is_empty(){Value::Null}
+        else if let (Some(se),Some(ep))=(start_season,start_episode){
+            json!(format!("{imdb}:{se}:{ep}"))
+        }else{json!(imdb)};
+    let sid_end=if imdb.is_empty(){Value::Null}
+        else if let (Some(se),Some(ep))=(end_season,end_episode){
+            json!(format!("{imdb}:{se}:{ep}"))
+        }else{json!(imdb)};
+    let anime=winner.get("anime").filter(|v|v.is_object());
+    let direct_asid=anime.and_then(|a|a.get("asid")).cloned().unwrap_or(Value::Null);
+    let segments=winner.pointer("/episode_range/segments").and_then(Value::as_array);
+    let asid_start=segments.and_then(|v|v.first()).and_then(|v|{
+        Some(json!(format!("{}:{}",v["anidb_id"].as_str()?,
+            v["start_anime_episode"].as_i64()?)))
+    }).unwrap_or_else(||direct_asid.clone());
+    let asid_end=segments.and_then(|v|v.last()).and_then(|v|{
+        Some(json!(format!("{}:{}",v["anidb_id"].as_str()?,
+            v["end_anime_episode"].as_i64()?)))
+    }).unwrap_or(direct_asid);
+    json!({"sid_start":sid_start,"sid_end":sid_end,
+        "asid_start":asid_start,"asid_end":asid_end})
+}
+
+async fn parse_request(Json(req):Json<MatchRequest>)->(StatusCode,Json<Value>){
+    parse_response(req).await
+}
+async fn get_parse_request(Query(req):Query<MatchRequest>)->(StatusCode,Json<Value>){
+    parse_response(req).await
+}
+async fn parse_response(req:MatchRequest)->(StatusCode,Json<Value>){
+    match tokio::task::spawn_blocking(move||parse_cached(&req.title)).await{
+        Ok(Ok(value))=>(StatusCode::OK,Json(value)),
+        Ok(Err(error))=>(StatusCode::BAD_REQUEST,Json(json!({"error":error}))),
+        Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":error.to_string()}))),
+    }
 }
 
 async fn match_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
@@ -766,6 +782,7 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         .route("/health/ready",get(readiness))
         .route("/health/live",get(liveness))
         .route("/match",get(get_match_request).post(match_request))
+        .route("/parse",get(get_parse_request).post(parse_request))
         .route("/debug/match",post(debug_request))
         .with_state(AppState{db:Arc::new(PathBuf::from(db)),history:Arc::new(PathBuf::from(history_db))});
     let listener = tokio::net::TcpListener::bind(&host).await?;
