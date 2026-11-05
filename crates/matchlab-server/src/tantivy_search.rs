@@ -84,20 +84,7 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
     Ok(SearchIndex{reader,forward,backward,id,anime})
 }
 
-/// Returns candidate IMDb IDs; the deterministic IMDb V4 ranker remains authoritative.
-/// Uses exhaustive document collection before ID deduplication.
-/// Year is intentionally not a hard filter: V4 ranks year proximity and
-/// permits matches outside a one-year window.
-/// The limit parameter is retained for API compatibility; V4 ranking must
-/// receive the complete matching set, so it does not truncate this result.
-pub fn candidates(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,limit:usize)->Result<Vec<String>,String>{
-    candidates_internal(db,key,_year,suffix,limit,false)
-}
-pub fn anime_candidates(db:&Connection,key:&str)->Result<Vec<String>,String>{
-    candidates_internal(db,key,None,false,1,true)
-}
-fn candidates_internal(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,limit:usize,anime_only:bool)->Result<Vec<String>,String>{
-    if key.is_empty()||limit==0{return Ok(Vec::new());}
+fn open_search(db:&Connection)->Result<(SearchIndex,Option<PathBuf>),String>{
     let source=db.path().filter(|path|!path.is_empty() && *path!=":memory:").unwrap_or(":memory:");
     let version=std::fs::metadata(source).ok().and_then(|m|m.modified().ok());
     // In-memory SQLite connections have no filesystem generation and must
@@ -127,6 +114,24 @@ fn candidates_internal(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,lim
         }
         guard.get(&path).ok_or("index missing")?.clone()
     };
+    Ok((search,memory_dir))
+}
+
+/// Returns candidate IMDb IDs; the deterministic IMDb V4 ranker remains authoritative.
+/// Uses exhaustive document collection before ID deduplication.
+/// Year is intentionally not a hard filter: V4 ranks year proximity and
+/// permits matches outside a one-year window.
+/// The limit parameter is retained for API compatibility; V4 ranking must
+/// receive the complete matching set, so it does not truncate this result.
+pub fn candidates(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,limit:usize)->Result<Vec<String>,String>{
+    candidates_internal(db,key,_year,suffix,limit,false)
+}
+pub fn anime_candidates(db:&Connection,key:&str)->Result<Vec<String>,String>{
+    candidates_internal(db,key,None,false,1,true)
+}
+fn candidates_internal(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,limit:usize,anime_only:bool)->Result<Vec<String>,String>{
+    if key.is_empty()||limit==0{return Ok(Vec::new());}
+    let (search,memory_dir)=open_search(db)?;
     let field=if anime_only{search.anime}else if suffix{search.backward}else{search.forward};
     let term=if suffix{key.chars().rev().collect::<String>()}else{key.to_string()};
     let pattern=if anime_only{term}else{format!("{}.*",term)};
@@ -155,7 +160,9 @@ fn candidates_internal(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,lim
 // Prepare the index before serving requests. A full implementation should invoke
 // this from the metadata publication pipeline, not from the request path.
 pub fn warmup(db:&Connection)->Result<(),String>{
-    let _=candidates(db,"a",None,false,1)?;
+    let (search,memory_dir)=open_search(db)?;
+    drop(search);
+    if let Some(directory)=memory_dir {let _=std::fs::remove_dir_all(directory);}
     Ok(())
 }
 
