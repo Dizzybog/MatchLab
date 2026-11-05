@@ -14,7 +14,7 @@ The native Rust service provides an HTTP matching API backed by a local SQLite m
 - **Hierarchical file paths:** Reads a specific file or episode from the final path component and can inherit a missing series title from parent folders. Parent season-pack ranges do not override the file's own season/episode.
 - **Absolute episode ranges:** Preserves both endpoints (e.g. `E768-E1064`) and resolves episodes individually across mapped TVDB-style seasons, reporting unmapped gaps instead of guessing.
 - **Reliable results:** Returns one matching title or `null` when a reliable match cannot be established.
-- **Local metadata:** Reads an existing SQLite database. Automatically downloads six public metadata sources on first startup and refreshes them periodically; custom URLs are optional.
+- **Local metadata:** Reads an existing SQLite database. Automatically downloads seven public metadata sources on first startup and refreshes them periodically; custom URLs are optional.
 - **Diagnostics:** Use `POST /debug/match` to inspect parsing, candidates and selection.
 - **Docker support:** Runs on x86-64 and ARM64 machines, with persistent data and detailed logs.
 
@@ -54,7 +54,7 @@ Start the service:
 docker compose up -d
 ```
 
-**No extra environment variables are required.** On a fresh volume the Rust API starts and downloads six public metadata feeds in the background. `/health` returns HTTP 503 until the first complete import succeeds; this requires outbound HTTPS access, disk space and time. Later refresh failures preserve the existing database.
+**No extra environment variables are required.** On a fresh volume the Rust API starts and downloads seven public metadata feeds in the background. `/health` returns HTTP 503 until the first complete import succeeds; this requires outbound HTTPS access, disk space and time. Later refresh failures preserve the existing database.
 
 Check the logs:
 
@@ -87,33 +87,54 @@ curl http://127.0.0.1:8765/health
 
 The service returns HTTP `200` when the metadata is ready and `503` while it is initializing.
 
-### Match a title
+### Minimal matching API — `/match`
+
+`GET /match` and `POST /match` return **exactly four fields**: `sid_start`, `sid_end`, `asid_start` and `asid_end`. The matcher runs independently: you **do not** need to call `/parse` first.
 
 ```bash
 curl -X POST http://127.0.0.1:8765/match \
   -H "Content-Type: application/json" \
-  -d '{"t_title":"Dune.2021.2160p.WEB-DL"}'
+  -d '{"title":"Supernatural.S01E01-E22.1080p"}'
 ```
 
-Example response (selected fields; the public endpoint uses `imdbid`, not `imdb_id`):
+Example response (assuming the selected IMDb identity is `tt0460681`):
 
 ```json
 {
-  "imdbid": "tt1160419",
-  "season": null,
-  "episode": null,
-  "sid": "tt1160419",
-  "anime_id": null,
-  "asid": null,
-  "type": "movie",
-  "parsed": {
-    "title": "Dune",
-    "year": 2021
-  }
+  "sid_start": "tt0460681:1:1",
+  "sid_end": "tt0460681:1:22",
+  "asid_start": null,
+  "asid_end": null
 }
 ```
 
-For TV episodes, `sid` uses `tt1234567:season:episode` when the season and episode are known. For anime with verified AniDB episode coordinates, `asid` uses `anidb_id:episode`. `parsed` contains the parser output (which can include more fields than shown here). `GET /match?title=...` is also supported. The full selected record and ranked IMDb candidates are available through `POST /debug/match`.
+- **Movie:** both SID fields contain the IMDb title ID, e.g. `tt1160419`.
+- **Single TV episode:** both SID fields contain `ttID:season:episode`.
+- **Episode/season pack:** SID fields identify the first and last episode when verified endpoints are available. Missing episode metadata is not guessed.
+- **Anime:** ASID fields contain `anidb_id:episode` when verified mappings exist. An interval may cross AniDB IDs; the start and end can therefore have different prefixes.
+- **No reliable match:** all four fields are `null`. Missing individual mappings are `null`; no synthetic IDs are returned.
+
+For a URL query, use `GET /match?title=Supernatural.S01E01`. Both endpoints accept `title` or `t_title` as the request input. A supplied `year` can constrain matching.
+
+### Full parser API — `/parse`
+
+`GET /parse` and `POST /parse` return the **complete structured parser output** for the torrent title, without requiring an IMDb/AniDB database lookup.
+
+```bash
+curl -X POST http://127.0.0.1:8765/parse \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Supernatural.S02E03.1080p.WEB-DL"}'
+```
+
+The JSON contains every field the parser recognizes, such as `title`, `seasons`, `episodes`, `year`, `resolution`, `quality`, `codec`, `languages` and release metadata. Fields not recognized in the input are omitted; the exact set depends on the title. `GET /parse?title=...` is also supported.
+
+### Shared 30-second cache
+
+Both APIs use the same native Rust parser. A bounded, in-memory cache stores parsed results by **exact input title** for **30 seconds**. If a client calls `/parse` and then `/match` with the same title, the second request can reuse the parsing result; the reverse order works too. `/match` always performs its own metadata matching and does not require a preceding parse call.
+
+The cache is process-local (not shared between replicas), has a maximum of 1,024 entries, and does not persist across restarts. The cache stores parsing results, **not** full match results.
+
+For detailed ranking, candidates, episode mapping segments and debugging, use `POST /debug/match`. The dashboard at `/` also uses diagnostic data.
 
 ### Hierarchical paths and folder inheritance
 
@@ -152,11 +173,11 @@ For `One.piece.E768-E1064`, the parser preserves:
 }
 ```
 
-The matcher resolves each episode independently. The `episode_range` response contains `absolute_start`, `absolute_end`, `start_season`, `start_episode`, `end_season`, `end_episode`, `segments`, `unmapped_count` and `complete`. Each segment groups consecutive, verified episodes within a mapped season. A range can span multiple seasons. `complete` is `true` only if every episode has a mapping; missing endpoints remain `null`, and unmapped episodes are counted rather than interpolated. Top-level `season_end` and `episode_end` are also exposed. The ordinary `sid` refers to the mapped start episode when available; it is **not** a representation of the entire range.
+The diagnostic endpoint (`POST /debug/match`) resolves each episode independently. Its `episode_range` object contains `absolute_start`, `absolute_end`, `start_season`, `start_episode`, `end_season`, `end_episode`, `segments`, `unmapped_count` and `complete`. Each segment groups consecutive, verified episodes within a mapped season. A range can span multiple seasons. `complete` is `true` only if every episode has a mapping; missing endpoints remain `null`, and unmapped episodes are counted rather than interpolated. The public `/match` response exposes only `sid_start`, `sid_end`, `asid_start` and `asid_end`; full segment details remain in diagnostics.
 
 The availability and correctness of conversions depend on the imported metadata and its season conventions.
 
-The API returns JSON `null` when it cannot identify a reliable match. Invalid input returns HTTP `400`.
+When no reliable match exists, `/match` returns an object with four `null` values. Invalid input returns HTTP `400`.
 
 To inspect the candidate lists programmatically, use the diagnostic endpoint:
 
@@ -176,7 +197,7 @@ The season table uses IMDb season numbering; anime crosswalk mappings may use di
 
 ## Metadata and updates
 
-The native Rust backend supports `refresh-metadata` for six local metadata files and `refresh-metadata-urls` for six HTTPS sources (IMDb basics, AKAs, episodes, animeApi, Anime-Lists, AniDB titles). Automatic initialization and periodic refresh use six built-in public HTTPS URLs. `MATCHLAB_METADATA_URLS` can optionally override all six URLs. `MATCHLAB_METADATA_REFRESH_HOURS` defaults to 168 and accepts values from 1 to 720. Each complete refresh is validated in a staging SQLite database before atomic publication; failures preserve the existing database.
+The native Rust backend supports `refresh-metadata` for six local metadata files and `refresh-metadata-urls` for seven HTTPS sources (IMDb basics, AKAs, episodes, ratings, animeApi, Anime-Lists, AniDB titles). Automatic initialization and periodic refresh use seven built-in public HTTPS URLs. `MATCHLAB_METADATA_URLS` accepts seven URLs, or the legacy six-URL configuration (the official IMDb ratings URL is inserted automatically). `MATCHLAB_METADATA_REFRESH_HOURS` defaults to 168 and accepts values from 1 to 720. Each complete refresh is validated in a staging SQLite database before atomic publication; failures preserve the existing database.
 
 ## Configuration
 
@@ -186,7 +207,7 @@ The native Rust backend supports `refresh-metadata` for six local metadata files
 | `/data` | Persistent storage location for the SQLite metadata database. |
 | `MATCHLAB_DB` | SQLite path (default `/data/metadata.sqlite3`). |
 | `MATCHLAB_HOST` | HTTP listen address (Docker default `0.0.0.0:8765`). |
-| `MATCHLAB_METADATA_URLS` | Optional override of six built-in HTTPS metadata source URLs. |
+| `MATCHLAB_METADATA_URLS` | Optional override of seven HTTPS metadata source URLs; legacy six-URL configuration is accepted. |
 | `MATCHLAB_METADATA_REFRESH_HOURS` | Refresh interval, default 168 hours, allowed 1–720. |
 | `8765` | HTTP port for the Rust API. |
 
