@@ -12,5 +12,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Test native Rust backend
         run: RUSTFLAGS="-D warnings" cargo test --workspace
+      - name: Check all Rust targets, including parser benchmarks
+        run: RUSTFLAGS="-D warnings" cargo check --workspace --all-targets
       - name: Build production Docker image
         run: docker build -t matchlab:test .
