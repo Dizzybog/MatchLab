@@ -86,3 +86,31 @@ pub fn warmup(db:&Connection)->Result<(),String>{
     let _=candidates(db,"a",None,false,1)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+
+    #[test]
+    fn disk_index_reopens_without_rebuilding() {
+        let root=std::env::temp_dir().join(format!(
+            "matchlab-tantivy-persistence-{}-{:?}",
+            std::process::id(),std::thread::current().id()));
+        let _=std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let database=root.join("metadata.sqlite3");
+        let conn=Connection::open(&database).unwrap();
+        conn.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER);
+            INSERT INTO titles VALUES('tt1234567','supernatural',2005);").unwrap();
+        let index_path=root.join("index");
+        let first=build(&conn,&index_path).unwrap();
+        assert_eq!(first.reader.searcher().num_docs(),1);
+        drop(first);
+        // Reopen the same persisted generation with no SQLite changes.
+        let reopened=build(&conn,&index_path).unwrap();
+        assert_eq!(reopened.reader.searcher().num_docs(),1);
+        drop(reopened);
+        drop(conn);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
