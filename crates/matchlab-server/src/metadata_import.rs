@@ -88,7 +88,7 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
                     continue;
                 }
                 let t=r.get(kind).unwrap_or("");
-                if !matches!(t,"movie"|"tvMovie"|"short"|"tvShort"|"tvSpecial"|"tvSeries"|"tvMiniSeries"){continue}
+                if !matches!(t,"movie"|"tvMovie"|"tvSpecial"|"tvSeries"|"tvMiniSeries"){continue}
                 let id=r.get(id).unwrap_or("");
                 let yr=r.get(year).unwrap_or("").parse::<i32>().unwrap_or(0);
                 let category=if t=="tvSeries"||t=="tvMiniSeries"{"series"}else{"movie"};
