@@ -2,7 +2,7 @@
 //! A disk-backed index is opened or built for the current SQLite generation.
 use std::{collections::HashMap,path::PathBuf,sync::{Mutex,OnceLock}};
 use rusqlite::Connection;
-use tantivy::{collector::TopDocs,doc,query::RegexQuery,schema::{Schema,STORED,STRING,Value},Index,IndexReader,ReloadPolicy};
+use tantivy::{collector::DocSetCollector,doc,query::RegexQuery,schema::{Schema,STORED,STRING,Value},Index,IndexReader,ReloadPolicy};
 
 struct SearchIndex { reader:IndexReader, forward:tantivy::schema::Field, backward:tantivy::schema::Field, id:tantivy::schema::Field, year:tantivy::schema::Field }
 static CACHE:OnceLock<Mutex<HashMap<String,SearchIndex>>>=OnceLock::new();
@@ -68,7 +68,7 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
 }
 
 /// Returns candidate IMDb IDs; the deterministic IMDb V4 ranker remains authoritative.
-/// The current capped retrieval is retained pending V4 parity validation.
+/// Uses exhaustive document collection before year filtering and ID deduplication.
 pub fn candidates(db:&Connection,key:&str,year:Option<i32>,suffix:bool,limit:usize)->Result<Vec<String>,String>{
     if key.is_empty()||limit==0{return Ok(Vec::new());}
     let cache=CACHE.get_or_init(||Mutex::new(HashMap::new()));
@@ -93,9 +93,10 @@ pub fn candidates(db:&Connection,key:&str,year:Option<i32>,suffix:bool,limit:usi
     let reader=search.reader.searcher();
     let mut ids=Vec::new();
     let mut seen=std::collections::HashSet::new();
-    let hits=reader.search(&query,&TopDocs::with_limit(limit.saturating_mul(8).min(10000)))
-        .map_err(|e|e.to_string())?;
-    for (_,addr) in hits {
+    // Exhaustive candidate collection prevents arbitrary TopDocs truncation
+    // from discarding a valid year or longer alias before V4 ranking.
+    let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
+    for addr in hits {
         let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
         let yr=doc.get_first(search.year).and_then(|v|v.as_i64()).unwrap_or(0);
         if year.is_some_and(|y|(yr-i64::from(y)).abs()>1){continue;}
