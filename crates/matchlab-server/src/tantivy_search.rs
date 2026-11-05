@@ -201,6 +201,23 @@ mod persistence_tests {
     }
 
     #[test]
+    fn corrupted_completion_marker_is_rejected() {
+        let root=std::env::temp_dir().join(format!(
+            "matchlab-tantivy-corrupt-{}-{:?}",
+            std::process::id(),std::thread::current().id()));
+        let _=std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER);
+            INSERT INTO titles VALUES('tt1234567','example',2020);").unwrap();
+        let index_path=root.join("index");
+        drop(build(&db,&index_path).unwrap());
+        std::fs::write(index_path.join(".matchlab-complete"),"999").unwrap();
+        assert!(build(&db,&index_path).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn disk_index_reopens_without_rebuilding() {
         let root=std::env::temp_dir().join(format!(
             "matchlab-tantivy-persistence-{}-{:?}",
