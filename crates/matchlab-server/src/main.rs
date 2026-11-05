@@ -12,7 +12,7 @@ use rusqlite::{Connection, OpenFlags};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{env, path::PathBuf, sync::Arc, time::Instant};
+use std::{env, path::PathBuf, sync::{Arc,Mutex,OnceLock}, time::{Instant,Duration}, collections::HashMap};
 use unicode_normalization::UnicodeNormalization;
 
 #[derive(Clone)]
@@ -45,6 +45,28 @@ struct Diagnostic {
     anime_candidate: Option<Value>,
     selected: Option<Value>,
     reason: String,
+}
+
+// Shared, bounded 30-second parser cache for /parse and /match.
+const PARSE_TTL:Duration=Duration::from_secs(30);
+static PARSE_CACHE:OnceLock<Mutex<HashMap<String,(Instant,Value)>>>=OnceLock::new();
+fn parse_cached(title:&str)->Result<Value,String>{
+    if title.trim().is_empty()||title.len()>4096 {
+        return Err("title must be 1–4096 bytes".into());
+    }
+    let cache=PARSE_CACHE.get_or_init(||Mutex::new(HashMap::new()));
+    if let Ok(guard)=cache.lock(){
+        if let Some((at,value))=guard.get(title){
+            if at.elapsed()<PARSE_TTL{return Ok(value.clone());}
+        }
+    }
+    let value=Value::Object(ptt_core::parse_title(title,false).map_err(|e|e.to_string())?);
+    if let Ok(mut guard)=cache.lock(){
+        guard.retain(|_,(at,_)|at.elapsed()<PARSE_TTL);
+        if guard.len()>=1024{guard.clear();}
+        guard.insert(title.to_string(),(Instant::now(),value.clone()));
+    }
+    Ok(value)
 }
 
 fn normalize(input: &str) -> String {
@@ -249,7 +271,8 @@ fn season_episode_end(db:&Connection,imdb:&str,season:i64)->Result<Option<i64>,S
 
 fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> {
     if req.title.trim().is_empty() || req.title.len() > 4096 { return Err("title must be 1–4096 bytes".into()); }
-    let parsed = ptt_core::parse_title(&req.title,false).map_err(|e|e.to_string())?;
+    let parsed_value=parse_cached(&req.title)?;
+    let parsed=parsed_value.as_object().ok_or("parser returned no object")?;
     let parsed_title = parsed.get("title").and_then(Value::as_str).unwrap_or("");
     let title_owned = if explicit_absolute_episode(&req.title).is_some() && numbers(parsed.get("seasons")).is_empty() {
         let parts:Vec<_>=parsed_title.split(|c:char|!c.is_ascii_alphanumeric()).filter(|x|!x.is_empty()).collect();
@@ -365,7 +388,7 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
             "sid":sid,"anime":anime_details,
             "match_source":"anime_priority","title":title,"year":year.unwrap_or(0),
             "category":"series","matched_title":title,
-            "anime_ids":anime_ids,"parsed":parsed.clone()}))
+            "anime_ids":anime_ids,"parsed":parsed_value.clone()}))
     } else {
         // Python match_title refuses ambiguous IMDb identities rather than
         // silently returning the first equally plausible candidate.
@@ -441,7 +464,7 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
                     }else{c.imdb_id.clone()},
                     "anime":anime_result,"match_source":"imdb",
                     "matched_title":c.matched_title,"anime_ids":c.anime_ids,
-                    "parsed":parsed}))
+                    "parsed":parsed_value.clone()}))
         }else{None}
     };
     // A season pack such as Supernatural.S02 covers the season's episodes.
@@ -449,8 +472,10 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
     if let (Some((start,end)),Some(winner))=(season_range,selected.as_mut()){
         winner["season"]=json!(start);
         winner["season_end"]=json!(end);
-        winner["episode"]=Value::Null;
-        winner["episode_end"]=Value::Null;
+        winner["episode"]=json!(1);
+        winner["episode_end"]=winner["imdb_id"].as_str()
+            .and_then(|id|season_episode_end(&db,id,end).ok().flatten())
+            .map_or(Value::Null,|n|json!(n));
         winner["episode_range"]=json!({"start_season":start,"end_season":end,
             "source":"imdb_season_pack"});
     }
@@ -501,7 +526,7 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
     let reason = if anime.is_some() {"Verified anime crosswalk"} else if selected.is_some() {
         "IMDb title candidate (experimental matching rules)"
     } else {"No eligible candidate"};
-    Ok(Diagnostic{parsed: Value::Object(parsed),normalized_title:key,imdb_candidates:imdb,anime_candidate:anime,
+    Ok(Diagnostic{parsed: parsed_value,normalized_title:key,imdb_candidates:imdb,anime_candidate:anime,
         selected,reason:reason.into()})
 }
 
@@ -562,33 +587,51 @@ async fn readiness(State(state):State<AppState>) -> (StatusCode,Json<Value>) {
 /// Public response: winner coordinates plus the complete parser output.
 /// Keep full candidates and ranking diagnostics exclusive to /debug.
 fn public_match_response(selected: Option<Value>) -> Value {
-    let Some(winner) = selected else { return Value::Null; };
-    let anime = winner.get("anime").filter(|v|v.is_object());
-    let anime_id = anime.and_then(|v|v.get("anidb_id")).cloned().unwrap_or(Value::Null);
-    let asid = anime.and_then(|v|v.get("asid")).cloned().unwrap_or(Value::Null);
-    let is_anime = anime.is_some()
-        || winner.get("match_source").and_then(Value::as_str) == Some("anime_priority")
-        || winner.get("anime_ids").and_then(Value::as_object).is_some_and(|ids| !ids.is_empty());
-    json!({
-        "imdbid": winner.get("imdb_id").cloned().unwrap_or(Value::Null),
-        "season": winner.get("season").cloned().unwrap_or(Value::Null),
-        "episode": winner.get("episode").cloned().unwrap_or(Value::Null),
-        "episode_start": winner.get("episode").cloned().unwrap_or(Value::Null),
-        "sid": winner.get("sid").cloned().unwrap_or(Value::Null),
-        "season_end": winner.get("season_end").cloned().unwrap_or(Value::Null),
-        "episode_end": winner.get("episode_end").cloned().unwrap_or(Value::Null),
-        "episode_range": winner.get("episode_range").cloned().unwrap_or(Value::Null),
-        "anime_episode_start": winner.get("anime_episode_start")
-            .cloned().or_else(||anime.and_then(|a|a.get("episode")).cloned())
-            .unwrap_or(Value::Null),
-        "anime_episode_end": winner.get("anime_episode_end")
-            .cloned().or_else(||anime.and_then(|a|a.get("episode")).cloned())
-            .unwrap_or(Value::Null),
-        "anime_id": anime_id,
-        "asid": asid,
-        "type": if is_anime { "anime" } else if winner.get("category").and_then(Value::as_str) == Some("series") { "series" } else { "movie" },
-        "parsed": winner.get("parsed").cloned().unwrap_or(Value::Null)
-    })
+    let Some(winner)=selected else {
+        return json!({"sid_start":null,"sid_end":null,"asid_start":null,"asid_end":null});
+    };
+    let imdb=winner["imdb_id"].as_str().unwrap_or_default();
+    let start_season=winner["season"].as_i64();
+    let start_episode=winner["episode"].as_i64();
+    let end_season=winner["season_end"].as_i64().or(start_season);
+    let end_episode=winner["episode_end"].as_i64().or(start_episode);
+    let sid_start=if imdb.is_empty(){Value::Null}
+        else if let (Some(se),Some(ep))=(start_season,start_episode){
+            json!(format!("{imdb}:{se}:{ep}"))
+        }else{json!(imdb)};
+    let sid_end=if imdb.is_empty(){Value::Null}
+        else if let (Some(se),Some(ep))=(end_season,end_episode){
+            json!(format!("{imdb}:{se}:{ep}"))
+        }else{json!(imdb)};
+    let anime=winner.get("anime").filter(|v|v.is_object());
+    let direct_asid=anime.and_then(|a|a.get("asid")).cloned().unwrap_or(Value::Null);
+    let segments=winner.pointer("/episode_range/segments").and_then(Value::as_array);
+    let complete=winner.pointer("/episode_range/complete")
+        .and_then(Value::as_bool).unwrap_or(true);
+    let asid_start=segments.filter(|_|complete).and_then(|v|v.first()).and_then(|v|{
+        Some(json!(format!("{}:{}",v["anidb_id"].as_str()?,
+            v["start_anime_episode"].as_i64()?)))
+    }).unwrap_or_else(||direct_asid.clone());
+    let asid_end=segments.filter(|_|complete).and_then(|v|v.last()).and_then(|v|{
+        Some(json!(format!("{}:{}",v["anidb_id"].as_str()?,
+            v["end_anime_episode"].as_i64()?)))
+    }).unwrap_or(direct_asid);
+    json!({"sid_start":sid_start,"sid_end":sid_end,
+        "asid_start":asid_start,"asid_end":asid_end})
+}
+
+async fn parse_request(Json(req):Json<MatchRequest>)->(StatusCode,Json<Value>){
+    parse_response(req).await
+}
+async fn get_parse_request(Query(req):Query<MatchRequest>)->(StatusCode,Json<Value>){
+    parse_response(req).await
+}
+async fn parse_response(req:MatchRequest)->(StatusCode,Json<Value>){
+    match tokio::task::spawn_blocking(move||parse_cached(&req.title)).await{
+        Ok(Ok(value))=>(StatusCode::OK,Json(value)),
+        Ok(Err(error))=>(StatusCode::BAD_REQUEST,Json(json!({"error":error}))),
+        Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":error.to_string()}))),
+    }
 }
 
 async fn match_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
@@ -743,6 +786,7 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         .route("/health/ready",get(readiness))
         .route("/health/live",get(liveness))
         .route("/match",get(get_match_request).post(match_request))
+        .route("/parse",get(get_parse_request).post(parse_request))
         .route("/debug/match",post(debug_request))
         .with_state(AppState{db:Arc::new(PathBuf::from(db)),history:Arc::new(PathBuf::from(history_db))});
     let listener = tokio::net::TcpListener::bind(&host).await?;
@@ -838,63 +882,36 @@ mod tests {
         assert_eq!(explicit_season_range("Supernatural S01-S12/S02E01"),None);
     }
     #[test]
-    fn public_response_movie_series_and_anime() {
-        let parsed=json!({"title":"Example","resolution":"1080p","languages":["Norwegian"],"year":2024});
-        let movie=public_match_response(Some(json!({
-            "imdb_id":"tt1234567","category":"movie","sid":"tt1234567",
-            "season":null,"episode":null,"anime":null,"anime_ids":{},"parsed":parsed
-        })));
-        assert_eq!(movie["type"],"movie");
-        assert_eq!(movie["imdbid"],"tt1234567");
-        assert_eq!(movie["parsed"]["resolution"],"1080p");
-        assert!(movie.get("imdb_candidates").is_none());
-        assert!(movie.get("matched_title").is_none());
-        let series=public_match_response(Some(json!({
-            "imdb_id":"tt7654321","category":"series","sid":"tt7654321:2:5",
-            "season":2,"episode":5,"anime":null,"anime_ids":{},"parsed":parsed
-        })));
-        assert_eq!(series["type"],"series");
-        assert_eq!(series["sid"],"tt7654321:2:5");
-        assert_eq!(series["season"],2);
-        assert_eq!(series["episode"],5);
-        let anime=public_match_response(Some(json!({
-            "imdb_id":"tt9999999","category":"series","sid":"tt9999999:1:4",
-            "season":1,"episode":4,
-            "anime":{"anidb_id":"123","episode":4,"asid":"123:4"},
-            "anime_ids":{"anidb":"123"},"parsed":parsed
-        })));
-        assert_eq!(anime["type"],"anime");
-        assert_eq!(anime["anime_id"],"123");
-        assert_eq!(anime["asid"],"123:4");
-        assert_eq!(anime["parsed"]["languages"][0],"Norwegian");
-        assert!(public_match_response(None).is_null());
+    fn match_response_has_only_four_fields() {
+        let movie=public_match_response(Some(json!({"imdb_id":"tt1234567",
+            "category":"movie","season":null,"episode":null})));
+        assert_eq!(movie,json!({"sid_start":"tt1234567","sid_end":"tt1234567",
+            "asid_start":null,"asid_end":null}));
+        let season=public_match_response(Some(json!({"imdb_id":"tt7654321",
+            "season":1,"season_end":2,"episode":1,"episode_end":22})));
+        assert_eq!(season["sid_start"],"tt7654321:1:1");
+        assert_eq!(season["sid_end"],"tt7654321:2:22");
+        let anime=public_match_response(Some(json!({"imdb_id":"tt9999999",
+            "season":1,"episode":4,"anime":{"asid":"123:4"}})));
+        assert_eq!(anime["asid_start"],"123:4");
+        assert_eq!(anime["asid_end"],"123:4");
+        let range=public_match_response(Some(json!({"imdb_id":"tt0388629",
+            "episode_range":{"complete":true,"segments":[
+                {"anidb_id":"69","start_anime_episode":700,"end_anime_episode":750},
+                {"anidb_id":"70","start_anime_episode":1,"end_anime_episode":50}
+            ]}})));
+        assert_eq!(range["asid_start"],"69:700");
+        assert_eq!(range["asid_end"],"70:50");
+        assert_eq!(public_match_response(None),
+            json!({"sid_start":null,"sid_end":null,"asid_start":null,"asid_end":null}));
     }
     #[test]
-    fn public_response_exposes_absolute_anime_range_without_inventing_asid() {
-        let result=public_match_response(Some(json!({
-            "imdb_id":"tt0388629","category":"series",
-            "anime_ids":{"anidb":"69"},
-            "anime":null,
-            "anime_episode_start":700,"anime_episode_end":800,
-            "episode_range":{"absolute_start":700,"absolute_end":800},
-            "season":null,"episode":null
-        })));
-        assert_eq!(result["type"],"anime");
-        assert_eq!(result["anime_episode_start"],700);
-        assert_eq!(result["anime_episode_end"],800);
-        assert!(result["asid"].is_null());
-    }
-    #[test]
-    fn anime_without_verified_episode_does_not_invent_coordinates() {
-        let result=public_match_response(Some(json!({
-            "imdb_id":"tt1111111","category":"series","sid":"tt1111111",
-            "season":null,"episode":null,"anime":null,
-            "anime_ids":{"anidb":"456"},"parsed":{"title":"Example Anime"}
-        })));
-        assert_eq!(result["type"],"anime");
-        assert!(result["season"].is_null());
-        assert!(result["episode"].is_null());
-        assert!(result["asid"].is_null());
+    fn parse_cache_returns_full_parser_fields() {
+        let first=parse_cached("Supernatural.S02E01.1080p.WEB-DL").unwrap();
+        let second=parse_cached("Supernatural.S02E01.1080p.WEB-DL").unwrap();
+        assert_eq!(first,second);
+        assert_eq!(first["title"],"Supernatural");
+        assert!(first.get("resolution").is_some());
     }
     #[test]
     fn anime_identity_without_episode_is_unambiguous(){
