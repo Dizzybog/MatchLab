@@ -76,7 +76,7 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
 /// receive the complete matching set, so it does not truncate this result.
 pub fn candidates(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,limit:usize)->Result<Vec<String>,String>{
     if key.is_empty()||limit==0{return Ok(Vec::new());}
-    let source=db.path().unwrap_or(":memory:");
+    let source=db.path().filter(|path|!path.is_empty() && *path!=":memory:").unwrap_or(":memory:");
     let version=std::fs::metadata(source).ok().and_then(|m|m.modified().ok());
     // In-memory SQLite connections have no filesystem generation and must
     // never share a cached Tantivy index across independent test databases.
