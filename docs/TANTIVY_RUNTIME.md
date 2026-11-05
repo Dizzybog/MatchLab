@@ -6,7 +6,7 @@ This document describes the current Rust implementation in PR #40.
 
 Tantivy is the sole title-discovery engine. The disk index stores IMDb aliases with their normalized forward and reverse terms, original title, year, type, region, ordering and IMDb ID, plus mapped AniDB title aliases. Exact-name, prefix, reverse-suffix, country-qualified, shorter/half-prefix, duplicate-title and anime alias matching all use Tantivy.
 
-SQLite remains authoritative for relational lookups: `seasons`, `season_episodes`, `imdb_ratings`, `anime_ids`, `anime_series_map` and `episode_map`. IMDb V4 still decides which candidate wins; Tantivy scores cannot override deterministic ranking.
+SQLite remains authoritative for relational lookups: `seasons`, `season_episodes`, `imdb_ratings`, `anime_ids`, `anime_series_map` and `episode_map`. MatchLab's deterministic matcher still decides which candidate wins; Tantivy scores cannot override deterministic ranking.
 
 ## Refresh and publication
 
