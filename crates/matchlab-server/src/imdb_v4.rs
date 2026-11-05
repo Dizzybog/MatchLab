@@ -65,7 +65,13 @@ fn tantivy_aliases(db:&Connection,key:&str,suffix:bool)->rusqlite::Result<Vec<Ak
     crate::tantivy_search::title_aliases(db,key,suffix)
         .map(|rows|rows.into_iter().map(Aka::from).collect()).map_err(index_error)
 }
+fn exact(db:&Connection,key:&str)->rusqlite::Result<Vec<Aka>>{
+    crate::tantivy_search::title_aliases_exact(db,key)
+        .map(|rows|rows.into_iter().map(Aka::from).collect()).map_err(index_error)
+}
 fn prefix(db:&Connection,key:&str,release:&str,series:bool,year:Option<i32>,season:i64)->rusqlite::Result<Vec<Aka>>{
+    let matching=filter(db,exact(db,key)?,release,series,year,season)?;
+    if !matching.is_empty(){return Ok(matching);}
     filter(db,tantivy_aliases(db,key,false)?,release,series,year,season)
 }
 fn type_rank(t:&str)->i32{
@@ -92,8 +98,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     // Exact country-qualified aliases precede generic prefix matching.
     if series {
         for candidate in crate::country_aliases::candidates(release_title) {
-            let found=tantivy_aliases(db,&candidate,false)?
-                .into_iter().filter(|row|row.clean==candidate).collect::<Vec<_>>();
+            let found=exact(db,&candidate)?;
             for row in found {
                 if is_series(&row.media_type) && eligible(db,&row,required_season)? {
                     rows.push(row);
@@ -107,9 +112,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
         for size in ((std::cmp::max(2,key.len()/2)+1)..key.len()).rev(){
             if !key.is_char_boundary(size){continue;}
             let short=&key[..size];
-            rows=filter(db,tantivy_aliases(db,&short,false)?
-                .into_iter().filter(|row|row.clean==short).collect(),
-                &release,series,year,required_season)?;
+            rows=filter(db,exact(db,short)?,&release,series,year,required_season)?;
             if !rows.is_empty(){stage="shorter_prefix";break;}
         }
     }

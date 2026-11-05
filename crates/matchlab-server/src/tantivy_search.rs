@@ -265,6 +265,24 @@ fn read_title(doc:&tantivy::TantivyDocument,s:&SearchIndex)->Option<TitleAlias>{
     Some(TitleAlias{imdb_id,title,clean,year,category,region,original,ordering,media_type})
 }
 
+/// Check the exact normalized alias first, avoiding broad prefix scans for
+/// common titles (including short titles such as "Up" and "It").
+pub fn title_aliases_exact(db:&Connection,key:&str)->Result<Vec<TitleAlias>,String>{
+    if key.is_empty(){return Ok(Vec::new());}
+    let (search,memory_dir)=open_search(db)?;
+    let reader=search.reader.searcher();
+    let query=TermQuery::new(Term::from_field_text(search.forward,key),IndexRecordOption::Basic);
+    let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
+    let mut aliases=Vec::with_capacity(hits.len());
+    for addr in hits {
+        let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
+        if let Some(alias)=read_title(&doc,&search){aliases.push(alias);}
+    }
+    drop(reader);drop(search);
+    if let Some(dir)=memory_dir{let _=std::fs::remove_dir_all(dir);}
+    Ok(aliases)
+}
+
 /// Complete prefix/suffix search. All candidates are retained until the V4
 /// ranker applies its deterministic rules; no top-N cutoff is introduced.
 pub fn title_aliases(db:&Connection,key:&str,suffix:bool)->Result<Vec<TitleAlias>,String>{
@@ -489,6 +507,7 @@ mod persistence_tests {
         let matches=title_aliases(&db,"dune",false).unwrap();
         assert_eq!(matches.len(),3);
         assert!(matches.iter().any(|m|m.imdb_id=="tt202"&&m.title=="Dune"&&m.year==2021));
+        assert_eq!(title_aliases_exact(&db,"dune").unwrap().len(),2);
         assert!(has_duplicate_title(&db,"dune").unwrap());
         assert!(!has_duplicate_title(&db,"duneland").unwrap());
         assert_eq!(titles_by_ids(&db,&["tt303".into()]).unwrap().len(),1);
