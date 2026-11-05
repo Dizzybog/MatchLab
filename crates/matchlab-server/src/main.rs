@@ -64,6 +64,21 @@ fn numbers(v: Option<&Value>) -> Vec<i64> {
     }
 }
 
+fn explicit_season_range(raw:&str)->Option<(i64,i64)>{
+    let leaf=raw.rsplit(&['/','\\'][..]).next().unwrap_or(raw);
+    let words:Vec<_>=leaf.split(|c:char|!c.is_ascii_alphanumeric()&&c!='-')
+        .collect();
+    for word in words {
+        let lower=word.to_ascii_lowercase();
+        if !lower.starts_with('s'){continue;}
+        let Some((left,right))=lower.split_once("-s") else {continue};
+        if left.len()<2||left.len()>4||right.is_empty()||right.len()>3{continue;}
+        let (Some(start),Ok(end))=(left[1..].parse::<i64>().ok(),right.parse::<i64>()) else {continue};
+        if start>0&&end>=start&&end-start<=100{return Some((start,end));}
+    }
+    None
+}
+
 /// Explicit absolute episode notation used by the Python matcher.
 fn explicit_absolute_episode(raw:&str)->Option<i64>{
     let words:Vec<_>=raw.split(|c:char|!c.is_ascii_alphanumeric())
@@ -249,7 +264,9 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
     }else{parsed_title.to_string()};
     let title=title_owned.as_str();
     let key = normalize(title);
-    let seasons = numbers(parsed.get("seasons"));
+    let season_range=explicit_season_range(&req.title);
+    let seasons = season_range.map(|(start,end)|vec![start,end])
+        .unwrap_or_else(||numbers(parsed.get("seasons")));
     let mut episodes = numbers(parsed.get("episodes"));
     if episodes.is_empty() {
         if let Some(ep)=explicit_absolute_episode(&req.title){episodes.push(ep);}
@@ -269,6 +286,14 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
     };
     let imdb = imdb_v4::search(&db,title,year,series,seasons.iter().copied().max().unwrap_or(0),&req.title,!episodes.is_empty(),20)
         .map_err(|e|e.to_string())?;
+    // Require every candidate for a multi-season pack to contain the final season.
+    let imdb=if let Some((_,end))=season_range {
+        imdb.into_iter().filter(|candidate|{
+            db.query_row("SELECT max_season FROM seasons WHERE imdb_id=?1",
+                [&candidate.imdb_id],|row|row.get::<_,i64>(0))
+                .is_ok_and(|max|max>=end)
+        }).collect::<Vec<_>>()
+    }else{imdb};
     let imdb=if seasons.len()==1 && episodes.len()==1 {
         let season=seasons[0];
         let episode=episodes[0];
@@ -413,6 +438,14 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
     };
     // A season pack such as Supernatural.S02 covers the season's episodes.
     // A specific S02E01 must never be expanded to the entire season.
+    if let (Some((start,end)),Some(winner))=(season_range,selected.as_mut()){
+        winner["season"]=json!(start);
+        winner["season_end"]=json!(end);
+        winner["episode"]=Value::Null;
+        winner["episode_end"]=Value::Null;
+        winner["episode_range"]=json!({"start_season":start,"end_season":end,
+            "source":"imdb_season_pack"});
+    }
     if episodes.is_empty() && seasons.len()==1 {
         if let Some(winner)=selected.as_mut(){
             if let Some(imdb_id)=winner["imdb_id"].as_str().map(str::to_owned){
