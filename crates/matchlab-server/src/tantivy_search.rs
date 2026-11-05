@@ -2,7 +2,7 @@
 //! A disk-backed index is opened or built for the current SQLite generation.
 use std::{collections::HashMap,fs::File,path::{Path,PathBuf},sync::{Mutex,OnceLock},time::{Duration,SystemTime,UNIX_EPOCH}};
 use rusqlite::{Connection,OptionalExtension};
-use tantivy::{collector::DocSetCollector,doc,query::{RegexQuery,TermQuery},schema::{Schema,STORED,STRING,Value,IndexRecordOption},Index,IndexReader,ReloadPolicy,Term};
+use tantivy::{collector::DocSetCollector,doc,query::{RegexQuery,TermQuery,TermSetQuery},schema::{Schema,STORED,STRING,Value,IndexRecordOption},Index,IndexReader,ReloadPolicy,Term};
 
 #[derive(Clone)]
 struct SearchIndex { reader:IndexReader, forward:tantivy::schema::Field, backward:tantivy::schema::Field, id:tantivy::schema::Field, anime:tantivy::schema::Field, anime_id:tantivy::schema::Field, title:tantivy::schema::Field,
@@ -242,22 +242,24 @@ pub fn anime_aliases(db:&Connection,key:&str,min_prefix:usize)->Result<Vec<Anime
     if key.len()<4{return Ok(Vec::new());}
     let (search,memory_dir)=open_search(db)?;
     let reader=search.reader.searcher();
-    let mut matches=Vec::new();
+    // Search all valid alias prefixes in one union query. The previous
+    // implementation submitted one Tantivy query per character position.
+    let terms=(4..=key.len())
+        .filter(|&len|key.is_char_boundary(len)&&(len>=min_prefix||len==key.len()))
+        .map(|len|Term::from_field_text(search.anime,&key[..len]));
+    let query=TermSetQuery::new(terms);
+    let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
+    let mut matches=Vec::with_capacity(hits.len());
     let mut seen=std::collections::HashSet::new();
-    for len in (4..=key.len()).rev(){
-        if !key.is_char_boundary(len)||len<min_prefix&&len!=key.len(){continue;}
-        let token=&key[..len];
-        let query=TermQuery::new(Term::from_field_text(search.anime,token),IndexRecordOption::Basic);
-        let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
-        for addr in hits {
-            let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
-            let Some(imdb)=doc.get_first(search.id).and_then(|v|v.as_str()) else {continue};
-            let Some(anidb)=doc.get_first(search.anime_id).and_then(|v|v.as_str()) else {continue};
-            let result=AnimeAlias{anidb_id:anidb.to_string(),
-                clean_title:token.to_owned(),imdb_id:imdb.to_owned()};
-            if seen.insert((result.anidb_id.clone(),result.clean_title.clone(),result.imdb_id.clone())){
-                matches.push(result);
-            }
+    for addr in hits {
+        let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
+        let Some(imdb)=doc.get_first(search.id).and_then(|v|v.as_str())else{continue};
+        let Some(anidb)=doc.get_first(search.anime_id).and_then(|v|v.as_str())else{continue};
+        let Some(alias)=doc.get_first(search.anime).and_then(|v|v.as_str())else{continue};
+        let result=AnimeAlias{anidb_id:anidb.to_owned(),
+            clean_title:alias.to_owned(),imdb_id:imdb.to_owned()};
+        if seen.insert((result.anidb_id.clone(),result.clean_title.clone(),result.imdb_id.clone())){
+            matches.push(result);
         }
     }
     drop(reader);
@@ -513,6 +515,29 @@ mod persistence_tests {
             INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt1234567','a.b',2020);
             INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt7654321','axb',2020);").unwrap();
         assert_eq!(candidates(&db,"a.b",None,false,1).unwrap(),vec!["tt1234567"]);
+    }
+
+    #[test]
+    fn anime_aliases_collect_nested_prefixes_in_one_query() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER,
+                title TEXT NOT NULL DEFAULT '',category TEXT NOT NULL DEFAULT 'movie',
+                region TEXT NOT NULL DEFAULT '',original INTEGER NOT NULL DEFAULT 1,
+                ordering INTEGER NOT NULL DEFAULT 0,type TEXT NOT NULL DEFAULT 'movie');
+            CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
+            CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT);
+            INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt001','onepiece',2000);
+            INSERT INTO anidb_titles VALUES('100','onepiece');
+            INSERT INTO anidb_titles VALUES('200','onepiecealabasta');
+            INSERT INTO anidb_titles VALUES('300','one');
+            INSERT INTO anime_series_map VALUES('100','tt001');
+            INSERT INTO anime_series_map VALUES('200','tt001');
+            INSERT INTO anime_series_map VALUES('300','tt001');").unwrap();
+        let results=anime_aliases(&db,"onepiecealabastaremastered",6).unwrap();
+        assert_eq!(results.len(),2);
+        assert_eq!(results[0].clean_title,"onepiecealabasta");
+        assert_eq!(results[1].clean_title,"onepiece");
+        assert_eq!(anime_aliases(&db,"one",6).unwrap()[0].clean_title,"one");
     }
 
     #[test]
