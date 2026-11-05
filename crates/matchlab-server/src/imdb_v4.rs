@@ -130,11 +130,11 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     for r in rows{groups.entry(r.imdb_id.clone()).or_default().push(r);}
     let mut duplicates=HashSet::new();
     let mut checked=HashSet::new();
-    let mut duplicate_stmt=db.prepare_cached("SELECT COUNT(DISTINCT imdb_id) FROM titles WHERE clean_title=?1 AND year>0")?;
+    let mut duplicate_stmt=db.prepare_cached("SELECT EXISTS(SELECT 1 FROM titles WHERE clean_title=?1 AND year>0 AND imdb_id <> (SELECT imdb_id FROM titles WHERE clean_title=?1 AND year>0 LIMIT 1))")?;
     for r in groups.values().flatten(){
         if checked.insert(r.clean.clone()) {
             let count:i64=duplicate_stmt.query_row([&r.clean],|row|row.get(0))?;
-            if count>1{duplicates.insert(r.clean.clone());}
+            if count!=0{duplicates.insert(r.clean.clone());}
         }
     }
     let count_first=year.is_none()&&required_season==0&&!has_episode;
