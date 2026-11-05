@@ -45,13 +45,22 @@ fn eligible(db:&Connection,r:&Aka,season:i64)->rusqlite::Result<bool>{
 use rusqlite::OptionalExtension;
 fn select(db:&Connection,where_clause:&str,values:&[&dyn rusqlite::ToSql])->rusqlite::Result<Vec<Aka>>{
     let sql=format!("SELECT * FROM titles WHERE {where_clause} AND year>0");
-    let mut stmt=db.prepare(&sql)?;
+    let mut stmt=db.prepare_cached(&sql)?;
     stmt.query_map(values,read_aka)?.collect()
 }
 fn filter(db:&Connection,rows:Vec<Aka>,release:&str,series:bool,year:Option<i32>,season:i64)->rusqlite::Result<Vec<Aka>>{
-    rows.into_iter().filter(|r|allowed(&r.media_type,series,year)&&release.contains(&r.clean))
-        .map(|r|eligible(db,&r,season).map(|yes|if yes{Some(r)}else{None}))
-        .collect::<rusqlite::Result<Vec<_>>>().map(|v|v.into_iter().flatten().collect())
+    let mut eligibility=std::collections::HashMap::new();
+    let mut result=Vec::new();
+    for row in rows {
+        if !allowed(&row.media_type,series,year)||!release.contains(&row.clean){continue;}
+        let yes=if let Some(&cached)=eligibility.get(&row.imdb_id){cached}else{
+            let value=eligible(db,&row,season)?;
+            eligibility.insert(row.imdb_id.clone(),value);
+            value
+        };
+        if yes{result.push(row);}
+    }
+    Ok(result)
 }
 fn prefix(db:&Connection,key:&str,release:&str,series:bool,year:Option<i32>,season:i64)->rusqlite::Result<Vec<Aka>>{
     let upper=format!("{key}\u{ffff}");
@@ -129,10 +138,13 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     let mut groups:BTreeMap<String,Vec<Aka>>=BTreeMap::new();
     for r in rows{groups.entry(r.imdb_id.clone()).or_default().push(r);}
     let mut duplicates=HashSet::new();
+    let mut checked=HashSet::new();
+    let mut duplicate_stmt=db.prepare_cached("SELECT EXISTS(SELECT 1 FROM titles WHERE clean_title=?1 AND year>0 AND imdb_id <> (SELECT imdb_id FROM titles WHERE clean_title=?1 AND year>0 LIMIT 1))")?;
     for r in groups.values().flatten(){
-        let count:i64=db.query_row("SELECT COUNT(DISTINCT imdb_id) FROM titles WHERE clean_title=?1 AND year>0",
-            [&r.clean],|row|row.get(0))?;
-        if count>1{duplicates.insert(r.clean.clone());}
+        if checked.insert(r.clean.clone()) {
+            let count:i64=duplicate_stmt.query_row([&r.clean],|row|row.get(0))?;
+            if count!=0{duplicates.insert(r.clean.clone());}
+        }
     }
     let count_first=year.is_none()&&required_season==0&&!has_episode;
     let mut output=Vec::new();

@@ -13,8 +13,7 @@ pub fn resolve(db:&Connection,imdb:&str,title:&str,season:i64,episode:i64)
     if key.len()<4{return Ok(None);}
     let mut stmt=db.prepare("SELECT DISTINCT a.anidb_id,a.clean_title
         FROM anidb_titles a JOIN anime_series_map l ON l.anidb_id=a.anidb_id
-        WHERE l.imdb_id=?1 AND (a.clean_title=?2 OR
-        (length(a.clean_title)>=4 AND ?2 LIKE a.clean_title||'%'))")?;
+        WHERE l.imdb_id=?1 AND (a.clean_title IN (WITH RECURSIVE prefixes(n) AS (SELECT 4 WHERE length(?2)>=4 UNION ALL SELECT n+1 FROM prefixes WHERE n<length(?2)) SELECT substr(?2,1,n) FROM prefixes UNION SELECT ?2))")?;
     let mut aliases=stmt.query_map(params![imdb,key],|r|
         Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -75,7 +74,7 @@ pub fn has_specific_alias(db:&Connection,imdb:&str,title:&str)->rusqlite::Result
     if key.len()<4{return Ok(false);}
     let mut stmt=db.prepare("SELECT DISTINCT a.anidb_id,a.clean_title FROM anidb_titles a
         JOIN anime_series_map l ON l.anidb_id=a.anidb_id WHERE l.imdb_id=?1 AND
-        (a.clean_title=?2 OR (length(a.clean_title)>=4 AND ?2 LIKE a.clean_title||'%'))")?;
+        (a.clean_title IN (WITH RECURSIVE prefixes(n) AS (SELECT 4 WHERE length(?2)>=4 UNION ALL SELECT n+1 FROM prefixes WHERE n<length(?2)) SELECT substr(?2,1,n) FROM prefixes UNION SELECT ?2))")?;
     let mut aliases=stmt.query_map(params![imdb,key],|r|
         Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
