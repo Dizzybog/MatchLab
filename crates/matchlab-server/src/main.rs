@@ -472,8 +472,10 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
     if let (Some((start,end)),Some(winner))=(season_range,selected.as_mut()){
         winner["season"]=json!(start);
         winner["season_end"]=json!(end);
-        winner["episode"]=Value::Null;
-        winner["episode_end"]=Value::Null;
+        winner["episode"]=json!(1);
+        winner["episode_end"]=winner["imdb_id"].as_str()
+            .and_then(|id|season_episode_end(&db,id,end).ok().flatten())
+            .map_or(Value::Null,|n|json!(n));
         winner["episode_range"]=json!({"start_season":start,"end_season":end,
             "source":"imdb_season_pack"});
     }
@@ -604,11 +606,13 @@ fn public_match_response(selected: Option<Value>) -> Value {
     let anime=winner.get("anime").filter(|v|v.is_object());
     let direct_asid=anime.and_then(|a|a.get("asid")).cloned().unwrap_or(Value::Null);
     let segments=winner.pointer("/episode_range/segments").and_then(Value::as_array);
-    let asid_start=segments.and_then(|v|v.first()).and_then(|v|{
+    let complete=winner.pointer("/episode_range/complete")
+        .and_then(Value::as_bool).unwrap_or(true);
+    let asid_start=segments.filter(|_|complete).and_then(|v|v.first()).and_then(|v|{
         Some(json!(format!("{}:{}",v["anidb_id"].as_str()?,
             v["start_anime_episode"].as_i64()?)))
     }).unwrap_or_else(||direct_asid.clone());
-    let asid_end=segments.and_then(|v|v.last()).and_then(|v|{
+    let asid_end=segments.filter(|_|complete).and_then(|v|v.last()).and_then(|v|{
         Some(json!(format!("{}:{}",v["anidb_id"].as_str()?,
             v["end_anime_episode"].as_i64()?)))
     }).unwrap_or(direct_asid);
