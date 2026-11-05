@@ -4,6 +4,7 @@ use std::{collections::HashMap,path::PathBuf,sync::{Mutex,OnceLock}};
 use rusqlite::Connection;
 use tantivy::{collector::DocSetCollector,doc,query::RegexQuery,schema::{Schema,STORED,STRING,Value},Index,IndexReader,ReloadPolicy};
 
+#[derive(Clone)]
 struct SearchIndex { reader:IndexReader, forward:tantivy::schema::Field, backward:tantivy::schema::Field, id:tantivy::schema::Field, year:tantivy::schema::Field }
 static CACHE:OnceLock<Mutex<HashMap<String,SearchIndex>>>=OnceLock::new();
 
@@ -71,21 +72,24 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
 /// Uses exhaustive document collection before year filtering and ID deduplication.
 pub fn candidates(db:&Connection,key:&str,year:Option<i32>,suffix:bool,limit:usize)->Result<Vec<String>,String>{
     if key.is_empty()||limit==0{return Ok(Vec::new());}
-    let cache=CACHE.get_or_init(||Mutex::new(HashMap::new()));
-    let mut guard=cache.lock().map_err(|e|e.to_string())?;
     let source=db.path().unwrap_or(":memory:");
     let version=std::fs::metadata(source).ok().and_then(|m|m.modified().ok());
     let path=format!("{source}:{version:?}");
-    guard.retain(|key,_|!key.starts_with(&format!("{source}:"))||key==&path);
-    if !guard.contains_key(&path){
-        let directory=if source==":memory:" {std::env::temp_dir().join(format!("matchlab-tantivy-{}",std::process::id()))} else {PathBuf::from(format!("{source}.tantivy"))};
-        // Version each snapshot by SQLite modification time, so metadata replacement
-        // cannot silently reuse an index built from an older database.
-        let generation=format!("{:?}",version).replace(|c:char|!c.is_ascii_alphanumeric(),"_");
-        let directory=directory.join(generation);
-        guard.insert(path.clone(),build(db,&directory)?);
-    }
-    let search=guard.get(&path).ok_or("index missing")?;
+    // Do not hold the global cache mutex while running regex queries.
+    // A concurrent metadata refresh may still build a generation under the
+    // mutex; queries on already-open generations can proceed independently.
+    let search={
+        let cache=CACHE.get_or_init(||Mutex::new(HashMap::new()));
+        let mut guard=cache.lock().map_err(|e|e.to_string())?;
+        guard.retain(|key,_|!key.starts_with(&format!("{source}:"))||key==&path);
+        if !guard.contains_key(&path){
+            let directory=if source==":memory:" {std::env::temp_dir().join(format!("matchlab-tantivy-{}",std::process::id()))} else {PathBuf::from(format!("{source}.tantivy"))};
+            let generation=format!("{:?}",version).replace(|c:char|!c.is_ascii_alphanumeric(),"_");
+            let directory=directory.join(generation);
+            guard.insert(path.clone(),build(db,&directory)?);
+        }
+        guard.get(&path).ok_or("index missing")?.clone()
+    };
     let field=if suffix{search.backward}else{search.forward};
     let term=if suffix{key.chars().rev().collect::<String>()}else{key.to_string()};
     let pattern=format!("{}.*",term);
