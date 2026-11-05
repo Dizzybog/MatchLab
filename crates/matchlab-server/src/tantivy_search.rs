@@ -50,7 +50,7 @@ pub fn candidates(db:&Connection,key:&str,year:Option<i32>,suffix:bool,limit:usi
     let path=format!("{source}:{version:?}");
     guard.retain(|key,_|!key.starts_with(&format!("{source}:"))||key==&path);
     if !guard.contains_key(&path){
-        let directory=PathBuf::from(format!("{source}.tantivy"));
+        let directory=if source==":memory:" {std::env::temp_dir().join(format!("matchlab-tantivy-{}",std::process::id()))} else {PathBuf::from(format!("{source}.tantivy"))};
         // Version each snapshot by SQLite modification time, so metadata replacement
         // cannot silently reuse an index built from an older database.
         let generation=format!("{:?}",version).replace(|c:char|!c.is_ascii_alphanumeric(),"_");
