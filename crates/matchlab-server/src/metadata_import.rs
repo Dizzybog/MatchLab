@@ -539,6 +539,16 @@ pub fn refresh_from_files_with_ratings(
                 return Err(format!("staging SQLite integrity check failed: {integrity}").into());
             }
         }
+        // Validate that the complete imported IMDb title set can be indexed
+        // before replacing the currently serving SQLite metadata.
+        // The staged index is deliberately not published: the live index is
+        // versioned from the final SQLite path and warmed after refresh.
+        {
+            let staged_db=Connection::open_with_flags(
+                &stage,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            crate::tantivy_search::warmup(&staged_db)
+                .map_err(|e|format!("staged Tantivy index failed: {e}"))?;
+        }
         // Persist the completed staging file before atomically publishing it.
         File::open(&stage)?.sync_all()?;
         fs::rename(&stage,target)?;
