@@ -62,26 +62,23 @@ fn filter(db:&Connection,rows:Vec<Aka>,release:&str,series:bool,year:Option<i32>
     }
     Ok(result)
 }
+fn tantivy_aliases(db:&Connection,key:&str,year:Option<i32>,suffix:bool)->rusqlite::Result<Vec<Aka>>{
+    let ids=crate::tantivy_search::candidates(db,key,year,suffix,1)
+        .map_err(|e|rusqlite::Error::ToSqlConversionFailure(
+            Box::new(std::io::Error::other(format!("Tantivy candidate search failed: {e}")))))?;
+    if ids.is_empty(){return Ok(Vec::new());}
+    let encoded=serde_json::to_string(&ids)
+        .map_err(|e|rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    // SQLite only resolves metadata for Tantivy-selected IDs. It does not
+    // perform prefix/suffix discovery or scan the full title catalog.
+    let rows=select(db,"imdb_id IN (SELECT value FROM json_each(?1))",&[&encoded])?;
+    Ok(rows.into_iter().filter(|row|{
+        if suffix {row.clean.len()>key.len() && row.clean.ends_with(key)}
+        else {row.clean.starts_with(key)}
+    }).collect())
+}
 fn prefix(db:&Connection,key:&str,release:&str,series:bool,year:Option<i32>,season:i64)->rusqlite::Result<Vec<Aka>>{
-    let upper=format!("{key}\u{ffff}");
-    // Query the exhaustive Tantivy ID set, then apply the authoritative
-    // relational eligibility and deterministic V4 ranking in SQLite.
-    // Keep the SQLite range as a safety fallback when the index is unavailable.
-    if let Ok(ids)=crate::tantivy_search::candidates(db,key,year,false,1){
-        if !ids.is_empty(){
-            // Pass all Tantivy IDs in one JSON parameter rather than
-            // issuing an individual SQL query per candidate.
-            let encoded=serde_json::to_string(&ids)
-                .map_err(|e|rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-            let eligible=filter(db,select(db,
-                "imdb_id IN (SELECT value FROM json_each(?1)) AND clean_title>=?2 AND clean_title<?3",
-                &[&encoded,&key,&upper])?,release,series,year,season)?;
-            if !eligible.is_empty(){return Ok(eligible);}
-            // A stale or incomplete Tantivy generation must never suppress
-            // eligible candidates from the authoritative SQLite snapshot.
-        }
-    }
-    filter(db,select(db,"clean_title>=?1 AND clean_title<?2",&[&key,&upper])?,release,series,year,season)
+    filter(db,tantivy_aliases(db,key,year,false)?,release,series,year,season)
 }
 fn type_rank(t:&str)->i32{
     match t{"movie"=>0,"tvMovie"=>1,"short"=>2,"tvShort"=>3,"tvSpecial"=>4,"tvSeries"=>5,_=>6}
@@ -126,25 +123,8 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
         }
     }
     if rows.is_empty()&&key.len()>=12{
-        let rev:String=key.chars().rev().collect();
-        let upper=format!("{rev}\u{ffff}");
-        let indexed=crate::tantivy_search::candidates(db,&key,year,true,1);
-        if let Ok(ids)=indexed {
-            if !ids.is_empty(){
-                let encoded=serde_json::to_string(&ids)
-                    .map_err(|e|rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-                rows=filter(db,select(db,
-                    "imdb_id IN (SELECT value FROM json_each(?1)) AND reverse(clean_title)>=?2 AND reverse(clean_title)<?3 AND length(clean_title)>?4",
-                    &[&encoded,&rev,&upper,&(key.len() as i64)])?,&release,series,year,required_season)?;
-            }
-        }
-        // Fallback to the complete SQLite range when Tantivy cannot
-        // provide eligible suffix candidates.
-        if rows.is_empty(){
-            rows=filter(db,select(db,
-                "reverse(clean_title)>=?1 AND reverse(clean_title)<?2 AND length(clean_title)>?3",
-                &[&rev,&upper,&(key.len() as i64)])?,&release,series,year,required_season)?;
-        }
+        rows=filter(db,tantivy_aliases(db,&key,year,true)?,
+            &release,series,year,required_season)?;
         if !rows.is_empty(){stage="reverse_suffix";}
     }
     if rows.is_empty()&&key.len()>=6{
