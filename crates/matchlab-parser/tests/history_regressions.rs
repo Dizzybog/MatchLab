@@ -14,6 +14,8 @@ fn spanish_uppercase_x_episode_and_chains() {
          "Suenos de libertad", 1, vec![124]),
         ("Chicago PD 9X21 HDTV XviD Castellano",
          "Chicago PD", 9, vec![21]),
+        ("911 Nashville 1X5 HDTV XviD Castellano",
+         "911 Nashville", 1, vec![5]),
         ("Navy Investigacion Criminal 22X17X18 HDTV XviD Castellano",
          "Navy Investigacion Criminal", 22, vec![17, 18]),
     ] {
@@ -50,6 +52,9 @@ fn explicit_sxe_not_lost_with_airdate_prefix() {
 
 #[test]
 fn anime_named_final_season_keeps_episode() {
+    let p = parsed("[Erai-raws] Spy x Family Season 3 - 03 [720p CR WEB-DL AVC AAC][MultiSub][3CA53AF2].mkv");
+    assert_eq!(p["seasons"], json!([3]));
+    assert_eq!(p["episodes"], json!([3]));
     let p = parsed("[Dough-Fansubs] Beastars Final Season - 05 [1080p NF WEB-DL AVC EAC3][English].mkv");
     assert_eq!(p["title"], "Beastars Final Season");
     assert_eq!(p["seasons"], json!([]));

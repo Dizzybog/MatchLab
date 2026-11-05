@@ -158,4 +158,31 @@ mod tests{
         let _=std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _=std::fs::remove_file(path.with_extension("sqlite3-shm"));
     }
+
+    #[test]
+    fn write_trigger_prunes_expired_history_when_due(){
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-history-trigger-{}.sqlite3",std::process::id()));
+        let _=std::fs::remove_file(&path);
+        {
+            let db=open(&path).unwrap();
+            db.execute_batch("
+                INSERT INTO requests(created_at,title,status,duration_ms,details)
+                VALUES(strftime('%Y-%m-%dT%H:%M:%fZ','now','-23 hours'),'recent','matched',10,'{}');
+                INSERT INTO requests(created_at,title,status,duration_ms,details)
+                VALUES(strftime('%Y-%m-%dT%H:%M:%fZ','now','-25 hours'),'expired','unmatched',20,'{}');
+                UPDATE history_maintenance SET last_run=0 WHERE key='history_prune';
+                INSERT INTO requests(title,status,duration_ms,details)
+                VALUES('new','matched',5,'{}');
+            ").unwrap();
+            let expired:i64=db.query_row(
+                "SELECT count(*) FROM requests WHERE title='expired'",[],|r|r.get(0)).unwrap();
+            assert_eq!(expired,0);
+            let live:i64=db.query_row("SELECT count(*) FROM requests",[],|r|r.get(0)).unwrap();
+            assert_eq!(live,2);
+        }
+        let _=std::fs::remove_file(&path);
+        let _=std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _=std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
 }
