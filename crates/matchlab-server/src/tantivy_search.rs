@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use tantivy::{collector::DocSetCollector,doc,query::RegexQuery,schema::{Schema,STORED,STRING,Value},Index,IndexReader,ReloadPolicy};
 
 #[derive(Clone)]
-struct SearchIndex { reader:IndexReader, forward:tantivy::schema::Field, backward:tantivy::schema::Field, id:tantivy::schema::Field }
+struct SearchIndex { reader:IndexReader, forward:tantivy::schema::Field, backward:tantivy::schema::Field, id:tantivy::schema::Field, anime:tantivy::schema::Field }
 static CACHE:OnceLock<Mutex<HashMap<String,SearchIndex>>>=OnceLock::new();
 
 fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
@@ -13,6 +13,7 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
     let forward=builder.add_text_field("forward",STRING|STORED);
     let backward=builder.add_text_field("backward",STRING);
     let id=builder.add_text_field("imdb_id",STRING|STORED);
+    let anime=builder.add_text_field("anime_alias",STRING);
     let year=builder.add_i64_field("year",tantivy::schema::INDEXED|STORED);
     let schema=builder.build();
     // Only a completed generation may be opened. Build in a sibling staging
@@ -44,6 +45,16 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
                     .map_err(|e|e.to_string())?;
                 count+=1;
             }
+            let mut aliases=db.prepare("SELECT DISTINCT l.imdb_id,a.clean_title
+                FROM anidb_titles a JOIN anime_series_map l ON l.anidb_id=a.anidb_id
+                WHERE a.clean_title<>''").map_err(|e|e.to_string())?;
+            let mapped=aliases.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))
+                .map_err(|e|e.to_string())?;
+            for item in mapped {
+                let (imdb,alias)=item.map_err(|e|e.to_string())?;
+                writer.add_document(doc!(anime=>alias,id=>imdb)).map_err(|e|e.to_string())?;
+                count+=1;
+            }
             writer.commit().map_err(|e|e.to_string())?;
             drop(writer);
             drop(staging_index);
@@ -65,7 +76,7 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
     let index=Index::open_in_dir(dir).map_err(|e|e.to_string())?;
     let reader=index.reader_builder().reload_policy(ReloadPolicy::Manual).try_into()
         .map_err(|e:tantivy::TantivyError|e.to_string())?;
-    Ok(SearchIndex{reader,forward,backward,id})
+    Ok(SearchIndex{reader,forward,backward,id,anime})
 }
 
 /// Returns candidate IMDb IDs; the deterministic IMDb V4 ranker remains authoritative.
@@ -75,6 +86,12 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
 /// The limit parameter is retained for API compatibility; V4 ranking must
 /// receive the complete matching set, so it does not truncate this result.
 pub fn candidates(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,limit:usize)->Result<Vec<String>,String>{
+    candidates_internal(db,key,_year,suffix,limit,false)
+}
+pub fn anime_candidates(db:&Connection,key:&str)->Result<Vec<String>,String>{
+    candidates_internal(db,key,None,false,1,true)
+}
+fn candidates_internal(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,limit:usize,anime_only:bool)->Result<Vec<String>,String>{
     if key.is_empty()||limit==0{return Ok(Vec::new());}
     let source=db.path().filter(|path|!path.is_empty() && *path!=":memory:").unwrap_or(":memory:");
     let version=std::fs::metadata(source).ok().and_then(|m|m.modified().ok());
@@ -87,7 +104,7 @@ pub fn candidates(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,limit:us
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
                 .map_err(|e|e.to_string())?.as_nanos())))
     }else{None};
-    let path=format!("{source}:{version:?}");
+    let path=format!("anime-v1:{source}:{version:?}");
     // Do not hold the global cache mutex while running regex queries.
     // A concurrent metadata refresh may still build a generation under the
     // mutex; queries on already-open generations can proceed independently.
@@ -96,18 +113,18 @@ pub fn candidates(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,limit:us
     }else{
         let cache=CACHE.get_or_init(||Mutex::new(HashMap::new()));
         let mut guard=cache.lock().map_err(|e|e.to_string())?;
-        guard.retain(|key,_|!key.starts_with(&format!("{source}:"))||key==&path);
+        guard.retain(|key,_|!key.starts_with(&format!("anime-v1:{source}:"))||key==&path);
         if !guard.contains_key(&path){
             let directory=if source==":memory:" {std::env::temp_dir().join(format!("matchlab-tantivy-{}",std::process::id()))} else {PathBuf::from(format!("{source}.tantivy"))};
-            let generation=format!("{:?}",version).replace(|c:char|!c.is_ascii_alphanumeric(),"_");
+            let generation=format!("anime-v1-{:?}",version).replace(|c:char|!c.is_ascii_alphanumeric(),"_");
             let directory=directory.join(generation);
             guard.insert(path.clone(),build(db,&directory)?);
         }
         guard.get(&path).ok_or("index missing")?.clone()
     };
-    let field=if suffix{search.backward}else{search.forward};
+    let field=if anime_only{search.anime}else if suffix{search.backward}else{search.forward};
     let term=if suffix{key.chars().rev().collect::<String>()}else{key.to_string()};
-    let pattern=format!("{}.*",term);
+    let pattern=if anime_only{term}else{format!("{}.*",term)};
     let query=RegexQuery::from_pattern(&pattern,field).map_err(|e|e.to_string())?;
     let reader=search.reader.searcher();
     let mut ids=Vec::new();
