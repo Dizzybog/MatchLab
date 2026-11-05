@@ -104,7 +104,8 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     // Exact country-qualified aliases precede generic prefix matching.
     if series {
         for candidate in crate::country_aliases::candidates(release_title) {
-            let found=select(db,"clean_title=?1",&[&candidate])?;
+            let found=tantivy_aliases(db,&candidate,year,false)?
+                .into_iter().filter(|row|row.clean==candidate).collect::<Vec<_>>();
             for row in found {
                 if is_series(&row.media_type) && eligible(db,&row,required_season)? {
                     rows.push(row);
@@ -118,7 +119,9 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
         for size in ((std::cmp::max(2,key.len()/2)+1)..key.len()).rev(){
             if !key.is_char_boundary(size){continue;}
             let short=&key[..size];
-            rows=filter(db,select(db,"clean_title=?1",&[&short])?,&release,series,year,required_season)?;
+            rows=filter(db,tantivy_aliases(db,&short,year,false)?
+                .into_iter().filter(|row|row.clean==short).collect(),
+                &release,series,year,required_season)?;
             if !rows.is_empty(){stage="shorter_prefix";break;}
         }
     }
