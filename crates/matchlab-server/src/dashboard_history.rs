@@ -55,6 +55,7 @@ pub fn record(path:&Path,title:&str,status:&str,selected:Option<&Value>,details:
 /// Physically delete rows outside the rolling 24-hour window. Called by the
 /// background maintenance worker (including once immediately at startup).
 /// SQLite reuses freed pages; a manual VACUUM can reclaim old file size.
+#[allow(dead_code)] // Manual maintenance helper; automatic expiry runs in the SQLite insert trigger.
 pub fn prune(path:&Path)->Result<usize,String>{
     let db=open(path).map_err(|e|e.to_string())?;
     db.execute("DELETE FROM requests
