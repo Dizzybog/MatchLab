@@ -13,10 +13,12 @@ const DEFAULT_METADATA_URLS:[&str;7]=[
 ];
 
 pub fn configured_urls(override_urls:Option<&str>)->Result<Vec<String>,Box<dyn Error>>{
-    let urls:Vec<String>=match override_urls {
+    let mut urls:Vec<String>=match override_urls {
         Some(value)=>value.split(',').map(|s|s.trim().to_owned()).collect(),
         None=>DEFAULT_METADATA_URLS.iter().map(|s|(*s).to_owned()).collect(),
     };
+    // Preserve existing six-URL overrides; insert the official ratings feed.
+    if urls.len()==6{urls.insert(3,DEFAULT_METADATA_URLS[3].to_string());}
     if urls.len()!=7 || urls.iter().any(|url|url.is_empty()) {
         return Err("MATCHLAB_METADATA_URLS requires seven comma-separated HTTPS URLs".into());
     }
