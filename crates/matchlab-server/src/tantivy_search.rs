@@ -233,7 +233,14 @@ fn open_search(db:&Connection)->Result<(SearchIndex,Option<PathBuf>),String>{
         // requests may hold an older SQLite snapshot after a refresh; evicting
         // every other generation on each query would cause cache thrashing.
         if !guard.contains_key(&path) {
-            let opened=build(db,&index_dir(Path::new(source),&generation_id))?;
+            let location=index_dir(Path::new(source),&generation_id);
+            // Never index millions of titles on an HTTP request. The importer
+            // publishes completed generations before SQLite; startup warmup
+            // is responsible for recovering genuinely missing indices.
+            if !location.join(".matchlab-complete").is_file(){
+                return Err(format!("Tantivy generation not ready: {}",location.display()));
+            }
+            let opened=build(db,&location)?;
             const MAX_GENERATIONS:usize=12;
             if guard.len()>=MAX_GENERATIONS {
                 if let Some(victim)=guard.keys().find(|k|k.as_str()!=path).cloned() {
@@ -435,6 +442,14 @@ fn candidates_internal(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,lim
 
 // Open the already-published index at startup or after a refresh.
 pub fn warmup(db:&Connection)->Result<(),String>{
+    // Startup / refresh workers may recover a genuinely missing index.
+    // No API request is allowed to trigger this expensive operation.
+    if let Some(source)=db.path().filter(|p|!p.is_empty()&&*p!=":memory:"){
+        let location=index_dir(Path::new(source),&generation(db)?);
+        if !location.join(".matchlab-complete").is_file(){
+            drop(build(db,&location)?);
+        }
+    }
     let (search,memory_dir)=open_search(db)?;
     drop(search);
     if let Some(directory)=memory_dir {let _=std::fs::remove_dir_all(directory);}
@@ -631,6 +646,31 @@ mod persistence_tests {
             assert_eq!(candidates(&current,"modern",None,false,1).unwrap(),vec!["tt2222222"]);
         }
         drop(current);drop(old);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_published_index_is_never_built_during_a_search(){
+        let root=std::env::temp_dir().join(format!(
+            "matchlab-no-request-rebuild-{}-{:?}",
+            std::process::id(),std::thread::current().id()));
+        let _=std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let db_path=root.join("metadata.sqlite3");
+        let db=Connection::open(&db_path).unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER,
+                title TEXT NOT NULL DEFAULT '',category TEXT NOT NULL DEFAULT 'movie',
+                region TEXT NOT NULL DEFAULT '',original INTEGER NOT NULL DEFAULT 1,
+                ordering INTEGER NOT NULL DEFAULT 0,type TEXT NOT NULL DEFAULT 'movie');
+            CREATE TABLE metadata_state(source TEXT PRIMARY KEY,updated_at TEXT,row_count INTEGER);
+            INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt4567890','example',2020);
+            INSERT INTO metadata_state VALUES('tantivy_generation','v3-no-request-build',0);").unwrap();
+        let dir=index_dir(&db_path,"v3-no-request-build");
+        assert!(candidates(&db,"example",None,false,1).is_err());
+        assert!(!dir.exists(),"HTTP lookups must not start index construction");
+        warmup(&db).unwrap();
+        assert_eq!(candidates(&db,"example",None,false,1).unwrap(),vec!["tt4567890"]);
+        drop(db);
         std::fs::remove_dir_all(root).unwrap();
     }
 

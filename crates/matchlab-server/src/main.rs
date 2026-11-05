@@ -1021,6 +1021,11 @@ mod tests {
                 params![ani_id,format!("tvdb{i}")]).unwrap();
         }
         drop(db);
+        // A published request must use a warmed index; building here would
+        // conceal an expensive request-time reindexing regression.
+        let snapshot=Connection::open(&path).unwrap();
+        tantivy_search::warmup(&snapshot).unwrap();
+        drop(snapshot);
         let mut checked=0;
         for i in 1..=100 {
             for (raw,id,season,episode) in [
@@ -1054,6 +1059,7 @@ mod tests {
         assert_eq!(unknown["sid"],"tt0000201");
         assert!(unknown["anime"].is_null());
         std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
     }
     #[test]
     fn normalization_handles_accents_and_and_word() {
