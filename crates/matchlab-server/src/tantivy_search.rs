@@ -227,6 +227,15 @@ mod persistence_tests {
     }
 
     #[test]
+    fn regex_metacharacters_are_literal() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER);
+            INSERT INTO titles VALUES('tt1234567','a.b',2020);
+            INSERT INTO titles VALUES('tt7654321','axb',2020);").unwrap();
+        assert_eq!(candidates(&db,"a.b",None,false,1).unwrap(),vec!["tt1234567"]);
+    }
+
+    #[test]
     fn disk_index_reopens_without_rebuilding() {
         let root=std::env::temp_dir().join(format!(
             "matchlab-tantivy-persistence-{}-{:?}",
