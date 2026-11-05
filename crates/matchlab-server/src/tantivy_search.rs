@@ -529,7 +529,7 @@ mod persistence_tests {
             INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt001','onepiece',2000);
             INSERT INTO anidb_titles VALUES('100','onepiece');
             INSERT INTO anidb_titles VALUES('200','onepiecealabasta');
-            INSERT INTO anidb_titles VALUES('300','one');
+            INSERT INTO anidb_titles VALUES('300','ones');
             INSERT INTO anime_series_map VALUES('100','tt001');
             INSERT INTO anime_series_map VALUES('200','tt001');
             INSERT INTO anime_series_map VALUES('300','tt001');").unwrap();
@@ -537,7 +537,7 @@ mod persistence_tests {
         assert_eq!(results.len(),2);
         assert_eq!(results[0].clean_title,"onepiecealabasta");
         assert_eq!(results[1].clean_title,"onepiece");
-        assert_eq!(anime_aliases(&db,"one",6).unwrap()[0].clean_title,"one");
+        assert_eq!(anime_aliases(&db,"ones",6).unwrap()[0].clean_title,"ones");
     }
 
     #[test]
