@@ -1,6 +1,7 @@
-//! Native Rust matching service backed by validated SQLite metadata.
+//! MatchLab's native Rust HTTP API.
+//! Tantivy searches titles; SQLite snapshots hold relational metadata.
 mod airdate;
-mod imdb_v4;
+mod matchlab_matcher;
 mod tantivy_search;
 mod metadata_import;
 mod metadata_download;
@@ -15,10 +16,11 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{env, path::PathBuf, sync::{Arc,Mutex,OnceLock}, time::{Instant,Duration}, collections::HashMap};
-use unicode_normalization::UnicodeNormalization;
+use tokio::sync::Semaphore;
+
 
 #[derive(Clone)]
-struct AppState { db: Arc<PathBuf>, history: Arc<PathBuf> }
+struct AppState { db: Arc<PathBuf>, history: Arc<PathBuf>, match_slots: Arc<Semaphore> }
 
 #[derive(Debug, Deserialize)]
 struct MatchRequest {
@@ -62,22 +64,24 @@ fn parse_cached(title:&str)->Result<Value,String>{
             if at.elapsed()<PARSE_TTL{return Ok(value.clone());}
         }
     }
-    let value=Value::Object(ptt_core::parse_title(title,false).map_err(|e|e.to_string())?);
+    let value=Value::Object(matchlab_parser::parse_title(title,false).map_err(|e|e.to_string())?);
     if let Ok(mut guard)=cache.lock(){
-        guard.retain(|_,(at,_)|at.elapsed()<PARSE_TTL);
-        if guard.len()>=1024{guard.clear();}
+        // Avoid O(cache size) cleanup on every previously unseen title.
+        // Under pressure, remove expired entries before evicting only the
+        // oldest live entry instead of wiping the entire warm cache.
+        const CAPACITY:usize=1024;
+        if guard.len()>=CAPACITY {
+            guard.retain(|_,(at,_)|at.elapsed()<PARSE_TTL);
+            if guard.len()>=CAPACITY {
+                if let Some(oldest)=guard.iter()
+                    .min_by_key(|(_, (at,_))|*at).map(|(key,_)|key.clone()){
+                    guard.remove(&oldest);
+                }
+            }
+        }
         guard.insert(title.to_string(),(Instant::now(),value.clone()));
     }
     Ok(value)
-}
-
-fn normalize(input: &str) -> String {
-    let lowered = input.to_lowercase()
-        .replace('æ', "ae").replace('ø', "o").replace('œ', "oe").replace('ß', "ss");
-    let ascii: String = lowered.nfkd().filter(|c| c.is_ascii()).collect();
-    let words = ascii.split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|part| !part.is_empty() && *part != "and");
-    words.collect()
 }
 
 fn numbers(v: Option<&Value>) -> Vec<i64> {
@@ -126,45 +130,12 @@ fn open_db(path: &PathBuf) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-#[cfg(test)]
-fn candidates(db: &Connection, key: &str, year: Option<i32>, series: bool) -> rusqlite::Result<Vec<Candidate>> {
-    let mut stmt = db.prepare(
-        "SELECT imdb_id,title,year,type,clean_title FROM titles
-         WHERE (clean_title=?1 OR (?1 LIKE clean_title || '%' AND length(clean_title)>=6))
-         AND year>0 AND type IN ('movie','tvMovie','short','tvShort','tvSpecial','tvSeries','tvMiniSeries')
-         ORDER BY CASE WHEN clean_title=?1 THEN 0 ELSE 1 END,
-                  length(clean_title) DESC, abs(year-coalesce(?2,year)),
-                  CASE type WHEN 'movie' THEN 0 WHEN 'tvMovie' THEN 1 WHEN 'short' THEN 2 ELSE 3 END,
-                  ordering ASC LIMIT 60"
-    )?;
-    let rows = stmt.query_map(params![key,year], |r| {
-        Ok(Candidate {imdb_id:r.get(0)?,title:r.get(1)?,year:r.get(2)?,
-            media_type:r.get(3)?,matched_title:r.get(4)?,anime_ids:Default::default(),source:"imdb"})
-    })?;
-    let mut result = Vec::new();
-    for row in rows {
-        let c = row?;
-        let is_series = c.media_type == "tvSeries" || c.media_type == "tvMiniSeries";
-        if is_series == series && !result.iter().any(|x: &Candidate| x.imdb_id == c.imdb_id) {
-            result.push(c);
-        }
-        if result.len() >= 20 { break; }
-    }
-    Ok(result)
-}
-
 fn anime_candidate(db: &Connection, key: &str, season: Option<i64>, episode: i64) -> rusqlite::Result<Option<Value>> {
     if key.len() < 4 || episode <= 0 { return Ok(None); }
-    let mut stmt = db.prepare(
-        "SELECT DISTINCT a.anidb_id,a.clean_title,l.imdb_id
-         FROM anidb_titles a JOIN anime_series_map l ON l.anidb_id=a.anidb_id
-         WHERE a.clean_title IN (WITH RECURSIVE prefixes(n) AS (SELECT 6 WHERE length(?1)>=6 UNION ALL SELECT n+1 FROM prefixes WHERE n<length(?1)) SELECT substr(?1,1,n) FROM prefixes UNION SELECT ?1)
-         ORDER BY CASE WHEN a.clean_title=?1 THEN 0 ELSE 1 END,
-                  length(a.clean_title) DESC LIMIT 40"
-    )?;
-    let rows = stmt.query_map([key], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?;
-    let mut matches = Vec::new();
-    for row in rows { matches.push(row?); }
+    let matches:Vec<_>=tantivy_search::anime_aliases(db,key,6)
+        .map_err(|error|rusqlite::Error::ToSqlConversionFailure(
+            Box::new(std::io::Error::other(error))))?
+        .into_iter().map(|alias|(alias.anidb_id,alias.clean_title,alias.imdb_id)).collect();
     if matches.is_empty() { return Ok(None); }
     let exact = matches[0].1 == key;
     let best_len = matches[0].1.len();
@@ -191,13 +162,10 @@ fn anime_candidate(db: &Connection, key: &str, season: Option<i64>, episode: i64
 /// season or episode coordinates. Exact aliases precede longest prefixes.
 fn anime_identity(db:&Connection,key:&str)->rusqlite::Result<Option<String>>{
     if key.len()<4{return Ok(None);}
-    let mut stmt=db.prepare("SELECT DISTINCT a.clean_title,l.imdb_id
-        FROM anidb_titles a JOIN anime_series_map l ON l.anidb_id=a.anidb_id
-        WHERE a.clean_title IN (WITH RECURSIVE prefixes(n) AS (SELECT 6 WHERE length(?1)>=6 UNION ALL SELECT n+1 FROM prefixes WHERE n<length(?1)) SELECT substr(?1,1,n) FROM prefixes UNION SELECT ?1)
-        ORDER BY CASE WHEN a.clean_title=?1 THEN 0 ELSE 1 END,
-                 length(a.clean_title) DESC,l.imdb_id LIMIT 100")?;
-    let rows=stmt.query_map([key],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows:Vec<_>=tantivy_search::anime_aliases(db,key,6)
+        .map_err(|error|rusqlite::Error::ToSqlConversionFailure(
+            Box::new(std::io::Error::other(error))))?
+        .into_iter().map(|alias|(alias.clean_title,alias.imdb_id)).collect();
     let Some((best_alias,best_imdb))=rows.first()else{return Ok(None)};
     let exact=best_alias==key;
     let size=best_alias.len();
@@ -292,7 +260,7 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
         && numbers(parsed.get("episodes")).is_empty();
     let title=if airdate_only{dated.as_ref().map(|(name,_)|name.as_str()).unwrap_or(&title_owned)}
         else{title_owned.as_str()};
-    let key = normalize(title);
+    let key = matchlab_matcher::clean_title(title);
     let season_range=explicit_season_range(&req.title);
     let seasons = season_range.map(|(start,end)|vec![start,end])
         .unwrap_or_else(||numbers(parsed.get("seasons")));
@@ -313,7 +281,7 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
         None => anime_title::season_from_any_exact_title(&db,&key)
             .map_err(|e|e.to_string())?.is_some(),
     };
-    let imdb = imdb_v4::search(&db,title,year,series,seasons.iter().copied().max().unwrap_or(0),&req.title,!episodes.is_empty(),20)
+    let imdb = matchlab_matcher::search(&db,title,year,series,seasons.iter().copied().max().unwrap_or(0),&req.title,!episodes.is_empty(),20)
         .map_err(|e|e.to_string())?;
     // Require every candidate for a multi-season pack to contain the final season.
     let imdb=if let Some((_,end))=season_range {
@@ -372,7 +340,7 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
         let anime_id=a["imdb_id"].as_str().unwrap_or_default();
         !imdb.iter().any(|c| {
             (c.media_type=="tvSeries" || c.media_type=="tvMiniSeries")
-                && normalize(&c.matched_title)==key && c.imdb_id!=anime_id
+                && matchlab_matcher::clean_title(&c.matched_title)==key && c.imdb_id!=anime_id
         })
     });
     let mut selected = if let Some(a) = &anime {
@@ -399,7 +367,7 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
         // Python match_title refuses ambiguous IMDb identities rather than
         // silently returning the first equally plausible candidate.
         // Always select a candidate. A verified anime crosswalk takes priority;
-        // otherwise IMDb V4 ranking (including stable IMDb ID tie-break) wins.
+        // otherwise MatchLab ranking (including stable IMDb ID tie-break) wins.
         let mut chosen_index=0usize;
         if series {
             if let Some(ep)=episodes.first().copied() {
@@ -606,9 +574,12 @@ async fn liveness() -> (StatusCode,Json<Value>) {
 }
 
 async fn readiness(State(state):State<AppState>) -> (StatusCode,Json<Value>) {
-    let ready = open_db(&state.db).and_then(|db|db.query_row(
-        "SELECT count(*) FROM metadata_state WHERE source='full_refresh'",[],|r|r.get::<_,i64>(0)))
-        .map(|n|n>0).unwrap_or(false);
+    let ready=open_db(&state.db).ok().is_some_and(|db|{
+        let metadata=db.query_row(
+            "SELECT count(*) FROM metadata_state WHERE source='full_refresh'",
+            [],|row|row.get::<_,i64>(0)).map(|count|count>0).unwrap_or(false);
+        metadata&&tantivy_search::index_ready(&db)
+    });
     (if ready {StatusCode::OK} else {StatusCode::SERVICE_UNAVAILABLE},
         Json(json!({"status":if ready {"ready"} else {"initializing"}})))
 }
@@ -663,32 +634,49 @@ async fn parse_response(req:MatchRequest)->(StatusCode,Json<Value>){
     }
 }
 
-async fn match_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
-    -> (StatusCode,Json<Value>) {
-    match tokio::task::spawn_blocking(move ||diagnose_logged(&state,&req)).await {
-        Ok(Ok(d)) => (StatusCode::OK,Json(public_match_response(d.selected))),
-        Ok(Err(e)) => (StatusCode::BAD_REQUEST,Json(json!({"error":e}))),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":e.to_string()}))),
+/// Bound CPU-heavy matching before it enters Tokio's blocking thread pool.
+/// This preserves full candidate ranking while protecting the process against
+/// request bursts during metadata imports and index-generation changes.
+async fn run_match(state: AppState, req: MatchRequest)
+    -> Result<Result<Diagnostic,String>,String> {
+    let permit=state.match_slots.clone().acquire_owned().await
+        .map_err(|e|e.to_string())?;
+    tokio::task::spawn_blocking(move ||{
+        let _permit=permit;
+        diagnose_logged(&state,&req)
+    }).await.map_err(|e|e.to_string())
+}
+
+async fn match_response(state:AppState,req:MatchRequest,debug:bool)
+    -> (StatusCode,Json<Value>){
+    match run_match(state,req).await{
+        Ok(Ok(d))=>{
+            let value=if debug{
+                serde_json::to_value(d).unwrap_or(Value::Null)
+            }else{
+                public_match_response(d.selected)
+            };
+            (StatusCode::OK,Json(value))
+        },
+        Ok(Err(e))=>(StatusCode::BAD_REQUEST,Json(json!({"error":e}))),
+        Err(e)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":e}))),
     }
+}
+
+async fn match_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
+    -> (StatusCode,Json<Value>){
+    match_response(state,req,false).await
 }
 
 /// GET /match?title=...&year=...
 async fn get_match_request(State(state):State<AppState>,Query(req):Query<MatchRequest>)
-    -> (StatusCode,Json<Value>) {
-    match tokio::task::spawn_blocking(move ||diagnose_logged(&state,&req)).await {
-        Ok(Ok(d))=>(StatusCode::OK,Json(public_match_response(d.selected))),
-        Ok(Err(e))=>(StatusCode::BAD_REQUEST,Json(json!({"error":e}))),
-        Err(e)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":e.to_string()}))),
-    }
+    -> (StatusCode,Json<Value>){
+    match_response(state,req,false).await
 }
 
 async fn debug_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
-    -> (StatusCode,Json<Value>) {
-    match tokio::task::spawn_blocking(move ||diagnose_logged(&state,&req)).await {
-        Ok(Ok(d)) => (StatusCode::OK,Json(serde_json::to_value(d).unwrap_or(Value::Null))),
-        Ok(Err(e)) => (StatusCode::BAD_REQUEST,Json(json!({"error":e}))),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":e.to_string()}))),
-    }
+    -> (StatusCode,Json<Value>){
+    match_response(state,req,true).await
 }
 
 #[tokio::main]
@@ -757,8 +745,17 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
     }
     let db = env::var("MATCHLAB_DB").unwrap_or_else(|_|"/data/metadata.sqlite3".into());
     let host = env::var("MATCHLAB_HOST").unwrap_or_else(|_|"127.0.0.1:8766".into());
+    // Open the current metadata index at startup rather than on the first search.
+    // A fresh deployment may have no metadata yet; the refresh worker below
+    // initializes it and the search path can then open its index.
+    if std::path::Path::new(&db).is_file() {
+        let index_db=Connection::open_with_flags(&db,OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        tantivy_search::warmup(&index_db)
+            .map_err(|e|format!("Tantivy startup initialization failed: {e}"))?;
+    }
+
     // Built-in HTTPS metadata feeds initialize a fresh Docker volume automatically.
-    // MATCHLAB_METADATA_URLS can override all six feeds.
+    // MATCHLAB_METADATA_URLS can override all seven feeds (or six legacy URLs).
     {
         let urls=metadata_download::configured_urls(env::var("MATCHLAB_METADATA_URLS").ok().as_deref())?;
         let hours=env::var("MATCHLAB_METADATA_REFRESH_HOURS")
@@ -796,8 +793,23 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
                 match tokio::task::spawn_blocking(move ||
                     metadata_download::refresh_from_urls(&refresh_target,&refresh_urls)
                         .map_err(|error|error.to_string())).await {
-                    Ok(Ok((imdb,links,mappings,aliases))) =>
-                        tracing::info!(imdb,links,mappings,aliases,"scheduled metadata refresh completed"),
+                    Ok(Ok((imdb,links,mappings,aliases))) => {
+                        tracing::info!(imdb,links,mappings,aliases,"scheduled metadata refresh completed");
+                        // Pre-open the new on-disk index off the async executor.
+                        // This avoids leaving the first request after refresh to
+                        // perform a full Tantivy build.
+                        let warm_target=target.clone();
+                        match tokio::task::spawn_blocking(move || -> Result<(),String> {
+                            let conn=Connection::open_with_flags(
+                                &warm_target,OpenFlags::SQLITE_OPEN_READ_ONLY)
+                                .map_err(|e|e.to_string())?;
+                            tantivy_search::warmup(&conn)
+                        }).await {
+                            Ok(Ok(())) => tracing::info!("refreshed Tantivy index ready"),
+                            Ok(Err(error)) => tracing::error!(%error,"Tantivy refresh warmup failed"),
+                            Err(error) => tracing::error!(%error,"Tantivy warmup task failed"),
+                        }
+                    },
                     Ok(Err(error)) => tracing::error!(%error,"scheduled metadata refresh failed; existing database preserved"),
                     Err(error) => tracing::error!(%error,"scheduled metadata refresh task failed"),
                 }
@@ -807,6 +819,13 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
             }
         });
     }
+    // Bound blocking match operations independently of the async HTTP executor.
+    let max_matches=env::var("MATCHLAB_MAX_CONCURRENT_MATCHES")
+        .unwrap_or_else(|_|"4".into()).parse::<usize>()?;
+    if !(1..=64).contains(&max_matches) {
+        return Err("MATCHLAB_MAX_CONCURRENT_MATCHES must be between 1 and 64".into());
+    }
+    tracing::info!(max_matches,"MatchLab match concurrency configured");
     let history_db=env::var("MATCHLAB_HISTORY_DB").unwrap_or_else(|_|"/data/history.sqlite3".into());
     let app = Router::new().route("/",get(dashboard))
         .route("/api/dashboard/history",get(dashboard_history_request))
@@ -817,7 +836,8 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         .route("/match",get(get_match_request).post(match_request))
         .route("/parse",get(get_parse_request).post(parse_request))
         .route("/debug/match",post(debug_request))
-        .with_state(AppState{db:Arc::new(PathBuf::from(db)),history:Arc::new(PathBuf::from(history_db))});
+        .with_state(AppState{db:Arc::new(PathBuf::from(db)),history:Arc::new(PathBuf::from(history_db)),
+            match_slots:Arc::new(Semaphore::new(max_matches))});
     let listener = tokio::net::TcpListener::bind(&host).await?;
     tracing::info!("Rust API listening on {host}");
     axum::serve(listener,app).await?;
@@ -850,6 +870,9 @@ mod tests {
             INSERT INTO anidb_titles VALUES('999','Supernatural','supernatural','main','en');
             INSERT INTO episode_map VALUES('999','999',1,1,1,12,0,'');").unwrap();
         drop(db);
+        let snapshot=Connection::open(&path).unwrap();
+        tantivy_search::warmup(&snapshot).unwrap();
+        drop(snapshot);
         let result=diagnose(&path,&MatchRequest{
             title:"Supernatural.S01-s12.hdr".into(),year:None,series:None
         }).unwrap();
@@ -858,6 +881,7 @@ mod tests {
         assert_eq!(winner["match_source"],"imdb");
         assert_eq!(winner["category"],"series");
         std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
     }
     #[test]
     fn requested_episode_must_exist_within_known_season_bounds() {
@@ -945,7 +969,8 @@ mod tests {
     #[test]
     fn anime_identity_without_episode_is_unambiguous(){
         let db=Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
             CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT);
             INSERT INTO anidb_titles VALUES('100','frieren');
             INSERT INTO anime_series_map VALUES('100','tt1234567');").unwrap();
@@ -987,7 +1012,7 @@ mod tests {
                 (&sid,&series,"series","tvSeries"),
                 (&aid,&anime,"series","tvSeries")] {
                 db.execute("INSERT INTO titles VALUES(?1,?2,?3,2020,?4,'US',1,0,?5)",
-                    params![id,name,normalize(name),category,kind]).unwrap();
+                    params![id,name,matchlab_matcher::clean_title(name),category,kind]).unwrap();
             }
             for id in [&sid,&aid] {
                 db.execute("INSERT INTO seasons VALUES(?1,10)",[id]).unwrap();
@@ -995,11 +1020,16 @@ mod tests {
             db.execute("INSERT INTO anime_series_map VALUES(?1,?2,?3,0)",
                 params![aid,ani_id,format!("tvdb{i}")]).unwrap();
             db.execute("INSERT INTO anidb_titles VALUES(?1,?2,?3,'main','en')",
-                params![ani_id,anime,normalize(&anime)]).unwrap();
+                params![ani_id,anime,matchlab_matcher::clean_title(&anime)]).unwrap();
             db.execute("INSERT INTO episode_map VALUES(?1,?2,1,1,1,24,0,'')",
                 params![ani_id,format!("tvdb{i}")]).unwrap();
         }
         drop(db);
+        // A published request must use a warmed index; building here would
+        // conceal an expensive request-time reindexing regression.
+        let snapshot=Connection::open(&path).unwrap();
+        tantivy_search::warmup(&snapshot).unwrap();
+        drop(snapshot);
         let mut checked=0;
         for i in 1..=100 {
             for (raw,id,season,episode) in [
@@ -1033,12 +1063,13 @@ mod tests {
         assert_eq!(unknown["sid"],"tt0000201");
         assert!(unknown["anime"].is_null());
         std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
     }
     #[test]
     fn normalization_handles_accents_and_and_word() {
-        assert_eq!(normalize("Bjørn & Ægir"),"bjorn aegir".replace(' ',""));
-        assert_eq!(normalize("Rock and Roll"),"rockroll");
-        assert_eq!(normalize("Pokémon"),"pokemon");
+        assert_eq!(matchlab_matcher::clean_title("Bjørn & Ægir"),"bjorn aegir".replace(' ',""));
+        assert_eq!(matchlab_matcher::clean_title("Rock and Roll"),"rockroll");
+        assert_eq!(matchlab_matcher::clean_title("Pokémon"),"pokemon");
     }
     #[test]
     fn absolute_episode_notation(){
@@ -1050,15 +1081,17 @@ mod tests {
     fn empty_number_array() { assert!(numbers(None).is_empty()); }
     #[test]
     fn imdb_candidates_are_filtered_by_media_type() {
-        let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE titles (
-            imdb_id TEXT, title TEXT, year INTEGER, type TEXT,
-            clean_title TEXT, ordering INTEGER
-        );").unwrap();
-        db.execute("INSERT INTO titles VALUES ('tt1','Example',2020,'movie','example',1)",[]).unwrap();
-        db.execute("INSERT INTO titles VALUES ('tt2','Example',2021,'tvSeries','example',1)",[]).unwrap();
-        let movies = candidates(&db,"example",Some(2020),false).unwrap();
-        let shows = candidates(&db,"example",Some(2021),true).unwrap();
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_season INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);
+            INSERT INTO titles VALUES('tt1','Example','example',2020,'movie','US',1,1,'movie');
+            INSERT INTO titles VALUES('tt2','Example','example',2021,'series','US',1,1,'tvSeries');").unwrap();
+        let movies=matchlab_matcher::search(&db,"Example",Some(2020),false,0,"Example",false,20).unwrap();
+        let shows=matchlab_matcher::search(&db,"Example",Some(2021),true,0,"Example",false,20).unwrap();
         assert_eq!(movies.len(),1);
         assert_eq!(movies[0].imdb_id,"tt1");
         assert_eq!(shows.len(),1);
@@ -1067,7 +1100,8 @@ mod tests {
     #[test]
     fn anime_requires_unique_verified_crosswalk() {
         let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
             CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT,tvdb_id TEXT DEFAULT '',trakt_season INTEGER DEFAULT 0);
             CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT DEFAULT '',tvdb_season INTEGER,
                 anidb_season INTEGER,map TEXT,offset INTEGER,start INTEGER,end INTEGER);

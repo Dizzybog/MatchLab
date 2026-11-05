@@ -1,10 +1,10 @@
 [package]
-name = "ptt-core"
+name = "matchlab-parser"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Core torrent title parsing engine used by matchlab."
+description = "MatchLab native torrent-release title parser."
 homepage.workspace = true
 repository.workspace = true
 
@@ -23,5 +23,5 @@ thiserror.workspace = true
 criterion.workspace = true
 
 [[bench]]
-name = "ptt_bench"
+name = "matchlab_parser_bench"
 harness = false

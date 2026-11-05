@@ -1,6 +1,7 @@
-//! IMDb V4 candidate search ported from MediaMatch/index.py.
-//! The ranking stages intentionally match the Python reference implementation.
-use rusqlite::{params, Connection, Row};
+//! MatchLab's deterministic IMDb title matcher.
+//! Ordered stages prioritize exact aliases, then title and season eligibility,
+//! year proximity and stable tie-breaking. Source metadata comes from Tantivy.
+use rusqlite::{params, Connection};
 use std::collections::{BTreeMap, HashSet};
 use unicode_normalization::UnicodeNormalization;
 use serde::Serialize;
@@ -16,11 +17,15 @@ struct Aka {
     imdb_id:String, title:String, clean:String, year:i32, category:String,
     region:Option<String>, original:bool, ordering:i32, media_type:String,
 }
-fn read_aka(r:&Row<'_>)->rusqlite::Result<Aka>{
-    Ok(Aka{imdb_id:r.get("imdb_id")?,title:r.get("title")?,clean:r.get("clean_title")?,
-        year:r.get("year")?,category:r.get("category")?,region:r.get("region")?,
-        original:r.get::<_,i64>("original")? != 0,ordering:r.get("ordering")?,
-        media_type:r.get("type")?})
+impl From<crate::tantivy_search::TitleAlias> for Aka {
+    fn from(a:crate::tantivy_search::TitleAlias)->Self{
+        Self{imdb_id:a.imdb_id,title:a.title,clean:a.clean,year:a.year,
+            category:a.category,region:a.region,original:a.original,
+            ordering:a.ordering,media_type:a.media_type}
+    }
+}
+fn index_error(error:String)->rusqlite::Error{
+    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(error)))
 }
 #[derive(Clone,Debug,Serialize)]
 pub struct Match {
@@ -43,11 +48,6 @@ fn eligible(db:&Connection,r:&Aka,season:i64)->rusqlite::Result<bool>{
         params![r.imdb_id,season],|row|row.get::<_,i32>(0)).optional()?.is_some())
 }
 use rusqlite::OptionalExtension;
-fn select(db:&Connection,where_clause:&str,values:&[&dyn rusqlite::ToSql])->rusqlite::Result<Vec<Aka>>{
-    let sql=format!("SELECT * FROM titles WHERE {where_clause} AND year>0");
-    let mut stmt=db.prepare_cached(&sql)?;
-    stmt.query_map(values,read_aka)?.collect()
-}
 fn filter(db:&Connection,rows:Vec<Aka>,release:&str,series:bool,year:Option<i32>,season:i64)->rusqlite::Result<Vec<Aka>>{
     let mut eligibility=std::collections::HashMap::new();
     let mut result=Vec::new();
@@ -62,20 +62,18 @@ fn filter(db:&Connection,rows:Vec<Aka>,release:&str,series:bool,year:Option<i32>
     }
     Ok(result)
 }
+fn tantivy_aliases(db:&Connection,key:&str,suffix:bool)->rusqlite::Result<Vec<Aka>>{
+    crate::tantivy_search::title_aliases(db,key,suffix)
+        .map(|rows|rows.into_iter().map(Aka::from).collect()).map_err(index_error)
+}
+fn exact(db:&Connection,key:&str)->rusqlite::Result<Vec<Aka>>{
+    crate::tantivy_search::title_aliases_exact(db,key)
+        .map(|rows|rows.into_iter().map(Aka::from).collect()).map_err(index_error)
+}
 fn prefix(db:&Connection,key:&str,release:&str,series:bool,year:Option<i32>,season:i64)->rusqlite::Result<Vec<Aka>>{
-    let upper=format!("{key}\u{ffff}");
-    let indexed=crate::tantivy_search::candidates(db,key,year,false,100);
-    if let Ok(ids)=indexed {
-        if !ids.is_empty() {
-            let mut rows=Vec::new();
-            for id in ids {
-                rows.extend(select(db,"imdb_id=?1 AND clean_title>=?2 AND clean_title<?3",&[&id,&key,&upper])?);
-            }
-            let matched=filter(db,rows,release,series,year,season)?;
-            if !matched.is_empty(){return Ok(matched);}
-        }
-    }
-    filter(db,select(db,"clean_title>=?1 AND clean_title<?2",&[&key,&upper])?,release,series,year,season)
+    let matching=filter(db,exact(db,key)?,release,series,year,season)?;
+    if !matching.is_empty(){return Ok(matching);}
+    filter(db,tantivy_aliases(db,key,false)?,release,series,year,season)
 }
 fn type_rank(t:&str)->i32{
     match t{"movie"=>0,"tvMovie"=>1,"short"=>2,"tvShort"=>3,"tvSpecial"=>4,"tvSeries"=>5,_=>6}
@@ -101,7 +99,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     // Exact country-qualified aliases precede generic prefix matching.
     if series {
         for candidate in crate::country_aliases::candidates(release_title) {
-            let found=select(db,"clean_title=?1",&[&candidate])?;
+            let found=exact(db,&candidate)?;
             for row in found {
                 if is_series(&row.media_type) && eligible(db,&row,required_season)? {
                     rows.push(row);
@@ -115,27 +113,13 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
         for size in ((std::cmp::max(2,key.len()/2)+1)..key.len()).rev(){
             if !key.is_char_boundary(size){continue;}
             let short=&key[..size];
-            rows=filter(db,select(db,"clean_title=?1",&[&short])?,&release,series,year,required_season)?;
+            rows=filter(db,exact(db,short)?,&release,series,year,required_season)?;
             if !rows.is_empty(){stage="shorter_prefix";break;}
         }
     }
     if rows.is_empty()&&key.len()>=12{
-        let rev:String=key.chars().rev().collect();
-        let upper=format!("{rev}\u{ffff}");
-        if let Ok(ids)=crate::tantivy_search::candidates(db,&key,year,true,100) {
-            let mut indexed_rows=Vec::new();
-            for id in ids {
-                indexed_rows.extend(select(db,
-                    "imdb_id=?1 AND reverse(clean_title)>=?2 AND reverse(clean_title)<?3 AND length(clean_title)>?4",
-                    &[&id,&rev,&upper,&(key.len() as i64)])?);
-            }
-            rows=filter(db,indexed_rows,&release,series,year,required_season)?;
-        }
-        if rows.is_empty(){
-            rows=filter(db,select(db,
-                "reverse(clean_title)>=?1 AND reverse(clean_title)<?2 AND length(clean_title)>?3",
-                &[&rev,&upper,&(key.len() as i64)])?,&release,series,year,required_season)?;
-        }
+        rows=filter(db,tantivy_aliases(db,&key,true)?,
+            &release,series,year,required_season)?;
         if !rows.is_empty(){stage="reverse_suffix";}
     }
     if rows.is_empty()&&key.len()>=6{
@@ -144,9 +128,12 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
         if !rows.is_empty(){stage="half_prefix";}
     }
     if rows.is_empty()&&series{
-        rows=filter(db,select(db,"imdb_id IN (
-            SELECT l.imdb_id FROM anidb_titles a JOIN anime_series_map l ON l.anidb_id=a.anidb_id
-            WHERE a.clean_title=?1)",&[&key])?,&release,series,year,required_season)?;
+        let ids=crate::tantivy_search::anime_candidates(db,&key).map_err(index_error)?;
+        if !ids.is_empty(){
+            let aliases=crate::tantivy_search::titles_by_ids(db,&ids).map_err(index_error)?;
+            rows=filter(db,aliases.into_iter().map(Aka::from).collect(),
+                &release,series,year,required_season)?;
+        }
         if !rows.is_empty(){stage="anime_alias";}
     }
     if rows.is_empty(){return Ok(vec![]);}
@@ -161,11 +148,12 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     for r in rows{groups.entry(r.imdb_id.clone()).or_default().push(r);}
     let mut duplicates=HashSet::new();
     let mut checked=HashSet::new();
-    let mut duplicate_stmt=db.prepare_cached("SELECT EXISTS(SELECT 1 FROM titles WHERE clean_title=?1 AND year>0 AND imdb_id <> (SELECT imdb_id FROM titles WHERE clean_title=?1 AND year>0 LIMIT 1))")?;
+    
     for r in groups.values().flatten(){
         if checked.insert(r.clean.clone()) {
-            let count:i64=duplicate_stmt.query_row([&r.clean],|row|row.get(0))?;
-            if count!=0{duplicates.insert(r.clean.clone());}
+            if crate::tantivy_search::has_duplicate_title(db,&r.clean).map_err(index_error)?{
+                duplicates.insert(r.clean.clone());
+            }
         }
     }
     let count_first=year.is_none()&&required_season==0&&!has_episode;

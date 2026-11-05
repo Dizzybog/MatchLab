@@ -1,22 +1,25 @@
-//! Port of anime_title_matcher.py: part-specific titles and local seasons.
+//! MatchLab's anime part-title matcher and local-season resolver.
 use rusqlite::{params,Connection,OptionalExtension};
-use crate::{anime_resolver,imdb_v4};
+use crate::{anime_resolver,matchlab_matcher};
 use std::collections::BTreeSet;
 
 #[derive(Debug,Clone)]
 struct Part {id:String}
 
+fn aliases(db:&Connection,imdb:&str,key:&str)->rusqlite::Result<Vec<(String,String)>>{
+    crate::tantivy_search::anime_aliases(db,key,4)
+        .map_err(|error|rusqlite::Error::ToSqlConversionFailure(
+            Box::new(std::io::Error::other(error))))
+        .map(|found|found.into_iter().filter(|a|a.imdb_id==imdb)
+            .map(|a|(a.anidb_id,a.clean_title)).collect())
+}
+
 pub fn resolve(db:&Connection,imdb:&str,title:&str,season:i64,episode:i64)
     -> rusqlite::Result<Option<anime_resolver::Episode>> {
     if season<=0||episode<=0{return Ok(None);}
-    let key=imdb_v4::clean_title(title);
+    let key=matchlab_matcher::clean_title(title);
     if key.len()<4{return Ok(None);}
-    let mut stmt=db.prepare("SELECT DISTINCT a.anidb_id,a.clean_title
-        FROM anidb_titles a JOIN anime_series_map l ON l.anidb_id=a.anidb_id
-        WHERE l.imdb_id=?1 AND (a.clean_title IN (WITH RECURSIVE prefixes(n) AS (SELECT 4 WHERE length(?2)>=4 UNION ALL SELECT n+1 FROM prefixes WHERE n<length(?2)) SELECT substr(?2,1,n) FROM prefixes UNION SELECT ?2))")?;
-    let mut aliases=stmt.query_map(params![imdb,key],|r|
-        Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut aliases=aliases(db,imdb,&key)?;
     if aliases.is_empty(){return Ok(None);}
     aliases.sort_by_key(|(id,alias)|(if alias==&key{0}else{1},
         -(alias.len() as i64),id.clone(),alias.clone()));
@@ -70,14 +73,9 @@ pub fn resolve(db:&Connection,imdb:&str,title:&str,season:i64,episode:i64)
 }
 
 pub fn has_specific_alias(db:&Connection,imdb:&str,title:&str)->rusqlite::Result<bool>{
-    let key=imdb_v4::clean_title(title);
+    let key=matchlab_matcher::clean_title(title);
     if key.len()<4{return Ok(false);}
-    let mut stmt=db.prepare("SELECT DISTINCT a.anidb_id,a.clean_title FROM anidb_titles a
-        JOIN anime_series_map l ON l.anidb_id=a.anidb_id WHERE l.imdb_id=?1 AND
-        (a.clean_title IN (WITH RECURSIVE prefixes(n) AS (SELECT 4 WHERE length(?2)>=4 UNION ALL SELECT n+1 FROM prefixes WHERE n<length(?2)) SELECT substr(?2,1,n) FROM prefixes UNION SELECT ?2))")?;
-    let mut aliases=stmt.query_map(params![imdb,key],|r|
-        Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut aliases=aliases(db,imdb,&key)?;
     if aliases.is_empty(){return Ok(false);}
     aliases.sort_by_key(|(id,alias)|(if alias==&key{0}else{1},-(alias.len() as i64),id.clone()));
     let best=&aliases[0];
@@ -97,14 +95,10 @@ pub fn has_specific_alias(db:&Connection,imdb:&str,title:&str)->rusqlite::Result
 /// Only publish a season when one uniquely identified AniDB work maps to exactly
 /// one positive TVDB season. Never manufacture an episode or an ASID.
 pub fn season_from_title(db:&Connection,imdb:&str,title:&str)->rusqlite::Result<Option<i64>>{
-    let key=imdb_v4::clean_title(title);
+    let key=matchlab_matcher::clean_title(title);
     if key.len()<4{return Ok(None);}
-    let mut stmt=db.prepare("SELECT DISTINCT a.anidb_id,a.clean_title
-        FROM anidb_titles a JOIN anime_series_map l ON l.anidb_id=a.anidb_id
-        WHERE l.imdb_id=?1 AND a.clean_title=?2")?;
-    let ids=stmt.query_map(params![imdb,key],|r|
-        Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let ids=aliases(db,imdb,&key)?.into_iter().filter(|(_,alias)|alias==&key)
+        .collect::<Vec<_>>();
     let unique:BTreeSet<_>=ids.into_iter().map(|(id,_)|id).collect();
     if unique.len()!=1{return Ok(None);}
     let selected=unique.iter().next().unwrap();
@@ -120,10 +114,11 @@ pub fn season_from_title(db:&Connection,imdb:&str,title:&str)->rusqlite::Result<
 /// IMDb identity and a uniquely mapped positive season.
 pub fn season_from_any_exact_title(db:&Connection,key:&str)->rusqlite::Result<Option<i64>>{
     if key.len()<4{return Ok(None);}
-    let mut stmt=db.prepare("SELECT DISTINCT l.imdb_id FROM anidb_titles a
-        JOIN anime_series_map l ON l.anidb_id=a.anidb_id WHERE a.clean_title=?1")?;
-    let ids=stmt.query_map([key],|r|r.get::<_,String>(0))?
-        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+    let ids=crate::tantivy_search::anime_aliases(db,key,4)
+        .map_err(|error|rusqlite::Error::ToSqlConversionFailure(
+            Box::new(std::io::Error::other(error))))?
+        .into_iter().filter(|a|a.clean_title==key).map(|a|a.imdb_id)
+        .collect::<BTreeSet<_>>();
     if ids.len()!=1{return Ok(None);}
     let imdb=ids.iter().next().unwrap();
     season_from_title(db,imdb,key)
@@ -135,7 +130,8 @@ mod title_only_season_tests {
     #[test]
     fn exact_part_alias_infers_season_but_ambiguous_alias_does_not() {
         let db=Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
             CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT);
             CREATE TABLE episode_map(anidb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER);
             INSERT INTO anidb_titles VALUES('101','swordartonlinealicization');

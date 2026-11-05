@@ -1,5 +1,5 @@
-//! Port of the episode-map rules in MediaMatch/anime_resolver.py.
-//! Only mapping tables establish episode identity; never infer it from IMDb AKAs.
+//! MatchLab anime episode mapping and coordinate validation.
+//! Only verified crosswalk data establishes episode identity.
 use rusqlite::{Connection};
 use serde::Serialize;
 use std::collections::BTreeSet;
