@@ -208,9 +208,18 @@ fn open_search(db:&Connection)->Result<(SearchIndex,Option<PathBuf>),String>{
     }else{
         let cache=CACHE.get_or_init(||Mutex::new(HashMap::new()));
         let mut guard=cache.lock().map_err(|e|e.to_string())?;
-        guard.retain(|key,_|!key.starts_with(&format!("{source}:"))||key==&path);
+        // Keep several immutable generations cached simultaneously. In-flight
+        // requests may hold an older SQLite snapshot after a refresh; evicting
+        // every other generation on each query would cause cache thrashing.
         if !guard.contains_key(&path) {
-            guard.insert(path.clone(),build(db,&index_dir(Path::new(source),&generation_id))?);
+            let opened=build(db,&index_dir(Path::new(source),&generation_id))?;
+            const MAX_GENERATIONS:usize=12;
+            if guard.len()>=MAX_GENERATIONS {
+                if let Some(victim)=guard.keys().find(|k|k.as_str()!=path).cloned() {
+                    guard.remove(&victim);
+                }
+            }
+            guard.insert(path.clone(),opened);
         }
         guard.get(&path).ok_or("index missing")?.clone()
     };
@@ -539,6 +548,41 @@ mod persistence_tests {
         assert_eq!(candidates(&published,"example",None,false,1).unwrap(),vec!["tt1234567"]);
         assert!(completed.is_file());
         drop(published);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn old_sqlite_readers_keep_their_generation_after_publication() {
+        let root=std::env::temp_dir().join(format!("matchlab-generation-overlap-{}-{:?}",
+            std::process::id(),std::thread::current().id()));
+        let _=std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let target=root.join("metadata.sqlite3");
+        let stage=root.join("stage.sqlite3");
+        let schema="CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER,
+            title TEXT NOT NULL DEFAULT '',category TEXT NOT NULL DEFAULT 'movie',
+            region TEXT DEFAULT '',original INTEGER DEFAULT 1,
+            ordering INTEGER DEFAULT 0,type TEXT DEFAULT 'movie');
+            CREATE TABLE metadata_state(source TEXT PRIMARY KEY,updated_at TEXT,row_count INTEGER);";
+        let old=Connection::open(&target).unwrap();
+        old.execute_batch(schema).unwrap();
+        old.execute_batch("INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt1111111','legacy',2000);
+            INSERT INTO metadata_state VALUES('tantivy_generation','v3-oldreader',0);").unwrap();
+        prepare(&old,&target).unwrap();
+        assert_eq!(candidates(&old,"legacy",None,false,1).unwrap(),vec!["tt1111111"]);
+        let next=Connection::open(&stage).unwrap();
+        next.execute_batch(schema).unwrap();
+        next.execute_batch("INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt2222222','modern',2020);
+            INSERT INTO metadata_state VALUES('tantivy_generation','v3-newreader',0);").unwrap();
+        prepare(&next,&target).unwrap();
+        drop(next);
+        std::fs::rename(&stage,&target).unwrap();
+        let current=Connection::open(&target).unwrap();
+        for _ in 0..3 {
+            assert_eq!(candidates(&old,"legacy",None,false,1).unwrap(),vec!["tt1111111"]);
+            assert_eq!(candidates(&current,"modern",None,false,1).unwrap(),vec!["tt2222222"]);
+        }
+        drop(current);drop(old);
         std::fs::remove_dir_all(root).unwrap();
     }
 
