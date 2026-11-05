@@ -73,9 +73,12 @@ fn prefix(db:&Connection,key:&str,release:&str,series:bool,year:Option<i32>,seas
             // issuing an individual SQL query per candidate.
             let encoded=serde_json::to_string(&ids)
                 .map_err(|e|rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-            return filter(db,select(db,
+            let eligible=filter(db,select(db,
                 "imdb_id IN (SELECT value FROM json_each(?1)) AND clean_title>=?2 AND clean_title<?3",
-                &[&encoded,&key,&upper])?,release,series,year,season);
+                &[&encoded,&key,&upper])?,release,series,year,season)?;
+            if !eligible.is_empty(){return Ok(eligible);}
+            // A stale or incomplete Tantivy generation must never suppress
+            // eligible candidates from the authoritative SQLite snapshot.
         }
     }
     filter(db,select(db,"clean_title>=?1 AND clean_title<?2",&[&key,&upper])?,release,series,year,season)
