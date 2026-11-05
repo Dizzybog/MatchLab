@@ -70,6 +70,8 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
 
 /// Returns candidate IMDb IDs; the deterministic IMDb V4 ranker remains authoritative.
 /// Uses exhaustive document collection before year filtering and ID deduplication.
+/// The limit parameter is retained for API compatibility; V4 ranking must
+/// receive the complete matching set, so it does not truncate this result.
 pub fn candidates(db:&Connection,key:&str,year:Option<i32>,suffix:bool,limit:usize)->Result<Vec<String>,String>{
     if key.is_empty()||limit==0{return Ok(Vec::new());}
     let source=db.path().unwrap_or(":memory:");
@@ -107,7 +109,7 @@ pub fn candidates(db:&Connection,key:&str,year:Option<i32>,suffix:bool,limit:usi
         if let Some(imdb)=doc.get_first(search.id).and_then(|v|v.as_str()){
             if seen.insert(imdb.to_string()){ids.push(imdb.to_string());}
         }
-        if ids.len()>=limit{break;}
+        // Do not truncate candidates before deterministic V4 ranking.
     }
     Ok(ids)
 }
