@@ -1,6 +1,7 @@
 //! Native Rust matching service backed by validated SQLite metadata.
 mod airdate;
 mod imdb_v4;
+mod tantivy_search;
 mod metadata_import;
 mod metadata_download;
 mod anime_resolver;
