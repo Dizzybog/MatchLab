@@ -161,6 +161,16 @@ fn index_dir(source:&Path,generation_id:&str)->PathBuf{
     PathBuf::from(format!("{}.tantivy",source.display())).join(format!("schema5-{generation_id}"))
 }
 
+/// Cheap readiness probe: never start a full index build from /health.
+pub fn index_ready(db:&Connection)->bool{
+    let Some(source)=db.path().filter(|path|!path.is_empty()&&*path!=":memory:")else{
+        return false;
+    };
+    let Ok(generation_id)=generation(db)else{return false;};
+    index_dir(Path::new(source),&generation_id)
+        .join(".matchlab-complete").is_file()
+}
+
 /// Build and verify the *final* Tantivy generation before publishing SQLite.
 /// No second index build or request-time warmup is required after publication.
 pub fn prepare(db:&Connection,target:&Path)->Result<(),String>{
@@ -541,10 +551,12 @@ mod persistence_tests {
         prepare(&db,&target).unwrap();
         let completed=index_dir(&target,"v3-testpublish").join(".matchlab-complete");
         assert!(completed.is_file());
+        assert!(!index_ready(&db),"staging SQLite is not published yet");
         drop(db);
         std::fs::rename(staging,&target).unwrap();
         let published=Connection::open(&target).unwrap();
         warmup(&published).unwrap();
+        assert!(index_ready(&published));
         assert_eq!(candidates(&published,"example",None,false,1).unwrap(),vec!["tt1234567"]);
         assert!(completed.is_file());
         drop(published);

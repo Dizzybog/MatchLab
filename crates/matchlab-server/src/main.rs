@@ -565,9 +565,12 @@ async fn liveness() -> (StatusCode,Json<Value>) {
 }
 
 async fn readiness(State(state):State<AppState>) -> (StatusCode,Json<Value>) {
-    let ready = open_db(&state.db).and_then(|db|db.query_row(
-        "SELECT count(*) FROM metadata_state WHERE source='full_refresh'",[],|r|r.get::<_,i64>(0)))
-        .map(|n|n>0).unwrap_or(false);
+    let ready=open_db(&state.db).ok().is_some_and(|db|{
+        let metadata=db.query_row(
+            "SELECT count(*) FROM metadata_state WHERE source='full_refresh'",
+            [],|row|row.get::<_,i64>(0)).map(|count|count>0).unwrap_or(false);
+        metadata&&tantivy_search::index_ready(&db)
+    });
     (if ready {StatusCode::OK} else {StatusCode::SERVICE_UNAVAILABLE},
         Json(json!({"status":if ready {"ready"} else {"initializing"}})))
 }
