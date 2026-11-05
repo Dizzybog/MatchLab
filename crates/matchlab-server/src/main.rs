@@ -1,3 +1,4 @@
+mod airdate;
 //! Native Rust matching service backed by validated SQLite metadata.
 mod imdb_v4;
 mod metadata_import;
@@ -285,7 +286,11 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
         }
         filtered.join(" ")
     }else{parsed_title.to_string()};
-    let title=title_owned.as_str();
+    let dated=airdate::extract(&req.title);
+    let airdate_only=dated.is_some() && numbers(parsed.get("seasons")).is_empty()
+        && numbers(parsed.get("episodes")).is_empty();
+    let title=if airdate_only{dated.as_ref().map(|(name,_)|name.as_str()).unwrap_or(&title_owned)}
+        else{title_owned.as_str()};
     let key = normalize(title);
     let season_range=explicit_season_range(&req.title);
     let seasons = season_range.map(|(start,end)|vec![start,end])
@@ -294,13 +299,13 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
     if episodes.is_empty() {
         if let Some(ep)=explicit_absolute_episode(&req.title){episodes.push(ep);}
     }
-    let year = req.year.or_else(||parsed.get("year").and_then(Value::as_i64).map(|n|n as i32));
+    let year = if airdate_only {req.year} else {req.year.or_else(||parsed.get("year").and_then(Value::as_i64).map(|n|n as i32))};
     let db = open_db(db_path).map_err(|e|e.to_string())?;
     // An exact anime alias can identify a series even without SxxExx tokens.
     // Respect an explicitly supplied series=false override.
     let series = match req.series {
         Some(value) => value,
-        None if !seasons.is_empty() || !episodes.is_empty() => true,
+        None if airdate_only || !seasons.is_empty() || !episodes.is_empty() => true,
         // A release with an explicit production year and no episode/season
         // coordinates is a movie candidate, even if an anime alias exists.
         None if year.is_some() => false,
@@ -467,6 +472,26 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
                     "parsed":parsed_value.clone()}))
         }else{None}
     };
+    // Date-only releases use Cinemeta; explicit SxxExx coordinates take precedence.
+    if airdate_only {
+        if let (Some((_,date)),Some(winner))=(dated.as_ref(),selected.as_mut()){
+            if let Some(id)=winner["imdb_id"].as_str().map(str::to_owned){
+                match airdate::resolve(db_path,&id,date){
+                    Ok(Some((season,episode)))=>{
+                        winner["season"]=json!(season);
+                        winner["episode"]=json!(episode);
+                        winner["season_end"]=json!(season);
+                        winner["episode_end"]=json!(episode);
+                        winner["sid"]=json!(format!("{id}:{season}:{episode}"));
+                        winner["air_date"]=json!(date);
+                        winner["match_source"]=json!("cinemeta_airdate");
+                    }
+                    Ok(None)=>{},
+                    Err(error)=>tracing::warn!(imdb_id=%id,%error,"airdate lookup failed"),
+                }
+            }
+        }
+    }
     // A season pack such as Supernatural.S02 covers the season's episodes.
     // A specific S02E01 must never be expanded to the entire season.
     if let (Some((start,end)),Some(winner))=(season_range,selected.as_mut()){
