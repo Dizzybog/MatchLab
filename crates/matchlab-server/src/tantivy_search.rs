@@ -45,15 +45,20 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
                     .map_err(|e|e.to_string())?;
                 count+=1;
             }
-            let mut aliases=db.prepare("SELECT DISTINCT l.imdb_id,a.clean_title
-                FROM anidb_titles a JOIN anime_series_map l ON l.anidb_id=a.anidb_id
-                WHERE a.clean_title<>''").map_err(|e|e.to_string())?;
-            let mapped=aliases.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))
-                .map_err(|e|e.to_string())?;
-            for item in mapped {
-                let (imdb,alias)=item.map_err(|e|e.to_string())?;
-                writer.add_document(doc!(anime=>alias,id=>imdb)).map_err(|e|e.to_string())?;
-                count+=1;
+            let has_alias_tables:i64=db.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('anidb_titles','anime_series_map')",
+                [],|r|r.get(0)).map_err(|e|e.to_string())?;
+            if has_alias_tables==2 {
+                let mut aliases=db.prepare("SELECT DISTINCT l.imdb_id,a.clean_title
+                    FROM anidb_titles a JOIN anime_series_map l ON l.anidb_id=a.anidb_id
+                    WHERE a.clean_title<>''").map_err(|e|e.to_string())?;
+                let mapped=aliases.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))
+                    .map_err(|e|e.to_string())?;
+                for item in mapped {
+                    let (imdb,alias)=item.map_err(|e|e.to_string())?;
+                    writer.add_document(doc!(anime=>alias,id=>imdb)).map_err(|e|e.to_string())?;
+                    count+=1;
+                }
             }
             writer.commit().map_err(|e|e.to_string())?;
             drop(writer);
