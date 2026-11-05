@@ -37,7 +37,7 @@ fn eligible(db:&Connection,r:&Aka,season:i64)->rusqlite::Result<bool>{
     if !is_series(&r.media_type)||season<=0{return Ok(true);}
     let max:Option<i64>=db.query_row("SELECT max_season FROM seasons WHERE imdb_id=?1",
         [&r.imdb_id],|row|row.get(0)).optional()?;
-    if max.unwrap_or(0)>=std::cmp::max(1,season-1){return Ok(true);}
+    if max.unwrap_or(0)>=season{return Ok(true);}
     Ok(db.query_row("SELECT 1 FROM anime_series_map l JOIN episode_map m ON m.anidb_id=l.anidb_id
         WHERE l.imdb_id=?1 AND (m.tvdb_season=?2 OR l.trakt_season=?2) LIMIT 1",
         params![r.imdb_id,season],|row|row.get::<_,i32>(0)).optional()?.is_some())
@@ -212,6 +212,39 @@ mod tests{
             INSERT INTO imdb_ratings VALUES('tthigh',50000);").unwrap();
         let found=search(&db,"Example",Some(2020),false,0,"Example.2020",false,5).unwrap();
         assert_eq!(found[0].imdb_id,"tthigh");
+    }
+    #[test] fn supernatural_season_two_rejects_one_season_competitor(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_season INTEGER);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO titles VALUES('ttwrong','Supernatural','supernatural',2020,'series','US',1,0,'tvMiniSeries');
+            INSERT INTO titles VALUES('ttright','Supernatural','supernatural',2005,'series','US',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('ttwrong',1);
+            INSERT INTO seasons VALUES('ttright',15);
+            INSERT INTO imdb_ratings VALUES('ttwrong',1000000);
+            INSERT INTO imdb_ratings VALUES('ttright',100);").unwrap();
+        let found=search(&db,"Supernatural",None,true,2,"Supernatural.S02",false,20).unwrap();
+        assert_eq!(found.len(),1);
+        assert_eq!(found[0].imdb_id,"ttright");
+    }
+    #[test] fn anime_explicit_season_mapping_remains_eligible(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_season INTEGER);
+            INSERT INTO seasons VALUES('ttanime',1);
+            INSERT INTO anime_series_map VALUES('ttanime','123','456',2);
+            INSERT INTO episode_map VALUES('123',2);").unwrap();
+        let anime=Aka{imdb_id:"ttanime".into(),title:"Anime".into(),clean:"anime".into(),
+            year:2020,category:"series".into(),region:None,original:true,ordering:0,
+            media_type:"tvSeries".into()};
+        assert!(eligible(&db,&anime,2).unwrap());
+        assert!(!eligible(&db,&anime,3).unwrap());
     }
     #[test] fn normalization(){assert_eq!(clean_title("Pokémon and Ægir"),"pokemonaegir");}
     #[test] fn country_specific_series_beats_generic_alias() {
