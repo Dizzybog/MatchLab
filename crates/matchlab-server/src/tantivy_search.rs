@@ -339,6 +339,7 @@ pub fn has_duplicate_title(db:&Connection,key:&str)->Result<bool,String>{
 /// permits matches outside a one-year window.
 /// The limit parameter is retained for API compatibility; V4 ranking must
 /// receive the complete matching set, so it does not truncate this result.
+#[cfg(test)]
 pub fn candidates(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,limit:usize)->Result<Vec<String>,String>{
     candidates_internal(db,key,_year,suffix,limit,false)
 }
