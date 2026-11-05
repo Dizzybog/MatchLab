@@ -60,16 +60,16 @@ fn prefix(db:&Connection,key:&str,release:&str,series:bool,year:Option<i32>,seas
 fn type_rank(t:&str)->i32{
     match t{"movie"=>0,"tvMovie"=>1,"short"=>2,"tvShort"=>3,"tvSpecial"=>4,"tvSeries"=>5,_=>6}
 }
-fn rank(r:&Aka,year:Option<i32>,series:bool,duplicate:bool,count_first:bool,aka_count:i64)
+fn rank(r:&Aka,year:Option<i32>,series:bool,duplicate:bool,count_first:bool,votes:i64)
     -> (i64,i32,i32,i32,i32,i32,i64,i32,String) {
     let original=if !duplicate||r.original{0}else{1};
     let us=if !duplicate||r.region.as_deref()==Some("US"){0}else{1};
     let (distance,original_order,year_order)=if let Some(y)=year{
         ((r.year-y).abs(),original,r.year)
     }else{(original,r.year,0)};
-    (-if count_first{aka_count}else{0},distance,original_order,year_order,
+    (-if count_first{votes}else{0},distance,original_order,year_order,
         if series{0}else{type_rank(&r.media_type)},us,
-        -if count_first{0}else{aka_count},r.ordering,r.imdb_id.clone())
+        -if count_first{0}else{votes},r.ordering,r.imdb_id.clone())
 }
 pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_season:i64,
     release_title:&str,has_episode:bool,limit:usize)->rusqlite::Result<Vec<Match>>{
@@ -137,8 +137,9 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     let count_first=year.is_none()&&required_season==0&&!has_episode;
     let mut output=Vec::new();
     for (id,aliases) in groups{
-        let count:i64=db.query_row("SELECT COUNT(*) FROM titles WHERE imdb_id=?1",[&id],|r|r.get(0))?;
-        let best=aliases.into_iter().min_by_key(|r|rank(r,year,series,duplicates.contains(&r.clean),count_first,count)).unwrap();
+        let votes:i64=db.query_row("SELECT num_votes FROM imdb_ratings WHERE imdb_id=?1",[&id],|r|r.get(0))
+            .optional()?.unwrap_or(0);
+        let best=aliases.into_iter().min_by_key(|r|rank(r,year,series,duplicates.contains(&r.clean),count_first,votes)).unwrap();
         let mut ids=BTreeMap::new();
         let mut stmt=db.prepare("SELECT type,value FROM anime_ids WHERE group_id=?1")?;
         for item in stmt.query_map([&id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?{
