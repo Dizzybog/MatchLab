@@ -78,3 +78,11 @@ pub fn candidates(db:&Connection,key:&str,year:Option<i32>,suffix:bool,limit:usi
     }
     Ok(ids)
 }
+
+
+// Prepare the index before serving requests. A full implementation should invoke
+// this from the metadata publication pipeline, not from the request path.
+pub fn warmup(db:&Connection)->Result<(),String>{
+    let _=candidates(db,"a",None,false,1)?;
+    Ok(())
+}
