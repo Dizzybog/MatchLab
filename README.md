@@ -251,6 +251,15 @@ Run the native Rust tests:
 RUSTFLAGS='-D warnings' cargo test -p matchlab-server
 ```
 
+## Acknowledgements and upstream projects
+
+MatchLab builds on ideas and work from the open-source community. Special thanks to:
+
+- **[Comet by g0ldyy](https://github.com/g0ldyy/comet)** for the torrent release-name parser foundations and the approach to matching date-based TV releases to season and episode numbers. Comet's [episode index implementation](https://github.com/g0ldyy/comet/blob/main/comet/metadata/episode_index.py) inspired MatchLab's native Rust Cinemeta airdate resolver and episode cache. MatchLab implements these capabilities in Rust, without a Python backend.
+- **[StremThru by MunifTanjim](https://github.com/MunifTanjim/stremthru)** for its metadata collection and ingestion approach, which informed MatchLab's native metadata import pipeline.
+
+Thank you to the maintainers and contributors of both projects. MatchLab is an independent project and is not officially affiliated with either team.
+
 ## License
 
 GPL-3.0-or-later. Metadata sources have their own terms of use.
