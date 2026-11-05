@@ -20,7 +20,23 @@ fn open(path:&Path)->rusqlite::Result<Connection>{
         );
         CREATE INDEX IF NOT EXISTS requests_recent ON requests(id DESC);
         CREATE INDEX IF NOT EXISTS requests_created_at ON requests(created_at);
-        CREATE INDEX IF NOT EXISTS requests_status ON requests(status);")?;
+        CREATE INDEX IF NOT EXISTS requests_status ON requests(status);
+        CREATE TABLE IF NOT EXISTS history_maintenance(
+            key TEXT PRIMARY KEY, last_run INTEGER NOT NULL
+        );
+        INSERT OR IGNORE INTO history_maintenance(key,last_run)
+            VALUES('history_prune',0);
+        CREATE TRIGGER IF NOT EXISTS requests_prune_on_insert
+        AFTER INSERT ON requests
+        WHEN (SELECT last_run FROM history_maintenance WHERE key='history_prune')
+             <= CAST(strftime('%s','now') AS INTEGER)-300
+        BEGIN
+            DELETE FROM requests
+             WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-24 hours');
+            UPDATE history_maintenance
+                SET last_run=CAST(strftime('%s','now') AS INTEGER)
+                WHERE key='history_prune';
+        END;")?;
     Ok(db)
 }
 
