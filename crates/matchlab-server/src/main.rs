@@ -575,12 +575,15 @@ async fn dashboard()->([(header::HeaderName,&'static str);1],&'static str){
 }
 
 #[derive(Deserialize)]
-struct HistoryQuery {limit:Option<usize>,offset:Option<usize>}
+struct HistoryQuery {limit:Option<usize>,offset:Option<usize>,status:Option<String>}
 
 async fn dashboard_history_request(State(state):State<AppState>,Query(q):Query<HistoryQuery>)
     -> (StatusCode,Json<Value>){
+    if q.status.as_deref().is_some_and(|s|!matches!(s,"matched"|"unmatched"|"error")){
+        return (StatusCode::BAD_REQUEST,Json(json!({"error":"invalid status filter"})));
+    }
     let result=tokio::task::spawn_blocking(move||
-        dashboard_history::history(&state.history,q.limit.unwrap_or(25),q.offset.unwrap_or(0))).await;
+        dashboard_history::history(&state.history,q.limit.unwrap_or(25),q.offset.unwrap_or(0),q.status.as_deref())).await;
     match result {
         Ok(Ok(v))=>(StatusCode::OK,Json(v)),
         Ok(Err(e))=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":e}))),

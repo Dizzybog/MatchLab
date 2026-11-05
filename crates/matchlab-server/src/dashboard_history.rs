@@ -35,11 +35,14 @@ pub fn record(path:&Path,title:&str,status:&str,selected:Option<&Value>,details:
     if let Err(error)=result {tracing::warn!(%error,"could not persist matching history");}
 }
 
-pub fn history(path:&Path,limit:usize,offset:usize)->Result<Value,String>{
+pub fn history(path:&Path,limit:usize,offset:usize,status:Option<&str>)->Result<Value,String>{
+    if status.is_some_and(|s|!matches!(s,"matched"|"unmatched"|"error")){
+        return Err("invalid history status filter".into());
+    }
     let db=open(path).map_err(|e|e.to_string())?;
     let mut stmt=db.prepare("SELECT id,created_at,title,status,imdb_id,match_source,duration_ms,details
-        FROM requests ORDER BY id DESC LIMIT ?1 OFFSET ?2").map_err(|e|e.to_string())?;
-    let rows=stmt.query_map(params![limit.min(100) as i64,offset.min(100_000) as i64],|r|{
+        FROM requests WHERE (?1 IS NULL OR status=?1) ORDER BY id DESC LIMIT ?2 OFFSET ?3").map_err(|e|e.to_string())?;
+    let rows=stmt.query_map(params![status,limit.min(100) as i64,offset.min(100_000) as i64],|r|{
         let details:String=r.get(7)?;
         Ok(json!({"id":r.get::<_,i64>(0)?,"created_at":r.get::<_,String>(1)?,
             "title":r.get::<_,String>(2)?,"status":r.get::<_,String>(3)?,
@@ -81,7 +84,12 @@ mod tests{
         record(&path,"broken","error",None,&json!({"error":"invalid"}),5);
         assert_eq!(stats(&path).unwrap()["total"],2);
         assert_eq!(stats(&path).unwrap()["errors"],1);
-        assert_eq!(history(&path,10,0).unwrap()["items"][0]["title"],"broken");
+        assert_eq!(history(&path,10,0,None).unwrap()["items"][0]["title"],"broken");
+        assert_eq!(history(&path,10,0,Some("matched")).unwrap()["items"].as_array().unwrap().len(),1);
+        assert_eq!(history(&path,10,0,Some("matched")).unwrap()["items"][0]["title"],"A S01E02");
+        assert_eq!(history(&path,10,0,Some("unmatched")).unwrap()["items"].as_array().unwrap().len(),0);
+        assert_eq!(history(&path,10,0,Some("error")).unwrap()["items"][0]["title"],"broken");
+        assert!(history(&path,10,0,Some("unknown")).is_err());
         let _=std::fs::remove_file(&path);
         let _=std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _=std::fs::remove_file(path.with_extension("sqlite3-shm"));
