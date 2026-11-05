@@ -64,6 +64,20 @@ fn filter(db:&Connection,rows:Vec<Aka>,release:&str,series:bool,year:Option<i32>
 }
 fn prefix(db:&Connection,key:&str,release:&str,series:bool,year:Option<i32>,season:i64)->rusqlite::Result<Vec<Aka>>{
     let upper=format!("{key}\u{ffff}");
+    // Query the exhaustive Tantivy ID set, then apply the authoritative
+    // relational eligibility and deterministic V4 ranking in SQLite.
+    // Keep the SQLite range as a safety fallback when the index is unavailable.
+    if let Ok(ids)=crate::tantivy_search::candidates(db,key,year,false,1){
+        if !ids.is_empty(){
+            let mut indexed=Vec::new();
+            for id in ids {
+                indexed.extend(select(db,
+                    "imdb_id=?1 AND clean_title>=?2 AND clean_title<?3",
+                    &[&id,&key,&upper])?);
+            }
+            return filter(db,indexed,release,series,year,season);
+        }
+    }
     filter(db,select(db,"clean_title>=?1 AND clean_title<?2",&[&key,&upper])?,release,series,year,season)
 }
 fn type_rank(t:&str)->i32{
