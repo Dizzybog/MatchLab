@@ -136,9 +136,16 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
         if !rows.is_empty(){stage="half_prefix";}
     }
     if rows.is_empty()&&series{
-        rows=filter(db,select(db,"imdb_id IN (
-            SELECT l.imdb_id FROM anidb_titles a JOIN anime_series_map l ON l.anidb_id=a.anidb_id
-            WHERE a.clean_title=?1)",&[&key])?,&release,series,year,required_season)?;
+        let ids=crate::tantivy_search::anime_candidates(db,&key)
+            .map_err(|e|rusqlite::Error::ToSqlConversionFailure(
+                Box::new(std::io::Error::other(e))))?;
+        if !ids.is_empty(){
+            let encoded=serde_json::to_string(&ids)
+                .map_err(|e|rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            rows=filter(db,select(db,
+                "imdb_id IN (SELECT value FROM json_each(?1))",&[&encoded])?,
+                &release,series,year,required_season)?;
+        }
         if !rows.is_empty(){stage="anime_alias";}
     }
     if rows.is_empty(){return Ok(vec![]);}
