@@ -59,6 +59,7 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
                 PRIMARY KEY(anidb_id,clean_title,title_type,language));
             CREATE TABLE metadata_state(source TEXT PRIMARY KEY,updated_at TEXT NOT NULL,row_count INTEGER NOT NULL);
             CREATE INDEX title_lookup ON titles(clean_title,year);
+            CREATE INDEX title_valid_lookup ON titles(clean_title,imdb_id) WHERE year>0;
             CREATE INDEX title_reverse_suffix ON titles(reverse(clean_title),type);
             CREATE INDEX anidb_title_lookup ON anidb_titles(clean_title);
             CREATE INDEX anime_series_by_anidb ON anime_series_map(anidb_id);
