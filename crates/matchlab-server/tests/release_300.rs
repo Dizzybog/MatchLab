@@ -1,6 +1,6 @@
 //! 300 release-name regression inputs: 100 movies, 100 TV, 100 anime.
 //! These are parser smoke tests, not IMDb/AniDB identity-parity assertions.
-use ptt_core::parse_title;
+use matchlab_parser::parse_title;
 
 fn variants(title: &str, year: u16, season: u8, episode: u16, series: bool) -> Vec<String> {
     let dot = title.replace(' ', ".");

@@ -1,6 +1,6 @@
 [workspace]
 members = [
-  "crates/ptt-core",
+  "crates/matchlab-parser",
   "crates/matchlab-server",
 ]
 resolver = "2"

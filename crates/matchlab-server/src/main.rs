@@ -62,7 +62,7 @@ fn parse_cached(title:&str)->Result<Value,String>{
             if at.elapsed()<PARSE_TTL{return Ok(value.clone());}
         }
     }
-    let value=Value::Object(ptt_core::parse_title(title,false).map_err(|e|e.to_string())?);
+    let value=Value::Object(matchlab_parser::parse_title(title,false).map_err(|e|e.to_string())?);
     if let Ok(mut guard)=cache.lock(){
         guard.retain(|_,(at,_)|at.elapsed()<PARSE_TTL);
         if guard.len()>=1024{guard.clear();}

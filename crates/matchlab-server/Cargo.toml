@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-ptt-core = { path = "../ptt-core" }
+matchlab-parser = { path = "../matchlab-parser" }
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 rusqlite = { version = "0.37", features = ["bundled", "functions"] }

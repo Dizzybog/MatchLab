@@ -1,7 +1,7 @@
 use std::hint::black_box;
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use ptt_core::{parse_many, parse_title};
+use matchlab_parser::{parse_many, parse_title};
 
 const TITLES: [&str; 20] = [
     "The.Walking.Dead.S05E03.720p.WEB-DL.x264-ASAP[ettv]",
@@ -26,8 +26,8 @@ const TITLES: [&str; 20] = [
     "Top.Gun.Maverick.2022.1080p.BluRay.x264.DTS",
 ];
 
-fn ptt_benches(c: &mut Criterion) {
-    let mut group = c.benchmark_group("ptt_core");
+fn matchlab_parser_benches(c: &mut Criterion) {
+    let mut group = c.benchmark_group("matchlab_parser");
 
     group.bench_function("parse_title_translate_false", |b| {
         let mut idx = 0usize;
@@ -85,5 +85,5 @@ fn ptt_benches(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, ptt_benches);
+criterion_group!(benches, matchlab_parser_benches);
 criterion_main!(benches);
