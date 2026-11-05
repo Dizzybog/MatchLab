@@ -201,6 +201,7 @@ pub fn import_ratings(db_path:&Path,ratings:&Path)->Result<u64,Box<dyn Error>>{
         if votes<0{continue;}
         count+=insert.execute(params![r.get(id).unwrap_or(""),votes])? as u64;
     }
+    drop(insert);
     if count==0{return Err("IMDb ratings contained no matching titles".into());}
     let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
     tx.execute("INSERT OR REPLACE INTO metadata_state VALUES('imdb_ratings',?1,?2)",
