@@ -86,7 +86,16 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
 
 fn open_search(db:&Connection)->Result<(SearchIndex,Option<PathBuf>),String>{
     let source=db.path().filter(|path|!path.is_empty() && *path!=":memory:").unwrap_or(":memory:");
-    let version=std::fs::metadata(source).ok().and_then(|m|m.modified().ok());
+    // SQLite metadata may be replaced atomically with identical timestamps.
+    // Bind the Tantivy generation to the file identity and size as well as mtime.
+    let metadata=std::fs::metadata(source).ok();
+    let version=metadata.as_ref().and_then(|m|m.modified().ok());
+    #[cfg(unix)]
+    let identity=std::os::unix::fs::MetadataExt::ino;
+    #[cfg(unix)]
+    let fingerprint=metadata.as_ref().map(|m|format!("{}-{}-{}-{}",identity(m),std::os::unix::fs::MetadataExt::dev(m),m.len(),std::os::unix::fs::MetadataExt::ctime_nsec(m)));
+    #[cfg(not(unix))]
+    let fingerprint=metadata.as_ref().map(|m|format!("{}",m.len()));
     // In-memory SQLite connections have no filesystem generation and must
     // never share a cached Tantivy index across independent test databases.
     // Each connection gets a fresh temporary generation for this query.
@@ -96,7 +105,7 @@ fn open_search(db:&Connection)->Result<(SearchIndex,Option<PathBuf>),String>{
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
                 .map_err(|e|e.to_string())?.as_nanos())))
     }else{None};
-    let path=format!("anime-v1:{source}:{version:?}");
+    let path=format!("anime-v2:{source}:{version:?}:{fingerprint:?}");
     // Do not hold the global cache mutex while running regex queries.
     // A concurrent metadata refresh may still build a generation under the
     // mutex; queries on already-open generations can proceed independently.
@@ -105,10 +114,10 @@ fn open_search(db:&Connection)->Result<(SearchIndex,Option<PathBuf>),String>{
     }else{
         let cache=CACHE.get_or_init(||Mutex::new(HashMap::new()));
         let mut guard=cache.lock().map_err(|e|e.to_string())?;
-        guard.retain(|key,_|!key.starts_with(&format!("anime-v1:{source}:"))||key==&path);
+        guard.retain(|key,_|!key.starts_with(&format!("anime-v2:{source}:"))||key==&path);
         if !guard.contains_key(&path){
             let directory=PathBuf::from(format!("{source}.tantivy"));
-            let generation=format!("anime-v1-{:?}",version).replace(|c:char|!c.is_ascii_alphanumeric(),"_");
+            let generation=format!("anime-v2-{:?}-{:?}",version,fingerprint).replace(|c:char|!c.is_ascii_alphanumeric(),"_");
             let directory=directory.join(generation);
             guard.insert(path.clone(),build(db,&directory)?);
         }
