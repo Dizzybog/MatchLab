@@ -4,7 +4,7 @@
 
 For example, `Breaking.Bad.S02E03.1080p.WEB-DL` is recognized as *Breaking Bad*, season 2, episode 3.
 
-The native Rust service provides an HTTP matching API backed by a local SQLite metadata database. The production image runs the native Rust service, including its metadata importer and automatic scheduled refresh.
+The native Rust service provides an HTTP matching API backed by a persistent Tantivy title index. SQLite remains the source for relational metadata such as ratings, seasons and anime episode crosswalks. The production image includes automatic native import and scheduled refresh.
 
 ## Features
 
@@ -14,7 +14,7 @@ The native Rust service provides an HTTP matching API backed by a local SQLite m
 - **Hierarchical file paths:** Reads a specific file or episode from the final path component and can inherit a missing series title from parent folders. Parent season-pack ranges do not override the file's own season/episode.
 - **Absolute episode ranges:** Preserves both endpoints (e.g. `E768-E1064`) and resolves episodes individually across mapped TVDB-style seasons, reporting unmapped gaps instead of guessing.
 - **Reliable results:** Returns one matching title or `null` when a reliable match cannot be established.
-- **Local metadata:** Reads an existing SQLite database. Automatically downloads seven public metadata sources on first startup and refreshes them periodically; custom URLs are optional.
+- **Local metadata:** Maintains a validated SQLite metadata snapshot and immutable on-disk Tantivy index generations. Downloads seven public sources and refreshes them on a schedule.
 - **Diagnostics:** Use `POST /debug/match` to inspect parsing, candidates and selection.
 - **Docker support:** Runs on x86-64 and ARM64 machines, with persistent data and detailed logs.
 
@@ -70,6 +70,14 @@ docker compose up -d
 ```
 
 The Docker image is published from GitHub Actions. If the image is not publicly accessible yet, you may need to build it from source or authenticate with GitHub Container Registry.
+
+## Tantivy index and safe metadata refresh
+
+IMDb and AniDB title discovery use Tantivy for exact aliases, country-qualified titles, prefixes, reversed suffixes, shorter-title fallback and duplicate-title detection. The index stores IMDb alias metadata directly so the matching pipeline does not perform SQLite title-table searches. SQLite is used only for relational season, episode, votes and anime crosswalk lookups.
+
+A metadata refresh validates a staging SQLite database, builds and verifies its new Tantivy generation under `/data/metadata.sqlite3.tantivy/`, and publishes the SQLite database only after the index is complete. A generation marker inside SQLite ensures in-flight requests retain the correct old index. A normal restart reopens the existing index; a legacy SQLite database without generation metadata is indexed once during startup.
+
+Allow space for overlapping metadata and index generations during an import. Historical completed indexes are retained conservatively before cleanup. The common exact-title path uses indexed term equality to avoid expensive broad prefix scans.
 
 ## Dashboard and diagnostics
 
