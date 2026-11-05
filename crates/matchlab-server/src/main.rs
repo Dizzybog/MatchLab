@@ -827,6 +827,26 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
     }
     tracing::info!(max_matches,"MatchLab match concurrency configured");
     let history_db=env::var("MATCHLAB_HISTORY_DB").unwrap_or_else(|_|"/data/history.sqlite3".into());
+    // Run retention off the HTTP request path. The first iteration executes at
+    // startup; subsequent passes run every five minutes even without traffic.
+    {
+        let history_path=PathBuf::from(&history_db);
+        tokio::spawn(async move {
+            loop {
+                let path=history_path.clone();
+                match tokio::task::spawn_blocking(move||dashboard_history::prune(&path)).await {
+                    Ok(Ok(count)) if count>0 =>
+                        tracing::info!(deleted=count,"expired request history removed"),
+                    Ok(Ok(_)) => (),
+                    Ok(Err(error)) =>
+                        tracing::warn!(%error,"request history cleanup failed"),
+                    Err(error) =>
+                        tracing::warn!(%error,"history cleanup task failed"),
+                }
+                tokio::time::sleep(Duration::from_secs(300)).await;
+            }
+        });
+    }
     let app = Router::new().route("/",get(dashboard))
         .route("/api/dashboard/history",get(dashboard_history_request))
         .route("/api/dashboard/stats",get(dashboard_stats_request))

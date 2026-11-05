@@ -1571,6 +1571,122 @@ fn absolute_episode_range(raw: &str) -> Option<(i64,i64)> {
     Some((start,end))
 }
 
+// Some common release conventions are more specific than the generic upstream
+// handlers. Apply these corrections to the leaf *after* normal parsing so we
+// never change the handler table or the fast regex prefilter.
+static SEASON_WORD_COORDS_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)(?:^|[ ._-])(?:seasons?|staffel|saison|seizoen|temporada|sezon|seson)[ ._-]+(\d{1,2})\b")
+        .expect("valid explicit season word regex")
+});
+static SEASON_WORD_IN_TITLE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)[ ._-]+(?:seasons?|staffel|saison|seizoen|temporada|sezon|seson)(?:[ ._-]*\d{1,2})?")
+        .expect("valid season word cleanup regex")
+});
+static X_COORDS_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)(?:^|[ ._-])([1-9]|[1-3]\d|40)[xх](\d{1,3}(?:[xх]\d{1,3})*)(?=$|[^a-z0-9])")
+        .expect("valid x notation regex")
+});
+static X_COORDS_IN_TITLE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)[ ._-]+\d{1,2}[xх]\d{1,3}(?:[xх]\d{1,3})*$")
+        .expect("valid x notation title suffix regex")
+});
+static S_E_COORDS_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)(?:^|[ ._-])s([1-9]\d{0,2})[ ._-]*e(\d{1,4})(?=$|[^0-9])")
+        .expect("valid explicit SxxExxx regex")
+});
+
+fn patch_missing_coordinates(raw: &str, result: &mut Map<String, Value>) -> Result<(), ParseError> {
+    // A word-based season number is different from an anime *episode* named
+    // "Final Season - 05". Only accept the spaced-dash spelling when "Season"
+    // is itself a separate release marker ("Show - Season - 04").
+    if let Some(caps) = SEASON_WORD_COORDS_RE
+        .captures(raw).map_err(|e| ParseError::Regex(e.to_string()))?
+    {
+        let matched = caps.get(0).expect("season match");
+        let marker = matched.as_str().to_ascii_lowercase();
+        let before = raw[..matched.start()].trim_end();
+        let spaced_dash = marker.contains("season - ") || marker.contains("season -.");
+        if !spaced_dash || before.ends_with('-') {
+            if let Some(season) = caps.get(1).and_then(|m| m.as_str().parse::<i64>().ok())
+                && (1..=99).contains(&season)
+            {
+                if result.get("seasons").and_then(Value::as_array).is_some_and(Vec::is_empty) {
+                    result.insert("seasons".into(), json!([season]));
+                }
+                // Upstream sometimes classifies the season number as an episode.
+                // Preserve an independent explicit episode such as S02E04.
+                if spaced_dash && before.ends_with('-')
+                    && !EXPLICIT_EPISODE_RE.is_match(raw).unwrap_or(false)
+                    && result.get("episodes") == Some(&json!([season]))
+                {
+                    result.insert("episodes".into(), json!([]));
+                }
+                if let Some(Value::String(title)) = result.get_mut("title") {
+                    let cleaned = SEASON_WORD_IN_TITLE_RE.replace_all(title, " ");
+                    let cleaned = cleaned.trim_matches(&[' ', '-', '.', '_'][..]);
+                    if !cleaned.is_empty() {
+                        *title = cleaned.to_owned();
+                    }
+                }
+            }
+        }
+    }
+
+    // Uppercase Spanish 1X124 and chained 22X17X18 often bypass the upstream
+    // case-sensitive season handler. A 4-digit width such as 1920x1080 must
+    // never be interpreted as season/episode notation.
+    if let Some(caps) = X_COORDS_RE
+        .captures(raw).map_err(|e| ParseError::Regex(e.to_string()))?
+    {
+        let matched = caps.get(0).expect("x notation match");
+        if raw[..matched.start()].chars().filter(|c| c.is_alphabetic()).count() >= 3 {
+            let season = caps.get(1).and_then(|m| m.as_str().parse::<i64>().ok());
+            let episodes: Vec<i64> = caps.get(2).into_iter()
+                .flat_map(|m| m.as_str().split(|c| matches!(c, 'x' | 'X' | 'х' | 'Х')))
+                .filter_map(|s| s.parse::<i64>().ok())
+                .collect();
+            if let Some(season) = season
+                && !episodes.is_empty() && episodes.len() <= 16
+                && episodes.iter().all(|&n| (1..=999).contains(&n))
+            {
+                if result.get("seasons").and_then(Value::as_array).is_some_and(Vec::is_empty) {
+                    result.insert("seasons".into(), json!([season]));
+                }
+                // Explicit x-notation is more reliable than a number in the
+                // show's name (for example "911 Nashville 1X5").
+                result.insert("episodes".into(), json!(episodes));
+                if let Some(Value::String(title)) = result.get_mut("title") {
+                    let cleaned = X_COORDS_IN_TITLE_RE.replace(title, "");
+                    let cleaned = cleaned.trim_matches(&[' ', '-', '.', '_'][..]);
+                    if !cleaned.is_empty() {
+                        *title = cleaned.to_owned();
+                    }
+                }
+            }
+        }
+    }
+
+    // Defensively restore a missing season in unambiguous S51E12 notation;
+    // existing ranges and more specific parsed episode lists are untouched.
+    if let Some(caps) = S_E_COORDS_RE
+        .captures(raw).map_err(|e| ParseError::Regex(e.to_string()))?
+    {
+        let season = caps.get(1).and_then(|m| m.as_str().parse::<i64>().ok());
+        let episode = caps.get(2).and_then(|m| m.as_str().parse::<i64>().ok());
+        if let (Some(season), Some(episode)) = (season, episode)
+            && (1..=120).contains(&season) && (1..=9999).contains(&episode)
+        {
+            if result.get("seasons").and_then(Value::as_array).is_some_and(Vec::is_empty) {
+                result.insert("seasons".into(), json!([season]));
+            }
+            if result.get("episodes").and_then(Value::as_array).is_some_and(Vec::is_empty) {
+                result.insert("episodes".into(), json!([episode]));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn parse_title(
     raw_title: &str,
     translate_languages: bool,
@@ -1614,6 +1730,7 @@ pub fn parse_title(
         // The existing episodes field is deliberately not expanded.
         // Consumers must use episode_start/episode_end for range semantics.
     }
+    patch_missing_coordinates(leaf, &mut result)?;
     Ok(result)
 }
 
