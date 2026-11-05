@@ -60,16 +60,16 @@ fn prefix(db:&Connection,key:&str,release:&str,series:bool,year:Option<i32>,seas
 fn type_rank(t:&str)->i32{
     match t{"movie"=>0,"tvMovie"=>1,"short"=>2,"tvShort"=>3,"tvSpecial"=>4,"tvSeries"=>5,_=>6}
 }
-fn rank(r:&Aka,year:Option<i32>,series:bool,duplicate:bool,count_first:bool,aka_count:i64)
+fn rank(r:&Aka,year:Option<i32>,series:bool,duplicate:bool,count_first:bool,votes:i64)
     -> (i64,i32,i32,i32,i32,i32,i64,i32,String) {
     let original=if !duplicate||r.original{0}else{1};
     let us=if !duplicate||r.region.as_deref()==Some("US"){0}else{1};
     let (distance,original_order,year_order)=if let Some(y)=year{
         ((r.year-y).abs(),original,r.year)
     }else{(original,r.year,0)};
-    (-if count_first{aka_count}else{0},distance,original_order,year_order,
+    (-if count_first{votes}else{0},distance,original_order,year_order,
         if series{0}else{type_rank(&r.media_type)},us,
-        -if count_first{0}else{aka_count},r.ordering,r.imdb_id.clone())
+        -if count_first{0}else{votes},r.ordering,r.imdb_id.clone())
 }
 pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_season:i64,
     release_title:&str,has_episode:bool,limit:usize)->rusqlite::Result<Vec<Match>>{
@@ -137,8 +137,9 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     let count_first=year.is_none()&&required_season==0&&!has_episode;
     let mut output=Vec::new();
     for (id,aliases) in groups{
-        let count:i64=db.query_row("SELECT COUNT(*) FROM titles WHERE imdb_id=?1",[&id],|r|r.get(0))?;
-        let best=aliases.into_iter().min_by_key(|r|rank(r,year,series,duplicates.contains(&r.clean),count_first,count)).unwrap();
+        let votes:i64=db.query_row("SELECT num_votes FROM imdb_ratings WHERE imdb_id=?1",[&id],|r|r.get(0))
+            .optional().unwrap_or(None).unwrap_or(0);
+        let best=aliases.into_iter().min_by_key(|r|rank(r,year,series,duplicates.contains(&r.clean),count_first,votes)).unwrap();
         let mut ids=BTreeMap::new();
         let mut stmt=db.prepare("SELECT type,value FROM anime_ids WHERE group_id=?1")?;
         for item in stmt.query_map([&id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?{
@@ -149,7 +150,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             let linked=stmt.query_map([&id],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
             if linked.len()==1{ids.insert("anidb".into(),linked[0].clone());}
         }
-        let score=rank(&best,year,series,duplicates.contains(&best.clean),count_first,count);
+        let score=rank(&best,year,series,duplicates.contains(&best.clean),count_first,votes);
         output.push((score,Match{imdb_id:id,title:best.title.clone(),year:best.year,
             category:best.category,matched_title:best.title,anime_ids:ids,media_type:best.media_type}));
     }
@@ -159,6 +160,25 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test] fn votes_replace_alias_count_as_tiebreaker(){
+        let db=Connection::open_in_memory().unwrap();
+        db.create_scalar_function("reverse",1,
+            rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC
+                |rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            |ctx|{let s:String=ctx.get(0)?;Ok(s.chars().rev().collect::<String>())}).unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES('ttlow','Example','example',2020,'movie','',1,0,'movie');
+            INSERT INTO titles VALUES('tthigh','Example','example',2020,'movie','',1,0,'movie');
+            INSERT INTO titles VALUES('ttlow','Example alternate','examplealternate',2020,'movie','',0,1,'movie');
+            INSERT INTO imdb_ratings VALUES('ttlow',100);
+            INSERT INTO imdb_ratings VALUES('tthigh',50000);").unwrap();
+        let found=search(&db,"Example",Some(2020),false,0,"Example.2020",false,5).unwrap();
+        assert_eq!(found[0].imdb_id,"tthigh");
+    }
     #[test] fn normalization(){assert_eq!(clean_title("Pokémon and Ægir"),"pokemonaegir");}
     #[test] fn country_specific_series_beats_generic_alias() {
         let db=Connection::open_in_memory().unwrap();

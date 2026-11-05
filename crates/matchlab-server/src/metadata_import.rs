@@ -41,6 +41,7 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
                 type TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY(imdb_id,clean_title,year,region,ordering));
             CREATE TABLE seasons(imdb_id TEXT PRIMARY KEY,max_season INTEGER NOT NULL);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE season_episodes(imdb_id TEXT NOT NULL,season INTEGER NOT NULL,
                 episode_count INTEGER NOT NULL,max_episode INTEGER NOT NULL,
                 PRIMARY KEY(imdb_id,season));
@@ -181,6 +182,32 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
     })();
     if result.is_err(){let _=fs::remove_file(&stage);}
     result
+}
+
+/// Import IMDb title.ratings.tsv.gz into the staging SQLite database.
+pub fn import_ratings(db_path:&Path,ratings:&Path)->Result<u64,Box<dyn Error>>{
+    let mut db=Connection::open(db_path)?;
+    let tx=db.transaction()?;
+    let mut input=reader(ratings)?;
+    let headers=input.headers()?.clone();
+    let (id,votes)=(col(&headers,"tconst")?,col(&headers,"numVotes")?);
+    let mut insert=tx.prepare_cached("INSERT OR REPLACE INTO imdb_ratings(imdb_id,num_votes)
+        SELECT ?1,?2 WHERE EXISTS(SELECT 1 FROM titles WHERE imdb_id=?1)")?;
+    let mut count=0u64;
+    for row in input.records(){
+        let r=row?;
+        if r.len()!=headers.len(){continue;}
+        let Some(votes)=r.get(votes).and_then(|v|v.parse::<i64>().ok()) else {continue};
+        if votes<0{continue;}
+        count+=insert.execute(params![r.get(id).unwrap_or(""),votes])? as u64;
+    }
+    drop(insert);
+    if count==0{return Err("IMDb ratings contained no matching titles".into());}
+    let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
+    tx.execute("INSERT OR REPLACE INTO metadata_state VALUES('imdb_ratings',?1,?2)",
+        params![now,count])?;
+    tx.commit()?;
+    Ok(count)
 }
 
 /// Import a locally downloaded animeApi v3 TSV into an existing staging database.
@@ -463,6 +490,13 @@ pub fn refresh_from_files(
     target:&Path,basics:&Path,akas:&Path,episodes:&Path,
     animeapi:&Path,animelists:&Path,anidb_titles:&Path,
 )->Result<(u64,u64,u64,u64),Box<dyn Error>>{
+    refresh_from_files_with_ratings(target,basics,akas,episodes,
+        animeapi,animelists,anidb_titles,None)
+}
+pub fn refresh_from_files_with_ratings(
+    target:&Path,basics:&Path,akas:&Path,episodes:&Path,
+    animeapi:&Path,animelists:&Path,anidb_titles:&Path,ratings:Option<&Path>,
+)->Result<(u64,u64,u64,u64),Box<dyn Error>>{
     let parent=target.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(parent)?;
     let stamp=SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
@@ -470,6 +504,7 @@ pub fn refresh_from_files(
     let result=(||{
         tracing::info!("metadata refresh: importing IMDb datasets");
         let imdb=import_imdb(&stage,basics,akas,episodes)?;
+        if let Some(ratings)=ratings {import_ratings(&stage,ratings)?;}
         tracing::info!("metadata refresh: importing animeApi");
         let links=import_animeapi(&stage,animeapi)?;
         tracing::info!("metadata refresh: importing Anime-Lists");

@@ -2,22 +2,25 @@
 //! the complete native importer validates the new SQLite database.
 use std::{error::Error,fs::{self,File},io::{Read,Write},path::{Path,PathBuf},time::{SystemTime,UNIX_EPOCH,Instant}};
 const MAX_DOWNLOAD_BYTES:u64=2_000_000_000;
-const DEFAULT_METADATA_URLS:[&str;6]=[
+const DEFAULT_METADATA_URLS:[&str;7]=[
     "https://datasets.imdbws.com/title.basics.tsv.gz",
     "https://datasets.imdbws.com/title.akas.tsv.gz",
     "https://datasets.imdbws.com/title.episode.tsv.gz",
+    "https://datasets.imdbws.com/title.ratings.tsv.gz",
     "https://raw.githubusercontent.com/nattadasu/animeApi/refs/heads/v3/database/animeapi.tsv",
     "https://raw.githubusercontent.com/Anime-Lists/anime-lists/refs/heads/master/anime-list.xml",
     "https://anidb.net/api/anime-titles.xml.gz",
 ];
 
 pub fn configured_urls(override_urls:Option<&str>)->Result<Vec<String>,Box<dyn Error>>{
-    let urls:Vec<String>=match override_urls {
+    let mut urls:Vec<String>=match override_urls {
         Some(value)=>value.split(',').map(|s|s.trim().to_owned()).collect(),
         None=>DEFAULT_METADATA_URLS.iter().map(|s|(*s).to_owned()).collect(),
     };
-    if urls.len()!=6 || urls.iter().any(|url|url.is_empty()) {
-        return Err("MATCHLAB_METADATA_URLS requires six comma-separated HTTPS URLs".into());
+    // Preserve existing six-URL overrides; insert the official ratings feed.
+    if urls.len()==6{urls.insert(3,DEFAULT_METADATA_URLS[3].to_string());}
+    if urls.len()!=7 || urls.iter().any(|url|url.is_empty()) {
+        return Err("MATCHLAB_METADATA_URLS requires seven comma-separated HTTPS URLs".into());
     }
     for url in &urls {
         if reqwest::Url::parse(url)?.scheme()!="https" {
@@ -66,10 +69,10 @@ fn download(client:&reqwest::blocking::Client,url:&str,path:&Path)->Result<(),Bo
 }
 struct Workspace(PathBuf);
 impl Drop for Workspace{fn drop(&mut self){let _=fs::remove_dir_all(&self.0);}}
-/// Six HTTPS URLs in order: IMDb basics, akas, episodes, animeApi,
+/// Seven HTTPS URLs in order: IMDb basics, akas, episodes, ratings, animeApi,
 /// Anime-Lists, AniDB titles. Sources are explicit to avoid silent feed changes.
 pub fn refresh_from_urls(target:&Path,urls:&[String])->Result<(u64,u64,u64,u64),Box<dyn Error>>{
-    if urls.len()!=6{return Err("expected exactly six metadata URLs".into());}
+    if urls.len()!=7{return Err("expected exactly seven metadata URLs".into());}
     // Reject every invalid source before starting network I/O or creating a workspace.
     for url in urls {
         if reqwest::Url::parse(url)?.scheme()!="https" {
@@ -87,10 +90,10 @@ pub fn refresh_from_urls(target:&Path,urls:&[String])->Result<(u64,u64,u64,u64),
         .connect_timeout(std::time::Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()?;
-    let names=["basics.tsv.gz","akas.tsv.gz","episodes.tsv.gz","animeapi.tsv","animelists.xml","anidb.xml.gz"];
+    let names=["basics.tsv.gz","akas.tsv.gz","episodes.tsv.gz","ratings.tsv.gz","animeapi.tsv","animelists.xml","anidb.xml.gz"];
     let paths:Vec<PathBuf>=names.iter().map(|name|dir.join(name)).collect();
     for (url,path) in urls.iter().zip(paths.iter()){download(&client,url,path)?;}
-    super::metadata_import::refresh_from_files(target,&paths[0],&paths[1],&paths[2],&paths[3],&paths[4],&paths[5])
+    super::metadata_import::refresh_from_files_with_ratings(target,&paths[0],&paths[1],&paths[2],&paths[4],&paths[5],&paths[6],Some(&paths[3]))
 }
 #[cfg(test)]
 mod tests{
@@ -98,17 +101,18 @@ mod tests{
     #[test]
     fn defaults_enable_zero_config_startup(){
         let urls=configured_urls(None).unwrap();
-        assert_eq!(urls.len(),6);
+        assert_eq!(urls.len(),7);
         assert!(urls.iter().all(|url|url.starts_with("https://")));
         assert!(urls[0].ends_with("title.basics.tsv.gz"));
-        assert!(urls[5].ends_with("anime-titles.xml.gz"));
+        assert!(urls[3].ends_with("title.ratings.tsv.gz"));
+        assert!(urls[6].ends_with("anime-titles.xml.gz"));
     }
     #[test]
     fn overrides_are_validated(){
         assert!(configured_urls(Some("")).is_err());
         assert!(configured_urls(Some("https://example.org/only-one")).is_err());
         let urls=configured_urls(None).unwrap().join(",");
-        assert_eq!(configured_urls(Some(&urls)).unwrap().len(),6);
+        assert_eq!(configured_urls(Some(&urls)).unwrap().len(),7);
         assert!(configured_urls(Some(&urls.replacen("https://","http://",1))).is_err());
     }
     #[test]
@@ -118,6 +122,7 @@ mod tests{
         let target=folder.join("live.sqlite3");
         let urls=vec!["https://example.org/file".to_string(),
             "http://example.org/insecure".to_string(),
+            "https://example.org/file".to_string(),
             "https://example.org/file".to_string(),
             "https://example.org/file".to_string(),
             "https://example.org/file".to_string(),
