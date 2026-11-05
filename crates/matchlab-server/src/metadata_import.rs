@@ -546,8 +546,11 @@ pub fn refresh_from_files_with_ratings(
         {
             let staged_db=Connection::open_with_flags(
                 &stage,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            crate::tantivy_search::warmup(&staged_db)
-                .map_err(|e|format!("staged Tantivy index failed: {e}"))?;
+            let index_result=crate::tantivy_search::warmup(&staged_db);
+            // Staged SQLite filenames are unique per refresh; do not retain
+            // their expensive temporary indexes after validation.
+            let _=fs::remove_dir_all(format!("{}.tantivy",stage.display()));
+            index_result.map_err(|e|format!("staged Tantivy index failed: {e}"))?;
         }
         // Persist the completed staging file before atomically publishing it.
         File::open(&stage)?.sync_all()?;
