@@ -210,6 +210,22 @@ mod persistence_tests {
     }
 
     #[test]
+    fn incomplete_generation_is_not_deleted() {
+        let root=std::env::temp_dir().join(format!(
+            "matchlab-tantivy-incomplete-{}-{:?}",
+            std::process::id(),std::thread::current().id()));
+        let _=std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let db=Connection::open_in_memory().unwrap();
+        let dir=root.join("index");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sentinel"),"in progress").unwrap();
+        assert!(build(&db,&dir).is_err());
+        assert_eq!(std::fs::read_to_string(dir.join("sentinel")).unwrap(),"in progress");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn corrupted_completion_marker_is_rejected() {
         let root=std::env::temp_dir().join(format!(
             "matchlab-tantivy-corrupt-{}-{:?}",
