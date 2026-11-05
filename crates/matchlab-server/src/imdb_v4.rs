@@ -49,9 +49,18 @@ fn select(db:&Connection,where_clause:&str,values:&[&dyn rusqlite::ToSql])->rusq
     stmt.query_map(values,read_aka)?.collect()
 }
 fn filter(db:&Connection,rows:Vec<Aka>,release:&str,series:bool,year:Option<i32>,season:i64)->rusqlite::Result<Vec<Aka>>{
-    rows.into_iter().filter(|r|allowed(&r.media_type,series,year)&&release.contains(&r.clean))
-        .map(|r|eligible(db,&r,season).map(|yes|if yes{Some(r)}else{None}))
-        .collect::<rusqlite::Result<Vec<_>>>().map(|v|v.into_iter().flatten().collect())
+    let mut eligibility=std::collections::HashMap::new();
+    let mut result=Vec::new();
+    for row in rows {
+        if !allowed(&row.media_type,series,year)||!release.contains(&row.clean){continue;}
+        let yes=if let Some(&cached)=eligibility.get(&row.imdb_id){cached}else{
+            let value=eligible(db,&row,season)?;
+            eligibility.insert(row.imdb_id.clone(),value);
+            value
+        };
+        if yes{result.push(row);}
+    }
+    Ok(result)
 }
 fn prefix(db:&Connection,key:&str,release:&str,series:bool,year:Option<i32>,season:i64)->rusqlite::Result<Vec<Aka>>{
     let upper=format!("{key}\u{ffff}");
