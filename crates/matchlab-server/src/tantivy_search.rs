@@ -133,8 +133,8 @@ fn generation(db:&Connection)->Result<String,String>{
         .replace(|c:char|!c.is_ascii_alphanumeric(),"_"))
 }
 
-fn index_dir(source:&Path,gen:&str)->PathBuf{
-    PathBuf::from(format!("{}.tantivy",source.display())).join(format!("schema4-{gen}"))
+fn index_dir(source:&Path,generation_id:&str)->PathBuf{
+    PathBuf::from(format!("{}.tantivy",source.display())).join(format!("schema4-{generation_id}"))
 }
 
 /// Build and verify the *final* Tantivy generation before publishing SQLite.
@@ -177,8 +177,8 @@ fn open_search(db:&Connection)->Result<(SearchIndex,Option<PathBuf>),String>{
             std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH)
                 .map_err(|e|e.to_string())?.as_nanos())))
     }else{None};
-    let gen=generation(db)?;
-    let path=format!("{source}:{gen}");
+    let generation_id=generation(db)?;
+    let path=format!("{source}:{generation_id}");
     let search=if let Some(ref directory)=memory_dir {
         build(db,directory)?
     }else{
@@ -186,7 +186,7 @@ fn open_search(db:&Connection)->Result<(SearchIndex,Option<PathBuf>),String>{
         let mut guard=cache.lock().map_err(|e|e.to_string())?;
         guard.retain(|key,_|!key.starts_with(&format!("{source}:"))||key==&path);
         if !guard.contains_key(&path) {
-            guard.insert(path.clone(),build(db,&index_dir(Path::new(source),&gen))?);
+            guard.insert(path.clone(),build(db,&index_dir(Path::new(source),&generation_id))?);
         }
         guard.get(&path).ok_or("index missing")?.clone()
     };
