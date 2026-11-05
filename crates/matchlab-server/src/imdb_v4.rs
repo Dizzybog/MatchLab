@@ -160,6 +160,25 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test] fn votes_replace_alias_count_as_tiebreaker(){
+        let db=Connection::open_in_memory().unwrap();
+        db.create_scalar_function("reverse",1,
+            rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC
+                |rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            |ctx|{let s:String=ctx.get(0)?;Ok(s.chars().rev().collect::<String>())}).unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES('ttlow','Example','example',2020,'movie','',1,0,'movie');
+            INSERT INTO titles VALUES('tthigh','Example','example',2020,'movie','',1,0,'movie');
+            INSERT INTO titles VALUES('ttlow','Example alternate','examplealternate',2020,'movie','',0,1,'movie');
+            INSERT INTO imdb_ratings VALUES('ttlow',100);
+            INSERT INTO imdb_ratings VALUES('tthigh',50000);").unwrap();
+        let found=search(&db,"Example",Some(2020),false,0,"Example.2020",false,5).unwrap();
+        assert_eq!(found[0].imdb_id,"tthigh");
+    }
     #[test] fn normalization(){assert_eq!(clean_title("Pokémon and Ægir"),"pokemonaegir");}
     #[test] fn country_specific_series_beats_generic_alias() {
         let db=Connection::open_in_memory().unwrap();
