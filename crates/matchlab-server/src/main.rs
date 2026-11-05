@@ -870,6 +870,9 @@ mod tests {
             INSERT INTO anidb_titles VALUES('999','Supernatural','supernatural','main','en');
             INSERT INTO episode_map VALUES('999','999',1,1,1,12,0,'');").unwrap();
         drop(db);
+        let snapshot=Connection::open(&path).unwrap();
+        tantivy_search::warmup(&snapshot).unwrap();
+        drop(snapshot);
         let result=diagnose(&path,&MatchRequest{
             title:"Supernatural.S01-s12.hdr".into(),year:None,series:None
         }).unwrap();
@@ -878,6 +881,7 @@ mod tests {
         assert_eq!(winner["match_source"],"imdb");
         assert_eq!(winner["category"],"series");
         std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
     }
     #[test]
     fn requested_episode_must_exist_within_known_season_bounds() {
