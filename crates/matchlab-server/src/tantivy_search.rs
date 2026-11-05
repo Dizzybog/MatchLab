@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use tantivy::{collector::DocSetCollector,doc,query::RegexQuery,schema::{Schema,STORED,STRING,Value},Index,IndexReader,ReloadPolicy};
 
 #[derive(Clone)]
-struct SearchIndex { reader:IndexReader, forward:tantivy::schema::Field, backward:tantivy::schema::Field, id:tantivy::schema::Field, year:tantivy::schema::Field }
+struct SearchIndex { reader:IndexReader, forward:tantivy::schema::Field, backward:tantivy::schema::Field, id:tantivy::schema::Field }
 static CACHE:OnceLock<Mutex<HashMap<String,SearchIndex>>>=OnceLock::new();
 
 fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
@@ -65,7 +65,7 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
     let index=Index::open_in_dir(dir).map_err(|e|e.to_string())?;
     let reader=index.reader_builder().reload_policy(ReloadPolicy::Manual).try_into()
         .map_err(|e:tantivy::TantivyError|e.to_string())?;
-    Ok(SearchIndex{reader,forward,backward,id,year})
+    Ok(SearchIndex{reader,forward,backward,id})
 }
 
 /// Returns candidate IMDb IDs; the deterministic IMDb V4 ranker remains authoritative.
