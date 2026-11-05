@@ -1,16 +1,16 @@
 services:
-  torrent-parse-match:
-    image: ghcr.io/dizzybog/torrent-parse-match:latest
+  matchlab:
+    image: ghcr.io/dizzybog/matchlab:latest
     pull_policy: always
-    container_name: torrent-parse-match
+    container_name: matchlab
     restart: unless-stopped
     environment:
       RUST_LOG: matchlab_server=info
       MATCHLAB_DB: /data/metadata.sqlite3
       MATCHLAB_HOST: 0.0.0.0:8765
-      # Optional overrides; public sources and 24-hour refresh are built in.
+      # Optional overrides; public sources and seven-day refresh are built in.
       # MATCHLAB_METADATA_URLS: https://...,...
-      # MATCHLAB_METADATA_REFRESH_HOURS: "24"
+      # MATCHLAB_METADATA_REFRESH_HOURS: "168"
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
