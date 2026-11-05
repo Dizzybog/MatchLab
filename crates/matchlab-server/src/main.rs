@@ -805,8 +805,23 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
                 match tokio::task::spawn_blocking(move ||
                     metadata_download::refresh_from_urls(&refresh_target,&refresh_urls)
                         .map_err(|error|error.to_string())).await {
-                    Ok(Ok((imdb,links,mappings,aliases))) =>
-                        tracing::info!(imdb,links,mappings,aliases,"scheduled metadata refresh completed"),
+                    Ok(Ok((imdb,links,mappings,aliases))) => {
+                        tracing::info!(imdb,links,mappings,aliases,"scheduled metadata refresh completed");
+                        // Pre-open the new on-disk index off the async executor.
+                        // This avoids leaving the first request after refresh to
+                        // perform a full Tantivy build.
+                        let warm_target=target.clone();
+                        match tokio::task::spawn_blocking(move || -> Result<(),String> {
+                            let conn=Connection::open_with_flags(
+                                &warm_target,OpenFlags::SQLITE_OPEN_READ_ONLY)
+                                .map_err(|e|e.to_string())?;
+                            tantivy_search::warmup(&conn)
+                        }).await {
+                            Ok(Ok(())) => tracing::info!("refreshed Tantivy index ready"),
+                            Ok(Err(error)) => tracing::error!(%error,"Tantivy refresh warmup failed"),
+                            Err(error) => tracing::error!(%error,"Tantivy warmup task failed"),
+                        }
+                    },
                     Ok(Err(error)) => tracing::error!(%error,"scheduled metadata refresh failed; existing database preserved"),
                     Err(error) => tracing::error!(%error,"scheduled metadata refresh task failed"),
                 }
