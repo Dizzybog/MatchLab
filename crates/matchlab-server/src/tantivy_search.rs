@@ -2,7 +2,7 @@
 //! The index is rebuilt from the currently published SQLite image on first use.
 use std::{collections::HashMap,path::Path,sync::{Mutex,OnceLock}};
 use rusqlite::Connection;
-use tantivy::{collector::TopDocs,doc,query::RegexQuery,schema::{Schema,STORED,STRING},Index,IndexReader,ReloadPolicy};
+use tantivy::{collector::TopDocs,doc,query::RegexQuery,schema::{Schema,STORED,STRING,Value},Index,IndexReader,ReloadPolicy};
 
 struct SearchIndex { reader:IndexReader, forward:tantivy::schema::Field, backward:tantivy::schema::Field, id:tantivy::schema::Field, year:tantivy::schema::Field }
 static CACHE:OnceLock<Mutex<HashMap<String,SearchIndex>>>=OnceLock::new();
@@ -37,7 +37,10 @@ pub fn candidates(db:&Connection,key:&str,year:Option<i32>,suffix:bool,limit:usi
     if key.is_empty()||limit==0{return Ok(Vec::new());}
     let cache=CACHE.get_or_init(||Mutex::new(HashMap::new()));
     let mut guard=cache.lock().map_err(|e|e.to_string())?;
-    let path=db.path().unwrap_or(":memory:").to_string();
+    let source=db.path().unwrap_or(":memory:");
+    let version=std::fs::metadata(source).ok().and_then(|m|m.modified().ok());
+    let path=format!("{source}:{version:?}");
+    guard.retain(|key,_|!key.starts_with(&format!("{source}:"))||key==&path);
     if !guard.contains_key(&path){guard.insert(path.clone(),build(db)?);}
     let search=guard.get(&path).ok_or("index missing")?;
     let field=if suffix{search.backward}else{search.forward};
