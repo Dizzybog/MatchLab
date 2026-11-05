@@ -142,6 +142,19 @@ mod persistence_tests {
     use super::*;
 
     #[test]
+    fn independent_in_memory_databases_never_share_titles() {
+        let first=Connection::open_in_memory().unwrap();
+        let second=Connection::open_in_memory().unwrap();
+        for db in [&first,&second] {
+            db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER);").unwrap();
+        }
+        first.execute("INSERT INTO titles VALUES('tt1111111','dune',1984)",[]).unwrap();
+        second.execute("INSERT INTO titles VALUES('tt2222222','dune',2021)",[]).unwrap();
+        assert_eq!(candidates(&first,"dune",None,false,1).unwrap(),vec!["tt1111111"]);
+        assert_eq!(candidates(&second,"dune",None,false,1).unwrap(),vec!["tt2222222"]);
+    }
+
+    #[test]
     fn disk_index_reopens_without_rebuilding() {
         let root=std::env::temp_dir().join(format!(
             "matchlab-tantivy-persistence-{}-{:?}",
