@@ -150,8 +150,14 @@ fn candidates_internal(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,lim
     let term=if suffix{key.chars().rev().collect::<String>()}else{key.to_string()};
     // Tantivy RegexQuery consumes a regex, not a literal string. Escape
     // metacharacters so aliases never change the intended search semantics.
-    let literal=term.chars().flat_map(|ch|{
-        if matches!(ch,'.'|'+'|'*'|'?'|'('|')'|'['|']'|'{'|'}'|'|'|'^'|'
+    let mut literal=String::new();
+    for ch in term.chars() {
+        if ".+*?()[]{}|^$\\".contains(ch) {
+            literal.push('\\');
+        }
+        literal.push(ch);
+    }
+    let pattern=if anime_only{literal}else{format!("{}.*",literal)};
     let query=RegexQuery::from_pattern(&pattern,field).map_err(|e|e.to_string())?;
     let reader=search.reader.searcher();
     let mut ids=Vec::new();
