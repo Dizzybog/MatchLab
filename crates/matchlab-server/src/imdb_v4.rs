@@ -69,14 +69,13 @@ fn prefix(db:&Connection,key:&str,release:&str,series:bool,year:Option<i32>,seas
     // Keep the SQLite range as a safety fallback when the index is unavailable.
     if let Ok(ids)=crate::tantivy_search::candidates(db,key,year,false,1){
         if !ids.is_empty(){
-            // SQLite's indexed prefix range is more efficient than issuing
-            // one SQL statement per IMDb ID for broad prefixes. The exhaustive
-            // Tantivy result guarantees discovery; a single range query loads
-            // the full V4 alias rows without an N+1 database access pattern.
-            let _=ids;
+            // Pass all Tantivy IDs in one JSON parameter rather than
+            // issuing an individual SQL query per candidate.
+            let encoded=serde_json::to_string(&ids)
+                .map_err(|e|rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
             return filter(db,select(db,
-                "clean_title>=?1 AND clean_title<?2",
-                &[&key,&upper])?,release,series,year,season);
+                "imdb_id IN (SELECT value FROM json_each(?1)) AND clean_title>=?2 AND clean_title<?3",
+                &[&encoded,&key,&upper])?,release,series,year,season);
         }
     }
     filter(db,select(db,"clean_title>=?1 AND clean_title<?2",&[&key,&upper])?,release,series,year,season)
@@ -129,12 +128,11 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
         let indexed=crate::tantivy_search::candidates(db,&key,year,true,1);
         if let Ok(ids)=indexed {
             if !ids.is_empty(){
-                // Avoid one SQLite query per candidate on high-cardinality
-                // suffix searches; fetch the complete indexed SQL range once.
-                let _=ids;
+                let encoded=serde_json::to_string(&ids)
+                    .map_err(|e|rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
                 rows=filter(db,select(db,
-                    "reverse(clean_title)>=?1 AND reverse(clean_title)<?2 AND length(clean_title)>?3",
-                    &[&rev,&upper,&(key.len() as i64)])?,&release,series,year,required_season)?;
+                    "imdb_id IN (SELECT value FROM json_each(?1)) AND reverse(clean_title)>=?2 AND reverse(clean_title)<?3 AND length(clean_title)>?4",
+                    &[&encoded,&rev,&upper,&(key.len() as i64)])?,&release,series,year,required_season)?;
             }
         }
         // Fallback to the complete SQLite range when Tantivy cannot
