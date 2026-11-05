@@ -370,7 +370,7 @@ pub fn has_duplicate_title(db:&Connection,key:&str)->Result<bool,String>{
     Ok(duplicate)
 }
 
-/// Returns candidate IMDb IDs; the deterministic IMDb V4 ranker remains authoritative.
+/// Returns candidate IMDb IDs; the deterministic MatchLab ranker remains authoritative.
 /// Uses exhaustive document collection before ID deduplication.
 /// Year is intentionally not a hard filter: V4 ranks year proximity and
 /// permits matches outside a one-year window.

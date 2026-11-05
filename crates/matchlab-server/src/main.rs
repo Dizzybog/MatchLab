@@ -1,6 +1,6 @@
 //! Native Rust matching service backed by validated SQLite metadata.
 mod airdate;
-mod imdb_v4;
+mod matchlab_matcher;
 mod tantivy_search;
 mod metadata_import;
 mod metadata_download;
@@ -69,10 +69,6 @@ fn parse_cached(title:&str)->Result<Value,String>{
         guard.insert(title.to_string(),(Instant::now(),value.clone()));
     }
     Ok(value)
-}
-
-fn normalize(input: &str) -> String {
-    imdb_v4::clean_title(input)
 }
 
 fn numbers(v: Option<&Value>) -> Vec<i64> {
@@ -251,7 +247,7 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
         && numbers(parsed.get("episodes")).is_empty();
     let title=if airdate_only{dated.as_ref().map(|(name,_)|name.as_str()).unwrap_or(&title_owned)}
         else{title_owned.as_str()};
-    let key = normalize(title);
+    let key = matchlab_matcher::clean_title(title);
     let season_range=explicit_season_range(&req.title);
     let seasons = season_range.map(|(start,end)|vec![start,end])
         .unwrap_or_else(||numbers(parsed.get("seasons")));
@@ -272,7 +268,7 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
         None => anime_title::season_from_any_exact_title(&db,&key)
             .map_err(|e|e.to_string())?.is_some(),
     };
-    let imdb = imdb_v4::search(&db,title,year,series,seasons.iter().copied().max().unwrap_or(0),&req.title,!episodes.is_empty(),20)
+    let imdb = matchlab_matcher::search(&db,title,year,series,seasons.iter().copied().max().unwrap_or(0),&req.title,!episodes.is_empty(),20)
         .map_err(|e|e.to_string())?;
     // Require every candidate for a multi-season pack to contain the final season.
     let imdb=if let Some((_,end))=season_range {
@@ -331,7 +327,7 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
         let anime_id=a["imdb_id"].as_str().unwrap_or_default();
         !imdb.iter().any(|c| {
             (c.media_type=="tvSeries" || c.media_type=="tvMiniSeries")
-                && normalize(&c.matched_title)==key && c.imdb_id!=anime_id
+                && matchlab_matcher::clean_title(&c.matched_title)==key && c.imdb_id!=anime_id
         })
     });
     let mut selected = if let Some(a) = &anime {
@@ -358,7 +354,7 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
         // Python match_title refuses ambiguous IMDb identities rather than
         // silently returning the first equally plausible candidate.
         // Always select a candidate. A verified anime crosswalk takes priority;
-        // otherwise IMDb V4 ranking (including stable IMDb ID tie-break) wins.
+        // otherwise MatchLab ranking (including stable IMDb ID tie-break) wins.
         let mut chosen_index=0usize;
         if series {
             if let Some(ep)=episodes.first().copied() {
@@ -974,7 +970,7 @@ mod tests {
                 (&sid,&series,"series","tvSeries"),
                 (&aid,&anime,"series","tvSeries")] {
                 db.execute("INSERT INTO titles VALUES(?1,?2,?3,2020,?4,'US',1,0,?5)",
-                    params![id,name,normalize(name),category,kind]).unwrap();
+                    params![id,name,matchlab_matcher::clean_title(name),category,kind]).unwrap();
             }
             for id in [&sid,&aid] {
                 db.execute("INSERT INTO seasons VALUES(?1,10)",[id]).unwrap();
@@ -982,7 +978,7 @@ mod tests {
             db.execute("INSERT INTO anime_series_map VALUES(?1,?2,?3,0)",
                 params![aid,ani_id,format!("tvdb{i}")]).unwrap();
             db.execute("INSERT INTO anidb_titles VALUES(?1,?2,?3,'main','en')",
-                params![ani_id,anime,normalize(&anime)]).unwrap();
+                params![ani_id,anime,matchlab_matcher::clean_title(&anime)]).unwrap();
             db.execute("INSERT INTO episode_map VALUES(?1,?2,1,1,1,24,0,'')",
                 params![ani_id,format!("tvdb{i}")]).unwrap();
         }
@@ -1023,9 +1019,9 @@ mod tests {
     }
     #[test]
     fn normalization_handles_accents_and_and_word() {
-        assert_eq!(normalize("Bjørn & Ægir"),"bjorn aegir".replace(' ',""));
-        assert_eq!(normalize("Rock and Roll"),"rockroll");
-        assert_eq!(normalize("Pokémon"),"pokemon");
+        assert_eq!(matchlab_matcher::clean_title("Bjørn & Ægir"),"bjorn aegir".replace(' ',""));
+        assert_eq!(matchlab_matcher::clean_title("Rock and Roll"),"rockroll");
+        assert_eq!(matchlab_matcher::clean_title("Pokémon"),"pokemon");
     }
     #[test]
     fn absolute_episode_notation(){
@@ -1046,8 +1042,8 @@ mod tests {
             CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);
             INSERT INTO titles VALUES('tt1','Example','example',2020,'movie','US',1,1,'movie');
             INSERT INTO titles VALUES('tt2','Example','example',2021,'series','US',1,1,'tvSeries');").unwrap();
-        let movies=imdb_v4::search(&db,"Example",Some(2020),false,0,"Example",false,20).unwrap();
-        let shows=imdb_v4::search(&db,"Example",Some(2021),true,0,"Example",false,20).unwrap();
+        let movies=matchlab_matcher::search(&db,"Example",Some(2020),false,0,"Example",false,20).unwrap();
+        let shows=matchlab_matcher::search(&db,"Example",Some(2021),true,0,"Example",false,20).unwrap();
         assert_eq!(movies.len(),1);
         assert_eq!(movies[0].imdb_id,"tt1");
         assert_eq!(shows.len(),1);

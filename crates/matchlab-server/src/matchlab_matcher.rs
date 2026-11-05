@@ -1,5 +1,6 @@
-//! IMDb V4 candidate search ported from MediaMatch/index.py.
-//! The ranking stages intentionally match the Python reference implementation.
+//! MatchLab's deterministic IMDb title matcher.
+//! Ordered stages prioritize exact aliases, then title and season eligibility,
+//! year proximity and stable tie-breaking. Source metadata comes from Tantivy.
 use rusqlite::{params, Connection};
 use std::collections::{BTreeMap, HashSet};
 use unicode_normalization::UnicodeNormalization;
