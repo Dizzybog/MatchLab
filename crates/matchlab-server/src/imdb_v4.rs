@@ -138,7 +138,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     let mut output=Vec::new();
     for (id,aliases) in groups{
         let votes:i64=db.query_row("SELECT num_votes FROM imdb_ratings WHERE imdb_id=?1",[&id],|r|r.get(0))
-            .optional()?.unwrap_or(0);
+            .optional().unwrap_or(None).unwrap_or(0);
         let best=aliases.into_iter().min_by_key(|r|rank(r,year,series,duplicates.contains(&r.clean),count_first,votes)).unwrap();
         let mut ids=BTreeMap::new();
         let mut stmt=db.prepare("SELECT type,value FROM anime_ids WHERE group_id=?1")?;
