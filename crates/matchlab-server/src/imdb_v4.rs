@@ -150,7 +150,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             let linked=stmt.query_map([&id],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
             if linked.len()==1{ids.insert("anidb".into(),linked[0].clone());}
         }
-        let score=rank(&best,year,series,duplicates.contains(&best.clean),count_first,count);
+        let score=rank(&best,year,series,duplicates.contains(&best.clean),count_first,votes);
         output.push((score,Match{imdb_id:id,title:best.title.clone(),year:best.year,
             category:best.category,matched_title:best.title,anime_ids:ids,media_type:best.media_type}));
     }
