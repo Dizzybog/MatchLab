@@ -15,10 +15,11 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{env, path::PathBuf, sync::{Arc,Mutex,OnceLock}, time::{Instant,Duration}, collections::HashMap};
+use tokio::sync::Semaphore;
 
 
 #[derive(Clone)]
-struct AppState { db: Arc<PathBuf>, history: Arc<PathBuf> }
+struct AppState { db: Arc<PathBuf>, history: Arc<PathBuf>, match_slots: Arc<Semaphore> }
 
 #[derive(Debug, Deserialize)]
 struct MatchRequest {
@@ -621,32 +622,49 @@ async fn parse_response(req:MatchRequest)->(StatusCode,Json<Value>){
     }
 }
 
-async fn match_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
-    -> (StatusCode,Json<Value>) {
-    match tokio::task::spawn_blocking(move ||diagnose_logged(&state,&req)).await {
-        Ok(Ok(d)) => (StatusCode::OK,Json(public_match_response(d.selected))),
-        Ok(Err(e)) => (StatusCode::BAD_REQUEST,Json(json!({"error":e}))),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":e.to_string()}))),
+/// Bound CPU-heavy matching before it enters Tokio's blocking thread pool.
+/// This preserves full candidate ranking while protecting the process against
+/// request bursts during metadata imports and index-generation changes.
+async fn run_match(state: AppState, req: MatchRequest)
+    -> Result<Result<Diagnostic,String>,String> {
+    let permit=state.match_slots.clone().acquire_owned().await
+        .map_err(|e|e.to_string())?;
+    tokio::task::spawn_blocking(move ||{
+        let _permit=permit;
+        diagnose_logged(&state,&req)
+    }).await.map_err(|e|e.to_string())
+}
+
+async fn match_response(state:AppState,req:MatchRequest,debug:bool)
+    -> (StatusCode,Json<Value>){
+    match run_match(state,req).await{
+        Ok(Ok(d))=>{
+            let value=if debug{
+                serde_json::to_value(d).unwrap_or(Value::Null)
+            }else{
+                public_match_response(d.selected)
+            };
+            (StatusCode::OK,Json(value))
+        },
+        Ok(Err(e))=>(StatusCode::BAD_REQUEST,Json(json!({"error":e}))),
+        Err(e)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":e}))),
     }
+}
+
+async fn match_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
+    -> (StatusCode,Json<Value>){
+    match_response(state,req,false).await
 }
 
 /// GET /match?title=...&year=...
 async fn get_match_request(State(state):State<AppState>,Query(req):Query<MatchRequest>)
-    -> (StatusCode,Json<Value>) {
-    match tokio::task::spawn_blocking(move ||diagnose_logged(&state,&req)).await {
-        Ok(Ok(d))=>(StatusCode::OK,Json(public_match_response(d.selected))),
-        Ok(Err(e))=>(StatusCode::BAD_REQUEST,Json(json!({"error":e}))),
-        Err(e)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":e.to_string()}))),
-    }
+    -> (StatusCode,Json<Value>){
+    match_response(state,req,false).await
 }
 
 async fn debug_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
-    -> (StatusCode,Json<Value>) {
-    match tokio::task::spawn_blocking(move ||diagnose_logged(&state,&req)).await {
-        Ok(Ok(d)) => (StatusCode::OK,Json(serde_json::to_value(d).unwrap_or(Value::Null))),
-        Ok(Err(e)) => (StatusCode::BAD_REQUEST,Json(json!({"error":e}))),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":e.to_string()}))),
-    }
+    -> (StatusCode,Json<Value>){
+    match_response(state,req,true).await
 }
 
 #[tokio::main]
@@ -725,7 +743,7 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
     }
 
     // Built-in HTTPS metadata feeds initialize a fresh Docker volume automatically.
-    // MATCHLAB_METADATA_URLS can override all six feeds.
+    // MATCHLAB_METADATA_URLS can override all seven feeds (or six legacy URLs).
     {
         let urls=metadata_download::configured_urls(env::var("MATCHLAB_METADATA_URLS").ok().as_deref())?;
         let hours=env::var("MATCHLAB_METADATA_REFRESH_HOURS")
@@ -789,6 +807,14 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
             }
         });
     }
+    // StremThru uses bounded worker pools for torrent lookups; cap MatchLab's
+    // blocking match operations independently of the async HTTP executor.
+    let max_matches=env::var("MATCHLAB_MAX_CONCURRENT_MATCHES")
+        .unwrap_or_else(|_|"4".into()).parse::<usize>()?;
+    if !(1..=64).contains(&max_matches) {
+        return Err("MATCHLAB_MAX_CONCURRENT_MATCHES must be between 1 and 64".into());
+    }
+    tracing::info!(max_matches,"MatchLab match concurrency configured");
     let history_db=env::var("MATCHLAB_HISTORY_DB").unwrap_or_else(|_|"/data/history.sqlite3".into());
     let app = Router::new().route("/",get(dashboard))
         .route("/api/dashboard/history",get(dashboard_history_request))
@@ -799,7 +825,8 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         .route("/match",get(get_match_request).post(match_request))
         .route("/parse",get(get_parse_request).post(parse_request))
         .route("/debug/match",post(debug_request))
-        .with_state(AppState{db:Arc::new(PathBuf::from(db)),history:Arc::new(PathBuf::from(history_db))});
+        .with_state(AppState{db:Arc::new(PathBuf::from(db)),history:Arc::new(PathBuf::from(history_db)),
+            match_slots:Arc::new(Semaphore::new(max_matches))});
     let listener = tokio::net::TcpListener::bind(&host).await?;
     tracing::info!("Rust API listening on {host}");
     axum::serve(listener,app).await?;
