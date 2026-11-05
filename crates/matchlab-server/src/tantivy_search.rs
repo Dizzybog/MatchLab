@@ -91,9 +91,7 @@ fn open_search(db:&Connection)->Result<(SearchIndex,Option<PathBuf>),String>{
     let metadata=std::fs::metadata(source).ok();
     let version=metadata.as_ref().and_then(|m|m.modified().ok());
     #[cfg(unix)]
-    let identity=std::os::unix::fs::MetadataExt::ino;
-    #[cfg(unix)]
-    let fingerprint=metadata.as_ref().map(|m|format!("{}-{}-{}-{}",identity(m),std::os::unix::fs::MetadataExt::dev(m),m.len(),std::os::unix::fs::MetadataExt::ctime_nsec(m)));
+    let fingerprint=metadata.as_ref().map(|m|format!("{}-{}-{}-{}",std::os::unix::fs::MetadataExt::ino(m),std::os::unix::fs::MetadataExt::dev(m),m.len(),std::os::unix::fs::MetadataExt::ctime_nsec(m)));
     #[cfg(not(unix))]
     let fingerprint=metadata.as_ref().map(|m|format!("{}",m.len()));
     // In-memory SQLite connections have no filesystem generation and must
