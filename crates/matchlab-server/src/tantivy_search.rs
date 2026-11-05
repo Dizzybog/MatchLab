@@ -78,11 +78,22 @@ pub fn candidates(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,limit:us
     if key.is_empty()||limit==0{return Ok(Vec::new());}
     let source=db.path().unwrap_or(":memory:");
     let version=std::fs::metadata(source).ok().and_then(|m|m.modified().ok());
+    // In-memory SQLite connections have no filesystem generation and must
+    // never share a cached Tantivy index across independent test databases.
+    // Each connection gets a fresh temporary generation for this query.
+    let memory_dir=if source==":memory:" {
+        Some(std::env::temp_dir().join(format!("matchlab-tantivy-memory-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e|e.to_string())?.as_nanos())))
+    }else{None};
     let path=format!("{source}:{version:?}");
     // Do not hold the global cache mutex while running regex queries.
     // A concurrent metadata refresh may still build a generation under the
     // mutex; queries on already-open generations can proceed independently.
-    let search={
+    let search=if let Some(ref directory)=memory_dir {
+        build(db,directory)?
+    }else{
         let cache=CACHE.get_or_init(||Mutex::new(HashMap::new()));
         let mut guard=cache.lock().map_err(|e|e.to_string())?;
         guard.retain(|key,_|!key.starts_with(&format!("{source}:"))||key==&path);
@@ -110,6 +121,10 @@ pub fn candidates(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,limit:us
             if seen.insert(imdb.to_string()){ids.push(imdb.to_string());}
         }
         // Do not truncate candidates before deterministic V4 ranking.
+    }
+    if let Some(directory)=memory_dir {
+        drop(search);
+        let _=std::fs::remove_dir_all(directory);
     }
     Ok(ids)
 }
