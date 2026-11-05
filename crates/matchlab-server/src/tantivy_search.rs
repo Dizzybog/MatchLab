@@ -227,6 +227,20 @@ mod persistence_tests {
     }
 
     #[test]
+    fn anime_alias_discovery_uses_tantivy_exact_match() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER);
+            CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
+            CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT);
+            INSERT INTO titles VALUES('tt1234567','official title',2020);
+            INSERT INTO anidb_titles VALUES('123','alternate anime');
+            INSERT INTO anime_series_map VALUES('123','tt1234567');").unwrap();
+        assert_eq!(anime_candidates(&db,"alternate anime").unwrap(),vec!["tt1234567"]);
+        assert!(anime_candidates(&db,"alternate").unwrap().is_empty());
+        assert!(candidates(&db,"alternate",None,false,1).unwrap().is_empty());
+    }
+
+    #[test]
     fn regex_metacharacters_are_literal() {
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER);
