@@ -128,6 +128,28 @@ curl -X POST http://127.0.0.1:8765/parse \
 
 The JSON contains every field the parser recognizes, such as `title`, `seasons`, `episodes`, `year`, `resolution`, `quality`, `codec`, `languages` and release metadata. Fields not recognized in the input are omitted; the exact set depends on the title. `GET /parse?title=...` is also supported.
 
+### Airdate matching (no API key)
+
+When a TV release contains a date instead of explicit SxxExx coordinates, MatchLab
+identifies the IMDb series from the title preceding the date, then looks up
+the episode's premiere date in Cinemeta's public episode feed.
+
+```text
+The.Daily.Show.2022.01.20.Francis.Ngannou.1080p
+```
+
+```bash
+curl 'http://127.0.0.1:8765/match?title=The.Daily.Show.2022.01.20.Francis.Ngannou.1080p'
+```
+
+On a verified date match, the normal four-field response contains
+`ttID:season:episode` in both SID fields. Explicit SxxExx information
+takes precedence over a date. Cinemeta is accessed only when needed, and
+its episode list is cached for seven days in `/data/matchlab_airdates.sqlite3`.
+No API key is required. If the upstream feed fails or the date is missing
+or ambiguous, MatchLab does not invent episode coordinates. The existing
+IMDb metadata database is never modified by these lookups.
+
 ### Shared 30-second cache
 
 Both APIs use the same native Rust parser. A bounded, in-memory cache stores parsed results by **exact input title** for **30 seconds**. If a client calls `/parse` and then `/match` with the same title, the second request can reuse the parsing result; the reverse order works too. `/match` always performs its own metadata matching and does not require a preceding parse call.
