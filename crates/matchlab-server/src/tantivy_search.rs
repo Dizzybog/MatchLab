@@ -1,7 +1,7 @@
 //! Tantivy inverted index for normalized IMDb title prefixes and reversed suffixes.
 //! A disk-backed index is opened or built for the current SQLite generation.
-use std::{collections::HashMap,path::PathBuf,sync::{Mutex,OnceLock}};
-use rusqlite::Connection;
+use std::{collections::HashMap,fs::File,path::{Path,PathBuf},sync::{Mutex,OnceLock},time::{Duration,SystemTime,UNIX_EPOCH}};
+use rusqlite::{Connection,OptionalExtension};
 use tantivy::{collector::DocSetCollector,doc,query::RegexQuery,schema::{Schema,STORED,STRING,Value},Index,IndexReader,ReloadPolicy};
 
 #[derive(Clone)]
@@ -75,7 +75,13 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
             drop(verify);
             std::fs::write(stage.join(".matchlab-complete"),count.to_string())
                 .map_err(|e|e.to_string())?;
-            std::fs::rename(&stage,dir).map_err(|e|e.to_string())?;
+            // A second process may already have published this immutable generation.
+            if let Err(error)=std::fs::rename(&stage,dir) {
+                if !dir.join(".matchlab-complete").exists() { return Err(error.to_string()); }
+            }
+            // Persist directory entries before metadata can point to this index.
+            File::open(dir).and_then(|f|f.sync_all()).map_err(|e|e.to_string())?;
+            File::open(parent).and_then(|f|f.sync_all()).map_err(|e|e.to_string())?;
             Ok(())
         })();
         if result.is_err(){let _=std::fs::remove_dir_all(&stage);}
@@ -94,40 +100,89 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
     Ok(SearchIndex{reader,forward,backward,id,anime})
 }
 
-fn open_search(db:&Connection)->Result<(SearchIndex,Option<PathBuf>),String>{
-    let source=db.path().filter(|path|!path.is_empty() && *path!=":memory:").unwrap_or(":memory:");
-    // SQLite metadata may be replaced atomically with identical timestamps.
-    // Bind the Tantivy generation to the file identity and size as well as mtime.
+/// Each staged SQLite image contains a unique index-generation identifier.
+/// Legacy databases continue to work using a filesystem fingerprint until
+/// their next full refresh.
+fn generation(db:&Connection)->Result<String,String>{
+    let stamped=db.query_row(
+        "SELECT updated_at FROM metadata_state WHERE source='tantivy_generation'",
+        [],|row|row.get::<_,String>(0)).optional();
+    match stamped {
+        Ok(Some(id)) if id.starts_with("v3-") &&
+            id.chars().all(|c|c.is_ascii_alphanumeric()||c=='-') => return Ok(id),
+        Ok(Some(_)) => return Err("invalid Tantivy generation identifier".into()),
+        Ok(None) => {},
+        Err(e) if e.to_string().contains("no such table: metadata_state") => {},
+        Err(e) => return Err(e.to_string()),
+    }
+    let source=db.path().filter(|p|!p.is_empty()&&*p!=":memory:").unwrap_or(":memory:");
     let metadata=std::fs::metadata(source).ok();
-    let version=metadata.as_ref().and_then(|m|m.modified().ok());
+    let modified=metadata.as_ref().and_then(|m|m.modified().ok());
     #[cfg(unix)]
-    let fingerprint=metadata.as_ref().map(|m|format!("{}-{}-{}-{}",std::os::unix::fs::MetadataExt::ino(m),std::os::unix::fs::MetadataExt::dev(m),m.len(),std::os::unix::fs::MetadataExt::ctime_nsec(m)));
+    let fingerprint=metadata.as_ref().map(|m|format!("{}-{}-{}-{}",
+        std::os::unix::fs::MetadataExt::ino(m),
+        std::os::unix::fs::MetadataExt::dev(m),m.len(),
+        std::os::unix::fs::MetadataExt::ctime_nsec(m)));
     #[cfg(not(unix))]
     let fingerprint=metadata.as_ref().map(|m|format!("{}",m.len()));
-    // In-memory SQLite connections have no filesystem generation and must
-    // never share a cached Tantivy index across independent test databases.
-    // Each connection gets a fresh temporary generation for this query.
-    let memory_dir=if source==":memory:" {
+    Ok(format!("legacy-v3-{modified:?}-{fingerprint:?}")
+        .replace(|c:char|!c.is_ascii_alphanumeric(),"_"))
+}
+
+fn index_dir(source:&Path,gen:&str)->PathBuf{
+    PathBuf::from(format!("{}.tantivy",source.display())).join(gen)
+}
+
+/// Build and verify the *final* Tantivy generation before publishing SQLite.
+/// No second index build or request-time warmup is required after publication.
+pub fn prepare(db:&Connection,target:&Path)->Result<(),String>{
+    let dest=index_dir(target,&generation(db)?);
+    drop(build(db,&dest)?);
+    Ok(())
+}
+
+/// Reclaim old published generations conservatively. Never remove a recent
+/// generation or the one currently referenced by the published database.
+pub fn prune(db:&Connection,target:&Path)->Result<(),String>{
+    let active=generation(db)?;
+    let root=PathBuf::from(format!("{}.tantivy",target.display()));
+    if !root.exists(){return Ok(());}
+    let mut old=Vec::new();
+    for entry in std::fs::read_dir(&root).map_err(|e|e.to_string())?{
+        let entry=entry.map_err(|e|e.to_string())?;
+        let name=entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("v3-")||name==active||!entry.path().is_dir()
+            ||!entry.path().join(".matchlab-complete").is_file(){continue;}
+        let modified=entry.metadata().and_then(|m|m.modified()).map_err(|e|e.to_string())?;
+        old.push((modified,entry.path()));
+    }
+    old.sort_by_key(|(when,_)|std::cmp::Reverse(*when));
+    for (when,path) in old.into_iter().skip(2) {
+        if SystemTime::now().duration_since(when).unwrap_or_default()>=Duration::from_secs(7*24*3600){
+            std::fs::remove_dir_all(path).map_err(|e|e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn open_search(db:&Connection)->Result<(SearchIndex,Option<PathBuf>),String>{
+    let source=db.path().filter(|p|!p.is_empty()&&*p!=":memory:").unwrap_or(":memory:");
+    let temporary=source==":memory:";
+    let memory_dir=if temporary {
         Some(std::env::temp_dir().join(format!("matchlab-tantivy-memory-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH)
                 .map_err(|e|e.to_string())?.as_nanos())))
     }else{None};
-    let path=format!("anime-v2:{source}:{version:?}:{fingerprint:?}");
-    // Do not hold the global cache mutex while running regex queries.
-    // A concurrent metadata refresh may still build a generation under the
-    // mutex; queries on already-open generations can proceed independently.
+    let gen=generation(db)?;
+    let path=format!("{source}:{gen}");
     let search=if let Some(ref directory)=memory_dir {
         build(db,directory)?
     }else{
         let cache=CACHE.get_or_init(||Mutex::new(HashMap::new()));
         let mut guard=cache.lock().map_err(|e|e.to_string())?;
-        guard.retain(|key,_|!key.starts_with(&format!("anime-v2:{source}:"))||key==&path);
-        if !guard.contains_key(&path){
-            let directory=PathBuf::from(format!("{source}.tantivy"));
-            let generation=format!("anime-v2-{:?}-{:?}",version,fingerprint).replace(|c:char|!c.is_ascii_alphanumeric(),"_");
-            let directory=directory.join(generation);
-            guard.insert(path.clone(),build(db,&directory)?);
+        guard.retain(|key,_|!key.starts_with(&format!("{source}:"))||key==&path);
+        if !guard.contains_key(&path) {
+            guard.insert(path.clone(),build(db,&index_dir(Path::new(source),&gen))?);
         }
         guard.get(&path).ok_or("index missing")?.clone()
     };
@@ -183,8 +238,7 @@ fn candidates_internal(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,lim
 }
 
 
-// Prepare the index before serving requests. A full implementation should invoke
-// this from the metadata publication pipeline, not from the request path.
+// Open the already-published index at startup or after a refresh.
 pub fn warmup(db:&Connection)->Result<(),String>{
     let (search,memory_dir)=open_search(db)?;
     drop(search);
@@ -263,6 +317,32 @@ mod persistence_tests {
             INSERT INTO titles VALUES('tt1234567','a.b',2020);
             INSERT INTO titles VALUES('tt7654321','axb',2020);").unwrap();
         assert_eq!(candidates(&db,"a.b",None,false,1).unwrap(),vec!["tt1234567"]);
+    }
+
+    #[test]
+    fn prebuilt_generation_survives_atomic_sqlite_publication() {
+        let root=std::env::temp_dir().join(format!("matchlab-tantivy-publish-{}-{:?}",
+            std::process::id(),std::thread::current().id()));
+        let _=std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let target=root.join("metadata.sqlite3");
+        let staging=root.join("staging.sqlite3");
+        let db=Connection::open(&staging).unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER);
+            CREATE TABLE metadata_state(source TEXT PRIMARY KEY,updated_at TEXT,row_count INTEGER);
+            INSERT INTO titles VALUES('tt1234567','example',2020);
+            INSERT INTO metadata_state VALUES('tantivy_generation','v3-testpublish',0);").unwrap();
+        prepare(&db,&target).unwrap();
+        let completed=index_dir(&target,"v3-testpublish").join(".matchlab-complete");
+        assert!(completed.is_file());
+        drop(db);
+        std::fs::rename(staging,&target).unwrap();
+        let published=Connection::open(&target).unwrap();
+        warmup(&published).unwrap();
+        assert_eq!(candidates(&published,"example",None,false,1).unwrap(),vec!["tt1234567"]);
+        assert!(completed.is_file());
+        drop(published);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

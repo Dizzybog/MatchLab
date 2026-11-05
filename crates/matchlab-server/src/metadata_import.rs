@@ -528,6 +528,12 @@ pub fn refresh_from_files_with_ratings(
             let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
             db.execute("INSERT OR REPLACE INTO metadata_state VALUES('full_refresh',?1,?2)",
                 params![now,imdb+links+episodes_count+aliases])?;
+            // Unique immutable generation: the final index is built under the
+            // live target path before the new SQLite image becomes visible.
+            let generation=format!("v3-{}-{}",std::process::id(),
+                SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos());
+            db.execute("INSERT INTO metadata_state VALUES('tantivy_generation',?1,0)",
+                [&generation])?;
             // Build query-planner statistics on the fully imported staging image.
             // The live database is never modified by this operation.
             tracing::info!("metadata refresh: analyzing SQLite indexes");
@@ -539,18 +545,14 @@ pub fn refresh_from_files_with_ratings(
                 return Err(format!("staging SQLite integrity check failed: {integrity}").into());
             }
         }
-        // Validate that the complete imported IMDb title set can be indexed
-        // before replacing the currently serving SQLite metadata.
-        // The staged index is deliberately not published: the live index is
-        // versioned from the final SQLite path and warmed after refresh.
+        // Publish the complete, validated index ahead of the SQLite switch.
+        // Both old and new SQLite readers select their own immutable generation;
+        // no request can observe new metadata with an old/unfinished index.
         {
             let staged_db=Connection::open_with_flags(
                 &stage,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            let index_result=crate::tantivy_search::warmup(&staged_db);
-            // Staged SQLite filenames are unique per refresh; do not retain
-            // their expensive temporary indexes after validation.
-            let _=fs::remove_dir_all(format!("{}.tantivy",stage.display()));
-            index_result.map_err(|e|format!("staged Tantivy index failed: {e}"))?;
+            crate::tantivy_search::prepare(&staged_db,target)
+                .map_err(|e|format!("staged Tantivy index failed: {e}"))?;
         }
         // Persist the completed staging file before atomically publishing it.
         File::open(&stage)?.sync_all()?;
@@ -559,6 +561,12 @@ pub fn refresh_from_files_with_ratings(
         // The rename is atomic on the same filesystem. Sync the directory as
         // well so the new directory entry survives a sudden power loss.
         File::open(parent)?.sync_all()?;
+        // Cleanup is best-effort and must never turn a published import into an error.
+        if let Ok(published)=Connection::open_with_flags(target,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            if let Err(error)=crate::tantivy_search::prune(&published,target){
+                tracing::warn!(%error,"old Tantivy generation cleanup failed");
+            }
+        }
         Ok((imdb,links,episodes_count,aliases))
     })();
     if result.is_err(){let _=fs::remove_file(&stage);}
