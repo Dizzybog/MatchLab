@@ -14,26 +14,54 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
     let id=builder.add_text_field("imdb_id",STRING|STORED);
     let year=builder.add_i64_field("year",tantivy::schema::INDEXED|STORED);
     let schema=builder.build();
-    let index=if dir.join("meta.json").exists(){
-        Index::open_in_dir(dir).map_err(|e|e.to_string())?
-    }else{
-        std::fs::create_dir_all(dir).map_err(|e|e.to_string())?;
-        Index::create_in_dir(dir,schema).map_err(|e|e.to_string())?
-    };
-    if index.searchable_segment_ids().map_err(|e|e.to_string())?.is_empty(){
-    let mut writer=index.writer(64_000_000).map_err(|e|e.to_string())?;
-    let mut stmt=db.prepare("SELECT DISTINCT imdb_id,clean_title,year FROM titles WHERE year>0")
-        .map_err(|e|e.to_string())?;
-    let rows=stmt.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?)))
-        .map_err(|e|e.to_string())?;
-    for row in rows{
-        let (imdb,clean,yr)=row.map_err(|e|e.to_string())?;
-        let reversed:String=clean.chars().rev().collect();
-        writer.add_document(doc!(forward=>clean,backward=>reversed,id=>imdb,year=>yr))
-            .map_err(|e|e.to_string())?;
+    // Only a completed generation may be opened. Build in a sibling staging
+    // directory so crashes cannot leave a partially written published index.
+    let marker=dir.join(".matchlab-complete");
+    if dir.exists() && !marker.exists(){
+        std::fs::remove_dir_all(dir).map_err(|e|e.to_string())?;
     }
-    writer.commit().map_err(|e|e.to_string())?;
+    if !marker.exists(){
+        let parent=dir.parent().ok_or("index directory has no parent")?;
+        std::fs::create_dir_all(parent).map_err(|e|e.to_string())?;
+        let stage=parent.join(format!(".tantivy-stage-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e|e.to_string())?.as_nanos()));
+        let result=(|| -> Result<(),String>{
+            std::fs::create_dir_all(&stage).map_err(|e|e.to_string())?;
+            let staging_index=Index::create_in_dir(&stage,schema).map_err(|e|e.to_string())?;
+            let mut writer=staging_index.writer(64_000_000).map_err(|e|e.to_string())?;
+            let mut stmt=db.prepare("SELECT DISTINCT imdb_id,clean_title,year FROM titles WHERE year>0")
+                .map_err(|e|e.to_string())?;
+            let rows=stmt.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?)))
+                .map_err(|e|e.to_string())?;
+            let mut count=0u64;
+            for row in rows{
+                let (imdb,clean,yr)=row.map_err(|e|e.to_string())?;
+                let reversed:String=clean.chars().rev().collect();
+                writer.add_document(doc!(forward=>clean,backward=>reversed,id=>imdb,year=>yr))
+                    .map_err(|e|e.to_string())?;
+                count+=1;
+            }
+            writer.commit().map_err(|e|e.to_string())?;
+            drop(writer);
+            drop(staging_index);
+            let verify=Index::open_in_dir(&stage).map_err(|e|e.to_string())?;
+            let reader=verify.reader().map_err(|e|e.to_string())?;
+            if reader.searcher().num_docs()!=count{
+                return Err("Tantivy index document count mismatch".into());
+            }
+            drop(reader);
+            drop(verify);
+            std::fs::write(stage.join(".matchlab-complete"),count.to_string())
+                .map_err(|e|e.to_string())?;
+            std::fs::rename(&stage,dir).map_err(|e|e.to_string())?;
+            Ok(())
+        })();
+        if result.is_err(){let _=std::fs::remove_dir_all(&stage);}
+        result?;
     }
+    let index=Index::open_in_dir(dir).map_err(|e|e.to_string())?;
     let reader=index.reader_builder().reload_policy(ReloadPolicy::Manual).try_into()
         .map_err(|e:tantivy::TantivyError|e.to_string())?;
     Ok(SearchIndex{reader,forward,backward,id,year})
