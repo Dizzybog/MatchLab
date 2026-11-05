@@ -1,4 +1,5 @@
-//! Native Rust matching service backed by validated SQLite metadata.
+//! MatchLab's native Rust HTTP API.
+//! Tantivy searches titles; SQLite snapshots hold relational metadata.
 mod airdate;
 mod matchlab_matcher;
 mod tantivy_search;
@@ -818,8 +819,7 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
             }
         });
     }
-    // StremThru uses bounded worker pools for torrent lookups; cap MatchLab's
-    // blocking match operations independently of the async HTTP executor.
+    // Bound blocking match operations independently of the async HTTP executor.
     let max_matches=env::var("MATCHLAB_MAX_CONCURRENT_MATCHES")
         .unwrap_or_else(|_|"4".into()).parse::<usize>()?;
     if !(1..=64).contains(&max_matches) {

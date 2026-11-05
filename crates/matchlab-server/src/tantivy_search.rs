@@ -1,14 +1,25 @@
-//! Tantivy inverted index for normalized IMDb title prefixes and reversed suffixes.
-//! A disk-backed index is opened or built for the current SQLite generation.
+//! MatchLab's persistent Tantivy search engine for IMDb and AniDB titles.
+//! Exact/prefix/suffix lookups share immutable metadata index generations.
 use std::{collections::HashMap,fs::File,path::{Path,PathBuf},sync::{Mutex,OnceLock},time::{Duration,SystemTime,UNIX_EPOCH}};
 use rusqlite::{Connection,OptionalExtension};
 use tantivy::{collector::DocSetCollector,doc,query::{RegexQuery,TermQuery,TermSetQuery},schema::{Schema,STORED,STRING,Value,IndexRecordOption},Index,IndexReader,ReloadPolicy,Term};
 
 #[derive(Clone)]
-struct SearchIndex { reader:IndexReader, forward:tantivy::schema::Field, backward:tantivy::schema::Field, id:tantivy::schema::Field, anime:tantivy::schema::Field, anime_id:tantivy::schema::Field, title:tantivy::schema::Field,
-    category:tantivy::schema::Field, region:tantivy::schema::Field,
-    original:tantivy::schema::Field, ordering:tantivy::schema::Field,
-    media_type:tantivy::schema::Field, year:tantivy::schema::Field }
+struct SearchIndex {
+    reader: IndexReader,
+    forward: tantivy::schema::Field,
+    backward: tantivy::schema::Field,
+    id: tantivy::schema::Field,
+    anime: tantivy::schema::Field,
+    anime_id: tantivy::schema::Field,
+    title: tantivy::schema::Field,
+    category: tantivy::schema::Field,
+    region: tantivy::schema::Field,
+    original: tantivy::schema::Field,
+    ordering: tantivy::schema::Field,
+    media_type: tantivy::schema::Field,
+    year: tantivy::schema::Field,
+}
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub struct AnimeAlias {pub anidb_id:String,pub clean_title:String,pub imdb_id:String}
 

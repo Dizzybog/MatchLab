@@ -1,4 +1,4 @@
-//! Reviewed country-qualified TV-series AKA expansion, ported from country_aliases.py.
+//! MatchLab country-qualified TV-series alias expansion.
 //! Only an explicit trailing country marker is expanded; language tags are not countries.
 use crate::matchlab_matcher::clean_title;
 use std::collections::HashSet;

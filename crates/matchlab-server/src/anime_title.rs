@@ -1,4 +1,4 @@
-//! Port of anime_title_matcher.py: part-specific titles and local seasons.
+//! MatchLab's anime part-title matcher and local-season resolver.
 use rusqlite::{params,Connection,OptionalExtension};
 use crate::{anime_resolver,matchlab_matcher};
 use std::collections::BTreeSet;
