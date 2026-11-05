@@ -1,5 +1,5 @@
 //! Tantivy inverted index for normalized IMDb title prefixes and reversed suffixes.
-//! The index is rebuilt from the currently published SQLite image on first use.
+//! A disk-backed index is opened or built for the current SQLite generation.
 use std::{collections::HashMap,path::PathBuf,sync::{Mutex,OnceLock}};
 use rusqlite::Connection;
 use tantivy::{collector::TopDocs,doc,query::RegexQuery,schema::{Schema,STORED,STRING,Value},Index,IndexReader,ReloadPolicy};
@@ -40,7 +40,7 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
 }
 
 /// Returns candidate IMDb IDs; the deterministic IMDb V4 ranker remains authoritative.
-/// A hard result cap limits work, with year +/-1 applied when available.
+/// The current capped retrieval is retained pending V4 parity validation.
 pub fn candidates(db:&Connection,key:&str,year:Option<i32>,suffix:bool,limit:usize)->Result<Vec<String>,String>{
     if key.is_empty()||limit==0{return Ok(Vec::new());}
     let cache=CACHE.get_or_init(||Mutex::new(HashMap::new()));
