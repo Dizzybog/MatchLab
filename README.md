@@ -109,12 +109,15 @@ IMDb basics, alternative titles, episodes, ratings, animeApi, Anime-Lists, and A
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `MATCHLAB_HISTORY_DB` | `/data/history.sqlite3` | Separate request-history SQLite file; only the last 24 hours are included in dashboard history and statistics |
 | `MATCHLAB_DB` | `/data/metadata.sqlite3` | Metadata SQLite file |
 | `MATCHLAB_HOST` | `0.0.0.0:8765` in Docker | HTTP listener |
 | `MATCHLAB_METADATA_REFRESH_HOURS` | `168` | Refresh every 1–720 hours |
 | `MATCHLAB_MAX_CONCURRENT_MATCHES` | `4` | Limit simultaneous match operations (1–64) |
 | `MATCHLAB_METADATA_URLS` | Built-in HTTPS feeds | Optional seven-source override; legacy six-source lists are supported |
 | `RUST_LOG` | `matchlab_server=info` | Logging verbosity |
+
+**History retention:** The dashboard keeps a rolling 24-hour view (UTC), including matched, unmatched, and error requests. An indexed SQLite trigger deletes expired rows on the first new request after each five-minute maintenance interval. Cleanup does not depend on metadata refresh and never deletes IMDb metadata. SQLite normally reuses freed database pages instead of reducing the file length immediately. After an upgrade from an older unlimited-history build, run `VACUUM` during a maintenance window to reclaim disk space if needed; do not copy a live SQLite database file without a consistent backup procedure.
 
 For importer options and the exact source URLs, see [Metadata lifecycle](docs/LOCAL_METADATA.md). For index internals and crash-safety considerations, see [Tantivy architecture](docs/TANTIVY_RUNTIME.md).
 

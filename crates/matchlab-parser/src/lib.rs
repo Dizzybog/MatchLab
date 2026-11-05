@@ -1615,7 +1615,8 @@ fn patch_missing_coordinates(raw: &str, result: &mut Map<String, Value>) -> Resu
                 }
                 // Upstream sometimes classifies the season number as an episode.
                 // Preserve an independent explicit episode such as S02E04.
-                if !EXPLICIT_EPISODE_RE.is_match(raw).unwrap_or(false)
+                if spaced_dash && before.ends_with('-')
+                    && !EXPLICIT_EPISODE_RE.is_match(raw).unwrap_or(false)
                     && result.get("episodes") == Some(&json!([season]))
                 {
                     result.insert("episodes".into(), json!([]));
@@ -1651,9 +1652,9 @@ fn patch_missing_coordinates(raw: &str, result: &mut Map<String, Value>) -> Resu
                 if result.get("seasons").and_then(Value::as_array).is_some_and(Vec::is_empty) {
                     result.insert("seasons".into(), json!([season]));
                 }
-                if result.get("episodes").and_then(Value::as_array).is_some_and(Vec::is_empty) {
-                    result.insert("episodes".into(), json!(episodes));
-                }
+                // Explicit x-notation is more reliable than a number in the
+                // show's name (for example "911 Nashville 1X5").
+                result.insert("episodes".into(), json!(episodes));
                 if let Some(Value::String(title)) = result.get_mut("title") {
                     let cleaned = X_COORDS_IN_TITLE_RE.replace(title, "");
                     let cleaned = cleaned.trim_matches(&[' ', '-', '.', '_'][..]);

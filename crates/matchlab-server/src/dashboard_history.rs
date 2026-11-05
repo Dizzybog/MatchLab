@@ -137,9 +137,9 @@ mod tests{
             let db=open(&path).unwrap();
             db.execute_batch("
                 INSERT INTO requests(created_at,title,status,duration_ms,details)
-                VALUES(strftime('%Y-%m-%dT%H:%M:%fZ','now','-25 hours'),'expired','matched',10,'{}');
-                INSERT INTO requests(created_at,title,status,duration_ms,details)
                 VALUES(strftime('%Y-%m-%dT%H:%M:%fZ','now','-23 hours'),'recent','unmatched',30,'{}');
+                INSERT INTO requests(created_at,title,status,duration_ms,details)
+                VALUES(strftime('%Y-%m-%dT%H:%M:%fZ','now','-25 hours'),'expired','matched',10,'{}');
             ").unwrap();
         }
         // The dashboard must never display an expired request even before
