@@ -79,8 +79,15 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
         result?;
     }
     let index=Index::open_in_dir(dir).map_err(|e|e.to_string())?;
-    let reader=index.reader_builder().reload_policy(ReloadPolicy::Manual).try_into()
+    let reader:IndexReader=index.reader_builder().reload_policy(ReloadPolicy::Manual).try_into()
         .map_err(|e:tantivy::TantivyError|e.to_string())?;
+    // A completion marker alone is not sufficient after disk corruption or
+    // interrupted external copies. Verify the committed document count.
+    let expected=std::fs::read_to_string(&marker).map_err(|e|e.to_string())?
+        .parse::<u64>().map_err(|e|format!("invalid Tantivy completion marker: {e}"))?;
+    if reader.searcher().num_docs()!=expected{
+        return Err(format!("Tantivy index corrupted: expected {expected} documents, found {}",reader.searcher().num_docs()));
+    }
     Ok(SearchIndex{reader,forward,backward,id,anime})
 }
 
