@@ -19,8 +19,11 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
     // Only a completed generation may be opened. Build in a sibling staging
     // directory so crashes cannot leave a partially written published index.
     let marker=dir.join(".matchlab-complete");
+    // A directory without a completion marker may belong to an interrupted
+    // build. Never delete it blindly: another process may still be writing.
+    // Fail closed instead of racing an active index builder.
     if dir.exists() && !marker.exists(){
-        std::fs::remove_dir_all(dir).map_err(|e|e.to_string())?;
+        return Err(format!("incomplete Tantivy generation at {}",dir.display()));
     }
     if !marker.exists(){
         let parent=dir.parent().ok_or("index directory has no parent")?;
