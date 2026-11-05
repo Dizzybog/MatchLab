@@ -757,6 +757,15 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
     }
     let db = env::var("MATCHLAB_DB").unwrap_or_else(|_|"/data/metadata.sqlite3".into());
     let host = env::var("MATCHLAB_HOST").unwrap_or_else(|_|"127.0.0.1:8766".into());
+    // Open the current metadata index at startup rather than on the first search.
+    // A fresh deployment may have no metadata yet; the refresh worker below
+    // initializes it and the search path can then open its index.
+    if std::path::Path::new(&db).is_file() {
+        let index_db=Connection::open_with_flags(&db,OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        tantivy_search::warmup(&index_db)
+            .map_err(|e|format!("Tantivy startup initialization failed: {e}"))?;
+    }
+
     // Built-in HTTPS metadata feeds initialize a fresh Docker volume automatically.
     // MATCHLAB_METADATA_URLS can override all six feeds.
     {
