@@ -5,9 +5,19 @@ use rusqlite::{Connection,OptionalExtension};
 use tantivy::{collector::DocSetCollector,doc,query::{RegexQuery,TermQuery},schema::{Schema,STORED,STRING,Value,IndexRecordOption},Index,IndexReader,ReloadPolicy,Term};
 
 #[derive(Clone)]
-struct SearchIndex { reader:IndexReader, forward:tantivy::schema::Field, backward:tantivy::schema::Field, id:tantivy::schema::Field, anime:tantivy::schema::Field, anime_id:tantivy::schema::Field }
+struct SearchIndex { reader:IndexReader, forward:tantivy::schema::Field, backward:tantivy::schema::Field, id:tantivy::schema::Field, anime:tantivy::schema::Field, anime_id:tantivy::schema::Field, title:tantivy::schema::Field,
+    category:tantivy::schema::Field, region:tantivy::schema::Field,
+    original:tantivy::schema::Field, ordering:tantivy::schema::Field,
+    media_type:tantivy::schema::Field, year:tantivy::schema::Field }
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub struct AnimeAlias {pub anidb_id:String,pub clean_title:String,pub imdb_id:String}
+
+#[derive(Debug,Clone)]
+pub struct TitleAlias {
+    pub imdb_id:String,pub title:String,pub clean:String,pub year:i32,
+    pub category:String,pub region:Option<String>,pub original:bool,
+    pub ordering:i32,pub media_type:String,
+}
 
 static CACHE:OnceLock<Mutex<HashMap<String,SearchIndex>>>=OnceLock::new();
 
@@ -18,7 +28,13 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
     let id=builder.add_text_field("imdb_id",STRING|STORED);
     let anime=builder.add_text_field("anime_alias",STRING|STORED);
     let anime_id=builder.add_text_field("anime_anidb_id",STORED);
-    let year=builder.add_i64_field("year",tantivy::schema::INDEXED|STORED);
+    let year=builder.add_i64_field("year",STORED);
+    let title=builder.add_text_field("title",STORED);
+    let category=builder.add_text_field("category",STORED);
+    let region=builder.add_text_field("region",STORED);
+    let original=builder.add_i64_field("original",STORED);
+    let ordering=builder.add_i64_field("ordering",STORED);
+    let media_type=builder.add_text_field("media_type",STORED);
     let schema=builder.build();
     // Only a completed generation may be opened. Build in a sibling staging
     // directory so crashes cannot leave a partially written published index.
@@ -40,15 +56,22 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
             std::fs::create_dir_all(&stage).map_err(|e|e.to_string())?;
             let staging_index=Index::create_in_dir(&stage,schema).map_err(|e|e.to_string())?;
             let mut writer=staging_index.writer(64_000_000).map_err(|e|e.to_string())?;
-            let mut stmt=db.prepare("SELECT DISTINCT imdb_id,clean_title,year FROM titles WHERE year>0")
+            let mut stmt=db.prepare("SELECT imdb_id,title,clean_title,year,category,region,original,ordering,type
+                FROM titles WHERE year>0")
                 .map_err(|e|e.to_string())?;
-            let rows=stmt.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?)))
+            let rows=stmt.query_map([],|r|Ok((
+                r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,
+                r.get::<_,i64>(3)?,r.get::<_,String>(4)?,r.get::<_,Option<String>>(5)?,
+                r.get::<_,i64>(6)?,r.get::<_,i64>(7)?,r.get::<_,String>(8)?)))
                 .map_err(|e|e.to_string())?;
             let mut count=0u64;
             for row in rows{
-                let (imdb,clean,yr)=row.map_err(|e|e.to_string())?;
+                let (imdb,title_text,clean,yr,category_text,region_text,original_value,ordering_value,kind)=
+                    row.map_err(|e|e.to_string())?;
                 let reversed:String=clean.chars().rev().collect();
-                writer.add_document(doc!(forward=>clean,backward=>reversed,id=>imdb,year=>yr))
+                writer.add_document(doc!(forward=>clean,backward=>reversed,id=>imdb,year=>yr,
+                    title=>title_text,category=>category_text,region=>region_text.unwrap_or_default(),
+                    original=>original_value,ordering=>ordering_value,media_type=>kind))
                     .map_err(|e|e.to_string())?;
                 count+=1;
             }
@@ -101,7 +124,8 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
     if reader.searcher().num_docs()!=expected{
         return Err(format!("Tantivy index corrupted: expected {expected} documents, found {}",reader.searcher().num_docs()));
     }
-    Ok(SearchIndex{reader,forward,backward,id,anime,anime_id})
+    Ok(SearchIndex{reader,forward,backward,id,anime,anime_id,title,category,region,
+        original,ordering,media_type,year})
 }
 
 /// Each staged SQLite image contains a unique index-generation identifier.
@@ -134,7 +158,7 @@ fn generation(db:&Connection)->Result<String,String>{
 }
 
 fn index_dir(source:&Path,generation_id:&str)->PathBuf{
-    PathBuf::from(format!("{}.tantivy",source.display())).join(format!("schema4-{generation_id}"))
+    PathBuf::from(format!("{}.tantivy",source.display())).join(format!("schema5-{generation_id}"))
 }
 
 /// Build and verify the *final* Tantivy generation before publishing SQLite.
@@ -148,14 +172,14 @@ pub fn prepare(db:&Connection,target:&Path)->Result<(),String>{
 /// Reclaim old published generations conservatively. Never remove a recent
 /// generation or the one currently referenced by the published database.
 pub fn prune(db:&Connection,target:&Path)->Result<(),String>{
-    let active=format!("schema4-{}",generation(db)?);
+    let active=format!("schema5-{}",generation(db)?);
     let root=PathBuf::from(format!("{}.tantivy",target.display()));
     if !root.exists(){return Ok(());}
     let mut old=Vec::new();
     for entry in std::fs::read_dir(&root).map_err(|e|e.to_string())?{
         let entry=entry.map_err(|e|e.to_string())?;
         let name=entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with("schema4-v3-")||name==active||!entry.path().is_dir()
+        if !name.starts_with("schema5-v3-")||name==active||!entry.path().is_dir()
             ||!entry.path().join(".matchlab-complete").is_file(){continue;}
         let modified=entry.metadata().and_then(|m|m.modified()).map_err(|e|e.to_string())?;
         old.push((modified,entry.path()));
@@ -223,6 +247,90 @@ pub fn anime_aliases(db:&Connection,key:&str,min_prefix:usize)->Result<Vec<Anime
     matches.sort_by(|a,b|b.clean_title.len().cmp(&a.clean_title.len())
         .then(a.anidb_id.cmp(&b.anidb_id)).then(a.imdb_id.cmp(&b.imdb_id)));
     Ok(matches)
+}
+
+/// Rehydrate a matching IMDb title document directly from Tantivy; no SQLite
+/// title-table lookup is needed during candidate selection or ranking.
+fn read_title(doc:&tantivy::TantivyDocument,s:&SearchIndex)->Option<TitleAlias>{
+    let get=|field|doc.get_first(field).and_then(|value|value.as_str()).map(str::to_owned);
+    let imdb_id=get(s.id)?;
+    let title=get(s.title)?;
+    let clean=get(s.forward)?;
+    let year=i32::try_from(doc.get_first(s.year)?.as_i64()?).ok()?;
+    let category=get(s.category)?;
+    let region=get(s.region).filter(|v|!v.is_empty());
+    let original=doc.get_first(s.original)?.as_i64()?!=0;
+    let ordering=i32::try_from(doc.get_first(s.ordering)?.as_i64()?).ok()?;
+    let media_type=get(s.media_type)?;
+    Some(TitleAlias{imdb_id,title,clean,year,category,region,original,ordering,media_type})
+}
+
+/// Complete prefix/suffix search. All candidates are retained until the V4
+/// ranker applies its deterministic rules; no top-N cutoff is introduced.
+pub fn title_aliases(db:&Connection,key:&str,suffix:bool)->Result<Vec<TitleAlias>,String>{
+    if key.is_empty(){return Ok(Vec::new());}
+    let (search,memory_dir)=open_search(db)?;
+    let field=if suffix{search.backward}else{search.forward};
+    let term=if suffix{key.chars().rev().collect::<String>()}else{key.to_string()};
+    let mut escaped=String::new();
+    for ch in term.chars(){
+        if ".+*?()[]{}|^$\\".contains(ch){escaped.push('\\');}
+        escaped.push(ch);
+    }
+    let query=RegexQuery::from_pattern(&format!("{escaped}.*"),field).map_err(|e|e.to_string())?;
+    let reader=search.reader.searcher();
+    let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
+    let mut aliases=Vec::with_capacity(hits.len());
+    for addr in hits {
+        let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
+        if let Some(title)=read_title(&doc,&search){
+            if (suffix&&title.clean.len()>key.len()&&title.clean.ends_with(key))
+                || (!suffix&&title.clean.starts_with(key)){aliases.push(title);}
+        }
+    }
+    drop(reader);drop(search);
+    if let Some(dir)=memory_dir{let _=std::fs::remove_dir_all(dir);}
+    Ok(aliases)
+}
+
+/// Indexed ID equality is reserved for resolving already-discovered anime
+/// IMDb IDs. It does not scan the SQLite title catalog.
+pub fn titles_by_ids(db:&Connection,ids:&[String])->Result<Vec<TitleAlias>,String>{
+    if ids.is_empty(){return Ok(Vec::new());}
+    let (search,memory_dir)=open_search(db)?;
+    let reader=search.reader.searcher();
+    let mut aliases=Vec::new();
+    let unique:std::collections::HashSet<_>=ids.iter().collect();
+    for imdb in unique {
+        let query=TermQuery::new(Term::from_field_text(search.id,imdb),IndexRecordOption::Basic);
+        let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
+        for addr in hits {
+            let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
+            if let Some(title)=read_title(&doc,&search){aliases.push(title);}
+        }
+    }
+    drop(reader);drop(search);
+    if let Some(dir)=memory_dir{let _=std::fs::remove_dir_all(dir);}
+    Ok(aliases)
+}
+
+pub fn has_duplicate_title(db:&Connection,key:&str)->Result<bool,String>{
+    let (search,memory_dir)=open_search(db)?;
+    let reader=search.reader.searcher();
+    let query=TermQuery::new(Term::from_field_text(search.forward,key),IndexRecordOption::Basic);
+    let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
+    let mut first:Option<String>=None;
+    let mut duplicate=false;
+    for addr in hits {
+        let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
+        if doc.get_first(search.year).and_then(|v|v.as_i64()).unwrap_or(0)<=0{continue;}
+        let Some(id)=doc.get_first(search.id).and_then(|v|v.as_str())else{continue;};
+        if first.as_deref().is_some_and(|prev|prev!=id){duplicate=true;break;}
+        first=Some(id.to_owned());
+    }
+    drop(reader);drop(search);
+    if let Some(dir)=memory_dir{let _=std::fs::remove_dir_all(dir);}
+    Ok(duplicate)
 }
 
 /// Returns candidate IMDb IDs; the deterministic IMDb V4 ranker remains authoritative.
@@ -355,6 +463,22 @@ mod persistence_tests {
             INSERT INTO titles VALUES('tt1234567','a.b',2020);
             INSERT INTO titles VALUES('tt7654321','axb',2020);").unwrap();
         assert_eq!(candidates(&db,"a.b",None,false,1).unwrap(),vec!["tt1234567"]);
+    }
+
+    #[test]
+    fn stored_title_aliases_are_selected_without_sqlite_title_scans(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            INSERT INTO titles VALUES('tt101','Dune','dune',1984,'movie','US',1,0,'movie');
+            INSERT INTO titles VALUES('tt202','Dune','dune',2021,'movie','US',1,0,'movie');
+            INSERT INTO titles VALUES('tt303','Duneland','duneland',2022,'movie','US',0,1,'movie');").unwrap();
+        let matches=title_aliases(&db,"dune",false).unwrap();
+        assert_eq!(matches.len(),3);
+        assert!(matches.iter().any(|m|m.imdb_id=="tt202"&&m.title=="Dune"&&m.year==2021));
+        assert!(has_duplicate_title(&db,"dune").unwrap());
+        assert!(!has_duplicate_title(&db,"duneland").unwrap());
+        assert_eq!(titles_by_ids(&db,&["tt303".into()]).unwrap().len(),1);
     }
 
     #[test]

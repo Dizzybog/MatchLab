@@ -2,14 +2,8 @@
 //! Builds a staging SQLite database and publishes it only after a complete import.
 use std::{error::Error,fs::{self,File},io::{Read,BufReader},path::Path,time::{SystemTime,UNIX_EPOCH,Instant}};
 use rusqlite::{params,Connection};
-use unicode_normalization::UnicodeNormalization;
+use crate::imdb_v4::clean_title as clean;
 
-fn clean(s:&str)->String {
-    s.to_lowercase().replace('æ',"ae").replace('ø',"o").replace('œ',"oe").replace('ß',"ss")
-        .nfkd().filter(|c|c.is_ascii()).collect::<String>()
-        .split(|c:char|!c.is_ascii_alphanumeric())
-        .filter(|x|!x.is_empty() && *x!="and").collect()
-}
 fn reader(path:&Path)->Result<csv::Reader<Box<dyn Read>>,Box<dyn Error>>{
     let file=File::open(path)?;
     let input:Box<dyn Read>=if path.extension().is_some_and(|e|e=="gz"){
@@ -31,9 +25,6 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
     let stage=parent.join(format!(".matchlab-{}-{stamp}.sqlite3",std::process::id()));
     let result=(||->Result<u64,Box<dyn Error>>{
         let mut db=Connection::open(&stage)?;
-        db.create_scalar_function("reverse",1,rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,|ctx|{
-            let s:String=ctx.get(0)?;Ok(s.chars().rev().collect::<String>())
-        })?;
         db.execute_batch("PRAGMA journal_mode=DELETE;
             CREATE TABLE titles(imdb_id TEXT NOT NULL,title TEXT NOT NULL,clean_title TEXT NOT NULL,
                 year INTEGER NOT NULL,category TEXT NOT NULL,region TEXT,
@@ -58,10 +49,6 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
                 clean_title TEXT NOT NULL,title_type TEXT NOT NULL,language TEXT NOT NULL,
                 PRIMARY KEY(anidb_id,clean_title,title_type,language));
             CREATE TABLE metadata_state(source TEXT PRIMARY KEY,updated_at TEXT NOT NULL,row_count INTEGER NOT NULL);
-            CREATE INDEX title_lookup ON titles(clean_title,year);
-            CREATE INDEX title_valid_lookup ON titles(clean_title,imdb_id) WHERE year>0;
-            CREATE INDEX title_reverse_suffix ON titles(reverse(clean_title),type);
-            CREATE INDEX anidb_title_lookup ON anidb_titles(clean_title);
             CREATE INDEX anime_series_by_anidb ON anime_series_map(anidb_id);
             CREATE INDEX anime_lookup_idx ON anime_ids(type,value);
             CREATE INDEX episode_lookup_idx ON episode_map(anidb_id,anidb_season,start,end);
@@ -517,14 +504,6 @@ pub fn refresh_from_files_with_ratings(
         }
         {
             let db=Connection::open(&stage)?;
-            // Expression index title_reverse_suffix uses reverse(clean_title).
-            // SQLite functions are connection-local, including for integrity_check.
-            db.create_scalar_function("reverse",1,
-                rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC
-                    | rusqlite::functions::FunctionFlags::SQLITE_UTF8,|ctx|{
-                    let value:String=ctx.get(0)?;
-                    Ok(value.chars().rev().collect::<String>())
-                })?;
             let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
             db.execute("INSERT OR REPLACE INTO metadata_state VALUES('full_refresh',?1,?2)",
                 params![now,imdb+links+episodes_count+aliases])?;
