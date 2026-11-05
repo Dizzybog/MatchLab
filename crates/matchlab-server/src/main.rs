@@ -65,8 +65,19 @@ fn parse_cached(title:&str)->Result<Value,String>{
     }
     let value=Value::Object(matchlab_parser::parse_title(title,false).map_err(|e|e.to_string())?);
     if let Ok(mut guard)=cache.lock(){
-        guard.retain(|_,(at,_)|at.elapsed()<PARSE_TTL);
-        if guard.len()>=1024{guard.clear();}
+        // Avoid O(cache size) cleanup on every previously unseen title.
+        // Under pressure, remove expired entries before evicting only the
+        // oldest live entry instead of wiping the entire warm cache.
+        const CAPACITY:usize=1024;
+        if guard.len()>=CAPACITY {
+            guard.retain(|_,(at,_)|at.elapsed()<PARSE_TTL);
+            if guard.len()>=CAPACITY {
+                if let Some(oldest)=guard.iter()
+                    .min_by_key(|(_, (at,_))|*at).map(|(key,_)|key.clone()){
+                    guard.remove(&oldest);
+                }
+            }
+        }
         guard.insert(title.to_string(),(Instant::now(),value.clone()));
     }
     Ok(value)
