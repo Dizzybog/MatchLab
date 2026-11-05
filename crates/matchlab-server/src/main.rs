@@ -331,6 +331,14 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
     // IMDb TV-series title. Only a matching IMDb identity can take priority.
     // A different anime identity is still eligible when IMDb has no exact
     // series-title candidate (e.g. a distinct anime part title).
+    let anime=anime.filter(|a|{
+        season_range.is_none_or(|(_,end)|{
+            a["imdb_id"].as_str().is_some_and(|id|
+                db.query_row("SELECT max_season FROM seasons WHERE imdb_id=?1",
+                    [id],|row|row.get::<_,i64>(0))
+                    .is_ok_and(|max|max>=end))
+        })
+    });
     let anime = anime.filter(|a| {
         let anime_id=a["imdb_id"].as_str().unwrap_or_default();
         !imdb.iter().any(|c| {
@@ -821,6 +829,13 @@ mod tests {
         assert_eq!(gap["unmapped_count"],1);
         assert_eq!(gap["complete"],false);
         assert!(gap["end_season"].is_null());
+    }
+    #[test]
+    fn explicit_multi_season_packs_keep_both_bounds() {
+        assert_eq!(explicit_season_range("Gary.Unmarried.S01-S02.1080p"),Some((1,2)));
+        assert_eq!(explicit_season_range("Supernatural S01-S02"),Some((1,2)));
+        assert_eq!(explicit_season_range("Supernatural.S01E22"),None);
+        assert_eq!(explicit_season_range("Supernatural S01-S12/S02E01"),None);
     }
     #[test]
     fn public_response_movie_series_and_anime() {
