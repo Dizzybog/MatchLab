@@ -64,19 +64,6 @@ fn filter(db:&Connection,rows:Vec<Aka>,release:&str,series:bool,year:Option<i32>
 }
 fn prefix(db:&Connection,key:&str,release:&str,series:bool,year:Option<i32>,season:i64)->rusqlite::Result<Vec<Aka>>{
     let upper=format!("{key}\u{ffff}");
-    let indexed=crate::tantivy_search::candidates(db,key,year,false,100);
-    if let Ok(ids)=indexed {
-        if !ids.is_empty() {
-            let mut rows=Vec::new();
-            for id in ids {
-                rows.extend(select(db,"imdb_id=?1 AND clean_title>=?2 AND clean_title<?3",&[&id,&key,&upper])?);
-            }
-            // Tantivy's bounded TopDocs shortlist is not exhaustive.
-            // Preserve V4 ranking correctness by including the full SQLite
-            // candidate set until Tantivy provides an exhaustive collector.
-            let _=rows;
-        }
-    }
     filter(db,select(db,"clean_title>=?1 AND clean_title<?2",&[&key,&upper])?,release,series,year,season)
 }
 fn type_rank(t:&str)->i32{
@@ -124,15 +111,6 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     if rows.is_empty()&&key.len()>=12{
         let rev:String=key.chars().rev().collect();
         let upper=format!("{rev}\u{ffff}");
-        if let Ok(ids)=crate::tantivy_search::candidates(db,&key,year,true,100) {
-            let mut indexed_rows=Vec::new();
-            for id in ids {
-                indexed_rows.extend(select(db,
-                    "imdb_id=?1 AND reverse(clean_title)>=?2 AND reverse(clean_title)<?3 AND length(clean_title)>?4",
-                    &[&id,&rev,&upper,&(key.len() as i64)])?);
-            }
-            rows=filter(db,indexed_rows,&release,series,year,required_season)?;
-        }
         // The indexed shortlist is capped and may miss the longest eligible
         // alias. Always evaluate the complete SQL suffix range for V4 parity.
         rows=filter(db,select(db,
