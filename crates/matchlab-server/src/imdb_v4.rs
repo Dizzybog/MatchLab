@@ -133,11 +133,11 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             }
             rows=filter(db,indexed_rows,&release,series,year,required_season)?;
         }
-        if rows.is_empty(){
-            rows=filter(db,select(db,
-                "reverse(clean_title)>=?1 AND reverse(clean_title)<?2 AND length(clean_title)>?3",
-                &[&rev,&upper,&(key.len() as i64)])?,&release,series,year,required_season)?;
-        }
+        // The indexed shortlist is capped and may miss the longest eligible
+        // alias. Always evaluate the complete SQL suffix range for V4 parity.
+        rows=filter(db,select(db,
+            "reverse(clean_title)>=?1 AND reverse(clean_title)<?2 AND length(clean_title)>?3",
+            &[&rev,&upper,&(key.len() as i64)])?,&release,series,year,required_season)?;
         if !rows.is_empty(){stage="reverse_suffix";}
     }
     if rows.is_empty()&&key.len()>=6{
