@@ -59,13 +59,13 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
                 PRIMARY KEY(anidb_id,clean_title,title_type,language));
             CREATE TABLE metadata_state(source TEXT PRIMARY KEY,updated_at TEXT NOT NULL,row_count INTEGER NOT NULL);
             CREATE INDEX title_lookup ON titles(clean_title,year);
-            CREATE INDEX title_suffix ON titles(clean_title);
             CREATE INDEX title_reverse_suffix ON titles(reverse(clean_title),type);
             CREATE INDEX anidb_title_lookup ON anidb_titles(clean_title);
             CREATE INDEX anime_series_by_anidb ON anime_series_map(anidb_id);
-            CREATE INDEX anime_series_by_imdb ON anime_series_map(imdb_id);
             CREATE INDEX anime_lookup_idx ON anime_ids(type,value);
-            CREATE INDEX episode_lookup_idx ON episode_map(anidb_id,anidb_season,start,end);")?;
+            CREATE INDEX episode_lookup_idx ON episode_map(anidb_id,anidb_season,start,end);
+            CREATE INDEX episode_by_tvdb ON episode_map(tvdb_id,tvdb_season,offset,start);
+            CREATE INDEX episode_by_anidb_order ON episode_map(anidb_id,tvdb_season,offset,start);")?;
         let tx=db.transaction()?;
         let mut count=0u64;
         {
@@ -527,6 +527,10 @@ pub fn refresh_from_files_with_ratings(
             let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
             db.execute("INSERT OR REPLACE INTO metadata_state VALUES('full_refresh',?1,?2)",
                 params![now,imdb+links+episodes_count+aliases])?;
+            // Build query-planner statistics on the fully imported staging image.
+            // The live database is never modified by this operation.
+            tracing::info!("metadata refresh: analyzing SQLite indexes");
+            db.execute_batch("ANALYZE;")?;
             // Verify the complete SQLite image before publishing it.
             tracing::info!("metadata refresh: verifying SQLite integrity");
             let integrity:String=db.query_row("PRAGMA integrity_check",[],|row|row.get(0))?;
