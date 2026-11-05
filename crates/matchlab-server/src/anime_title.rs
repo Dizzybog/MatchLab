@@ -130,7 +130,8 @@ mod title_only_season_tests {
     #[test]
     fn exact_part_alias_infers_season_but_ambiguous_alias_does_not() {
         let db=Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
             CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT);
             CREATE TABLE episode_map(anidb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER);
             INSERT INTO anidb_titles VALUES('101','swordartonlinealicization');

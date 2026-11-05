@@ -121,33 +121,6 @@ fn open_db(path: &PathBuf) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-#[cfg(test)]
-fn candidates(db: &Connection, key: &str, year: Option<i32>, series: bool) -> rusqlite::Result<Vec<Candidate>> {
-    let mut stmt = db.prepare(
-        "SELECT imdb_id,title,year,type,clean_title FROM titles
-         WHERE (clean_title=?1 OR (?1 LIKE clean_title || '%' AND length(clean_title)>=6))
-         AND year>0 AND type IN ('movie','tvMovie','short','tvShort','tvSpecial','tvSeries','tvMiniSeries')
-         ORDER BY CASE WHEN clean_title=?1 THEN 0 ELSE 1 END,
-                  length(clean_title) DESC, abs(year-coalesce(?2,year)),
-                  CASE type WHEN 'movie' THEN 0 WHEN 'tvMovie' THEN 1 WHEN 'short' THEN 2 ELSE 3 END,
-                  ordering ASC LIMIT 60"
-    )?;
-    let rows = stmt.query_map(params![key,year], |r| {
-        Ok(Candidate {imdb_id:r.get(0)?,title:r.get(1)?,year:r.get(2)?,
-            media_type:r.get(3)?,matched_title:r.get(4)?,anime_ids:Default::default(),source:"imdb"})
-    })?;
-    let mut result = Vec::new();
-    for row in rows {
-        let c = row?;
-        let is_series = c.media_type == "tvSeries" || c.media_type == "tvMiniSeries";
-        if is_series == series && !result.iter().any(|x: &Candidate| x.imdb_id == c.imdb_id) {
-            result.push(c);
-        }
-        if result.len() >= 20 { break; }
-    }
-    Ok(result)
-}
-
 fn anime_candidate(db: &Connection, key: &str, season: Option<i64>, episode: i64) -> rusqlite::Result<Option<Value>> {
     if key.len() < 4 || episode <= 0 { return Ok(None); }
     let matches:Vec<_>=tantivy_search::anime_aliases(db,key,6)
@@ -955,7 +928,8 @@ mod tests {
     #[test]
     fn anime_identity_without_episode_is_unambiguous(){
         let db=Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
             CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT);
             INSERT INTO anidb_titles VALUES('100','frieren');
             INSERT INTO anime_series_map VALUES('100','tt1234567');").unwrap();
@@ -1060,15 +1034,17 @@ mod tests {
     fn empty_number_array() { assert!(numbers(None).is_empty()); }
     #[test]
     fn imdb_candidates_are_filtered_by_media_type() {
-        let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE titles (
-            imdb_id TEXT, title TEXT, year INTEGER, type TEXT,
-            clean_title TEXT, ordering INTEGER
-        );").unwrap();
-        db.execute("INSERT INTO titles VALUES ('tt1','Example',2020,'movie','example',1)",[]).unwrap();
-        db.execute("INSERT INTO titles VALUES ('tt2','Example',2021,'tvSeries','example',1)",[]).unwrap();
-        let movies = candidates(&db,"example",Some(2020),false).unwrap();
-        let shows = candidates(&db,"example",Some(2021),true).unwrap();
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_season INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);
+            INSERT INTO titles VALUES('tt1','Example','example',2020,'movie','US',1,1,'movie');
+            INSERT INTO titles VALUES('tt2','Example','example',2021,'series','US',1,1,'tvSeries');").unwrap();
+        let movies=imdb_v4::search(&db,"Example",Some(2020),false,0,"Example",false,20).unwrap();
+        let shows=imdb_v4::search(&db,"Example",Some(2021),true,0,"Example",false,20).unwrap();
         assert_eq!(movies.len(),1);
         assert_eq!(movies[0].imdb_id,"tt1");
         assert_eq!(shows.len(),1);
@@ -1077,7 +1053,8 @@ mod tests {
     #[test]
     fn anime_requires_unique_verified_crosswalk() {
         let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
             CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT,tvdb_id TEXT DEFAULT '',trakt_season INTEGER DEFAULT 0);
             CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT DEFAULT '',tvdb_season INTEGER,
                 anidb_season INTEGER,map TEXT,offset INTEGER,start INTEGER,end INTEGER);

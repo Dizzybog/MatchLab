@@ -399,10 +399,13 @@ mod persistence_tests {
         let first=Connection::open_in_memory().unwrap();
         let second=Connection::open_in_memory().unwrap();
         for db in [&first,&second] {
-            db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER);").unwrap();
+            db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER,
+                title TEXT NOT NULL DEFAULT '',category TEXT NOT NULL DEFAULT 'movie',
+                region TEXT NOT NULL DEFAULT '',original INTEGER NOT NULL DEFAULT 1,
+                ordering INTEGER NOT NULL DEFAULT 0,type TEXT NOT NULL DEFAULT 'movie');").unwrap();
         }
-        first.execute("INSERT INTO titles VALUES('tt1111111','dune',1984)",[]).unwrap();
-        second.execute("INSERT INTO titles VALUES('tt2222222','dune',2021)",[]).unwrap();
+        first.execute("INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt1111111','dune',1984)",[]).unwrap();
+        second.execute("INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt2222222','dune',2021)",[]).unwrap();
         assert_eq!(candidates(&first,"dune",None,false,1).unwrap(),vec!["tt1111111"]);
         assert_eq!(candidates(&second,"dune",None,false,1).unwrap(),vec!["tt2222222"]);
     }
@@ -431,8 +434,11 @@ mod persistence_tests {
         let _=std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let db=Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER);
-            INSERT INTO titles VALUES('tt1234567','example',2020);").unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER,
+                title TEXT NOT NULL DEFAULT '',category TEXT NOT NULL DEFAULT 'movie',
+                region TEXT NOT NULL DEFAULT '',original INTEGER NOT NULL DEFAULT 1,
+                ordering INTEGER NOT NULL DEFAULT 0,type TEXT NOT NULL DEFAULT 'movie');
+            INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt1234567','example',2020);").unwrap();
         let index_path=root.join("index");
         drop(build(&db,&index_path).unwrap());
         std::fs::write(index_path.join(".matchlab-complete"),"999").unwrap();
@@ -443,10 +449,13 @@ mod persistence_tests {
     #[test]
     fn anime_alias_discovery_uses_tantivy_exact_match() {
         let db=Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER);
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER,
+                title TEXT NOT NULL DEFAULT '',category TEXT NOT NULL DEFAULT 'movie',
+                region TEXT NOT NULL DEFAULT '',original INTEGER NOT NULL DEFAULT 1,
+                ordering INTEGER NOT NULL DEFAULT 0,type TEXT NOT NULL DEFAULT 'movie');
             CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
             CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT);
-            INSERT INTO titles VALUES('tt1234567','official title',2020);
+            INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt1234567','official title',2020);
             INSERT INTO anidb_titles VALUES('123','alternate anime');
             INSERT INTO anime_series_map VALUES('123','tt1234567');").unwrap();
         assert_eq!(anime_candidates(&db,"alternate anime").unwrap(),vec!["tt1234567"]);
@@ -459,9 +468,12 @@ mod persistence_tests {
     #[test]
     fn regex_metacharacters_are_literal() {
         let db=Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER);
-            INSERT INTO titles VALUES('tt1234567','a.b',2020);
-            INSERT INTO titles VALUES('tt7654321','axb',2020);").unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER,
+                title TEXT NOT NULL DEFAULT '',category TEXT NOT NULL DEFAULT 'movie',
+                region TEXT NOT NULL DEFAULT '',original INTEGER NOT NULL DEFAULT 1,
+                ordering INTEGER NOT NULL DEFAULT 0,type TEXT NOT NULL DEFAULT 'movie');
+            INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt1234567','a.b',2020);
+            INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt7654321','axb',2020);").unwrap();
         assert_eq!(candidates(&db,"a.b",None,false,1).unwrap(),vec!["tt1234567"]);
     }
 
@@ -490,9 +502,12 @@ mod persistence_tests {
         let target=root.join("metadata.sqlite3");
         let staging=root.join("staging.sqlite3");
         let db=Connection::open(&staging).unwrap();
-        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER);
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER,
+                title TEXT NOT NULL DEFAULT '',category TEXT NOT NULL DEFAULT 'movie',
+                region TEXT NOT NULL DEFAULT '',original INTEGER NOT NULL DEFAULT 1,
+                ordering INTEGER NOT NULL DEFAULT 0,type TEXT NOT NULL DEFAULT 'movie');
             CREATE TABLE metadata_state(source TEXT PRIMARY KEY,updated_at TEXT,row_count INTEGER);
-            INSERT INTO titles VALUES('tt1234567','example',2020);
+            INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt1234567','example',2020);
             INSERT INTO metadata_state VALUES('tantivy_generation','v3-testpublish',0);").unwrap();
         prepare(&db,&target).unwrap();
         let completed=index_dir(&target,"v3-testpublish").join(".matchlab-complete");
@@ -516,8 +531,11 @@ mod persistence_tests {
         std::fs::create_dir_all(&root).unwrap();
         let database=root.join("metadata.sqlite3");
         let conn=Connection::open(&database).unwrap();
-        conn.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER);
-            INSERT INTO titles VALUES('tt1234567','supernatural',2005);").unwrap();
+        conn.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER,
+                title TEXT NOT NULL DEFAULT '',category TEXT NOT NULL DEFAULT 'movie',
+                region TEXT NOT NULL DEFAULT '',original INTEGER NOT NULL DEFAULT 1,
+                ordering INTEGER NOT NULL DEFAULT 0,type TEXT NOT NULL DEFAULT 'movie');
+            INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt1234567','supernatural',2005);").unwrap();
         let index_path=root.join("index");
         let first=build(&conn,&index_path).unwrap();
         assert_eq!(first.reader.searcher().num_docs(),1);
