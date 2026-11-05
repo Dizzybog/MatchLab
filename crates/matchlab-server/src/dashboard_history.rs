@@ -20,23 +20,7 @@ fn open(path:&Path)->rusqlite::Result<Connection>{
         );
         CREATE INDEX IF NOT EXISTS requests_recent ON requests(id DESC);
         CREATE INDEX IF NOT EXISTS requests_created_at ON requests(created_at);
-        CREATE INDEX IF NOT EXISTS requests_status ON requests(status);
-        CREATE TABLE IF NOT EXISTS history_maintenance(
-            key TEXT PRIMARY KEY, last_run INTEGER NOT NULL
-        );
-        INSERT OR IGNORE INTO history_maintenance(key,last_run)
-            VALUES('history_prune',0);
-        CREATE TRIGGER IF NOT EXISTS requests_prune_on_insert
-        AFTER INSERT ON requests
-        WHEN (SELECT last_run FROM history_maintenance WHERE key='history_prune')
-             <= CAST(strftime('%s','now') AS INTEGER)-300
-        BEGIN
-            DELETE FROM requests
-             WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-24 hours');
-            UPDATE history_maintenance
-                SET last_run=CAST(strftime('%s','now') AS INTEGER)
-                WHERE key='history_prune';
-        END;")?;
+        CREATE INDEX IF NOT EXISTS requests_status ON requests(status);")?;
     Ok(db)
 }
 
@@ -55,7 +39,6 @@ pub fn record(path:&Path,title:&str,status:&str,selected:Option<&Value>,details:
 /// Physically delete rows outside the rolling 24-hour window. Called by the
 /// background maintenance worker (including once immediately at startup).
 /// SQLite reuses freed pages; a manual VACUUM can reclaim old file size.
-#[allow(dead_code)] // Manual maintenance helper; automatic expiry runs in the SQLite insert trigger.
 pub fn prune(path:&Path)->Result<usize,String>{
     let db=open(path).map_err(|e|e.to_string())?;
     db.execute("DELETE FROM requests
@@ -161,27 +144,19 @@ mod tests{
     }
 
     #[test]
-    fn write_trigger_prunes_expired_history_when_due(){
+    fn background_prune_does_not_need_a_new_request(){
         let path=std::env::temp_dir().join(format!(
-            "matchlab-history-trigger-{}.sqlite3",std::process::id()));
+            "matchlab-history-maintenance-{}.sqlite3",std::process::id()));
         let _=std::fs::remove_file(&path);
-        {
-            let db=open(&path).unwrap();
-            db.execute_batch("
-                INSERT INTO requests(created_at,title,status,duration_ms,details)
-                VALUES(strftime('%Y-%m-%dT%H:%M:%fZ','now','-23 hours'),'recent','matched',10,'{}');
-                INSERT INTO requests(created_at,title,status,duration_ms,details)
-                VALUES(strftime('%Y-%m-%dT%H:%M:%fZ','now','-25 hours'),'expired','unmatched',20,'{}');
-                UPDATE history_maintenance SET last_run=0 WHERE key='history_prune';
-                INSERT INTO requests(title,status,duration_ms,details)
-                VALUES('new','matched',5,'{}');
-            ").unwrap();
-            let expired:i64=db.query_row(
-                "SELECT count(*) FROM requests WHERE title='expired'",[],|r|r.get(0)).unwrap();
-            assert_eq!(expired,0);
-            let live:i64=db.query_row("SELECT count(*) FROM requests",[],|r|r.get(0)).unwrap();
-            assert_eq!(live,2);
-        }
+        let db=open(&path).unwrap();
+        db.execute_batch("
+            INSERT INTO requests(created_at,title,status,duration_ms,details)
+            VALUES(strftime('%Y-%m-%dT%H:%M:%fZ','now','-25 hours'),'expired','matched',10,'{}');
+        ").unwrap();
+        assert_eq!(db.query_row("SELECT count(*) FROM requests",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        drop(db);
+        assert_eq!(prune(&path).unwrap(),1);
+        assert_eq!(prune(&path).unwrap(),0);
         let _=std::fs::remove_file(&path);
         let _=std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _=std::fs::remove_file(path.with_extension("sqlite3-shm"));
