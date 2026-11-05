@@ -71,8 +71,10 @@ fn prefix(db:&Connection,key:&str,release:&str,series:bool,year:Option<i32>,seas
             for id in ids {
                 rows.extend(select(db,"imdb_id=?1 AND clean_title>=?2 AND clean_title<?3",&[&id,&key,&upper])?);
             }
-            let matched=filter(db,rows,release,series,year,season)?;
-            if !matched.is_empty(){return Ok(matched);}
+            // Tantivy's bounded TopDocs shortlist is not exhaustive.
+            // Preserve V4 ranking correctness by including the full SQLite
+            // candidate set until Tantivy provides an exhaustive collector.
+            let _=rows;
         }
     }
     filter(db,select(db,"clean_title>=?1 AND clean_title<?2",&[&key,&upper])?,release,series,year,season)
