@@ -106,6 +106,30 @@ Defaults: 500 aliases/page, up to 2,000 using `limit` and `offset`.
 IDs are assembled across all hits, independently of `aliases` pagination.
 Input is at most 512 UTF-8 bytes, and conflicting selectors are rejected.
 
+### Automatic AniDB enrichment during `/match`
+
+A normal **single-episode match** should return **both a canonical SID
+and an AniDB ASID** when there is a uniquely verified crosswalk. For
+example, with the One Piece Anime-Lists mapping (AniDB 69):
+
+```bash
+curl -G --data-urlencode 'title=One Piece S21E03' \
+  http://127.0.0.1:8765/match
+```
+
+```json
+{"sid_start":"tt0388629:21:3","sid_end":"tt0388629:21:3",
+ "asid_start":"69:894","asid_end":"69:894"}
+```
+
+The matcher resolves AniDB coordinates while selecting candidates, and
+also runs a **final, crosswalk-verified single-episode enrichment** when
+an IMDb season/episode pair was assigned later (for instance, Cinemeta
+airdate matching). This requires **no second API request** and does not
+override selected IMDb IDs, episode boundaries, or match sources.
+Unmapped, conflicting, non-anime and multi-episode releases retain a null
+ASID rather than inventing one.
+
 ### Bidirectional episode conversion: `GET /episode/resolve`, `POST /episode/resolve`
 
 Convert canonical IMDb episode coordinates into the corresponding AniDB

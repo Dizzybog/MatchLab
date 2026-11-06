@@ -115,6 +115,18 @@ or text detection. Alias objects are paginated; use `limit`/`offset`
 with `total`/`has_more` for large result sets. See
 [API documentation](docs/API.md#alias-lookup-get-alias-post-alias).
 
+### Automatic SID + ASID in a normal match
+
+```bash
+curl -G --data-urlencode 'title=One Piece S21E03' \
+  http://127.0.0.1:8765/match
+```
+
+With a verified One Piece crosswalk this returns
+`sid_start=sid_end=tt0388629:21:3` and `asid_start=asid_end=69:894`.
+The same crosswalk is applied automatically after late episode
+identification (such as date matches); no second lookup is required.
+
 ### Convert IMDb ↔ AniDB episode coordinates
 
 ```bash
