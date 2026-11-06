@@ -296,6 +296,9 @@ fn anime_aliases_uncached(db:&Connection,key:&str,min_prefix:usize)->Result<Vec<
     for addr in hits {
         let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
         let Some(imdb)=doc.get_first(search.id).and_then(|v|v.as_str())else{continue};
+        // Old metadata snapshots may still contain comma-joined Anime-Lists
+        // IDs until their next refresh. Do not treat them as valid titles.
+        if !crate::metadata_import::valid_imdb_id(imdb){continue;}
         let Some(anidb)=doc.get_first(search.anime_id).and_then(|v|v.as_str())else{continue};
         let Some(alias)=doc.get_first(search.anime).and_then(|v|v.as_str())else{continue};
         let result=AnimeAlias{anidb_id:anidb.to_owned(),
