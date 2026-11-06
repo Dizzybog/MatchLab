@@ -1634,10 +1634,10 @@ mod tests {
             CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT DEFAULT '',tvdb_season INTEGER,
                 anidb_season INTEGER,map TEXT,offset INTEGER,start INTEGER,end INTEGER);
             INSERT INTO anidb_titles VALUES('123','exampleanime');
-            INSERT INTO anime_series_map(anidb_id,imdb_id) VALUES('123','tt999');
+            INSERT INTO anime_series_map(anidb_id,imdb_id) VALUES('123','tt0000999');
             INSERT INTO episode_map(anidb_id,tvdb_season,anidb_season,map,offset,start,end) VALUES('123',1,1,'',0,1,12);").unwrap();
         let found = anime_candidate(&db,"exampleanime",Some(1),4).unwrap().unwrap();
-        assert_eq!(found["imdb_id"],"tt999");
+        assert_eq!(found["imdb_id"],"tt0000999");
         assert_eq!(found["anidb_episode"],4);
         assert!(anime_candidate(&db,"exampleanime",Some(2),4).unwrap().is_none());
         db.execute("INSERT INTO episode_map(anidb_id,tvdb_season,anidb_season,map,offset,start,end) VALUES('123',1,1,'',1,1,12)",[]).unwrap();
