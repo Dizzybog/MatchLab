@@ -1184,18 +1184,28 @@ mod tests {
         }));
         // If another AniDB work also maps the complete span, the same
         // exact title becomes ambiguous and no coordinates are promoted.
-        let db=Connection::open(&path).unwrap();
+        // Rebuild Tantivy on a separate immutable metadata snapshot; changing
+        // episode_map in place after warmup would correctly invalidate
+        // MatchLab's SQLite/Tantivy generation checksum.
+        let ambiguous_path=std::env::temp_dir().join(format!(
+            "matchlab-one-piece-ambiguous-{}-{stamp}.sqlite3",std::process::id()));
+        std::fs::copy(&path,&ambiguous_path).unwrap();
+        let db=Connection::open(&ambiguous_path).unwrap();
         db.execute_batch("INSERT INTO episode_map VALUES('1253','81797',1,-1,1,0,0,'');
             INSERT INTO episode_map VALUES('1253','81797',1,21,892,1085,-891,'');
             INSERT INTO episode_map VALUES('1253','81797',1,22,1086,1155,-1085,'');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
         assert!(verified_unmarked_anime_range_imdb(&db,"onepiece",892,1089)
             .unwrap().is_none());
         drop(db);
-        let ambiguous=match_title();
+        let ambiguous=diagnose(&ambiguous_path,&MatchRequest{
+            title:title.into(),year:None,series:None}).unwrap();
         assert!(ambiguous.parsed.get("anime_title_verified").is_none());
         assert!(ambiguous.parsed.get("episode_start").is_none());
-        std::fs::remove_file(&path).unwrap();
-        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+        for database in [&path,&ambiguous_path] {
+            std::fs::remove_file(database).unwrap();
+            std::fs::remove_dir_all(format!("{}.tantivy",database.display())).unwrap();
+        }
     }
 
     #[test]
