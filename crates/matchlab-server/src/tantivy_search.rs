@@ -16,6 +16,9 @@ struct SearchIndex {
     anime_title: tantivy::schema::Field,
     anime_type: tantivy::schema::Field,
     anime_language: tantivy::schema::Field,
+    external_key: tantivy::schema::Field,
+    external_type: tantivy::schema::Field,
+    external_value: tantivy::schema::Field,
     title: tantivy::schema::Field,
     category: tantivy::schema::Field,
     region: tantivy::schema::Field,
@@ -69,6 +72,9 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
     let anime_title=builder.add_text_field("anime_original_title",STORED);
     let anime_type=builder.add_text_field("anime_title_type",STORED);
     let anime_language=builder.add_text_field("anime_language",STORED);
+    let external_key=builder.add_text_field("external_key",STRING);
+    let external_type=builder.add_text_field("external_type",STORED);
+    let external_value=builder.add_text_field("external_value",STORED);
     let year=builder.add_i64_field("year",STORED);
     let title=builder.add_text_field("title",STORED);
     let category=builder.add_text_field("category",STORED);
@@ -171,6 +177,59 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
                     count+=1;
                 }
             }
+            // ID bridge entries come from animeApi and Anime-Lists' relational
+            // tables. They have no title fields, so cannot contaminate title
+            // lookup or canonical IMDb ranking. The external_key term is
+            // indexed for reverse Kitsu/AniList/MAL/TVDB lookup.
+            let mut ids=BTreeSet::<(String,String,String)>::new();
+            let has_ids:i64=db.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='anime_ids'",
+                [],|r|r.get(0)).map_err(|e|e.to_string())?;
+            if has_ids>0{
+                let mut stmt=db.prepare("SELECT group_id,type,value FROM anime_ids")
+                    .map_err(|e|e.to_string())?;
+                let rows=stmt.query_map([],|r|Ok((r.get::<_,String>(0)?,
+                    r.get::<_,String>(1)?,r.get::<_,String>(2)?)))
+                    .map_err(|e|e.to_string())?;
+                for row in rows{
+                    let (imdb,kind,value)=row.map_err(|e|e.to_string())?;
+                    if crate::metadata_import::valid_imdb_id(&imdb)
+                        && !kind.is_empty() && !value.is_empty(){
+                        ids.insert((imdb,kind,value));
+                    }
+                }
+            }
+            if has_links>0{
+                let mut info=db.prepare("PRAGMA table_info(anime_series_map)")
+                    .map_err(|e|e.to_string())?;
+                let columns:BTreeSet<String>=info.query_map([],|r|r.get::<_,String>(1))
+                    .map_err(|e|e.to_string())?
+                    .collect::<Result<_,_>>().map_err(|e|e.to_string())?;
+                if columns.contains("imdb_id")&&columns.contains("anidb_id"){
+                    let tvdb=if columns.contains("tvdb_id"){"tvdb_id"}else{"''"};
+                    let sql=format!(
+                        "SELECT imdb_id,anidb_id,{tvdb} FROM anime_series_map");
+                    let mut stmt=db.prepare(&sql).map_err(|e|e.to_string())?;
+                    let rows=stmt.query_map([],|r|Ok((r.get::<_,String>(0)?,
+                        r.get::<_,String>(1)?,r.get::<_,String>(2)?)))
+                        .map_err(|e|e.to_string())?;
+                    for row in rows{
+                        let (imdb,anidb,tvdb)=row.map_err(|e|e.to_string())?;
+                        if !crate::metadata_import::valid_imdb_id(&imdb){continue;}
+                        if !anidb.is_empty(){ids.insert((imdb.clone(),
+                            "anidb".into(),anidb));}
+                        if !tvdb.is_empty(){ids.insert((imdb,
+                            "tvdb".into(),tvdb));}
+                    }
+                }
+            }
+            for (imdb,kind,value) in ids{
+                writer.add_document(doc!(
+                    id=>imdb,external_key=>format!("{kind}:{value}"),
+                    external_type=>kind,external_value=>value
+                )).map_err(|e|e.to_string())?;
+                count+=1;
+            }
             writer.commit().map_err(|e|e.to_string())?;
             drop(writer);
             drop(staging_index);
@@ -205,7 +264,7 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
     if reader.searcher().num_docs()!=expected{
         return Err(format!("Tantivy index corrupted: expected {expected} documents, found {}",reader.searcher().num_docs()));
     }
-    Ok(SearchIndex{reader,forward,backward,id,anime,anime_id,anime_title,anime_type,anime_language,title,category,region,
+    Ok(SearchIndex{reader,forward,backward,id,anime,anime_id,anime_title,anime_type,anime_language,external_key,external_type,external_value,title,category,region,
         original,ordering,media_type,year})
 }
 
@@ -239,7 +298,7 @@ fn generation(db:&Connection)->Result<String,String>{
 }
 
 fn index_dir(source:&Path,generation_id:&str)->PathBuf{
-    PathBuf::from(format!("{}.tantivy",source.display())).join(format!("schema6-{generation_id}"))
+    PathBuf::from(format!("{}.tantivy",source.display())).join(format!("schema7-{generation_id}"))
 }
 
 /// Cheap readiness probe: never start a full index build from /health.
@@ -263,14 +322,14 @@ pub fn prepare(db:&Connection,target:&Path)->Result<(),String>{
 /// Reclaim old published generations conservatively. Never remove a recent
 /// generation or the one currently referenced by the published database.
 pub fn prune(db:&Connection,target:&Path)->Result<(),String>{
-    let active=format!("schema6-{}",generation(db)?);
+    let active=format!("schema7-{}",generation(db)?);
     let root=PathBuf::from(format!("{}.tantivy",target.display()));
     if !root.exists(){return Ok(());}
     let mut old=Vec::new();
     for entry in std::fs::read_dir(&root).map_err(|e|e.to_string())?{
         let entry=entry.map_err(|e|e.to_string())?;
         let name=entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with("schema6-v3-")||name==active||!entry.path().is_dir()
+        if !name.starts_with("schema7-v3-")||name==active||!entry.path().is_dir()
             ||!entry.path().join(".matchlab-complete").is_file(){continue;}
         let modified=entry.metadata().and_then(|m|m.modified()).map_err(|e|e.to_string())?;
         old.push((modified,entry.path()));
@@ -405,6 +464,73 @@ pub fn lookup_aliases(
     drop(search);
     if let Some(dir)=memory_dir{let _=std::fs::remove_dir_all(dir);}
     Ok(records.into_iter().collect())
+}
+
+
+/// All source IDs linked to each IMDb identity, retaining the group boundary
+/// so an unrelated AniDB part is never described as the direct ID of another.
+pub fn external_ids_by_imdb(
+    db:&Connection,ids:&BTreeSet<String>,
+)->Result<std::collections::BTreeMap<String,std::collections::BTreeMap<String,BTreeSet<String>>>,String>{
+    let mut out=std::collections::BTreeMap::new();
+    if ids.is_empty(){return Ok(out);}
+    let (search,memory_dir)=open_search(db)?;
+    let reader=search.reader.searcher();
+    let query=TermSetQuery::new(ids.iter().map(|id|
+        Term::from_field_text(search.id,id)));
+    let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
+    for addr in hits{
+        let d:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
+        let get=|f|d.get_first(f).and_then(|v|v.as_str());
+        if let (Some(imdb),Some(kind),Some(value))=(
+            get(search.id),get(search.external_type),get(search.external_value)){
+            if ids.contains(imdb){
+                out.entry(imdb.to_owned())
+                    .or_insert_with(std::collections::BTreeMap::new)
+                    .entry(kind.to_owned())
+                    .or_insert_with(BTreeSet::new)
+                    .insert(value.to_owned());
+            }
+        }
+    }
+    drop(reader);drop(search);
+    if let Some(dir)=memory_dir{let _=std::fs::remove_dir_all(dir);}
+    Ok(out)
+}
+
+/// Exact external identity (Kitsu/MAL/AniList/TVDB/etc.) -> every IMDb link.
+/// No best-match ranking: multiple works with this ID remain separate.
+pub fn imdb_ids_for_external_id(
+    db:&Connection,kind:&str,value:&str,
+)->Result<BTreeSet<String>,String>{
+    let (search,memory_dir)=open_search(db)?;
+    let reader=search.reader.searcher();
+    let term=Term::from_field_text(search.external_key,&format!("{kind}:{value}"));
+    let query=TermQuery::new(term,IndexRecordOption::Basic);
+    let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
+    let mut ids=BTreeSet::new();
+    for addr in hits{
+        let d:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
+        if let Some(id)=d.get_first(search.id).and_then(|v|v.as_str())
+            && crate::metadata_import::valid_imdb_id(id){
+            ids.insert(id.to_owned());
+        }
+    }
+    drop(reader);drop(search);
+    if let Some(dir)=memory_dir{let _=std::fs::remove_dir_all(dir);}
+    Ok(ids)
+}
+
+/// Fetch all titles for an explicit set of IMDb IDs with one Tantivy union.
+/// Used after alternate-ID lookup, not for fuzzy title discovery.
+pub fn aliases_for_imdb_ids(
+    db:&Connection,ids:&BTreeSet<String>,
+)->Result<Vec<AliasRecord>,String>{
+    let mut out=BTreeSet::new();
+    for id in ids {
+        out.extend(lookup_aliases(db,AliasLookupKind::ImdbId,id)?);
+    }
+    Ok(out.into_iter().collect())
 }
 
 /// Resolve AniDB aliases through exact Tantivy term lookups, including aliases

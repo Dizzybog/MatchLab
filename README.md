@@ -68,7 +68,8 @@ MatchLab listens on port **8765**. Both `GET` and `POST` accept `title` (or `t_t
 | Endpoint | Description |
 | --- | --- |
 | `GET /match`, `POST /match` | Match a release to IMDb and optional AniDB coordinates |
-| `GET /alias`, `POST /alias` | List original IMDb/AniDB titles and all IDs matching an exact normalized alias |
+| `GET /alias`, `POST /alias` | Exact title/ID lookup across IMDb, AniDB, TVDB, MAL, AniList and Kitsu |
+| `GET /episode/resolve`, `POST /episode/resolve` | Verified IMDb season/episode ↔ AniDB episode conversion |
 | `GET /parse`, `POST /parse` | Parse the full release name without metadata lookups |
 | `POST /debug/match` | Show candidate ranking and episode-mapping details |
 | `GET /health` | Check whether indexed metadata is ready |
@@ -96,11 +97,13 @@ Example response:
 
 `/match` **always returns exactly these four fields**. Movies use the IMDb title ID in both SID fields; TV episodes add season/episode coordinates. Verified anime episodes may also include AniDB IDs. If nothing can be matched reliably, the corresponding values are `null`.
 
-### Find all aliases by IMDb ID, AniDB ID, or exact title
+### Find all anime names and third-party IDs
 
 ```bash
 curl -G --data-urlencode 'imdb_id=tt0388629' http://127.0.0.1:8765/alias
 curl -G --data-urlencode 'anidb_id=69' http://127.0.0.1:8765/alias
+curl -G --data-urlencode 'kitsu_id=987' http://127.0.0.1:8765/alias
+curl -G --data-urlencode 'mal_id=21' http://127.0.0.1:8765/alias
 curl -G --data-urlencode 'query=One Piece' http://127.0.0.1:8765/alias
 ```
 
@@ -111,6 +114,30 @@ original aliases with language, source and optional year. Search is
 or text detection. Alias objects are paginated; use `limit`/`offset`
 with `total`/`has_more` for large result sets. See
 [API documentation](docs/API.md#alias-lookup-get-alias-post-alias).
+
+### Automatic SID + ASID in a normal match
+
+```bash
+curl -G --data-urlencode 'title=One Piece S21E03' \
+  http://127.0.0.1:8765/match
+```
+
+With a verified One Piece crosswalk this returns
+`sid_start=sid_end=tt0388629:21:3` and `asid_start=asid_end=69:894`.
+The same crosswalk is applied automatically after late episode
+identification (such as date matches); no second lookup is required.
+
+### Convert IMDb ↔ AniDB episode coordinates
+
+```bash
+curl -G -d 'imdb_id=tt0388629' -d 'season=21' -d 'episode=1' \
+  http://127.0.0.1:8765/episode/resolve
+curl -G -d 'anidb_id=69' -d 'episode=892' \
+  http://127.0.0.1:8765/episode/resolve
+```
+
+Only verified crosswalk data produces a result. Ambiguous reverse matches
+return all candidates, with `selected: null`, rather than guessing.
 
 ### Parse or debug
 

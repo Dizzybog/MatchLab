@@ -2,6 +2,7 @@
 //! Tantivy searches titles; SQLite snapshots hold relational metadata.
 mod airdate;
 mod alias;
+mod episode_conversion;
 mod matchlab_matcher;
 mod tantivy_search;
 mod metadata_import;
@@ -743,11 +744,55 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
             }
         }
     }
+    if let Some(winner)=selected.as_mut(){
+        enrich_selected_anime_episode(&db,winner)?;
+    }
     let reason = if anime.is_some() {"Verified anime crosswalk"} else if selected.is_some() {
         "IMDb title candidate (experimental matching rules)"
     } else {"No eligible candidate"};
     Ok(Diagnostic{parsed: parsed_value,normalized_title:key,imdb_candidates:imdb,anime_candidate:anime,
         selected,reason:reason.into()})
+}
+
+/// A canonical single-episode SID and a verified AniDB crosswalk should
+/// always produce both identifiers in /match. Some episode coordinates are
+/// assigned *after* candidate ranking (for example Cinemeta airdate), so
+/// ensure crosswalk enrichment runs after those steps too. Do not invent an
+/// ASID for non-anime, incomplete ranges, or unverified coordinates.
+fn enrich_selected_anime_episode(
+    db:&Connection,winner:&mut Value,
+)->Result<(),String>{
+    if winner["category"]!="series" || winner.get("episode_range").is_some()
+        || winner.pointer("/anime/asid").and_then(Value::as_str).is_some(){
+        return Ok(());
+    }
+    let Some(imdb)=winner["imdb_id"].as_str().map(str::to_owned)
+        else{return Ok(())};
+    let (Some(season),Some(episode))=(
+        winner["season"].as_i64(),winner["episode"].as_i64())
+        else{return Ok(())};
+    if !metadata_import::valid_imdb_id(&imdb)
+        || !valid_sid_coordinate(season,episode)
+        || season<=0||episode<=0{return Ok(());}
+    let Some(mapped)=anime_resolver::resolve_season(
+        db,&imdb,season,episode).map_err(|e|e.to_string())?
+        else{return Ok(())};
+    if mapped.imdb_id!=imdb||mapped.season!=season||mapped.episode!=episode{
+        return Ok(());
+    }
+    winner["anime"]=json!({
+        "anidb_id":mapped.anidb_id,
+        "episode":mapped.anidb_episode,
+        "asid":format!("{}:{}",mapped.anidb_id,mapped.anidb_episode),
+    });
+    // Preserve the already chosen IMDb identity, episode coordinates and
+    // source. The canonical title may contain several third-party IDs.
+    if let Some(identities)=winner["anime_ids"].as_object_mut(){
+        identities.insert("anidb".into(),json!(mapped.anidb_id));
+    }else{
+        winner["anime_ids"]=json!({"anidb":mapped.anidb_id});
+    }
+    Ok(())
 }
 
 fn diagnose_logged(state:&AppState,req:&MatchRequest)->Result<Diagnostic,String>{
@@ -1109,6 +1154,7 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         .route("/health/live",get(liveness))
         .route("/match",get(get_match_request).post(match_request))
         .route("/alias",get(alias::get_alias).post(alias::post_alias))
+        .route("/episode/resolve",get(episode_conversion::get_resolve).post(episode_conversion::post_resolve))
         .route("/parse",get(get_parse_request).post(parse_request))
         .route("/debug/match",post(debug_request))
         .with_state(AppState{db:Arc::new(PathBuf::from(db)),history:Arc::new(PathBuf::from(history_db)),
@@ -1315,6 +1361,81 @@ mod tests {
                 "unverified unmarked range must not invent an ordinary TV episode");
         }
 
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
+    fn match_single_anime_season_episode_publishes_sid_and_asid(){
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-onepiece-season-asid-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
+            region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES
+                ('tt0388629','One Piece','onepiece',1999,
+                    'series','',1,0,'tvSeries'),
+                ('tt2222222','Example Show','exampleshow',2020,
+                    'series','',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt0388629',23);
+            INSERT INTO seasons VALUES('tt2222222',1);
+            INSERT INTO season_episodes VALUES('tt0388629',21,194,194);
+            INSERT INTO season_episodes VALUES('tt2222222',1,12,12);
+            INSERT INTO anime_series_map VALUES('tt0388629','69','81797',1);
+            INSERT INTO anime_ids VALUES('tt0388629','anidb','69');
+            INSERT INTO anidb_titles VALUES('69','One Piece',
+                'onepiece','main','en');
+            INSERT INTO episode_map VALUES('69','81797',1,-1,1,0,0,'');
+            INSERT INTO episode_map VALUES('69','81797',1,21,892,1085,-891,'');
+            INSERT INTO episode_map VALUES('69','81797',1,22,1086,1155,-1085,'');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        let result=diagnose(&path,&MatchRequest{
+            title:"One Piece S21E03".into(),year:None,series:None}).unwrap();
+        assert_eq!(result.parsed["title"],"One Piece");
+        assert_eq!(result.parsed["seasons"],json!([21]));
+        assert_eq!(result.parsed["episodes"],json!([3]));
+        let winner=result.selected.expect("One Piece must be matched");
+        assert_eq!(winner["imdb_id"],"tt0388629");
+        assert_eq!(winner["season"],21);
+        assert_eq!(winner["episode"],3);
+        assert_eq!(winner["anime"]["asid"],"69:894");
+        assert_eq!(public_match_response(Some(winner)),json!({
+            "sid_start":"tt0388629:21:3","sid_end":"tt0388629:21:3",
+            "asid_start":"69:894","asid_end":"69:894"}));
+        // The final enrichment also handles coordinates assigned after
+        // candidate matching (such as dates) without relying on titles.
+        let mut late=json!({"imdb_id":"tt0388629","category":"series",
+            "season":21,"episode":3,"anime":null,
+            "match_source":"cinemeta_airdate","anime_ids":{"kitsu":"9"}});
+        enrich_selected_anime_episode(&db,&mut late).unwrap();
+        assert_eq!(late["anime"]["asid"],"69:894");
+        assert_eq!(late["match_source"],"cinemeta_airdate");
+        assert_eq!(late["anime_ids"]["kitsu"],"9");
+        assert_eq!(late["anime_ids"]["anidb"],"69");
+        let mut ordinary=json!({"imdb_id":"tt2222222","category":"series",
+            "season":1,"episode":3,"anime":null});
+        enrich_selected_anime_episode(&db,&mut ordinary).unwrap();
+        assert!(ordinary["anime"].is_null());
+        let mut range=json!({"imdb_id":"tt0388629","category":"series",
+            "season":21,"episode":3,"anime":null,
+            "episode_range":{"complete":false}});
+        enrich_selected_anime_episode(&db,&mut range).unwrap();
+        assert!(range["anime"].is_null());
+        drop(db);
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
     }
