@@ -1763,6 +1763,24 @@ fn patch_missing_coordinates(raw: &str, result: &mut Map<String, Value>) -> Resu
     Ok(())
 }
 
+// A folder's year is useful for remakes with identical IMDb titles, but
+// only when the folder actually belongs to the series named by the leaf.
+// Compare full word boundaries (so "Doctor Who" does not match "Doctor Whom")
+// and permit an appended episode subtitle in the leaf.
+fn same_series_parent(parent_title: &str, leaf_title: &str) -> bool {
+    // Work on owned lowercase text to keep the split slices alive.
+    let parent_lower = parent_title.to_lowercase();
+    let leaf_lower = leaf_title.to_lowercase();
+    let parent:Vec<_> = parent_lower.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty()).collect();
+    let leaf:Vec<_> = leaf_lower.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty()).collect();
+    // Avoid inheriting a folder's year from broad labels such as "TV".
+    parent.join("").len() >= 4 && !parent.is_empty()
+        && parent.len() <= leaf.len()
+        && parent.iter().zip(leaf.iter()).all(|(a,b)| a==b)
+}
+
 pub fn parse_title(
     raw_title: &str,
     translate_languages: bool,
@@ -1818,6 +1836,30 @@ pub fn parse_title(
     } else if !result.contains_key("episode_start")
         && let Some(candidate)=unmarked_anime_episode_candidate(leaf,translate_languages)? {
         result.insert("anime_episode_range_candidate".into(),candidate);
+    }
+    // The leaf is authoritative for episode coordinates and explicit years.
+    // When it has no year, inherit a *series production year* from the
+    // nearest parent whose parsed title agrees with the leaf. A generic
+    // "Series.2024" directory must not change an unrelated title's IMDb ID.
+    let has_coordinates = result.get("seasons").is_some_and(|v|
+        v.as_array().is_some_and(|v|!v.is_empty()))
+        || result.get("episodes").is_some_and(|v|
+            v.as_array().is_some_and(|v|!v.is_empty()))
+        || result.contains_key("episode_start");
+    if components.len()>1 && has_coordinates && !result.contains_key("year") {
+        let leaf_title=result.get("title").and_then(Value::as_str)
+            .unwrap_or("").to_owned();
+        for parent in components[..components.len()-1].iter().rev() {
+            let parsed_parent=ENGINE.parse(parent,translate_languages)?;
+            let Some(year)=parsed_parent.get("year").and_then(Value::as_i64)
+                .filter(|year|(1870..=2100).contains(year)) else{continue};
+            let parent_title=parsed_parent.get("title")
+                .and_then(Value::as_str).unwrap_or("");
+            if same_series_parent(parent_title,&leaf_title) {
+                result.insert("year".to_owned(),json!(year));
+                break;
+            }
+        }
     }
     Ok(result)
 }
@@ -2186,6 +2228,40 @@ mod tests {
                 "{title:?}"
             );
         }
+    }
+
+    #[test]
+    fn matching_parent_folder_supplies_missing_series_year() {
+        let full="Doctor.Who.2005.S01.REPACK.1080p.AMZN.WEB-DL.DDP2.0.H.264-KHEZU/Doctor.Who.S01E06.Dalek.1080p.AMZN.WEB-DL.DDP2.0.H.264-KHEZU.mkv";
+        let leaf=parse_title(full.rsplit('/').next().unwrap(),false).unwrap();
+        assert!(leaf.get("year").is_none(),"episode file alone has no year");
+        let parsed=parse_title(full,false).unwrap();
+        assert_eq!(parsed["year"],json!(2005));
+        assert_eq!(parsed["seasons"],json!([1]));
+        assert_eq!(parsed["episodes"],json!([6]));
+        assert_eq!(parsed["title"],leaf["title"],"parent must not replace episode title");
+    }
+
+    #[test]
+    fn parent_year_never_overrides_leaf_or_unrelated_directories() {
+        for (input,year) in [
+            ("Doctor.Who.1963.S01/Doctor.Who.2005.S01E06.mkv",Some(2005)),
+            ("Doctor.Who.2005/Doctor.Who.S01E06.mkv",Some(2005)),
+            ("Archive.2024/Doctor.Who.S01E06.mkv",None),
+            ("Doctor.Whom.2024/Doctor.Who.S01E06.mkv",None),
+            ("Doctor.Who.2005/Season.1/Doctor.Who.S01E06.mkv",Some(2005)),
+            ("Doctor.Who.1963/Doctor.Who.2005/Doctor.Who.S01E06.mkv",Some(2005)),
+        ] {
+            let parsed=parse_title(input,false).unwrap();
+            assert_eq!(parsed.get("year").and_then(Value::as_i64),year,
+                "wrong inherited year for {input}");
+            assert_eq!(parsed["seasons"],json!([1]),"{input}");
+            assert_eq!(parsed["episodes"],json!([6]),"{input}");
+        }
+        // Not a serial episode: an unrelated folder's year must not be
+        // inherited into a movie or standalone title.
+        let movie=parse_title("Doctor.Who.2005/Completely.Different.Movie.mkv",false).unwrap();
+        assert!(movie.get("year").is_none());
     }
 
     #[test]

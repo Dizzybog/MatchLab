@@ -1110,6 +1110,65 @@ mod tests {
     }
 
     #[test]
+    fn matching_parent_year_selects_2005_doctor_who_not_1963() {
+        // The same IMDb title is shared by two series. The folder's
+        // production year disambiguates the actual episode filename.
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-parent-year-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
+            region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES('tt0056751','Doctor Who','doctorwho',1963,
+                'series','',1,0,'tvSeries');
+            INSERT INTO titles VALUES('tt0436992','Doctor Who','doctorwho',2005,
+                'series','',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt0056751',26);
+            INSERT INTO seasons VALUES('tt0436992',14);
+            INSERT INTO season_episodes VALUES('tt0056751',1,42,42);
+            INSERT INTO season_episodes VALUES('tt0436992',1,13,13);").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+
+        let folder="Doctor.Who.2005.S01.REPACK.1080p.AMZN.WEB-DL.DDP2.0.H.264-KHEZU";
+        let leaf="Doctor.Who.S01E06.Dalek.1080p.AMZN.WEB-DL.DDP2.0.H.264-KHEZU.mkv";
+        let full=format!("{folder}/{leaf}");
+        let diagnose_title=|title:String,year:Option<i32>|{
+            diagnose(&path,&MatchRequest{title,year,series:None}).unwrap()
+        };
+        let selected=diagnose_title(full.clone(),None).selected.unwrap();
+        assert_eq!(selected["imdb_id"],"tt0436992");
+        assert_eq!(selected["season"],1);
+        assert_eq!(selected["episode"],6);
+        let response=public_match_response(Some(selected));
+        assert_eq!(response["sid_start"],"tt0436992:1:6");
+        assert_eq!(response["sid_end"],"tt0436992:1:6");
+
+        let forced=diagnose_title(full,Some(1963)).selected.unwrap();
+        assert_eq!(forced["imdb_id"],"tt0056751",
+            "explicit API year must override inherited folder year");
+        let unrelated=diagnose_title(
+            format!("Unrelated.Show.2024/{leaf}"),None).selected.unwrap();
+        assert_eq!(unrelated["imdb_id"],"tt0056751",
+            "unrelated folder year must not affect ranking");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
     fn exact_supernatural_series_beats_unrelated_anime_alias() {
         let path=std::env::temp_dir().join(format!(
             "matchlab_supernatural_{}.sqlite3",std::process::id()));
