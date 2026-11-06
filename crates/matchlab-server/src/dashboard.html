@@ -24,7 +24,7 @@ html{scroll-padding-top:16px}
 .btn:focus-visible,.nav a:focus-visible,.table-wrap:focus-visible,
 tr[data-id]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .stat{min-width:0}
-.stat .value{font-variant-numeric:tabular-nums}
+.stat .value{font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis}
 .field{min-width:0;flex-wrap:nowrap}
 .field input,.field select,.field .btn{min-width:0}
 .toolbar h2{margin:0}
@@ -182,7 +182,7 @@ function rankResults(d){
     field('AniDB ID',r.anime_id)+field('Anime episode',displayRange(r.anime_episode,r.anime_episode_end))+
     field('Source',r.source)+'</div><div class="rank-meta" title="'+val(r.year)+' · '+val(r.type)+'">'+val(r.year)+' · '+val(r.type)+'</div></article>').join('')+'</div>';
 }
-async function stats(){try{const s=await json('/api/dashboard/stats');for(const k of ['total','matched','unmatched','errors'])$(k).textContent=Number(s[k]).toLocaleString();$('latency').textContent='Avg. latency: '+Math.round(s.average_duration_ms)+' ms';const days=[...(s.daily||[])].reverse();const max=Math.max(1,...days.map(d=>d.total));$('chart').innerHTML=days.length?days.map(d=>'<div class="bar" title="'+esc(d.day+': '+d.total+' requests')+'" style="height:'+Math.max(4,100*d.total/max)+'%"></div>').join(''):'<div class="empty">No activity yet</div>'}catch(e){$('latency').textContent='Statistics unavailable: '+e.message}}
+async function stats(){try{const s=await json('/api/dashboard/stats');for(const k of ['total','matched','unmatched','errors']){const value=Number(s[k]).toLocaleString();$(k).textContent=value;$(k).title=value}$('latency').textContent='Avg. latency: '+Math.round(s.average_duration_ms)+' ms';const days=[...(s.daily||[])].reverse();const max=Math.max(1,...days.map(d=>d.total));$('chart').innerHTML=days.length?days.map(d=>'<div class="bar" title="'+esc(d.day+': '+d.total+' requests')+'" style="height:'+Math.max(4,100*d.total/max)+'%"></div>').join(''):'<div class="empty">No activity yet</div>'}catch(e){$('latency').textContent='Statistics unavailable: '+e.message}}
 async function history(){try{const data=await json('/api/dashboard/history?limit=25&offset='+offset+(statusFilter==='all'?'':'&status='+encodeURIComponent(statusFilter)));current=data.items;$('rows').innerHTML=current.length?current.map((r,i)=>'<tr data-id="'+i+'" tabindex="0" aria-label="View diagnostics for '+esc(r.title)+'"><td>'+esc(r.created_at.replace('T',' ').slice(0,19))+'</td><td class="title" title="'+esc(r.title)+'">'+esc(r.title)+'</td><td class="'+(r.status==='matched'?'good':r.status==='error'?'bad':'')+'">'+esc(r.status)+'</td><td title="'+esc(r.imdb_id||'—')+'">'+esc(r.imdb_id||'—')+'</td><td title="'+esc(r.match_source||'—')+'">'+esc(r.match_source||'—')+'</td><td>'+esc(r.duration_ms)+'</td></tr>').join(''):'<tr><td colspan="6" class="muted">No requests for this filter</td></tr>';$('prev').disabled=offset===0;$('next').disabled=current.length<25;$('rows').querySelectorAll('tr[data-id]').forEach(tr=>{const show=()=>{const r=current[Number(tr.dataset.id)];$('history-details').hidden=false;$('history-details').innerHTML='<div class="history-title" title="'+esc(r.title)+'">'+esc(r.title)+'</div>'+rankResults(r.details)};tr.addEventListener('click',show);tr.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();show()}})})}catch(e){$('rows').innerHTML='<tr><td colspan="6">'+esc(e.message)+'</td></tr>'}}
 function setHistoryFilter(value){
   if(!['all','matched','unmatched','error'].includes(value))return;
