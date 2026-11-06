@@ -110,6 +110,69 @@ Anime matching uses the same local metadata snapshot as IMDb matching, supplemen
 
 **Important:** Episode mappings in this project are **TVDB-style** coordinates from Anime-Lists, not independently verified IMDb season assignments. Do not assume the returned season number always equals IMDb's own season numbering.
 
+#### AnimeTosho-style episode batches
+
+Anime release names often omit SxxExx notation. MatchLab recognizes numeric
+batch candidates such as:
+
+| Release name fragment | Meaning after anime identity verification |
+| --- | --- |
+| Anime Title 1-7 / 01-07 / 001-007 | Absolute episodes 1–7 |
+| Anime Title (01-25) / [01-25] | Absolute episodes 1–25 |
+| Anime Title 01~12 / 01 – 12 / 01～12 | Absolute episodes 1–12 |
+| Anime Title 01-12 Batch | Absolute episodes 1–12 |
+| Anime Title 01-12 + OVA | Episodes 1–12 only; the additional OVA is not inferred |
+
+The /parse endpoint is **metadata-free**. It reports these as tentative
+anime_episode_range_candidate objects containing the title, start/end,
+numbering=absolute and verified=false. It does **not** treat the candidate
+as canonical episode_start/episode_end. During /match, the service uses
+Tantivy to find an **exact, unambiguous AniDB-linked title** corresponding
+to the candidate title. Only then does it promote the endpoints and validate
+each episode against the AniDB/TVDB crosswalk. A matching IMDb title alone
+does not authorize an unmarked anime episode interval.
+
+A validated candidate may resemble:
+
+```json
+{
+  "anime_episode_range_candidate": {
+    "title": "Spy x Family",
+    "start": 1,
+    "end": 7,
+    "numbering": "absolute",
+    "verified": false
+  },
+  "anime_title_verified": true,
+  "episode_range_numbering": "absolute",
+  "episode_start": 1,
+  "episode_end": 7,
+  "episode_count": 7
+}
+```
+
+The verified flag in the original candidate stays false: it describes
+untrusted lexical input. anime_title_verified establishes identity only;
+episode_range.complete indicates whether **all** requested episodes were
+mapped. A partial crosswalk never fills missing SID or ASID endpoints with
+guessed values. Mapping is batched with one crosswalk read instead of running
+the same SQLite queries once per episode.
+
+The parser excludes release years (2015-2020), resolution dimensions
+(1920x1080), season/volume/part labels (Season 1-7, Vol 1-7),
+standalone title 009-1, and ambiguous prose. No interval is inferred when
+the release explicitly requests movie matching or when the anime identity
+is absent/ambiguous.
+
+**Season-numbered intervals are different:** S01E01-E12,
+S01E01-S01E12, and S1E01-12 carry a requested season and are not
+interpreted as absolute anime numbering. Ordinary series use imported
+IMDb season bounds, while AniDB-linked titles require verified episode
+crosswalks. Mismatched season endpoints (S01E01-S02E12) are not
+flattened into one season. A conservative 1,000-episode maximum applies
+to newly recognized numeric batches.
+
+
 #### Absolute episode intervals across seasons
 
 For `One.piece.E768-E1064`, the parser preserves:

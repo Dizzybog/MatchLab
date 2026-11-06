@@ -182,9 +182,9 @@ fn mapped_absolute_range(db:&Connection,imdb:&str,start:i64,end:i64)->Result<Val
     let mut missing=0i64;
     let mut first:Option<anime_resolver::Episode>=None;
     let mut last:Option<anime_resolver::Episode>=None;
-    for absolute in start..=end {
-        let mapped=anime_resolver::resolve_absolute(db,imdb,absolute)
-            .map_err(|e|e.to_string())?;
+    let mapped_episodes=anime_resolver::resolve_absolute_range(db,imdb,start,end)
+        .map_err(|e|e.to_string())?;
+    for (absolute,mapped) in (start..=end).zip(mapped_episodes) {
         if let Some(ep)=mapped {
             if absolute==start{first=Some(ep.clone());}
             if absolute==end{last=Some(ep.clone());}
@@ -217,6 +217,56 @@ fn mapped_absolute_range(db:&Connection,imdb:&str,start:i64,end:i64)->Result<Val
         "complete":missing==0}))
 }
 
+/// Validate each episode in a season-labeled anime batch against the
+/// AniDB/TVDB crosswalk. A partial mapping never produces guessed endpoints.
+fn mapped_season_episode_range(
+    db:&Connection,imdb:&str,title:&str,season:i64,start:i64,end:i64,
+)->Result<Value,String>{
+    let mut segments:Vec<Value>=Vec::new();
+    let mut first:Option<anime_resolver::Episode>=None;
+    let mut last:Option<anime_resolver::Episode>=None;
+    let mut missing=0i64;
+    let specific=anime_title::has_specific_alias(db,imdb,title)
+        .map_err(|e|e.to_string())?;
+    let resolved=if specific {
+        (start..=end).map(|episode|anime_title::resolve(db,imdb,title,season,episode)
+            .map_err(|e|e.to_string())).collect::<Result<Vec<_>,_>>()?
+    }else{
+        anime_resolver::resolve_season_range(db,imdb,season,start,end)
+            .map_err(|e|e.to_string())?
+    };
+    for (episode,mapped) in (start..=end).zip(resolved) {
+        if let Some(ep)=mapped {
+            if episode==start{first=Some(ep.clone());}
+            if episode==end{last=Some(ep.clone());}
+            let continues=segments.last().is_some_and(|seg|
+                seg["season"].as_i64()==Some(ep.season)
+                &&seg["end_episode"].as_i64()==Some(ep.episode-1)
+                &&seg["anidb_id"].as_str()==Some(ep.anidb_id.as_str())
+                &&seg["end_anime_episode"].as_i64()==Some(ep.anidb_episode-1));
+            if continues {
+                let tail=segments.last_mut().expect("contiguous segment");
+                tail["end_episode"]=json!(ep.episode);
+                tail["end_anime_episode"]=json!(ep.anidb_episode);
+            }else{
+                segments.push(json!({"season":ep.season,
+                    "start_episode":ep.episode,"end_episode":ep.episode,
+                    "anidb_id":ep.anidb_id,
+                    "start_anime_episode":ep.anidb_episode,
+                    "end_anime_episode":ep.anidb_episode}));
+            }
+        }else{missing+=1;}
+    }
+    Ok(json!({"requested_season":season,
+        "requested_episode_start":start,"requested_episode_end":end,
+        "start_season":first.as_ref().map(|e|e.season),
+        "start_episode":first.as_ref().map(|e|e.episode),
+        "end_season":last.as_ref().map(|e|e.season),
+        "end_episode":last.as_ref().map(|e|e.episode),
+        "segments":segments,"unmapped_count":missing,
+        "complete":missing==0,"source":"anime_season_crosswalk"}))
+}
+
 /// Use the highest observed episode number, not the count: IMDb
 /// episode numbers can contain gaps. Only applies to season-only releases.
 /// Reject candidates whose imported IMDb season cannot contain the
@@ -241,7 +291,51 @@ fn season_episode_end(db:&Connection,imdb:&str,season:i64)->Result<Option<i64>,S
 
 fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> {
     if req.title.trim().is_empty() || req.title.len() > 4096 { return Err("title must be 1–4096 bytes".into()); }
-    let parsed_value=parse_cached(&req.title)?;
+    let mut parsed_value=parse_cached(&req.title)?;
+    let db=open_db(db_path).map_err(|e|e.to_string())?;
+
+    // An unmarked range (Title 01-07, (01-25), 01~12) is not authoritative.
+    // The parser exposes a tentative title and endpoints, without changing
+    // regular release parsing. Use it only when Tantivy finds an exact,
+    // unambiguous AniDB-linked title. No SQLite title discovery is performed.
+    let mut verified_anime_range_imdb:Option<String>=None;
+    if req.series!=Some(false) {
+        let hint=parsed_value.get("anime_episode_range_candidate");
+        if let Some((Some(candidate_title),Some(start),Some(end)))=hint.map(|v|
+            (v.get("title").and_then(Value::as_str),
+             v.get("start").and_then(Value::as_i64),
+             v.get("end").and_then(Value::as_i64))) {
+            let candidate_title=candidate_title.to_owned();
+            let key=matchlab_matcher::clean_title(&candidate_title);
+            let exact_ids=tantivy_search::anime_aliases(&db,&key,6)?
+                .into_iter().filter(|a|a.clean_title==key)
+                .map(|a|a.imdb_id).collect::<std::collections::BTreeSet<_>>();
+            if exact_ids.len()==1
+                && let Some(imdb)=exact_ids.into_iter().next() {
+                verified_anime_range_imdb=Some(imdb);
+                if let Some(parsed)=parsed_value.as_object_mut(){
+                    parsed.insert("title".into(),json!(candidate_title));
+                    parsed.insert("episodes".into(),json!([]));
+                    parsed.insert("seasons".into(),json!([]));
+                    parsed.insert("episode_start".into(),json!(start));
+                    parsed.insert("episode_end".into(),json!(end));
+                    parsed.insert("episode_count".into(),json!(end-start+1));
+                    parsed.insert("episode_range_numbering".into(),json!("absolute"));
+                    parsed.insert("anime_title_verified".into(),json!(true));
+                }
+            }
+        }
+    }
+    // The generic release parser may have interpreted 01-07 as a single
+    // episode even if no anime identity was verified. For an untrusted batch
+    // candidate, suppress that inference rather than publishing guessed
+    // coordinates for unrelated movies or ordinary TV titles.
+    if verified_anime_range_imdb.is_none()
+        && parsed_value.get("anime_episode_range_candidate").is_some()
+        && let Some(parsed)=parsed_value.as_object_mut(){
+        parsed.insert("episodes".into(),json!([]));
+        parsed.insert("seasons".into(),json!([]));
+    }
     let parsed=parsed_value.as_object().ok_or("parser returned no object")?;
     let parsed_title = parsed.get("title").and_then(Value::as_str).unwrap_or("");
     let title_owned = if explicit_absolute_episode(&req.title).is_some() && numbers(parsed.get("seasons")).is_empty() {
@@ -269,19 +363,20 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
         if let Some(ep)=explicit_absolute_episode(&req.title){episodes.push(ep);}
     }
     let year = if airdate_only {req.year} else {req.year.or_else(||parsed.get("year").and_then(Value::as_i64).map(|n|n as i32))};
-    let db = open_db(db_path).map_err(|e|e.to_string())?;
     // An exact anime alias can identify a series even without SxxExx tokens.
     // Respect an explicitly supplied series=false override.
     let series = match req.series {
         Some(value) => value,
-        None if airdate_only || !seasons.is_empty() || !episodes.is_empty() => true,
+        None if airdate_only || !seasons.is_empty() || !episodes.is_empty()
+            || parsed.contains_key("episode_start") => true,
         // A release with an explicit production year and no episode/season
         // coordinates is a movie candidate, even if an anime alias exists.
         None if year.is_some() => false,
         None => anime_title::season_from_any_exact_title(&db,&key)
             .map_err(|e|e.to_string())?.is_some(),
     };
-    let imdb = matchlab_matcher::search(&db,title,year,series,seasons.iter().copied().max().unwrap_or(0),&req.title,!episodes.is_empty(),20)
+    let imdb = matchlab_matcher::search(&db,title,year,series,seasons.iter().copied().max().unwrap_or(0),&req.title,
+        !episodes.is_empty()||parsed.contains_key("episode_start"),20)
         .map_err(|e|e.to_string())?;
     // Require every candidate for a multi-season pack to contain the final season.
     let imdb=if let Some((_,end))=season_range {
@@ -496,25 +591,58 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
         selected.as_mut()
     ){
         if let Some(imdb_id)=winner["imdb_id"].as_str().map(str::to_owned){
-            let range=mapped_absolute_range(&db,&imdb_id,start,end)?;
-            // Keep the raw absolute endpoints even when the metadata mapping
-            // is incomplete; never claim inferred IMDb season coordinates.
-            winner["episode_range"]=range.clone();
-            winner["season"]=range["start_season"].clone();
-            winner["episode"]=range["start_episode"].clone();
-            winner["season_end"]=range["end_season"].clone();
-            winner["episode_end"]=range["end_episode"].clone();
-            winner["sid"]=if let (Some(se),Some(ep))=(
-                range["start_season"].as_i64(),range["start_episode"].as_i64()){
-                json!(format!("{imdb_id}:{se}:{ep}"))
-            }else{json!(imdb_id)};
-            // An absolute range can span seasons; a single ASID is not an
-            // adequate representation of the entire release.
-            // Absolute episode numbers are meaningful to anime viewers even
-            // when the AniDB/TVDB mapping crosses parts or seasons.
-            winner["anime_episode_start"]=json!(start);
-            winner["anime_episode_end"]=json!(end);
-            winner["anime"]=Value::Null;
+            let numbering=parsed.get("episode_range_numbering")
+                .and_then(Value::as_str).unwrap_or("absolute");
+            if numbering=="season" {
+                let season=seasons.first().copied().unwrap_or(0);
+                if season>0 {
+                    let linked=winner["anime_ids"].as_object()
+                        .is_some_and(|ids|!ids.is_empty())
+                        || anime_title::has_specific_alias(&db,&imdb_id,title)
+                            .map_err(|e|e.to_string())?;
+                    let range=if linked {
+                        mapped_season_episode_range(&db,&imdb_id,title,season,start,end)?
+                    }else {
+                        let known_end=season_episode_end(&db,&imdb_id,season)?;
+                        let valid=known_end.is_some_and(|last|last>=end);
+                        json!({"start_season":if valid {Some(season)}else{None},
+                            "start_episode":if valid {Some(start)}else{None},
+                            "end_season":if valid {Some(season)}else{None},
+                            "end_episode":if valid {Some(end)}else{None},
+                            "complete":valid,"segments":[],"source":"imdb_season_bounds",
+                            "requested_season":season,
+                            "requested_episode_start":start,"requested_episode_end":end})
+                    };
+                    winner["episode_range"]=range.clone();
+                    winner["season"]=range["start_season"].clone();
+                    winner["episode"]=range["start_episode"].clone();
+                    winner["season_end"]=range["end_season"].clone();
+                    winner["episode_end"]=range["end_episode"].clone();
+                    winner["sid"]=if let (Some(se),Some(ep))=(
+                        range["start_season"].as_i64(),range["start_episode"].as_i64()){
+                        json!(format!("{imdb_id}:{se}:{ep}"))
+                    }else{json!(imdb_id)};
+                    winner["anime"]=Value::Null;
+                }
+            }else if verified_anime_range_imdb.as_ref()
+                .is_none_or(|verified|verified==&imdb_id){
+                let range=mapped_absolute_range(&db,&imdb_id,start,end)?;
+                // Preserve the requested absolute endpoints even when some
+                // crosswalk entries are missing, but never invent IMDb or
+                // AniDB episode coordinates.
+                winner["episode_range"]=range.clone();
+                winner["season"]=range["start_season"].clone();
+                winner["episode"]=range["start_episode"].clone();
+                winner["season_end"]=range["end_season"].clone();
+                winner["episode_end"]=range["end_episode"].clone();
+                winner["sid"]=if let (Some(se),Some(ep))=(
+                    range["start_season"].as_i64(),range["start_episode"].as_i64()){
+                    json!(format!("{imdb_id}:{se}:{ep}"))
+                }else{json!(imdb_id)};
+                winner["anime_episode_start"]=json!(start);
+                winner["anime_episode_end"]=json!(end);
+                winner["anime"]=Value::Null;
+            }
         }
     }
     let reason = if anime.is_some() {"Verified anime crosswalk"} else if selected.is_some() {
@@ -591,18 +719,21 @@ fn public_match_response(selected: Option<Value>) -> Value {
         return json!({"sid_start":null,"sid_end":null,"asid_start":null,"asid_end":null});
     };
     let imdb=winner["imdb_id"].as_str().unwrap_or_default();
+    let has_range=winner.get("episode_range").is_some();
     let start_season=winner["season"].as_i64();
     let start_episode=winner["episode"].as_i64();
-    let end_season=winner["season_end"].as_i64().or(start_season);
-    let end_episode=winner["episode_end"].as_i64().or(start_episode);
+    let end_season=winner["season_end"].as_i64()
+        .or(if has_range {None}else{start_season});
+    let end_episode=winner["episode_end"].as_i64()
+        .or(if has_range {None}else{start_episode});
     let sid_start=if imdb.is_empty(){Value::Null}
         else if let (Some(se),Some(ep))=(start_season,start_episode){
             json!(format!("{imdb}:{se}:{ep}"))
-        }else{json!(imdb)};
+        }else if has_range{Value::Null}else{json!(imdb)};
     let sid_end=if imdb.is_empty(){Value::Null}
         else if let (Some(se),Some(ep))=(end_season,end_episode){
             json!(format!("{imdb}:{se}:{ep}"))
-        }else{json!(imdb)};
+        }else if has_range{Value::Null}else{json!(imdb)};
     let anime=winner.get("anime").filter(|v|v.is_object());
     let direct_asid=anime.and_then(|a|a.get("asid")).cloned().unwrap_or(Value::Null);
     let segments=winner.pointer("/episode_range/segments").and_then(Value::as_array);
@@ -877,6 +1008,107 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn anime_batches_verify_unmarked_ranges_and_keep_incomplete_endpoints_null(){
+        let suffix=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-anime-range-{}-{suffix}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
+            region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES('tt1234567','Spy x Family','spyxfamily',2022,
+                'series','',1,0,'tvSeries');
+            INSERT INTO titles VALUES('tt7654321','Example Show','exampleshow',2020,
+                'series','',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt1234567',1);
+            INSERT INTO seasons VALUES('tt7654321',1);
+            INSERT INTO season_episodes VALUES('tt1234567',1,7,7);
+            INSERT INTO season_episodes VALUES('tt7654321',1,12,12);
+            INSERT INTO anime_series_map VALUES('tt1234567','123','456',0);
+            INSERT INTO anime_ids VALUES('tt1234567','anidb','123');
+            INSERT INTO anidb_titles VALUES('123','Spy x Family','spyxfamily','main','en');
+            INSERT INTO episode_map VALUES('123','456',1,1,1,7,0,'');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+
+        for raw in [
+            "[SubsPlease] Spy x Family (01-07) (1080p) [Batch]",
+            "Spy x Family 1-7",
+            "Spy x Family 01~07",
+        ] {
+            let d=diagnose(&path,&MatchRequest{
+                title:raw.into(),year:None,series:None}).unwrap();
+            assert_eq!(d.parsed["anime_title_verified"],true,"{raw}");
+            let winner=d.selected.expect("verified anime title must match");
+            assert_eq!(winner["imdb_id"],"tt1234567","{raw}");
+            assert_eq!(winner["anime_episode_start"],1,"{raw}");
+            assert_eq!(winner["anime_episode_end"],7,"{raw}");
+            assert_eq!(winner["episode_range"]["complete"],true,"{raw}");
+            let response=public_match_response(Some(winner));
+            assert_eq!(response["sid_start"],"tt1234567:1:1","{raw}");
+            assert_eq!(response["sid_end"],"tt1234567:1:7","{raw}");
+            assert_eq!(response["asid_start"],"123:1","{raw}");
+            assert_eq!(response["asid_end"],"123:7","{raw}");
+        }
+
+        let incomplete=diagnose(&path,&MatchRequest{
+            title:"Spy x Family 01-09 Batch".into(),year:None,series:None}).unwrap();
+        let winner=incomplete.selected.unwrap();
+        assert_eq!(winner["episode_range"]["complete"],false);
+        assert_eq!(winner["episode_range"]["unmapped_count"],2);
+        let response=public_match_response(Some(winner));
+        assert_eq!(response["sid_start"],"tt1234567:1:1");
+        assert!(response["sid_end"].is_null());
+        assert!(response["asid_start"].is_null());
+        assert!(response["asid_end"].is_null());
+
+        let generic=diagnose(&path,&MatchRequest{
+            title:"Example Show S01E01-E07".into(),year:None,series:None}).unwrap();
+        let public=public_match_response(generic.selected);
+        assert_eq!(public["sid_start"],"tt7654321:1:1");
+        assert_eq!(public["sid_end"],"tt7654321:1:7");
+        assert!(public["asid_start"].is_null());
+
+        let season_anime=diagnose(&path,&MatchRequest{
+            title:"Spy x Family S01E01-E07".into(),year:None,series:None}).unwrap();
+        let public=public_match_response(season_anime.selected);
+        assert_eq!(public["sid_start"],"tt1234567:1:1");
+        assert_eq!(public["sid_end"],"tt1234567:1:7");
+        assert_eq!(public["asid_start"],"123:1");
+        assert_eq!(public["asid_end"],"123:7");
+
+        let forced_movie=diagnose(&path,&MatchRequest{
+            title:"Spy x Family 01-07".into(),year:None,series:Some(false)}).unwrap();
+        assert!(forced_movie.parsed.get("anime_title_verified").is_none());
+        assert!(forced_movie.parsed.get("episode_start").is_none());
+
+        let unrelated=diagnose(&path,&MatchRequest{
+            title:"Example Show 01-07".into(),year:None,series:None}).unwrap();
+        assert!(unrelated.parsed.get("anime_title_verified").is_none());
+        assert!(unrelated.parsed.get("episode_start").is_none());
+        assert_eq!(unrelated.parsed["episodes"],json!([]));
+        if let Some(selected)=unrelated.selected {
+            assert!(selected["episode"].is_null(),
+                "unverified unmarked range must not invent an ordinary TV episode");
+        }
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
     #[test]
     fn exact_supernatural_series_beats_unrelated_anime_alias() {
         let path=std::env::temp_dir().join(format!(
