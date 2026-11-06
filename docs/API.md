@@ -55,6 +55,79 @@ curl -X POST http://127.0.0.1:8765/parse \
 
 The JSON contains every field the parser recognizes, such as `title`, `seasons`, `episodes`, `year`, `resolution`, `quality`, `codec`, `languages` and release metadata. Fields not recognized in the input are omitted; the exact set depends on the title. `GET /parse?title=...` is also supported.
 
+### Alias lookup: `GET /alias`, `POST /alias`
+
+Returns **every exact normalized IMDb or AniDB title association**, without
+ranking, prefix matches, or selecting a single IMDb winner. Search is
+performed exclusively against the immutable Tantivy index, never through
+SQLite title scans.
+
+Pass **exactly one** of the following parameters in the query string or
+as a POST JSON body:
+
+- `imdb_id`: every indexed IMDb alias and linked AniDB title/name
+- `anidb_id`: every indexed name for that AniDB work, including titles
+  without any IMDb association
+- `query`: exact normalized title matching, across both IMDb and AniDB;
+  all independent matching IMDb and AniDB identifiers are returned
+- `q`: convenient automatic interpretation of `tt<digits>` as an IMDb
+  ID, a positive numeric value as an AniDB ID, or anything else as a title
+
+Examples:
+
+```bash
+curl -G --data-urlencode 'imdb_id=tt0388629' http://127.0.0.1:8765/alias
+curl -G --data-urlencode 'anidb_id=69' http://127.0.0.1:8765/alias
+curl -G --data-urlencode 'query=One Piece' http://127.0.0.1:8765/alias
+curl -X POST http://127.0.0.1:8765/alias \
+  -H 'Content-Type: application/json' \
+  -d '{"q":"Psycho-Pass"}'
+```
+
+Example *shape* (identifiers and lists depend on the loaded metadata):
+
+```json
+{
+  "mode": "title",
+  "input": "One Piece",
+  "normalized": "onepiece",
+  "imdb_ids": ["tt0388629", "tt0997084"],
+  "anidb_ids": ["1253", "69"],
+  "aliases": [
+    {
+      "source": "anidb", "name": "One Piece",
+      "normalized": "onepiece",
+      "imdb_id": "tt0997084", "anidb_id": "1253",
+      "language": "en", "title_type": "main"
+    }
+  ],
+  "total": 4,
+  "limit": 500,
+  "offset": 0,
+  "has_more": false
+}
+```
+
+The example is illustrative and deliberately omits other alias objects.
+Each alias includes the original title, its normalized form, its source,
+and any **verified, linked** identifiers. IMDb titles can also include
+`year`; AniDB titles can include `language` and `title_type`.
+Unlinked AniDB names return no `imdb_id`, rather than inventing one.
+
+IDs are deduplicated across the **entire** result, not just the page.
+`aliases` contains up to `limit` rows (default 500, maximum 2,000) from
+`offset` (default 0, maximum 1,000,000), with deterministic ordering,
+`total` and `has_more`. Continue using the next offset to retrieve
+every alias when there are more than one page. Input must be 1–512
+UTF-8 bytes; multiple search selectors or invalid IDs receive HTTP 400.
+
+The new index schema stores original AniDB aliases, their languages and
+name types, and searchable AniDB IDs. Upgrading from the previous image
+requires a **one-time Tantivy schema6 index build at startup** from the
+existing SQLite metadata snapshot. This does not redownload metadata or
+change the primary matcher's API. The old Tantivy generations remain on
+disk for rollback until separately pruned.
+
 ### Airdate matching (no API key)
 
 When a TV release contains a date instead of explicit SxxExx coordinates, MatchLab

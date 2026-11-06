@@ -1,6 +1,7 @@
 //! MatchLab's native Rust HTTP API.
 //! Tantivy searches titles; SQLite snapshots hold relational metadata.
 mod airdate;
+mod alias;
 mod matchlab_matcher;
 mod tantivy_search;
 mod metadata_import;
@@ -1107,6 +1108,7 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         .route("/health/ready",get(readiness))
         .route("/health/live",get(liveness))
         .route("/match",get(get_match_request).post(match_request))
+        .route("/alias",get(alias::get_alias).post(alias::post_alias))
         .route("/parse",get(get_parse_request).post(parse_request))
         .route("/debug/match",post(debug_request))
         .with_state(AppState{db:Arc::new(PathBuf::from(db)),history:Arc::new(PathBuf::from(history_db)),
