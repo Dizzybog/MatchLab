@@ -39,7 +39,9 @@ pub fn initialize(path: &Path) -> Result<(), String> {
             duration_ms INTEGER NOT NULL,
             details TEXT NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS requests_recent ON requests(id DESC);
+        -- INTEGER PRIMARY KEY is the rowid B-tree. Reverse rowid scans
+        -- already serve ORDER BY id DESC; drop the legacy duplicate index.
+        DROP INDEX IF EXISTS requests_recent;
         CREATE TABLE IF NOT EXISTS request_minute_stats(
             minute TEXT PRIMARY KEY NOT NULL,
             total INTEGER NOT NULL DEFAULT 0,
@@ -228,6 +230,31 @@ pub fn stats(path: &Path) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn latest_history_uses_rowid_without_duplicated_index(){
+        let path=path();
+        initialize(&path).unwrap();
+        // Upgrade a database created by the previous build.
+        {
+            let db=connect(&path).unwrap();
+            db.execute_batch("CREATE INDEX requests_recent ON requests(id DESC);").unwrap();
+        }
+        initialize(&path).unwrap();
+        let db=connect(&path).unwrap();
+        let mut index_stmt=db.prepare("PRAGMA index_list('requests')").unwrap();
+        let indexes=index_stmt.query_map([],|r|r.get::<_,String>(1)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert!(!indexes.contains(&"requests_recent".to_owned()));
+        drop(index_stmt);
+        let plan:String=db.query_row(
+            "EXPLAIN QUERY PLAN SELECT id FROM requests ORDER BY id DESC LIMIT 1000",
+            [],|r|r.get(3)).unwrap();
+        assert!(!plan.contains("INDEX"),"rowid scan should not require a secondary index: {plan}");
+        drop(db);
+        record(&path,"new","matched",None,&json!({}),1);
+        assert_eq!(history(&path,10,0,None).unwrap()["items"][0]["title"],"new");
+        cleanup(&path);
+    }
     use std::{path::PathBuf, sync::atomic::{AtomicU64, Ordering}};
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(0);

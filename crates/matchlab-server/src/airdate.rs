@@ -42,7 +42,9 @@ fn open_cache(path:&Path)->Result<Connection,String>{
         imdb_id TEXT NOT NULL,air_date TEXT NOT NULL,season INTEGER NOT NULL,episode INTEGER NOT NULL,
         PRIMARY KEY(imdb_id,air_date,season,episode));
         CREATE TABLE IF NOT EXISTS episode_airdate_refresh(imdb_id TEXT PRIMARY KEY,refreshed_at INTEGER NOT NULL);
-        CREATE INDEX IF NOT EXISTS episode_airdates_lookup ON episode_airdates(imdb_id,air_date);")
+        -- The (imdb_id,air_date,season,episode) PRIMARY KEY already
+        -- covers the lookup; remove the redundant index on existing caches.
+        DROP INDEX IF EXISTS episode_airdates_lookup;")
         .map_err(|e|e.to_string())?;
     Ok(conn)
 }
@@ -120,6 +122,36 @@ pub fn resolve(metadata:&Path,id:&str,date:&str)->Result<Option<(i64,i64)>,Strin
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn airdate_lookup_uses_primary_key_after_legacy_index_removal(){
+        let folder=std::env::temp_dir().join(format!(
+            "matchlab-airdate-index-{}-{}",
+            std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let metadata=folder.join("metadata.sqlite3");
+        {
+            let db=open_cache(&metadata).unwrap();
+            db.execute_batch("CREATE INDEX episode_airdates_lookup
+                ON episode_airdates(imdb_id,air_date);
+                INSERT INTO episode_airdates VALUES('tt1','2022-01-20',27,45);").unwrap();
+        }
+        let db=open_cache(&metadata).unwrap();
+        let indexes={
+            let mut stmt=db.prepare("PRAGMA index_list('episode_airdates')").unwrap();
+            let rows=stmt.query_map([],|r|r.get::<_,String>(1)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert_eq!(indexes.len(),1);
+        assert!(indexes[0].starts_with("sqlite_autoindex_episode_airdates"));
+        let plan:String=db.query_row(
+            "EXPLAIN QUERY PLAN SELECT DISTINCT season,episode
+             FROM episode_airdates WHERE imdb_id='tt1' AND air_date='2022-01-20' LIMIT 2",
+            [],|r|r.get(3)).unwrap();
+        assert!(plan.contains("COVERING INDEX sqlite_autoindex_episode_airdates"),"{plan}");
+        assert_eq!(lookup(&db,"tt1","2022-01-20").unwrap(),Some((27,45)));
+        drop(db);
+        std::fs::remove_dir_all(folder).unwrap();
+    }
     #[test]fn date_and_title(){
         assert_eq!(extract("The.Daily.Show.2022.01.20.Francis.Ngannou.1080p"),
             Some(("The Daily Show".into(),"2022-01-20".into())));
