@@ -1645,6 +1645,7 @@ fn unmarked_anime_episode_candidate(
         })));
     }
     Ok(None)
+}
 
 // Some common release conventions are more specific than the generic upstream
 // handlers. Apply these corrections to the leaf *after* normal parsing so we
