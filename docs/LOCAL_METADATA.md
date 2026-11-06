@@ -20,6 +20,28 @@ Automatic initialization and refresh use seven built-in public HTTPS URLs. No en
 
 Alternatively, import six local files using `matchlab-server refresh-metadata <database.sqlite3> <basics.tsv.gz> <akas.tsv.gz> <episodes.tsv.gz> <animeapi.tsv> <anime-list.xml> <anidb-titles.xml.gz>`.
 
+## Anime-Lists entries with multiple IMDb IDs
+
+Anime-Lists can associate a single AniDB entry with several IMDb movies or
+specials using a comma-separated `imdbid` attribute. MatchLab imports each
+syntactically valid IMDb title ID separately; it never stores the comma-joined
+value as an IMDb ID or arbitrarily chooses the first ID. When the same AniDB
+alias points to multiple equally plausible IMDb identities, anime-alias
+priority leaves the title unmatched until other independent title and episode
+evidence resolves the ambiguity.
+
+A previously published SQLite/Tantivy generation can still contain the
+old malformed strings after upgrading the image. Runtime validation suppresses
+these invalid identities, but **the split associations appear only after the
+next successful full metadata refresh**. The refresh is normally weekly.
+To prompt an earlier refresh, temporarily set
+`MATCHLAB_METADATA_REFRESH_HOURS: "1"` in the Compose environment and
+recreate the MatchLab container; a refresh runs when the previous snapshot
+is at least one hour old. Watch for `scheduled metadata refresh completed`,
+then restore the normal 168-hour interval. Do not delete the metadata volume:
+the importer atomically replaces completed snapshots while preserving the
+last usable generation if downloading or indexing fails.
+
 ## SQLite index lifecycle
 
 Tantivy handles all title and anime-alias discovery. SQLite maintains relational

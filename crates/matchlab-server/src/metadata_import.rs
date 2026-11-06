@@ -18,6 +18,13 @@ fn log_progress(source:&str,processed:u64,started:Instant){
 fn col(headers:&csv::StringRecord,name:&str)->Result<usize,Box<dyn Error>>{
     headers.iter().position(|h|h==name).ok_or_else(||format!("missing TSV header: {name}").into())
 }
+
+/// Only individual, syntactically valid IMDb title IDs may enter the anime
+/// crosswalk. Anime-Lists deliberately permits comma-separated movie IDs.
+pub(crate) fn valid_imdb_id(value:&str)->bool{
+    value.strip_prefix("tt").is_some_and(|digits|
+        (7..=10).contains(&digits.len()) && digits.bytes().all(|byte|byte.is_ascii_digit()))
+}
 // Import-time mapping overrides need an AniDB-id lookup. Create this index
 // immediately before Anime-Lists ingestion, not during the IMDb title load.
 fn prepare_episode_import_index(db:&Connection)->rusqlite::Result<()>{
@@ -255,8 +262,7 @@ pub fn import_animeapi(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>{
                 }
         let id=r.get(imdb).unwrap_or("").trim();
         let aid=r.get(anidb).unwrap_or("").trim();
-        if !id.starts_with("tt") || !id[2..].bytes().all(|b|b.is_ascii_digit())
-            || aid.parse::<u64>().unwrap_or(0)==0 {continue;}
+        if !valid_imdb_id(id) || aid.parse::<u64>().unwrap_or(0)==0 {continue;}
         let tv=r.get(tvdb).unwrap_or("").trim();
         let tv=if tv.parse::<u64>().unwrap_or(0)>0 {tv}else{""};
         let may_invalid=headers.iter().position(|h|h=="trakt_may_invalid")
@@ -375,6 +381,8 @@ pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>
     let mut valid=false;
     let mut pending:Option<(i64,i64,i64,i64,i64,String)>=None;
     let mut count=0u64;
+    let mut invalid_imdb_ids=0u64;
+    let mut multi_imdb_entries=0u64;
     let started=Instant::now();
     let mut last_logged=0u64;
     tracing::info!(source="animelists","metadata import started");
@@ -399,7 +407,20 @@ pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>
                 }
                 valid=aid.parse::<u64>().unwrap_or(0)>0 && tvdb.parse::<u64>().unwrap_or(0)>0;
                 if valid{
-                    if imdb.starts_with("tt"){links.execute(params![imdb,aid,tvdb])?;}
+                    // A single AniDB entry may represent several films or OVAs,
+                    // with a comma-separated IMDb list. Never store that CSV
+                    // as one IMDb title ID, and never arbitrarily select its
+                    // first entry: each valid association stays independent.
+                    let mut imported_imdb_ids=0u64;
+                    for imdb_id in imdb.split(',').map(str::trim).filter(|id|!id.is_empty()){
+                        if valid_imdb_id(imdb_id){
+                            links.execute(params![imdb_id,aid,tvdb])?;
+                            imported_imdb_ids+=1;
+                        }else{
+                            invalid_imdb_ids+=1;
+                        }
+                    }
+                    if imported_imdb_ids>1{multi_imdb_entries+=1;}
                     if let Some(season)=default_season{
                         let mut start=if season == -1{1}else{0};
                         if season>0 {
@@ -492,6 +513,14 @@ pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>
         buf.clear();
     }
     log_progress("animelists",count,started);
+    if multi_imdb_entries>0{
+        tracing::info!(source="animelists",multi_imdb_entries,
+            "imported multi-IMDb entries as separate title associations");
+    }
+    if invalid_imdb_ids>0{
+        tracing::warn!(source="animelists",invalid_imdb_ids,
+            "ignored malformed IMDb identifiers during Anime-Lists import");
+    }
     drop(insert);drop(links);
     if count==0{return Err("Anime-Lists contained no episode mappings".into());}
     let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
@@ -739,6 +768,49 @@ mod tests {
         assert_eq!(links,1);
         drop(db);
         fs::remove_dir_all(&folder).unwrap();
+    }
+    #[test]
+    fn imdb_identifier_validation_rejects_lists_and_malformed_tokens(){
+        for valid in ["tt1663145","tt1809274","tt12345678","tt1234567890"]{
+            assert!(valid_imdb_id(valid), "expected valid IMDb ID: {valid}");
+        }
+        for invalid in ["","tt","tt123456","tt12345678901","tt1234x67",
+            "TT1234567","tt1663145,tt1679583","tt1234567:1:1","unknown"]{
+            assert!(!valid_imdb_id(invalid), "accepted malformed IMDb ID: {invalid}");
+        }
+    }
+    #[test]
+    fn animelists_splits_multiple_imdb_ids_without_publishing_csv_ids(){
+        let folder=std::env::temp_dir().join(format!("matchlab-anime-multi-imdb-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&folder).unwrap();
+        let db_path=folder.join("test.sqlite3");
+        let xml_path=folder.join("anime-list.xml");
+        // Real-world multi-IMDb shape, plus whitespace, duplicate and invalid IDs.
+        fs::write(&xml_path,br#"<anime-list>
+            <anime anidbid="123" tvdbid="456"
+                imdbid=" tt1663145,tt1679583,tt1726641,tt1753855,tt1809274,tt1865375,tt1663145,invalid,tt123 "
+                defaulttvdbseason="1" episodeoffset="0"></anime>
+            </anime-list>"#).unwrap();
+        let db=Connection::open(&db_path).unwrap();
+        db.execute_batch("CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER,start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER,PRIMARY KEY(imdb_id,anidb_id,tvdb_id,trakt_season));
+            CREATE TABLE metadata_state(source TEXT PRIMARY KEY,updated_at TEXT,row_count INTEGER);").unwrap();
+        drop(db);
+        assert_eq!(import_animelists(&db_path,&xml_path).unwrap(),1);
+        let db=Connection::open(&db_path).unwrap();
+        let mut stmt=db.prepare("SELECT imdb_id FROM anime_series_map ORDER BY imdb_id").unwrap();
+        let ids=stmt.query_map([],|r|r.get::<_,String>(0)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(ids, vec![
+            "tt1663145","tt1679583","tt1726641","tt1753855","tt1809274","tt1865375"
+        ].into_iter().map(str::to_owned).collect::<Vec<_>>());
+        let mappings:i64=db.query_row("SELECT count(*) FROM episode_map WHERE anidb_id='123'",
+            [],|r|r.get(0)).unwrap();
+        assert_eq!(mappings,1, "IMDb list must not duplicate AniDB episode mappings");
+        drop(stmt);drop(db);
+        fs::remove_dir_all(folder).unwrap();
     }
     #[test]
     fn malformed_animelists_rolls_back_all_rows_and_metadata_state() {

@@ -755,6 +755,12 @@ fn public_match_response(selected: Option<Value>) -> Value {
         return json!({"sid_start":null,"sid_end":null,"asid_start":null,"asid_end":null});
     };
     let imdb=winner["imdb_id"].as_str().unwrap_or_default();
+    // Refuse to publish a malformed SID even when an older metadata snapshot
+    // still contains a comma-separated Anime-Lists IMDb field. Callers must
+    // receive an unambiguous single title ID or an explicit no-match.
+    if !metadata_import::valid_imdb_id(imdb){
+        return json!({"sid_start":null,"sid_end":null,"asid_start":null,"asid_end":null});
+    }
     let has_range=winner.get("episode_range").is_some();
     let start_season=winner["season"].as_i64();
     let start_episode=winner["episode"].as_i64();
@@ -1447,6 +1453,40 @@ mod tests {
             json!({"sid_start":null,"sid_end":null,"asid_start":null,"asid_end":null}));
     }
     #[test]
+    fn ambiguous_anime_collection_does_not_choose_the_first_imdb_movie(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
+            CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT);
+            INSERT INTO anidb_titles VALUES('123','multiple specials');
+            INSERT INTO anime_series_map VALUES('123','tt1663145');
+            INSERT INTO anime_series_map VALUES('123','tt1679583');
+            INSERT INTO anime_series_map VALUES('123','tt1726641');
+            INSERT INTO anime_series_map VALUES('123','tt1753855');
+            INSERT INTO anime_series_map VALUES('123','tt1809274');
+            INSERT INTO anime_series_map VALUES('123','tt1865375');").unwrap();
+        assert!(anime_identity(&db,"multiple specials").unwrap().is_none(),
+            "ambiguous AniDB alias must not select the first IMDb movie");
+        assert!(anime_candidate(&db,"multiple specials",Some(1),1).unwrap().is_none(),
+            "ambiguous AniDB alias must not guess a film for an episode");
+    }
+    #[test]
+    fn public_api_never_exposes_comma_joined_imdb_id(){
+        let response=public_match_response(Some(json!({
+            "imdb_id":"tt1663145,tt1679583,tt1726641,tt1753855,tt1809274,tt1865375",
+            "season":1,"episode":1,
+            "anime":{"asid":"123:1"}
+        })));
+        assert_eq!(response,json!({"sid_start":null,"sid_end":null,
+            "asid_start":null,"asid_end":null}));
+        let valid=public_match_response(Some(json!({
+            "imdb_id":"tt1663145","season":1,"episode":1
+        })));
+        assert_eq!(valid["sid_start"],"tt1663145:1:1");
+        assert_eq!(valid["sid_end"],"tt1663145:1:1");
+    }
+    #[test]
     fn parse_cache_returns_full_parser_fields() {
         let first=parse_cached("Supernatural.S02E01.1080p.WEB-DL").unwrap();
         let second=parse_cached("Supernatural.S02E01.1080p.WEB-DL").unwrap();
@@ -1594,10 +1634,10 @@ mod tests {
             CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT DEFAULT '',tvdb_season INTEGER,
                 anidb_season INTEGER,map TEXT,offset INTEGER,start INTEGER,end INTEGER);
             INSERT INTO anidb_titles VALUES('123','exampleanime');
-            INSERT INTO anime_series_map(anidb_id,imdb_id) VALUES('123','tt999');
+            INSERT INTO anime_series_map(anidb_id,imdb_id) VALUES('123','tt0000999');
             INSERT INTO episode_map(anidb_id,tvdb_season,anidb_season,map,offset,start,end) VALUES('123',1,1,'',0,1,12);").unwrap();
         let found = anime_candidate(&db,"exampleanime",Some(1),4).unwrap().unwrap();
-        assert_eq!(found["imdb_id"],"tt999");
+        assert_eq!(found["imdb_id"],"tt0000999");
         assert_eq!(found["anidb_episode"],4);
         assert!(anime_candidate(&db,"exampleanime",Some(2),4).unwrap().is_none());
         db.execute("INSERT INTO episode_map(anidb_id,tvdb_season,anidb_season,map,offset,start,end) VALUES('123',1,1,'',1,1,12)",[]).unwrap();

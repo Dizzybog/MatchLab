@@ -296,6 +296,9 @@ fn anime_aliases_uncached(db:&Connection,key:&str,min_prefix:usize)->Result<Vec<
     for addr in hits {
         let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
         let Some(imdb)=doc.get_first(search.id).and_then(|v|v.as_str())else{continue};
+        // Old metadata snapshots may still contain comma-joined Anime-Lists
+        // IDs until their next refresh. Do not treat them as valid titles.
+        if !crate::metadata_import::valid_imdb_id(imdb){continue;}
         let Some(anidb)=doc.get_first(search.anime_id).and_then(|v|v.as_str())else{continue};
         let Some(alias)=doc.get_first(search.anime).and_then(|v|v.as_str())else{continue};
         let result=AnimeAlias{anidb_id:anidb.to_owned(),
@@ -452,6 +455,9 @@ fn candidates_internal(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,lim
     for addr in hits {
         let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
         if let Some(imdb)=doc.get_first(search.id).and_then(|v|v.as_str()){
+            // Old AniDB alias indexes may contain a comma-separated IMDb
+            // field. Never expose that string as a candidate ID.
+            if anime_only && !crate::metadata_import::valid_imdb_id(imdb){continue;}
             if seen.insert(imdb.to_string()){ids.push(imdb.to_string());}
         }
         // Do not truncate candidates before deterministic V4 ranking.
@@ -661,6 +667,41 @@ mod persistence_tests {
     }
 
     #[test]
+    fn stale_multi_imdb_aliases_are_not_returned_as_valid_candidates(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER,
+                title TEXT NOT NULL DEFAULT '',category TEXT NOT NULL DEFAULT 'movie',
+                region TEXT NOT NULL DEFAULT '',original INTEGER NOT NULL DEFAULT 1,
+                ordering INTEGER NOT NULL DEFAULT 0,type TEXT NOT NULL DEFAULT 'movie');
+            CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
+            CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT);
+            INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt1663145','valid title',2020);
+            INSERT INTO anidb_titles VALUES('123','shared anime');
+            INSERT INTO anime_series_map VALUES('123','tt1663145,tt1679583');").unwrap();
+        assert!(anime_aliases(&db,"shared anime",6).unwrap().is_empty(),
+            "legacy CSV identifier must not enter anime priority");
+        assert!(anime_candidates(&db,"shared anime").unwrap().is_empty(),
+            "legacy CSV identifier must not enter IMDb candidate selection");
+    }
+    #[test]
+    fn multi_imdb_aliases_preserve_ambiguity_instead_of_picking_first(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER,
+                title TEXT NOT NULL DEFAULT '',category TEXT NOT NULL DEFAULT 'movie',
+                region TEXT NOT NULL DEFAULT '',original INTEGER NOT NULL DEFAULT 1,
+                ordering INTEGER NOT NULL DEFAULT 0,type TEXT NOT NULL DEFAULT 'movie');
+            CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
+            CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT);
+            INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt1663145','valid title',2020);
+            INSERT INTO anidb_titles VALUES('123','shared anime');
+            INSERT INTO anime_series_map VALUES('123','tt1663145');
+            INSERT INTO anime_series_map VALUES('123','tt1679583');").unwrap();
+        let aliases=anime_aliases(&db,"shared anime",6).unwrap();
+        assert_eq!(aliases.len(),2);
+        assert_eq!(aliases[0].imdb_id,"tt1663145");
+        assert_eq!(aliases[1].imdb_id,"tt1679583");
+    }
+    #[test]
     fn regex_metacharacters_are_literal() {
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER,
@@ -681,13 +722,13 @@ mod persistence_tests {
                 ordering INTEGER NOT NULL DEFAULT 0,type TEXT NOT NULL DEFAULT 'movie');
             CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
             CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT);
-            INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt001','onepiece',2000);
+            INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt0000001','onepiece',2000);
             INSERT INTO anidb_titles VALUES('100','onepiece');
             INSERT INTO anidb_titles VALUES('200','onepiecealabasta');
             INSERT INTO anidb_titles VALUES('300','ones');
-            INSERT INTO anime_series_map VALUES('100','tt001');
-            INSERT INTO anime_series_map VALUES('200','tt001');
-            INSERT INTO anime_series_map VALUES('300','tt001');").unwrap();
+            INSERT INTO anime_series_map VALUES('100','tt0000001');
+            INSERT INTO anime_series_map VALUES('200','tt0000001');
+            INSERT INTO anime_series_map VALUES('300','tt0000001');").unwrap();
         let results=anime_aliases(&db,"onepiecealabastaremastered",6).unwrap();
         assert_eq!(results.len(),2);
         assert_eq!(results[0].clean_title,"onepiecealabasta");
