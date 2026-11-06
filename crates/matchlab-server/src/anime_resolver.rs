@@ -118,6 +118,24 @@ pub fn resolve_absolute(db:&Connection,imdb:&str,episode:i64)->rusqlite::Result<
     Ok(resolve_absolute_preloaded(imdb,episode,&links,&maps))
 }
 
+/// Check two absolute episode endpoints against one crosswalk snapshot.
+/// This is a cheap eligibility check when multiple unrelated AniDB works
+/// share an alias (for example One Piece films vs. the long-running series).
+/// The caller must still validate the entire requested range before publishing.
+pub fn resolve_absolute_endpoints(
+    db:&Connection,imdb:&str,start:i64,end:i64,
+)->rusqlite::Result<(Option<Episode>,Option<Episode>)>{
+    if start<=0 || end<start || end-start>=10_000 {
+        return Ok((None,None));
+    }
+    let links=links(db,imdb)?;
+    let maps=mappings(db,&links,true)?;
+    Ok((
+        resolve_absolute_preloaded(imdb,start,&links,&maps),
+        resolve_absolute_preloaded(imdb,end,&links,&maps),
+    ))
+}
+
 /// Load the AniDB/TVDB crosswalk once per batch, not once per episode.
 /// This prevents a 300-episode torrent from issuing hundreds of SQLite reads
 /// while still checking every episode independently for ambiguous mappings.

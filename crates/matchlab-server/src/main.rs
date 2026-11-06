@@ -333,6 +333,40 @@ fn verified_anime_subfolder_title(
     Ok(None)
 }
 
+/// Verify an unmarked anime interval using indexed exact AniDB aliases.
+/// Film and OVA titles can share the long-running TV series' alias. Preserve
+/// partial-range diagnostics for an unambiguous single IMDb association; for
+/// collisions, require exactly one IMDb identity with an entirely mapped span.
+fn verified_unmarked_anime_range_imdb(
+    db:&Connection,key:&str,start:i64,end:i64,
+)->Result<Option<String>,String>{
+    let ids=tantivy_search::anime_aliases(db,key,6)?
+        .into_iter().filter(|alias|alias.clean_title==key)
+        .map(|alias|alias.imdb_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    if ids.len()==1{return Ok(ids.into_iter().next());}
+    // Bound the cost of checking generic aliases shared by many works.
+    if ids.len()>32 || start<=0 || end<start || end-start>=1_000 {
+        return Ok(None);
+    }
+    let mut verified=None;
+    for imdb in ids {
+        // Two endpoints are cheap to validate using one preloaded crosswalk.
+        // Most colliding movie/OVA identities cannot map both endpoints.
+        let (first,last)=anime_resolver::resolve_absolute_endpoints(
+            db,&imdb,start,end).map_err(|error|error.to_string())?;
+        if first.is_none() || last.is_none(){continue;}
+        let range=mapped_absolute_range(db,&imdb,start,end)?;
+        if range["complete"]!=true || range["segments"]
+            .as_array().is_none_or(Vec::is_empty){continue;}
+        if verified.replace(imdb).is_some(){
+            // Distinct works fully cover the range: never choose one by rank.
+            return Ok(None);
+        }
+    }
+    Ok(verified)
+}
+
 fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> {
     if req.title.trim().is_empty() || req.title.len() > 4096 { return Err("title must be 1–4096 bytes".into()); }
     let mut parsed_value=parse_cached(&req.title)?;
@@ -351,11 +385,8 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
              v.get("end").and_then(Value::as_i64))) {
             let candidate_title=candidate_title.to_owned();
             let key=matchlab_matcher::clean_title(&candidate_title);
-            let exact_ids=tantivy_search::anime_aliases(&db,&key,6)?
-                .into_iter().filter(|a|a.clean_title==key)
-                .map(|a|a.imdb_id).collect::<std::collections::BTreeSet<_>>();
-            if exact_ids.len()==1
-                && let Some(imdb)=exact_ids.into_iter().next() {
+            if let Some(imdb)=verified_unmarked_anime_range_imdb(
+                &db,&key,start,end)? {
                 verified_anime_range_imdb=Some(imdb);
                 if let Some(parsed)=parsed_value.as_object_mut(){
                     parsed.insert("title".into(),json!(candidate_title));
@@ -1082,6 +1113,91 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn one_piece_batch_with_seven_anidb_aliases_uses_unique_complete_crosswalk(){
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-one-piece-batch-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
+            region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES('tt0388629','One Piece','onepiece',1999,
+                'series','',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt0388629',23);
+            INSERT INTO season_episodes VALUES('tt0388629',21,194,194);
+            INSERT INTO season_episodes VALUES('tt0388629',22,70,70);
+            INSERT INTO anime_series_map VALUES('tt0388629','69','81797',1);
+            INSERT INTO anime_ids VALUES('tt0388629','anidb','69');
+            INSERT INTO episode_map VALUES('69','81797',1,-1,1,0,0,'');
+            INSERT INTO episode_map VALUES('69','81797',1,21,892,1085,-891,'');
+            INSERT INTO episode_map VALUES('69','81797',1,22,1086,1155,-1085,'');").unwrap();
+        // Real-world data contains several One Piece films/OVAs sharing the
+        // exact normalized alias; only the main series has a crosswalk
+        // that spans absolute episodes 892..1089.
+        for (aid,imdb) in [
+            ("1253","tt0997084"),("2036","tt1010435"),("2644","tt1018764"),
+            ("2736","tt1012788"),("4851","tt1037116"),("893","tt0832449"),
+        ]{
+            db.execute("INSERT INTO anime_series_map VALUES(?1,?2,'',0)",
+                rusqlite::params![imdb,aid]).unwrap();
+            db.execute("INSERT INTO anime_ids VALUES(?1,'anidb',?2)",
+                rusqlite::params![imdb,aid]).unwrap();
+            db.execute("INSERT INTO anidb_titles VALUES(?1,'One Piece','onepiece','main','en')",
+                [aid]).unwrap();
+        }
+        db.execute("INSERT INTO anidb_titles VALUES('69','One Piece','onepiece','main','en')",[])
+            .unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        let title="[Erai-raws] One Piece - 0892 ~ 1089 [720p][Multiple Subtitle]";
+        let match_title=||diagnose(&path,&MatchRequest{
+            title:title.into(),year:None,series:None}).unwrap();
+        let result=match_title();
+        assert_eq!(result.parsed["anime_title_verified"],true);
+        assert_eq!(result.parsed["episode_start"],892);
+        assert_eq!(result.parsed["episode_end"],1089);
+        let selected=result.selected.expect("verified full-range One Piece match");
+        assert_eq!(selected["imdb_id"],"tt0388629");
+        assert_eq!(selected["episode_range"]["complete"],true);
+        assert_eq!(selected["episode_range"]["unmapped_count"],0);
+        assert_eq!(selected["episode_range"]["segments"].as_array().unwrap().len(),2);
+        assert_eq!(selected["season"],21);
+        assert_eq!(selected["episode"],1);
+        assert_eq!(selected["season_end"],22);
+        assert_eq!(selected["episode_end"],4);
+        assert_eq!(public_match_response(Some(selected)),json!({
+            "sid_start":"tt0388629:21:1","sid_end":"tt0388629:22:4",
+            "asid_start":"69:892","asid_end":"69:1089"
+        }));
+        // If another AniDB work also maps the complete span, the same
+        // exact title becomes ambiguous and no coordinates are promoted.
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("INSERT INTO episode_map VALUES('1253','81797',1,-1,1,0,0,'');
+            INSERT INTO episode_map VALUES('1253','81797',1,21,892,1085,-891,'');
+            INSERT INTO episode_map VALUES('1253','81797',1,22,1086,1155,-1085,'');").unwrap();
+        assert!(verified_unmarked_anime_range_imdb(&db,"onepiece",892,1089)
+            .unwrap().is_none());
+        drop(db);
+        let ambiguous=match_title();
+        assert!(ambiguous.parsed.get("anime_title_verified").is_none());
+        assert!(ambiguous.parsed.get("episode_start").is_none());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
     #[test]
     fn anime_batches_verify_unmarked_ranges_and_keep_incomplete_endpoints_null(){
         let suffix=std::time::SystemTime::now()
