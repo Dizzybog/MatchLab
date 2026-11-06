@@ -22,12 +22,12 @@ services:
     image: ghcr.io/dizzybog/matchlab:latest
     container_name: matchlab
     restart: unless-stopped
-    cpus: 2.0
-    mem_limit: 8g
+    cpus: 1.0
+    mem_limit: 6g
     pids_limit: 256
     environment:
       RUST_LOG: matchlab_server=info
-      MATCHLAB_MAX_CONCURRENT_MATCHES: "4"
+      MATCHLAB_MAX_CONCURRENT_MATCHES: "40"
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
@@ -54,7 +54,7 @@ On first startup, MatchLab downloads **seven public metadata feeds** and builds 
 
 For updates, run `docker compose pull && docker compose up -d`.
 
-> **Resource limits:** The example restricts MatchLab to **2 CPUs, 8 GB RAM, and 256 processes/threads**, with up to **4 simultaneous matching operations**. These are starting values, not verified minimum requirements. Increase the RAM/CPU limits if full metadata imports exceed them. Disk space must cover both the active and incoming metadata/index generations.
+> **Resource limits:** The example restricts MatchLab to **1 CPU, 6 GB RAM, and 256 processes/threads**, with up to **40 simultaneous matching operations**. These are starting values, not verified minimum requirements. Increase the RAM/CPU limits if full metadata imports exceed them. Disk space must cover both the active and incoming metadata/index generations.
 
 ## HTTP API
 
@@ -109,7 +109,7 @@ IMDb basics, alternative titles, episodes, ratings, animeApi, Anime-Lists, and A
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `MATCHLAB_HISTORY_DB` | `/data/history.sqlite3` | Separate request-history SQLite file; only the last 24 hours are included in dashboard history and statistics |
+| `MATCHLAB_HISTORY_DB` | `/data/history.sqlite3` | Separate history database; latest 1,000 request details and independent 14-day statistics |
 | `MATCHLAB_DB` | `/data/metadata.sqlite3` | Metadata SQLite file |
 | `MATCHLAB_HOST` | `0.0.0.0:8765` in Docker | HTTP listener |
 | `MATCHLAB_METADATA_REFRESH_HOURS` | `168` | Refresh every 1–720 hours |
@@ -117,7 +117,7 @@ IMDb basics, alternative titles, episodes, ratings, animeApi, Anime-Lists, and A
 | `MATCHLAB_METADATA_URLS` | Built-in HTTPS feeds | Optional seven-source override; legacy six-source lists are supported |
 | `RUST_LOG` | `matchlab_server=info` | Logging verbosity |
 
-**History retention:** The dashboard keeps a rolling 24-hour view (UTC), including matched, unmatched, and error requests. A background maintenance task removes expired rows at startup and every five minutes, even when no new requests arrive. Cleanup runs off the asynchronous HTTP request path. Cleanup does not depend on metadata refresh and never deletes IMDb metadata. SQLite normally reuses freed database pages instead of reducing the file length immediately. After an upgrade from an older unlimited-history build, run `VACUUM` during a maintenance window to reclaim disk space if needed; do not copy a live SQLite database file without a consistent backup procedure.
+**History and statistics retention:** The dashboard keeps at most **1,000 latest individual requests** (including full diagnostics), regardless of age. Its **Requests, Matched, Unmatched, Errors, and average latency** statistics cover all requests from the **last 14 days (UTC, minute precision)**, not just those 1,000 rows. A separate SQLite `request_minute_stats` table accumulates counters by minute; the dashboard activity chart groups them into daily totals. During the first startup after upgrading, the last 14 days are backfilled from any existing legacy request history **before** old request rows are removed. An indexed SQLite trigger evicts only the oldest request detail row on each insert once the 1,000-row cap is reached; it never alters aggregate statistics. A background maintenance task additionally runs at startup and every five minutes to remove bulk legacy history and expire aggregate buckets older than 14 days, off the asynchronous HTTP executor. This does not modify IMDb metadata. SQLite generally reuses freed pages instead of immediately shrinking the existing file; run `VACUUM` during a maintenance window once after upgrading if reclaiming disk space is important. Back up a live SQLite database using a consistent backup method, not a direct file copy.
 
 For importer options and the exact source URLs, see [Metadata lifecycle](docs/LOCAL_METADATA.md). For index internals and crash-safety considerations, see [Tantivy architecture](docs/TANTIVY_RUNTIME.md).
 
