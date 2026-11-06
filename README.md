@@ -68,6 +68,7 @@ MatchLab listens on port **8765**. Both `GET` and `POST` accept `title` (or `t_t
 | Endpoint | Description |
 | --- | --- |
 | `GET /match`, `POST /match` | Match a release to IMDb and optional AniDB coordinates |
+| `GET /alias`, `POST /alias` | List original IMDb/AniDB titles and all IDs matching an exact normalized alias |
 | `GET /parse`, `POST /parse` | Parse the full release name without metadata lookups |
 | `POST /debug/match` | Show candidate ranking and episode-mapping details |
 | `GET /health` | Check whether indexed metadata is ready |
@@ -94,6 +95,22 @@ Example response:
 ```
 
 `/match` **always returns exactly these four fields**. Movies use the IMDb title ID in both SID fields; TV episodes add season/episode coordinates. Verified anime episodes may also include AniDB IDs. If nothing can be matched reliably, the corresponding values are `null`.
+
+### Find all aliases by IMDb ID, AniDB ID, or exact title
+
+```bash
+curl -G --data-urlencode 'imdb_id=tt0388629' http://127.0.0.1:8765/alias
+curl -G --data-urlencode 'anidb_id=69' http://127.0.0.1:8765/alias
+curl -G --data-urlencode 'query=One Piece' http://127.0.0.1:8765/alias
+```
+
+`/alias` returns all matching `imdb_ids` and `anidb_ids`, plus
+original aliases with language, source and optional year. Search is
+**exact after MatchLab normalization** (not fuzzy or prefix search).
+`GET` and `POST` accept the same fields; use `q` for automatic ID
+or text detection. Alias objects are paginated; use `limit`/`offset`
+with `total`/`has_more` for large result sets. See
+[API documentation](docs/API.md#alias-lookup-get-alias-post-alias).
 
 ### Parse or debug
 
