@@ -57,76 +57,111 @@ The JSON contains every field the parser recognizes, such as `title`, `seasons`,
 
 ### Alias lookup: `GET /alias`, `POST /alias`
 
-Returns **every exact normalized IMDb or AniDB title association**, without
-ranking, prefix matches, or selecting a single IMDb winner. Search is
-performed exclusively against the immutable Tantivy index, never through
-SQLite title scans.
+Returns all exact normalized IMDb/AniDB title associations, without ranking,
+prefix scanning or choosing a single winner. The indexed sources contain the
+IMDb title/AKA catalog, AniDB titles and all identities loaded into
+`anime_ids` by animeApi: **AniDB, TVDB, MyAnimeList (MAL), AniList and Kitsu**.
 
-Pass **exactly one** of the following parameters in the query string or
-as a POST JSON body:
+Pass exactly one selector in the query string or in a POST JSON body:
 
-- `imdb_id`: every indexed IMDb alias and linked AniDB title/name
-- `anidb_id`: every indexed name for that AniDB work, including titles
-  without any IMDb association
-- `query`: exact normalized title matching, across both IMDb and AniDB;
-  all independent matching IMDb and AniDB identifiers are returned
-- `q`: convenient automatic interpretation of `tt<digits>` as an IMDb
-  ID, a positive numeric value as an AniDB ID, or anything else as a title
-
-Examples:
+| Selector | Description |
+| --- | --- |
+| `imdb_id=tt0388629` | Every IMDb alias, linked AniDB alias and alternate ID |
+| `anidb_id=69` | Names for a given AniDB work and IDs of its linked IMDb group(s) |
+| `kitsu_id=987` | Titles linked to a Kitsu ID |
+| `anilist_id=101` | Titles linked to an AniList ID |
+| `mal_id=21` | Titles linked to a MyAnimeList ID |
+| `tvdb_id=81797` | Titles linked to a TVDB ID |
+| `query=One Piece` | Exact normalized IMDb and AniDB title, all matching IDs |
+| `q=kitsu:987` | Automatic ID detection, also `mal:`, `anilist:`, `tvdb:`, `anidb:`, `imdb:` |
+| `id_type=kitsu&id=987` | Generic typed ID lookup for any type imported in `anime_ids` |
 
 ```bash
+curl -G --data-urlencode 'query=One Piece' http://127.0.0.1:8765/alias
 curl -G --data-urlencode 'imdb_id=tt0388629' http://127.0.0.1:8765/alias
 curl -G --data-urlencode 'anidb_id=69' http://127.0.0.1:8765/alias
-curl -G --data-urlencode 'query=One Piece' http://127.0.0.1:8765/alias
+curl -G --data-urlencode 'kitsu_id=987' http://127.0.0.1:8765/alias
 curl -X POST http://127.0.0.1:8765/alias \
   -H 'Content-Type: application/json' \
-  -d '{"q":"Psycho-Pass"}'
+  -d '{"id_type":"anilist","id":"101"}'
 ```
 
-Example *shape* (identifiers and lists depend on the loaded metadata):
+The response preserves the existing `mode`, `input`, `normalized`,
+`imdb_ids`, `anidb_ids`, `aliases`, `total`, `limit`, `offset` and
+`has_more` fields, and adds `tvdb_ids`, `mal_ids`, `anilist_ids`,
+`kitsu_ids`, `ids` (grouped by type), and `linked_ids_by_imdb`.
+The latter preserves IMDb-group provenance to avoid suggesting that a
+Kitsu or AniList ID applies directly to every AniDB part in a collection.
+For text lookup, `imdb_ids` and `anidb_ids` continue to refer only to
+**exact normalized alias matches**; other ID families are associated
+through those IMDb identities. Multiple works with identical aliases or
+third-party IDs are all preserved.
+
+The underlying Tantivy schema stores names, AniDB IDs, and typed alternate
+identities as separately indexed documents. **No SQLite title scans** run
+on requests. The index has one-time schema7 regeneration on image upgrade
+from the existing SQLite metadata; this does not re-download metadata.
+
+Defaults: 500 aliases/page, up to 2,000 using `limit` and `offset`.
+IDs are assembled across all hits, independently of `aliases` pagination.
+Input is at most 512 UTF-8 bytes, and conflicting selectors are rejected.
+
+### Bidirectional episode conversion: `GET /episode/resolve`, `POST /episode/resolve`
+
+Convert canonical IMDb episode coordinates into the corresponding AniDB
+identity and AniDB episode number, **or convert back** from AniDB using
+the same verified Anime-Lists/TVDB crosswalk already used by `/match`.
+
+```bash
+# IMDb season 21, episode 1 -> AniDB 69, absolute episode 892
+curl -G --data-urlencode 'imdb_id=tt0388629' \
+  --data-urlencode 'season=21' --data-urlencode 'episode=1' \
+  http://127.0.0.1:8765/episode/resolve
+
+# AniDB 69, episode 892 -> IMDb season 21, episode 1
+curl -G --data-urlencode 'anidb_id=69' \
+  --data-urlencode 'episode=892' \
+  http://127.0.0.1:8765/episode/resolve
+
+curl -X POST http://127.0.0.1:8765/episode/resolve \
+  -H 'Content-Type: application/json' \
+  -d '{"anidb_id":"69","episode":1089}'
+```
+
+Example response for a **unique** reverse mapping (dependent on imported
+Anime-Lists metadata):
 
 ```json
 {
-  "mode": "title",
-  "input": "One Piece",
-  "normalized": "onepiece",
-  "imdb_ids": ["tt0388629", "tt0997084"],
-  "anidb_ids": ["1253", "69"],
-  "aliases": [
+  "direction": "anidb_to_imdb",
+  "input": {"anidb_id": "69", "episode": 892},
+  "found": true,
+  "ambiguous": false,
+  "count": 1,
+  "selected": {
+    "imdb_id": "tt0388629", "season": 21, "episode": 1,
+    "anidb_id": "69", "anidb_episode": 892,
+    "sid": "tt0388629:21:1", "asid": "69:892"
+  },
+  "matches": [
     {
-      "source": "anidb", "name": "One Piece",
-      "normalized": "onepiece",
-      "imdb_id": "tt0997084", "anidb_id": "1253",
-      "language": "en", "title_type": "main"
+      "imdb_id": "tt0388629", "season": 21, "episode": 1,
+      "anidb_id": "69", "anidb_episode": 892,
+      "sid": "tt0388629:21:1", "asid": "69:892"
     }
-  ],
-  "total": 4,
-  "limit": 500,
-  "offset": 0,
-  "has_more": false
+  ]
 }
 ```
 
-The example is illustrative and deliberately omits other alias objects.
-Each alias includes the original title, its normalized form, its source,
-and any **verified, linked** identifiers. IMDb titles can also include
-`year`; AniDB titles can include `language` and `title_type`.
-Unlinked AniDB names return no `imdb_id`, rather than inventing one.
-
-IDs are deduplicated across the **entire** result, not just the page.
-`aliases` contains up to `limit` rows (default 500, maximum 2,000) from
-`offset` (default 0, maximum 1,000,000), with deterministic ordering,
-`total` and `has_more`. Continue using the next offset to retrieve
-every alias when there are more than one page. Input must be 1–512
-UTF-8 bytes; multiple search selectors or invalid IDs receive HTTP 400.
-
-The new index schema stores original AniDB aliases, their languages and
-name types, and searchable AniDB IDs. Upgrading from the previous image
-requires a **one-time Tantivy schema6 index build at startup** from the
-existing SQLite metadata snapshot. This does not redownload metadata or
-change the primary matcher's API. The old Tantivy generations remain on
-disk for rollback until separately pruned.
+`selected` is null when the conversion is missing **or ambiguous**.
+When two verified IMDb records can represent the same AniDB episode,
+`matches` reports both and `ambiguous` is true. No arbitrary selection,
+unverified season-1 default or IMDb title ranking is applied.
+The reverse lookup derives candidate coordinates from explicit episode
+maps, season offsets and split parts, then **rechecks each result through
+the existing IMDb → AniDB resolver**. Canonical public `/match` remains
+unchanged; the conversion API is an explicit metadata query, not a torrent
+name parser.
 
 ### Airdate matching (no API key)
 

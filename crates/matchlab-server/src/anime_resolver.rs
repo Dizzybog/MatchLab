@@ -197,6 +197,78 @@ fn resolve_absolute_preloaded(
     let (anidb_id,anidb_episode,season,episode)=candidates.into_iter().next().unwrap();
     Some(Episode{imdb_id:imdb.into(),season,episode,anidb_id,anidb_episode})
 }
+
+/// Reverse lookup: AniDB work + AniDB-local (often absolute) episode number
+/// -> all independently verifiable IMDb season/episode coordinates.
+///
+/// A TVDB family may share several AniDB parts. First derive candidates from
+/// that part's real episode_map rows, then run the *existing* forward resolver
+/// against each coordinate. This ensures both directions agree on explicit
+/// pairs, offsets, split cours, and ambiguity rules. Never guess season 1.
+pub fn resolve_anidb(
+    db:&Connection,anidb_id:&str,episode:i64,
+)->rusqlite::Result<Vec<Episode>>{
+    if episode<=0||episode>99_999{return Ok(Vec::new());}
+    let mut stmt=db.prepare(
+        "SELECT DISTINCT imdb_id FROM anime_series_map
+           WHERE anidb_id=?1
+         UNION
+         SELECT DISTINCT l.imdb_id
+           FROM episode_map e
+           JOIN anime_series_map l ON l.tvdb_id=e.tvdb_id
+          WHERE e.anidb_id=?1 AND e.tvdb_id<>'' AND l.tvdb_id<>''")?;
+    let imdbs=stmt.query_map([anidb_id],|r|r.get::<_,String>(0))?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+    let mut results=BTreeSet::new();
+    for imdb in imdbs {
+        if !crate::metadata_import::valid_imdb_id(&imdb){continue;}
+        let linked=links(db,&imdb)?;
+        let maps=mappings(db,&linked,false)?;
+        let relevant=linked.iter().filter(|l|l.anidb==anidb_id)
+            .collect::<Vec<_>>();
+        for link in relevant {
+            for m in maps.iter().filter(|m|m.anidb==anidb_id &&
+                (link.tvdb.is_empty()||link.tvdb==m.tvdb)&&m.tv_season>0){
+                let split_part=split(link,m,&linked,&maps);
+                let season=if split_part{link.trakt}else{m.tv_season};
+                if season<=0||season>9_999{continue;}
+                let ep_candidates:Vec<i64>=if split_part{
+                    if episode<m.start.max(1) || (m.end>0&&episode>m.end){
+                        Vec::new()
+                    }else{vec![episode-m.start.max(1)+1]}
+                }else{
+                    let pairs=explicit_pairs(&m.map);
+                    if !pairs.is_empty(){
+                        // Non-bijective maps may associate one AniDB episode
+                        // with several TVDB episodes: preserve every result.
+                        pairs.into_iter().filter_map(|(ani,tv)|
+                            (ani==episode).then_some(tv)).collect()
+                    }else if episode>=m.start.max(1) &&
+                        (m.end<=0||episode<=m.end){
+                        vec![episode+m.offset]
+                    }else{Vec::new()}
+                };
+                for tv_episode in ep_candidates{
+                    if tv_episode<=0||tv_episode>99_999{continue;}
+                    // Re-run the verified forward conversion with this
+                    // *preloaded* snapshot. Reject aliases/overlap where it
+                    // chooses a different AniDB episode or returns None.
+                    if let Some(forward)=resolve_season_preloaded(
+                        &imdb,season,tv_episode,&linked,&maps)
+                        && forward.anidb_id==anidb_id
+                        && forward.anidb_episode==episode {
+                        results.insert((imdb.clone(),season,tv_episode));
+                    }
+                }
+            }
+        }
+    }
+    Ok(results.into_iter().map(|(imdb_id,season,tv_episode)|Episode{
+        imdb_id,season,episode:tv_episode,anidb_id:anidb_id.to_owned(),
+        anidb_episode:episode,
+    }).collect())
+}
+
 #[cfg(test)]
 mod tests{
     use super::*;
