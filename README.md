@@ -22,12 +22,12 @@ services:
     image: ghcr.io/dizzybog/matchlab:latest
     container_name: matchlab
     restart: unless-stopped
-    cpus: 2.0
-    mem_limit: 8g
+    cpus: 1.0
+    mem_limit: 6g
     pids_limit: 256
     environment:
       RUST_LOG: matchlab_server=info
-      MATCHLAB_MAX_CONCURRENT_MATCHES: "4"
+      MATCHLAB_MAX_CONCURRENT_MATCHES: "40"
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
@@ -54,7 +54,7 @@ On first startup, MatchLab downloads **seven public metadata feeds** and builds 
 
 For updates, run `docker compose pull && docker compose up -d`.
 
-> **Resource limits:** The example restricts MatchLab to **2 CPUs, 8 GB RAM, and 256 processes/threads**, with up to **4 simultaneous matching operations**. These are starting values, not verified minimum requirements. Increase the RAM/CPU limits if full metadata imports exceed them. Disk space must cover both the active and incoming metadata/index generations.
+> **Resource limits:** The example restricts MatchLab to **1 CPU, 6 GB RAM, and 256 processes/threads**, with up to **40 simultaneous matching operations**. These are starting values, not verified minimum requirements. Increase the RAM/CPU limits if full metadata imports exceed them. Disk space must cover both the active and incoming metadata/index generations.
 
 ## HTTP API
 
@@ -109,7 +109,7 @@ IMDb basics, alternative titles, episodes, ratings, animeApi, Anime-Lists, and A
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `MATCHLAB_HISTORY_DB` | `/data/history.sqlite3` | Separate request-history SQLite file; only the last 24 hours are included in dashboard history and statistics |
+| `MATCHLAB_HISTORY_DB` | `/data/history.sqlite3` | Separate history database; latest 1,000 request details and independent 14-day statistics |
 | `MATCHLAB_DB` | `/data/metadata.sqlite3` | Metadata SQLite file |
 | `MATCHLAB_HOST` | `0.0.0.0:8765` in Docker | HTTP listener |
 | `MATCHLAB_METADATA_REFRESH_HOURS` | `168` | Refresh every 1–720 hours |
