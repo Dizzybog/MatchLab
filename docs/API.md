@@ -77,11 +77,40 @@ No API key is required. If the upstream feed fails or the date is missing
 or ambiguous, MatchLab does not invent episode coordinates. The existing
 IMDb metadata database is never modified by these lookups.
 
-### Shared 30-second cache
+### Matching caches: exact-input parser and shared IMDb/AniDB lookup
 
-Both APIs use the same native Rust parser. A bounded, in-memory cache stores parsed results by **exact input title** for **30 seconds**. If a client calls `/parse` and then `/match` with the same title, the second request can reuse the parsing result; the reverse order works too. `/match` always performs its own metadata matching and does not require a preceding parse call.
+The native Rust parser maintains a **30-second exact-input cache** shared by
+`/parse` and `/match` (up to 1,024 entries). The key is the complete input
+string, including any file path.
 
-The cache is process-local (not shared between replicas), has a maximum of 1,024 entries, and does not persist across restarts. The cache stores parsing results, **not** full match results.
+For repeated matches of **different file paths** in one torrent, MatchLab
+additionally caches the expensive, deterministic **Tantivy title and anime
+identity lookup candidates**. The cache uses the normalized title query,
+lookup kind (exact, prefix/suffix, AniDB alias or identity), and the current
+**immutable metadata generation**. The same title lookup is reused by
+different episodes without repeating the Tantivy search. Each lookup has
+a 10-minute TTL; caches are process-local, bounded to 512 keys per type, and
+skip candidate sets larger than 256 items to avoid retaining expensive
+high-cardinality title lookups. Simultaneous requests for the same key
+share a single in-flight lookup instead of independently executing it.
+
+**Crucially, final SID/ASID results are not shared between files.** The
+`year`, `series`, season, episode, anime subfolder/part, and all
+crosswalk validation are still applied **for each file**. This avoids
+accidentally returning the episode 1 SID for episode 2, or conflating
+different anime parts. Lookup errors are not cached. SQLite relational
+metadata is not cached, and all text discovery remains in Tantivy.
+
+The metadata generation key prevents old title candidates from being reused
+after a full IMDb/AniDB refresh. In-memory SQLite databases bypass the
+process-wide Tantivy lookup cache altogether so separate test databases
+cannot mix identities.
+
+There is currently **no infohash identifier on the /match API**: this is
+generation-safe **shared-title caching**, which benefits torrent siblings
+without requiring clients to send a new field. A future explicit
+infohash-keyed torrent context cache would need additional validity guards
+for files with conflicting years and anime subfolder titles.
 
 For detailed ranking, candidates, episode mapping segments and debugging, use `POST /debug/match`. The dashboard at `/` also uses diagnostic data.
 

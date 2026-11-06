@@ -9,6 +9,7 @@ mod anime_resolver;
 mod anime_title;
 mod country_aliases;
 mod dashboard_history;
+mod query_cache;
 use axum::{extract::{Query, State}, http::{StatusCode,header}, routing::{get,post}, Json, Router};
 use rusqlite::{Connection, OpenFlags};
 #[cfg(test)]
@@ -1277,6 +1278,59 @@ mod tests {
             .selected.unwrap();
         assert_eq!(child_override["imdb_id"],"tt9999900",
             "the leaf's 2006 production year must override its 2005 parent");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
+    fn files_with_a_shared_torrent_title_reuse_candidates_but_not_episode_coordinates(){
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-shared-torrent-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
+            region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,
+                tvdb_season INTEGER,start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            CREATE TABLE metadata_state(source TEXT PRIMARY KEY,
+                updated_at TEXT NOT NULL,row_count INTEGER NOT NULL);
+            INSERT INTO metadata_state VALUES('tantivy_generation','v3-shared-torrent',0);
+            INSERT INTO titles VALUES('tt0056751','Doctor Who','doctorwho',1963,
+                'series','',1,0,'tvSeries');
+            INSERT INTO titles VALUES('tt0436992','Doctor Who','doctorwho',2005,
+                'series','',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt0056751',26);
+            INSERT INTO seasons VALUES('tt0436992',14);
+            INSERT INTO season_episodes VALUES('tt0056751',1,42,42);
+            INSERT INTO season_episodes VALUES('tt0436992',1,13,13);").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        for episode in [1,2,6] {
+            let raw=format!("Doctor.Who.2005.S01.REPACK/Doctor.Who.2005.S01E{episode:02}.mkv");
+            let result=diagnose(&path,&MatchRequest{
+                title:raw.clone(),year:None,series:None}).unwrap();
+            let winner=result.selected.expect("series must match");
+            assert_eq!(winner["imdb_id"],"tt0436992","{raw}");
+            let response=public_match_response(Some(winner));
+            assert_eq!(response["sid_start"],
+                format!("tt0436992:1:{episode}"),"{raw}");
+            assert_eq!(response["sid_end"],
+                format!("tt0436992:1:{episode}"),"{raw}");
+        }
+        // A request-specific override must not be polluted by the title cache.
+        let override_result=diagnose(&path,&MatchRequest{
+            title:"Doctor.Who.2005.S01.REPACK/Doctor.Who.2005.S01E01.mkv".into(),
+            year:Some(1963),series:None}).unwrap().selected.unwrap();
+        assert_eq!(override_result["imdb_id"],"tt0056751");
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
     }
