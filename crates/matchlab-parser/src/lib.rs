@@ -130,6 +130,7 @@ enum MatchGuard {
     AmbiguousMetadata,
     SitePrefix,
     UnmarkedSeason,
+    AnchoredEpisode,
 }
 
 struct ParserEngine {
@@ -273,6 +274,10 @@ impl ParserEngine {
                 ("seasons", Some(r"\b(\d{2})[ ._]\d{2}(?:.F)?\.\w{2,4}$")) => {
                     MatchGuard::UnmarkedSeason
                 }
+                // The upstream catch-all E123 handler can also match the
+                // trailing "e100" in The100 or a hash like RE301085.
+                // Require a token boundary, except after an Sxx season marker.
+                ("episodes", Some(r"E(\d+)\b")) => MatchGuard::AnchoredEpisode,
                 _ => MatchGuard::None,
             };
             let is_hdr_format =
@@ -526,6 +531,21 @@ impl ParserEngine {
                     .map_err(|e| ParseError::Regex(e.to_string()))?
                 {
                     return Ok(None);
+                }
+            }
+            MatchGuard::AnchoredEpisode => {
+                // E01 and S01E01 are valid coordinates. The100, RE301085
+                // and 3E121247 are *not* episode tokens: their E is embedded
+                // inside an unrelated alphanumeric word/release code.
+                let prefix=&title[..m0.start()];
+                if prefix.as_bytes().last().is_some_and(u8::is_ascii_alphanumeric){
+                    let token=prefix.rsplit(|c:char|!c.is_ascii_alphanumeric())
+                        .next().unwrap_or_default();
+                    let digits=token.strip_prefix(['s','S']);
+                    if !digits.is_some_and(|d|!d.is_empty()&&d.len()<=3
+                        &&d.bytes().all(|b|b.is_ascii_digit())){
+                        return Ok(None);
+                    }
                 }
             }
             MatchGuard::None => {}
@@ -1828,6 +1848,12 @@ fn merge_path_metadata(merged:&mut Map<String,Value>, layer:&Map<String,Value>){
 
 fn generic_path_title(title:&str)->bool{
     let lowercase=title.trim().to_lowercase();
+    // A leaf like "S6E1-8 ..." can be reduced by the upstream parser to
+    // just "S". It is a coordinate marker, not a stronger title than its
+    // descriptive parent directory.
+    if lowercase.len()==1 && lowercase.bytes().all(|b|b.is_ascii_alphabetic()){
+        return true;
+    }
     lowercase.is_empty()||[
         "episode","ep","season","seasons","season 1","series",
         "shows","tv","tv shows","movies","films","media","videos",
@@ -2253,6 +2279,37 @@ mod tests {
                 "{title:?}"
             );
         }
+    }
+
+    #[test]
+    fn embedded_e_release_codes_do_not_invent_enormous_episodes(){
+        let potion=parse_title(
+            "Potion danomi de Ikinobimasu 04 480p Multiple Subtitle 3E121247 Erai raws TGx",false).unwrap();
+        assert!(!potion["episodes"].as_array().unwrap().contains(&json!(121247)));
+        assert!(potion["title"].as_str().unwrap().to_lowercase().contains("potion"));
+        let diary=parse_title("survive - Scumbag sage's diary (2020) [RE301085]",false).unwrap();
+        assert!(diary["episodes"].as_array().unwrap().is_empty());
+        assert!(diary["title"].as_str().unwrap().to_lowercase().contains("survive"));
+        let the100=parse_title("The100.s01",false).unwrap();
+        assert!(the100["title"].as_str().unwrap().to_lowercase().contains("the100"),
+            "title should not be truncated to Th: {the100:?}");
+        assert_eq!(the100["seasons"],json!([1]));
+        assert!(the100["episodes"].as_array().unwrap().is_empty());
+        // Do not break legitimately embedded season-episode coordinates.
+        let explicit=parse_title("Show.S01E06.1080p",false).unwrap();
+        assert_eq!(explicit["seasons"],json!([1]));
+        assert_eq!(explicit["episodes"],json!([6]));
+        let bare=parse_title("Show.E06.1080p",false).unwrap();
+        assert_eq!(bare["episodes"],json!([6]));
+    }
+
+    #[test]
+    fn weak_season_leaf_inherits_descriptive_parent_title(){
+        let raw="Hercules: The Legendary Journeys / S6E1-8 (8) (Bruce Campbell, Garth Maxwell, Charles Siebert) [1999, 3 DVD9 + DVD5 (Custom)] MVO + Original";
+        let result=parse_title(raw,false).unwrap();
+        assert!(result["title"].as_str().unwrap().to_lowercase().contains("hercules"),
+            "coordinate-only leaf should not override its descriptive parent: {result:?}");
+        assert_eq!(result["seasons"],json!([6]));
     }
 
     #[test]
