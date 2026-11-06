@@ -85,17 +85,42 @@ The cache is process-local (not shared between replicas), has a maximum of 1,024
 
 For detailed ranking, candidates, episode mapping segments and debugging, use `POST /debug/match`. The dashboard at `/` also uses diagnostic data.
 
-### Hierarchical paths and folder inheritance
+### Hierarchical paths: deepest metadata wins
 
-Pass a full relative path as the `title` or `t_title` value. Forward slashes and backslashes separate path components. MatchLab parses the **leaf** (last component) first. If the leaf supplies season/episode coordinates but lacks a meaningful series title, it looks for a title in the nearest suitable parent folder. Folder names supply missing context, **not** a replacement for the leaf's explicit episode information.
+Pass the full relative path as `title` or `t_title`. Both forward slashes and
+backslashes separate components. MatchLab parses **every level independently**
+from the outermost directory to the leaf filename. For each recognized,
+non-empty field **except `title`**, a deeper value replaces the value from its
+parent (year, season, episodes, resolution, quality, codec, language, etc.).
+Fields not supplied at a deeper level remain inherited. A child episode or
+season discards stale parent episode-range endpoints.
 
-| Input | Intended interpretation |
+| Path | Effective parsed metadata |
 | --- | --- |
-| `Supernatural S01-S12/S02E01` | Series `Supernatural`, season 2, episode 1; `S01-S12` is collection context. |
-| `Supernatural S01-S12/S02E01.mkv` | Same episode, with a filename extension. |
-| `One.piece.E768-E1064` | Absolute episode interval 768–1064 (297 episodes), potentially crossing season boundaries. |
+| `Doctor.Who.2005.S01/Doctor.Who.S01E06.mkv` | Year 2005, season 1, episode 6 |
+| `Doctor.Who.2005/Doctor.Who.2006.S01E06.mkv` | Year **2006**, season 1, episode 6 |
+| `The.Show.2005.S01.2160p/Season.2.720p/The.Show.E06.1080p.mkv` | Year 2005, season 2, episode 6, resolution **1080p** |
+| `Supernatural S01-S12/S02E01.mkv` | Season 2, episode 1; the parent pack does not override the file |
 
-A parent folder does not automatically assign its season range to a child file. Explicit child coordinates take precedence. This is title inheritance, not a filesystem crawler: MatchLab parses the path **string supplied in the request** and does not inspect directories on disk.
+**Title is an exception.** Ordinary movie/series matching keeps the meaningful
+leaf title, or inherits the nearest parent title when the leaf has no usable
+title. The parser exposes non-generic directory titles in
+`path_title_candidates` (outermost to innermost) for the matcher.
+
+**Anime-specific title context:** A subdirectory may be an actual AniDB part,
+cour, or season title distinct from the series' base name. When the matcher
+finds an **exact, unambiguous AniDB alias** in a subdirectory that belongs to
+an eligible IMDb identity already found from the leaf title, the **nearest**
+matching subdirectory title takes precedence **for anime episode mapping only**.
+For instance, `Sword Art Online/Sword Art Online Alicization/Sword.Art.Online.S01E01.mkv`
+can identify the Alicization part even when the file uses the base series
+title. Non-anime matches do not receive this override. Parent titles are
+never accepted on their own as evidence to silently change an unrelated
+IMDb identity.
+
+An explicitly supplied API `year` overrides the parsed value, including the
+deepest component's year. This operates on the path **string** provided to
+MatchLab; it does not crawl folders or read the filesystem.
 
 ### Anime identity and episode mapping
 
