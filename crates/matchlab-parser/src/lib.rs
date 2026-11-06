@@ -1763,105 +1763,125 @@ fn patch_missing_coordinates(raw: &str, result: &mut Map<String, Value>) -> Resu
     Ok(())
 }
 
-// A folder's year is useful for remakes with identical IMDb titles, but
-// only when the folder actually belongs to the series named by the leaf.
-// Compare full word boundaries (so "Doctor Who" does not match "Doctor Whom")
-// and permit an appended episode subtitle in the leaf.
-fn same_series_parent(parent_title: &str, leaf_title: &str) -> bool {
-    // Work on owned lowercase text to keep the split slices alive.
-    let parent_lower = parent_title.to_lowercase();
-    let leaf_lower = leaf_title.to_lowercase();
-    let parent:Vec<_> = parent_lower.split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty()).collect();
-    let leaf:Vec<_> = leaf_lower.split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty()).collect();
-    // Avoid inheriting a folder's year from broad labels such as "TV".
-    parent.join("").len() >= 4 && !parent.is_empty()
-        && parent.len() <= leaf.len()
-        && parent.iter().zip(leaf.iter()).all(|(a,b)| a==b)
-}
-
-pub fn parse_title(
-    raw_title: &str,
-    translate_languages: bool,
-) -> Result<Map<String, Value>, ParseError> {
-    // A path represents a single file in its parent collection. Parse the
-    // leaf first; parent folders supply a missing series title, not their
-    // season packs or episode ranges.
-    let components:Vec<&str>=raw_title.split(&['/','\\'][..])
-        .filter(|part|!part.is_empty() && *part!="." && *part!="..").collect();
-    let leaf=components.last().copied().unwrap_or(raw_title);
-    let mut result=ENGINE.parse(leaf, translate_languages)?;
-    if components.len()>1 {
-        let leaf_title=result.get("title").and_then(Value::as_str).unwrap_or("").trim().to_owned();
-        // Only inherit a folder title when the leaf contains episode/season
-        // coordinates but no meaningful show title of its own.
-        let has_coordinates=result.contains_key("episodes")||result.contains_key("seasons");
-        let generic=leaf_title.is_empty()
-            ||leaf_title.eq_ignore_ascii_case("episode")
-            ||leaf_title.eq_ignore_ascii_case("ep");
-        if has_coordinates && generic {
-            for parent in components[..components.len()-1].iter().rev() {
-                let parent_result=ENGINE.parse(parent,translate_languages)?;
-                let parent_title=parent_result.get("title").and_then(Value::as_str).unwrap_or("").trim();
-                if parent_title.is_empty(){continue;}
-                // Reparse with inherited series name, retaining the leaf's
-                // specific episode coordinates as authoritative.
-                let combined=format!("{parent_title} {leaf}");
-                let enriched=ENGINE.parse(&combined,translate_languages)?;
-                if enriched.get("title").and_then(Value::as_str)
-                    .is_some_and(|title|!title.trim().is_empty()) {
-                    result=enriched;
-                    break;
-                }
-            }
-        }
-    }
-    if let Some((start,end))=absolute_episode_range(leaf){
+// Parse each directory entry independently. The path-level merge below
+// never concatenates release names (which could confuse episode coordinates).
+fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<String,Value>,ParseError> {
+    let mut result=ENGINE.parse(raw,translate_languages)?;
+    if let Some((start,end))=absolute_episode_range(raw){
         result.insert("episode_start".into(),json!(start));
         result.insert("episode_end".into(),json!(end));
         result.insert("episode_count".into(),json!(end-start+1));
         result.insert("episode_range_numbering".into(),json!("absolute"));
-        // The existing episodes field is deliberately not expanded.
-        // Consumers must use episode_start/episode_end for range semantics.
     }
-    patch_missing_coordinates(leaf, &mut result)?;
-    if let Some((season,start,end))=explicit_season_episode_range(leaf)? {
+    patch_missing_coordinates(raw,&mut result)?;
+    if let Some((season,start,end))=explicit_season_episode_range(raw)?{
         result.insert("seasons".into(),json!([season]));
         result.insert("episodes".into(),json!([start]));
         result.insert("episode_start".into(),json!(start));
         result.insert("episode_end".into(),json!(end));
         result.insert("episode_count".into(),json!(end-start+1));
         result.insert("episode_range_numbering".into(),json!("season"));
-    } else if !result.contains_key("episode_start")
-        && let Some(candidate)=unmarked_anime_episode_candidate(leaf,translate_languages)? {
+    }else if !result.contains_key("episode_start")
+        && let Some(candidate)=unmarked_anime_episode_candidate(raw,translate_languages)?{
         result.insert("anime_episode_range_candidate".into(),candidate);
     }
-    // The leaf is authoritative for episode coordinates and explicit years.
-    // When it has no year, inherit a *series production year* from the
-    // nearest parent whose parsed title agrees with the leaf. A generic
-    // "Series.2024" directory must not change an unrelated title's IMDb ID.
-    let has_coordinates = result.get("seasons").is_some_and(|v|
-        v.as_array().is_some_and(|v|!v.is_empty()))
-        || result.get("episodes").is_some_and(|v|
-            v.as_array().is_some_and(|v|!v.is_empty()))
-        || result.contains_key("episode_start");
-    if components.len()>1 && has_coordinates && !result.contains_key("year") {
-        let leaf_title=result.get("title").and_then(Value::as_str)
-            .unwrap_or("").to_owned();
-        for parent in components[..components.len()-1].iter().rev() {
-            let parsed_parent=ENGINE.parse(parent,translate_languages)?;
-            let Some(year)=parsed_parent.get("year").and_then(Value::as_i64)
-                .filter(|year|(1870..=2100).contains(year)) else{continue};
-            let parent_title=parsed_parent.get("title")
-                .and_then(Value::as_str).unwrap_or("");
-            if same_series_parent(parent_title,&leaf_title) {
-                result.insert("year".to_owned(),json!(year));
-                break;
-            }
+    Ok(result)
+}
+
+fn meaningful_path_value(v:&Value)->bool{
+    match v {
+        Value::Null=>false,
+        Value::String(s)=>!s.trim().is_empty(),
+        Value::Array(a)=>!a.is_empty(),
+        Value::Object(o)=>!o.is_empty(),
+        _=>true,
+    }
+}
+
+fn path_has_coordinates(layer:&Map<String,Value>, field:&str)->bool{
+    layer.get(field).is_some_and(meaningful_path_value)
+}
+
+fn merge_path_metadata(merged:&mut Map<String,Value>, layer:&Map<String,Value>){
+    let new_episodes=path_has_coordinates(layer,"episodes")
+        ||path_has_coordinates(layer,"episode_start")
+        ||path_has_coordinates(layer,"anime_episode_range_candidate");
+    let new_season=path_has_coordinates(layer,"seasons");
+    if new_episodes||new_season {
+        // A more specific episode or season supersedes a parent collection.
+        // Never leak the parent's range endpoints into a child single-episode
+        // file, or combine conflicting parent/leaf episode lists.
+        for key in ["episode_start","episode_end","episode_count",
+            "episode_range_numbering","anime_episode_range_candidate"] {
+            merged.remove(key);
+        }
+        if new_episodes||new_season {merged.remove("episodes");}
+    }
+    // An empty value from the generic parser means "not detected", not an
+    // instruction to erase metadata that was detected in an ancestor.
+    for (key,value) in layer {
+        if key!="title"&&meaningful_path_value(value){
+            merged.insert(key.clone(),value.clone());
         }
     }
-    Ok(result)
+}
+
+fn generic_path_title(title:&str)->bool{
+    let lowercase=title.trim().to_lowercase();
+    lowercase.is_empty()||[
+        "episode","ep","season","seasons","season 1","series",
+        "shows","tv","tv shows","movies","films","media","videos",
+        "downloads","download","archive","library","complete",
+        "extras","specials","subtitles"
+    ].contains(&lowercase.as_str())
+}
+
+/// Parse a hierarchical torrent path from ancestor to leaf. Any explicit,
+/// non-empty metadata value on a deeper level overrides the same field from
+/// an ancestor (year, season, episode, quality, resolution, codec, etc.).
+/// Title is NOT merged: use the leaf's meaningful series title, otherwise
+/// inherit the nearest meaningful parent title.
+pub fn parse_title(
+    raw_title: &str,
+    translate_languages: bool,
+) -> Result<Map<String, Value>, ParseError> {
+    let components:Vec<&str>=raw_title.split(&['/','\\'][..])
+        .filter(|part|!part.is_empty() && *part!="." && *part!="..").collect();
+    let mut merged=Map::new();
+    let mut fallback_parent_title:Option<String>=None;
+    // Preserve title candidates separately. The parser cannot determine if
+    // a title is anime; the matcher may use a verified AniDB *part* alias in
+    // a subfolder, without changing the ordinary series/movie title.
+    let mut parent_title_candidates:Vec<String>=Vec::new();
+    let mut leaf_title=String::new();
+    let mut leaf_title_generic=false;
+    for (index,component) in components.iter().enumerate(){
+        let layer=parse_path_component(component,translate_languages)?;
+        if let Some(title)=layer.get("title").and_then(Value::as_str){
+            let title=title.trim();
+            if index+1==components.len(){
+                // A standalone title is preserved even if it happens to be
+                // named "Season" or "Episode". Only use the parent when one
+                // exists and the leaf title is empty or generic.
+                leaf_title=title.to_owned();
+                leaf_title_generic=generic_path_title(title);
+            }else if !generic_path_title(title){
+                fallback_parent_title=Some(title.to_owned());
+                parent_title_candidates.push(title.to_owned());
+            }
+        }
+        merge_path_metadata(&mut merged,&layer);
+    }
+    let title=if !leaf_title.is_empty()&&!leaf_title_generic{
+        leaf_title
+    }else{
+        fallback_parent_title.unwrap_or(leaf_title)
+    };
+    if !title.is_empty(){merged.insert("title".into(),Value::String(title));}
+    if !parent_title_candidates.is_empty() {
+        merged.insert("path_title_candidates".into(),json!(parent_title_candidates));
+    }
+    Ok(merged)
 }
 
 pub fn parse_title_context(
@@ -2243,25 +2263,86 @@ mod tests {
     }
 
     #[test]
-    fn parent_year_never_overrides_leaf_or_unrelated_directories() {
+    fn hierarchy_inherits_year_at_each_level_with_deepest_value_winning() {
         for (input,year) in [
-            ("Doctor.Who.1963.S01/Doctor.Who.2005.S01E06.mkv",Some(2005)),
-            ("Doctor.Who.2005/Doctor.Who.S01E06.mkv",Some(2005)),
-            ("Archive.2024/Doctor.Who.S01E06.mkv",None),
-            ("Doctor.Whom.2024/Doctor.Who.S01E06.mkv",None),
-            ("Doctor.Who.2005/Season.1/Doctor.Who.S01E06.mkv",Some(2005)),
-            ("Doctor.Who.1963/Doctor.Who.2005/Doctor.Who.S01E06.mkv",Some(2005)),
+            ("Doctor.Who.1963.S01/Doctor.Who.2005.S01E06.mkv",2005),
+            ("Doctor.Who.2005/Doctor.Who.S01E06.mkv",2005),
+            ("Archive.2024/Doctor.Who.S01E06.mkv",2024),
+            ("Doctor.Whom.2024/Doctor.Who.S01E06.mkv",2024),
+            ("Doctor.Who.2005/Season.1/Doctor.Who.S01E06.mkv",2005),
+            ("Doctor.Who.1963/Doctor.Who.2005/Doctor.Who.S01E06.mkv",2005),
+            ("Doctor.Who.2005/Doctor.Who.2006.S01E06.mkv",2006),
+            ("Doctor.Who.2005/Doctor.Who.2006/Doctor.Who.2007.S01E06.mkv",2007),
         ] {
             let parsed=parse_title(input,false).unwrap();
-            assert_eq!(parsed.get("year").and_then(Value::as_i64),year,
-                "wrong inherited year for {input}");
+            assert_eq!(parsed["year"],json!(year),"{input}");
             assert_eq!(parsed["seasons"],json!([1]),"{input}");
             assert_eq!(parsed["episodes"],json!([6]),"{input}");
         }
-        // Not a serial episode: an unrelated folder's year must not be
-        // inherited into a movie or standalone title.
-        let movie=parse_title("Doctor.Who.2005/Completely.Different.Movie.mkv",false).unwrap();
-        assert!(movie.get("year").is_none());
+        // Non-title metadata inherits through movie paths as well.
+        let movie=parse_title("Movie.Name.2005.2160p/Movie.Name.mkv",false).unwrap();
+        assert_eq!(movie["year"],2005);
+    }
+
+    #[test]
+    fn hierarchical_metadata_merges_season_episode_and_quality_independently() {
+        let folder="The.Show.2005.S01.2160p.WEB-DL";
+        let subfolder="Season.2.720p";
+        let episode="The.Show.E06.1080p.mkv";
+        let parsed=parse_title(&format!("{folder}/{subfolder}/{episode}"),false).unwrap();
+        let leaf=parse_title(episode,false).unwrap();
+        let parent=parse_title(folder,false).unwrap();
+        assert_eq!(parsed["year"],2005);
+        assert_eq!(parsed["seasons"],json!([2]));
+        assert_eq!(parsed["episodes"],json!([6]));
+        assert_eq!(parsed["title"],leaf["title"]);
+        assert!(leaf.get("resolution").is_some(),"leaf must have resolution");
+        assert_eq!(parsed["resolution"],leaf["resolution"]);
+        if let Some(quality)=parent.get("quality"){
+            assert_eq!(parsed["quality"],*quality);
+        }
+
+        let inherited=parse_title("The.Show.2005.S02/E06.mkv",false).unwrap();
+        assert_eq!(inherited["year"],2005);
+        assert_eq!(inherited["seasons"],json!([2]));
+        assert_eq!(inherited["episodes"],json!([6]));
+        assert!(!inherited["title"].as_str().unwrap_or("").is_empty());
+    }
+
+    #[test]
+    fn path_title_candidates_preserve_subfolder_anime_part_names() {
+        let parsed=parse_title(
+            "Sword Art Online/Sword Art Online Alicization/             Sword.Art.Online.S03E01.1080p.mkv",false).unwrap();
+        assert_eq!(parsed["path_title_candidates"],
+            json!(["Sword Art Online","Sword Art Online Alicization"]));
+        // Parser does not decide which is anime: regular titles still use
+        // the leaf (or nearest meaningful parent for a bare episode file).
+        let leaf=parse_title("Sword.Art.Online.S03E01.1080p.mkv",false).unwrap();
+        assert_eq!(parsed["title"],leaf["title"]);
+        assert_eq!(parsed["seasons"],json!([3]));
+        assert_eq!(parsed["episodes"],json!([1]));
+    }
+
+    #[test]
+    fn child_episode_and_season_clear_parent_episode_ranges() {
+        let single=parse_title("One.Piece.E768-E1064/One.Piece.S02E05.mkv",false).unwrap();
+        assert_eq!(single["seasons"],json!([2]));
+        assert_eq!(single["episodes"],json!([5]));
+        assert!(single.get("episode_start").is_none());
+        assert!(single.get("episode_end").is_none());
+        assert!(single.get("episode_count").is_none());
+
+        let season=parse_title("The.Show.S01E06/The.Show.S02",false).unwrap();
+        assert_eq!(season["seasons"],json!([2]));
+        assert!(season.get("episodes").is_none_or(|v|v.as_array().is_some_and(Vec::is_empty)));
+    }
+
+    #[test]
+    fn hierarchy_supports_windows_paths_and_deeper_overrides() {
+        let parsed=parse_title("Doctor.Who.2005.S01\\Season.2\\Doctor.Who.2006.S03E06.mkv",false).unwrap();
+        assert_eq!(parsed["year"],2006);
+        assert_eq!(parsed["seasons"],json!([3]));
+        assert_eq!(parsed["episodes"],json!([6]));
     }
 
     #[test]

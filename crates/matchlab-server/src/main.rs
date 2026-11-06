@@ -289,6 +289,33 @@ fn season_episode_end(db:&Connection,imdb:&str,season:i64)->Result<Option<i64>,S
     }
 }
 
+/// A child directory can identify an anime cour/part more precisely than the
+/// release filename. Title selection here is intentionally *anime-only*:
+/// resolve the nearest parent that is an exact, unique AniDB title alias for
+/// one of the already ranked IMDb identities. Non-anime shows keep their
+/// leaf series title and regular Tantivy ordering. No SQLite text search.
+fn verified_anime_subfolder_title(
+    db:&Connection,parsed:&serde_json::Map<String,Value>,
+    imdb:&[Candidate],
+)->Result<Option<String>,String>{
+    let Some(parents)=parsed.get("path_title_candidates").and_then(Value::as_array)
+        else{return Ok(None)};
+    if imdb.is_empty(){return Ok(None);}
+    for name in parents.iter().rev().filter_map(Value::as_str){
+        let key=matchlab_matcher::clean_title(name);
+        if key.len()<4 {continue;}
+        let aliases=tantivy_search::anime_aliases(db,&key,4)?;
+        let exact_ids:std::collections::BTreeSet<String>=aliases.into_iter()
+            .filter(|alias|alias.clean_title==key)
+            .map(|alias|alias.imdb_id).collect();
+        if exact_ids.len()==1 && imdb.iter().any(|candidate|
+            exact_ids.contains(&candidate.imdb_id)) {
+            return Ok(Some(name.to_owned()));
+        }
+    }
+    Ok(None)
+}
+
 fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> {
     if req.title.trim().is_empty() || req.title.len() > 4096 { return Err("title must be 1–4096 bytes".into()); }
     let mut parsed_value=parse_cached(&req.title)?;
@@ -404,15 +431,23 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
     let imdb: Vec<Candidate> = imdb.into_iter().map(|m|Candidate{
         imdb_id:m.imdb_id,title:m.title,year:m.year,media_type:m.media_type,
         matched_title:m.matched_title,anime_ids:m.anime_ids,source:"imdb"}).collect();
+    // Normal titles remain leaf-driven; an exact, verified AniDB alias from
+    // the *nearest* anime subfolder may provide more specific part/season
+    // context for the crosswalk resolver.
+    let anime_subfolder_title=if series {
+        verified_anime_subfolder_title(&db,parsed,&imdb)?
+    }else {None};
+    let anime_resolve_title=anime_subfolder_title.as_deref().unwrap_or(title);
+    let anime_resolve_key=matchlab_matcher::clean_title(anime_resolve_title);
     let anime = if series {
         if let Some(ep)=episodes.first(){
-            anime_candidate(&db,&key,seasons.first().copied(),*ep)
+            anime_candidate(&db,&anime_resolve_key,seasons.first().copied(),*ep)
                 .map_err(|e|e.to_string())?
         }else{
-            anime_identity(&db,&key).map_err(|e|e.to_string())?
+            anime_identity(&db,&anime_resolve_key).map_err(|e|e.to_string())?
                 .map(|id|{
                     let inferred=if seasons.is_empty() {
-                        anime_title::season_from_title(&db,&id,title).ok().flatten()
+                        anime_title::season_from_title(&db,&id,anime_resolve_title).ok().flatten()
                     } else {None};
                     json!({"imdb_id":id,"season":seasons.first().copied().or(inferred),
                         "episode":null,"anidb_id":null,"anidb_episode":null})
@@ -469,10 +504,10 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
                 for (index,candidate) in imdb.iter().enumerate() {
                     let mapped=match seasons.first().copied() {
                         Some(season) => {
-                            let titled=anime_title::resolve(&db,&candidate.imdb_id,title,season,ep)
+                            let titled=anime_title::resolve(&db,&candidate.imdb_id,anime_resolve_title,season,ep)
                                 .map_err(|e|e.to_string())?;
                             if titled.is_some(){titled}
-                            else if anime_title::has_specific_alias(&db,&candidate.imdb_id,title)
+                            else if anime_title::has_specific_alias(&db,&candidate.imdb_id,anime_resolve_title)
                                 .map_err(|e|e.to_string())? {None}
                             else {anime_resolver::resolve_season(&db,&candidate.imdb_id,season,ep)
                                 .map_err(|e|e.to_string())?}
@@ -491,7 +526,7 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
         if let Some(c)=chosen {
             let mut selected_season=seasons.first().copied();
             if series && selected_season.is_none() && episodes.is_empty() {
-                selected_season=anime_title::season_from_title(&db,&c.imdb_id,title)
+                selected_season=anime_title::season_from_title(&db,&c.imdb_id,anime_resolve_title)
                     .map_err(|e|e.to_string())?;
             }
             let mut selected_episode=episodes.first().copied();
@@ -499,10 +534,10 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
 
             if let Some(ep)=selected_episode {
                 let mapped=if let Some(season)=selected_season {
-                    let titled=anime_title::resolve(&db,&c.imdb_id,title,season,ep)
+                    let titled=anime_title::resolve(&db,&c.imdb_id,anime_resolve_title,season,ep)
                         .map_err(|e|e.to_string())?;
                     if titled.is_some(){titled}
-                    else if anime_title::has_specific_alias(&db,&c.imdb_id,title)
+                    else if anime_title::has_specific_alias(&db,&c.imdb_id,anime_resolve_title)
                         .map_err(|e|e.to_string())? {None}
                     else {anime_resolver::resolve_season(&db,&c.imdb_id,season,ep)
                         .map_err(|e|e.to_string())?}
@@ -517,7 +552,7 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
                         "episode":mapped.anidb_episode,
                         "asid":format!("{}:{}",mapped.anidb_id,mapped.anidb_episode)});
                 } else if !c.anime_ids.is_empty() ||
-                    anime_title::has_specific_alias(&db,&c.imdb_id,title)
+                    anime_title::has_specific_alias(&db,&c.imdb_id,anime_resolve_title)
                         .map_err(|e|e.to_string())? {
                     // Anime identity can be valid without a verified episode
                     // crosswalk. Do not publish the raw release S/E as canonical.
@@ -598,10 +633,10 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
                 if season>0 {
                     let linked=winner["anime_ids"].as_object()
                         .is_some_and(|ids|!ids.is_empty())
-                        || anime_title::has_specific_alias(&db,&imdb_id,title)
+                        || anime_title::has_specific_alias(&db,&imdb_id,anime_resolve_title)
                             .map_err(|e|e.to_string())?;
                     let range=if linked {
-                        mapped_season_episode_range(&db,&imdb_id,title,season,start,end)?
+                        mapped_season_episode_range(&db,&imdb_id,anime_resolve_title,season,start,end)?
                     }else {
                         let known_end=season_episode_end(&db,&imdb_id,season)?;
                         let valid=known_end.is_some_and(|last|last>=end);
@@ -1110,6 +1145,76 @@ mod tests {
     }
 
     #[test]
+    fn anime_part_subfolder_overrides_leaf_only_for_verified_anime_identity() {
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-anime-path-title-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
+            region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES('tt0300001','Sword Art Online','swordartonline',2012,
+                'series','',1,0,'tvSeries');
+            INSERT INTO titles VALUES('tt0300002','Ordinary Show','ordinaryshow',2010,
+                'series','',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt0300001',3);
+            INSERT INTO seasons VALUES('tt0300002',3);
+            INSERT INTO season_episodes VALUES('tt0300001',1,12,12);
+            INSERT INTO season_episodes VALUES('tt0300002',1,12,12);
+            INSERT INTO anime_series_map VALUES('tt0300001','100','456',0);
+            INSERT INTO anime_series_map VALUES('tt0300001','101','456',0);
+            INSERT INTO anime_ids VALUES('tt0300001','anidb','100');
+            INSERT INTO anidb_titles VALUES('100','Sword Art Online','swordartonline','main','en');
+            INSERT INTO anidb_titles VALUES('101','Sword Art Online Alicization',
+                'swordartonlinealicization','main','en');
+            INSERT INTO episode_map VALUES('100','456',1,1,1,12,0,'');
+            INSERT INTO episode_map VALUES('101','456',1,3,1,12,0,'');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        let find=|raw:&str|{
+            diagnose(&path,&MatchRequest{title:raw.into(),year:None,series:None})
+                .unwrap_or_else(|e|panic!("{raw}: {e}"))
+        };
+        let standard=find("Sword.Art.Online.S01E01.mkv");
+        let base=standard.selected.unwrap();
+        assert_eq!(base["imdb_id"],"tt0300001");
+        assert_eq!(base["season"],1);
+        assert_eq!(base["episode"],1);
+        assert_eq!(base["anime"]["asid"],"100:1");
+        let nested=find("Sword Art Online/Sword Art Online Alicization/Sword.Art.Online.S01E01.mkv");
+        assert_eq!(nested.parsed["path_title_candidates"],
+            json!(["Sword Art Online","Sword Art Online Alicization"]));
+        let part=nested.selected.unwrap();
+        assert_eq!(part["imdb_id"],"tt0300001");
+        assert_eq!(part["season"],3);
+        assert_eq!(part["episode"],1);
+        assert_eq!(part["anime"]["asid"],"101:1");
+        assert_eq!(public_match_response(Some(part))["sid_start"],"tt0300001:3:1");
+
+        // The word "Alicization" is not blindly inherited for non-anime.
+        let ordinary=find("Anime Library/Ordinary.Show.S01E01.mkv");
+        let ordinary=ordinary.selected.unwrap();
+        assert_eq!(ordinary["imdb_id"],"tt0300002");
+        assert_eq!(ordinary["season"],1);
+        assert_eq!(ordinary["episode"],1);
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
     fn matching_parent_year_selects_2005_doctor_who_not_1963() {
         // The same IMDb title is shared by two series. The folder's
         // production year disambiguates the actual episode filename.
@@ -1136,8 +1241,11 @@ mod tests {
                 'series','',1,0,'tvSeries');
             INSERT INTO titles VALUES('tt0436992','Doctor Who','doctorwho',2005,
                 'series','',1,0,'tvSeries');
+            INSERT INTO titles VALUES('tt9999900','Doctor Who','doctorwho',2006,
+                'series','',1,0,'tvSeries');
             INSERT INTO seasons VALUES('tt0056751',26);
             INSERT INTO seasons VALUES('tt0436992',14);
+            INSERT INTO seasons VALUES('tt9999900',14);
             INSERT INTO season_episodes VALUES('tt0056751',1,42,42);
             INSERT INTO season_episodes VALUES('tt0436992',1,13,13);").unwrap();
         tantivy_search::warmup(&db).unwrap();
@@ -1160,10 +1268,15 @@ mod tests {
         let forced=diagnose_title(full,Some(1963)).selected.unwrap();
         assert_eq!(forced["imdb_id"],"tt0056751",
             "explicit API year must override inherited folder year");
-        let unrelated=diagnose_title(
-            format!("Unrelated.Show.2024/{leaf}"),None).selected.unwrap();
-        assert_eq!(unrelated["imdb_id"],"tt0056751",
-            "unrelated folder year must not affect ranking");
+        let archived=diagnose_title(
+            format!("Archive.1963/{leaf}"),None).selected.unwrap();
+        assert_eq!(archived["imdb_id"],"tt0056751",
+            "parent year is inherited even when the folder is an archive");
+        let child_override=diagnose_title(
+            format!("{folder}/Doctor.Who.2006.S01E06.Dalek.mkv"),None)
+            .selected.unwrap();
+        assert_eq!(child_override["imdb_id"],"tt9999900",
+            "the leaf's 2006 production year must override its 2005 parent");
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
     }
