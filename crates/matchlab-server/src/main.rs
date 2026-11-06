@@ -631,14 +631,21 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
         if let (Some((_,date)),Some(winner))=(dated.as_ref(),selected.as_mut()){
             if let Some(id)=winner["imdb_id"].as_str().map(str::to_owned){
                 match airdate::resolve(db_path,&id,date){
-                    Ok(Some((season,episode)))=>{
+                    Ok(Some((season,episode,actual_air_date)))=>{
                         winner["season"]=json!(season);
                         winner["episode"]=json!(episode);
                         winner["season_end"]=json!(season);
                         winner["episode_end"]=json!(episode);
                         winner["sid"]=json!(format!("{id}:{season}:{episode}"));
-                        winner["air_date"]=json!(date);
-                        winner["match_source"]=json!("cinemeta_airdate");
+                        // Preserve both the release date and actual Cinemeta
+                        // date so a +/-1 timezone adjustment is auditable.
+                        winner["air_date"]=json!(actual_air_date);
+                        winner["release_date"]=json!(date);
+                        winner["match_source"]=json!(if actual_air_date==*date {
+                            "cinemeta_airdate"
+                        }else{
+                            "cinemeta_airdate_1day"
+                        });
                     }
                     Ok(None)=>{},
                     Err(error)=>tracing::warn!(imdb_id=%id,%error,"airdate lookup failed"),
