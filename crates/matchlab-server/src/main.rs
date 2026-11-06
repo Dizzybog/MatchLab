@@ -755,6 +755,12 @@ fn public_match_response(selected: Option<Value>) -> Value {
         return json!({"sid_start":null,"sid_end":null,"asid_start":null,"asid_end":null});
     };
     let imdb=winner["imdb_id"].as_str().unwrap_or_default();
+    // Refuse to publish a malformed SID even when an older metadata snapshot
+    // still contains a comma-separated Anime-Lists IMDb field. Callers must
+    // receive an unambiguous single title ID or an explicit no-match.
+    if !metadata_import::valid_imdb_id(imdb){
+        return json!({"sid_start":null,"sid_end":null,"asid_start":null,"asid_end":null});
+    }
     let has_range=winner.get("episode_range").is_some();
     let start_season=winner["season"].as_i64();
     let start_episode=winner["episode"].as_i64();
@@ -1445,6 +1451,21 @@ mod tests {
         assert_eq!(range["asid_end"],"70:50");
         assert_eq!(public_match_response(None),
             json!({"sid_start":null,"sid_end":null,"asid_start":null,"asid_end":null}));
+    }
+    #[test]
+    fn public_api_never_exposes_comma_joined_imdb_id(){
+        let response=public_match_response(Some(json!({
+            "imdb_id":"tt1663145,tt1679583,tt1726641,tt1753855,tt1809274,tt1865375",
+            "season":1,"episode":1,
+            "anime":{"asid":"123:1"}
+        })));
+        assert_eq!(response,json!({"sid_start":null,"sid_end":null,
+            "asid_start":null,"asid_end":null}));
+        let valid=public_match_response(Some(json!({
+            "imdb_id":"tt1663145","season":1,"episode":1
+        })));
+        assert_eq!(valid["sid_start"],"tt1663145:1:1");
+        assert_eq!(valid["sid_end"],"tt1663145:1:1");
     }
     #[test]
     fn parse_cache_returns_full_parser_fields() {
