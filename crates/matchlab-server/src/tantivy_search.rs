@@ -1,6 +1,7 @@
 //! MatchLab's persistent Tantivy search engine for IMDb and AniDB titles.
 //! Exact/prefix/suffix lookups share immutable metadata index generations.
 use std::{collections::HashMap,fs::File,path::{Path,PathBuf},sync::{Mutex,OnceLock},time::{Duration,SystemTime,UNIX_EPOCH}};
+use crate::query_cache::QueryCache;
 use rusqlite::{Connection,OptionalExtension};
 use tantivy::{collector::DocSetCollector,doc,query::{RegexQuery,TermQuery,TermSetQuery},schema::{Schema,STORED,STRING,Value,IndexRecordOption},Index,IndexReader,ReloadPolicy,Term};
 
@@ -31,6 +32,29 @@ pub struct TitleAlias {
 }
 
 static CACHE:OnceLock<Mutex<HashMap<String,SearchIndex>>>=OnceLock::new();
+
+// Reuse identical immutable Tantivy lookups across files belonging to the
+// same torrent (and across unrelated torrents with the same title). Never
+// cache a final SID/ASID: per-file episode, anime part and year still apply.
+const LOOKUP_TTL:Duration=Duration::from_secs(600);
+const LOOKUP_CAP:usize=512;
+const LOOKUP_MAX_ALIASES:usize=256;
+static TITLE_LOOKUPS:OnceLock<QueryCache<Vec<TitleAlias>>>=OnceLock::new();
+static ANIME_LOOKUPS:OnceLock<QueryCache<Vec<AnimeAlias>>>=OnceLock::new();
+static DUPLICATE_LOOKUPS:OnceLock<QueryCache<bool>>=OnceLock::new();
+static ANIME_ID_LOOKUPS:OnceLock<QueryCache<Vec<String>>>=OnceLock::new();
+
+fn lookup_cache_key(db:&Connection,kind:&str,key:&str)->Option<String>{
+    // In-memory SQLite connections may share the same ':memory:' label but
+    // contain unrelated metadata: bypass the process-wide cache completely.
+    let source=db.path().filter(|p|!p.is_empty()&&*p!=":memory:")?;
+    // Generation is read from this *connection* (possibly an old snapshot)
+    // rather than the latest published database path. All query caches
+    // automatically miss after an atomic metadata generation change.
+    let version=generation(db).ok()?;
+    Some(format!("{source:?}|{version:?}|{kind:?}|{key:?}"))
+}
+
 
 fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
     let mut builder=Schema::builder();
@@ -256,7 +280,7 @@ fn open_search(db:&Connection)->Result<(SearchIndex,Option<PathBuf>),String>{
 
 /// Resolve AniDB aliases through exact Tantivy term lookups, including aliases
 /// that are prefixes of a release. SQLite is only used later for mapping data.
-pub fn anime_aliases(db:&Connection,key:&str,min_prefix:usize)->Result<Vec<AnimeAlias>,String>{
+fn anime_aliases_uncached(db:&Connection,key:&str,min_prefix:usize)->Result<Vec<AnimeAlias>,String>{
     if key.len()<4{return Ok(Vec::new());}
     let (search,memory_dir)=open_search(db)?;
     let reader=search.reader.searcher();
@@ -306,7 +330,7 @@ fn read_title(doc:&tantivy::TantivyDocument,s:&SearchIndex)->Option<TitleAlias>{
 
 /// Check the exact normalized alias first, avoiding broad prefix scans for
 /// common titles (including short titles such as "Up" and "It").
-pub fn title_aliases_exact(db:&Connection,key:&str)->Result<Vec<TitleAlias>,String>{
+fn title_aliases_exact_uncached(db:&Connection,key:&str)->Result<Vec<TitleAlias>,String>{
     if key.is_empty(){return Ok(Vec::new());}
     let (search,memory_dir)=open_search(db)?;
     let reader=search.reader.searcher();
@@ -324,7 +348,7 @@ pub fn title_aliases_exact(db:&Connection,key:&str)->Result<Vec<TitleAlias>,Stri
 
 /// Complete prefix/suffix search. All candidates are retained until the V4
 /// ranker applies its deterministic rules; no top-N cutoff is introduced.
-pub fn title_aliases(db:&Connection,key:&str,suffix:bool)->Result<Vec<TitleAlias>,String>{
+fn title_aliases_uncached(db:&Connection,key:&str,suffix:bool)->Result<Vec<TitleAlias>,String>{
     if key.is_empty(){return Ok(Vec::new());}
     let (search,memory_dir)=open_search(db)?;
     let field=if suffix{search.backward}else{search.forward};
@@ -371,7 +395,7 @@ pub fn titles_by_ids(db:&Connection,ids:&[String])->Result<Vec<TitleAlias>,Strin
     Ok(aliases)
 }
 
-pub fn has_duplicate_title(db:&Connection,key:&str)->Result<bool,String>{
+fn has_duplicate_title_uncached(db:&Connection,key:&str)->Result<bool,String>{
     let (search,memory_dir)=open_search(db)?;
     let reader=search.reader.searcher();
     let query=TermQuery::new(Term::from_field_text(search.forward,key),IndexRecordOption::Basic);
@@ -400,7 +424,7 @@ pub fn has_duplicate_title(db:&Connection,key:&str)->Result<bool,String>{
 pub fn candidates(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,limit:usize)->Result<Vec<String>,String>{
     candidates_internal(db,key,_year,suffix,limit,false)
 }
-pub fn anime_candidates(db:&Connection,key:&str)->Result<Vec<String>,String>{
+fn anime_candidates_uncached(db:&Connection,key:&str)->Result<Vec<String>,String>{
     candidates_internal(db,key,None,false,1,true)
 }
 fn candidates_internal(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,limit:usize,anime_only:bool)->Result<Vec<String>,String>{
@@ -456,9 +480,114 @@ pub fn warmup(db:&Connection)->Result<(),String>{
     Ok(())
 }
 
+
+/// Single-flight, generation-aware memoization of immutable Tantivy results.
+/// Exact-title, prefix and suffix queries remain exhaustive. Oversized
+/// candidate sets are deliberately not cached to keep memory bounded.
+pub fn title_aliases_exact(db:&Connection,key:&str)->Result<Vec<TitleAlias>,String>{
+    if let Some(id)=lookup_cache_key(db,"exact_title",key){
+        TITLE_LOOKUPS.get_or_init(||QueryCache::new(LOOKUP_CAP,LOOKUP_TTL))
+            .get_or_compute(id,||title_aliases_exact_uncached(db,key),
+                |rows|rows.len()<=LOOKUP_MAX_ALIASES)
+    }else{title_aliases_exact_uncached(db,key)}
+}
+
+pub fn title_aliases(db:&Connection,key:&str,suffix:bool)->Result<Vec<TitleAlias>,String>{
+    let kind=if suffix{"suffix_title"}else{"prefix_title"};
+    if let Some(id)=lookup_cache_key(db,kind,key){
+        TITLE_LOOKUPS.get_or_init(||QueryCache::new(LOOKUP_CAP,LOOKUP_TTL))
+            .get_or_compute(id,||title_aliases_uncached(db,key,suffix),
+                |rows|rows.len()<=LOOKUP_MAX_ALIASES)
+    }else{title_aliases_uncached(db,key,suffix)}
+}
+
+pub fn anime_aliases(db:&Connection,key:&str,min_prefix:usize)->Result<Vec<AnimeAlias>,String>{
+    if let Some(id)=lookup_cache_key(db,&format!("anime_aliases_{min_prefix}"),key){
+        ANIME_LOOKUPS.get_or_init(||QueryCache::new(LOOKUP_CAP,LOOKUP_TTL))
+            .get_or_compute(id,||anime_aliases_uncached(db,key,min_prefix),
+                |rows|rows.len()<=LOOKUP_MAX_ALIASES)
+    }else{anime_aliases_uncached(db,key,min_prefix)}
+}
+
+pub fn has_duplicate_title(db:&Connection,key:&str)->Result<bool,String>{
+    if let Some(id)=lookup_cache_key(db,"duplicate_title",key){
+        DUPLICATE_LOOKUPS.get_or_init(||QueryCache::new(LOOKUP_CAP,LOOKUP_TTL))
+            .get_or_compute(id,||has_duplicate_title_uncached(db,key),|_|true)
+    }else{has_duplicate_title_uncached(db,key)}
+}
+
+pub fn anime_candidates(db:&Connection,key:&str)->Result<Vec<String>,String>{
+    if let Some(id)=lookup_cache_key(db,"anime_candidate_ids",key){
+        ANIME_ID_LOOKUPS.get_or_init(||QueryCache::new(LOOKUP_CAP,LOOKUP_TTL))
+            .get_or_compute(id,||anime_candidates_uncached(db,key),
+                |rows|rows.len()<=LOOKUP_MAX_ALIASES)
+    }else{anime_candidates_uncached(db,key)}
+}
+
 #[cfg(test)]
 mod persistence_tests {
     use super::*;
+
+    #[test]
+    fn disk_cache_key_changes_with_metadata_generation(){
+        let root=std::env::temp_dir().join(format!(
+            "matchlab-query-generation-{}-{:?}",
+            std::process::id(),std::thread::current().id()));
+        let _=std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file=root.join("metadata.sqlite3");
+        let db=Connection::open(&file).unwrap();
+        db.execute_batch("CREATE TABLE metadata_state(source TEXT PRIMARY KEY,
+            updated_at TEXT NOT NULL,row_count INTEGER NOT NULL);
+            INSERT INTO metadata_state VALUES('tantivy_generation','v3-one',0);").unwrap();
+        let one=lookup_cache_key(&db,"exact_title","doctorwho").unwrap();
+        assert_eq!(one,lookup_cache_key(&db,"exact_title","doctorwho").unwrap());
+        assert_ne!(one,lookup_cache_key(&db,"exact_title","onepiece").unwrap());
+        db.execute("UPDATE metadata_state SET updated_at='v3-two'
+            WHERE source='tantivy_generation'",[]).unwrap();
+        let two=lookup_cache_key(&db,"exact_title","doctorwho").unwrap();
+        assert_ne!(one,two);
+        assert_ne!(two,lookup_cache_key(&db,"anime_aliases_6","doctorwho").unwrap());
+        assert!(lookup_cache_key(&Connection::open_in_memory().unwrap(),
+            "exact_title","doctorwho").is_none());
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cache_does_not_change_tantivy_matching_results(){
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-search-cache-{}-{:?}.sqlite3",
+            std::process::id(),std::thread::current().id()));
+        let _=std::fs::remove_file(&path);
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
+            region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE metadata_state(source TEXT PRIMARY KEY,
+                updated_at TEXT NOT NULL,row_count INTEGER NOT NULL);
+            INSERT INTO metadata_state VALUES('tantivy_generation','v3-cache-test',0);
+            INSERT INTO titles VALUES('tt0056751','Doctor Who','doctorwho',1963,
+                'series','',1,0,'tvSeries');
+            INSERT INTO titles VALUES('tt0436992','Doctor Who','doctorwho',2005,
+                'series','',1,0,'tvSeries');").unwrap();
+        warmup(&db).unwrap();
+        let first=title_aliases_exact(&db,"doctorwho").unwrap();
+        let again=title_aliases_exact(&db,"doctorwho").unwrap();
+        assert_eq!(first.len(),2);
+        assert_eq!(again.len(),2);
+        assert_eq!(first.iter().map(|r|(&r.imdb_id,r.year)).collect::<std::collections::BTreeSet<_>>(),
+            again.iter().map(|r|(&r.imdb_id,r.year)).collect::<std::collections::BTreeSet<_>>());
+        assert!(has_duplicate_title(&db,"doctorwho").unwrap());
+        assert!(has_duplicate_title(&db,"doctorwho").unwrap());
+        // Query variants have separate keys; title and prefix searches can
+        // cache independently without changing their returned documents.
+        assert_eq!(title_aliases(&db,"doctorwho",false).unwrap().len(),2);
+        assert_eq!(title_aliases(&db,"doctorwho",false).unwrap().len(),2);
+        drop(db);
+        let _=std::fs::remove_file(&path);
+        let _=std::fs::remove_dir_all(format!("{}.tantivy",path.display()));
+    }
 
     #[test]
     fn independent_in_memory_databases_never_share_titles() {
