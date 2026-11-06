@@ -170,6 +170,50 @@ mod tests{
     }
 
     #[test]
+    fn split_anidb_parts_use_verifiable_local_episode_offsets(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE anime_series_map(
+             imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+             CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+             CREATE TABLE episode_map(
+             anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER,
+             start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+             INSERT INTO anime_series_map VALUES('tt1234567','101','456',1);
+             INSERT INTO anime_series_map VALUES('tt1234567','102','456',2);
+             INSERT INTO episode_map VALUES('101','456',1,3,1,12,0,'');
+             INSERT INTO episode_map VALUES('102','456',1,3,13,24,-12,'');").unwrap();
+        let reverse=resolve(&db,Request::Anidb{
+            id:"102".into(),episode:15}).unwrap();
+        assert_eq!(reverse["selected"]["sid"],"tt1234567:2:3");
+        let forward=resolve(&db,Request::Imdb{
+            id:"tt1234567".into(),season:2,episode:3}).unwrap();
+        assert_eq!(forward["selected"]["asid"],"102:15");
+        let out_of_range=resolve(&db,Request::Anidb{
+            id:"102".into(),episode:25}).unwrap();
+        assert_eq!(out_of_range["count"],0);
+    }
+
+    #[test]
+    fn one_anidb_episode_with_two_explicit_tvdb_coordinates_is_ambiguous(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE anime_series_map(
+             imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+             CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+             CREATE TABLE episode_map(
+             anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER,
+             start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+             INSERT INTO anime_series_map VALUES('tt1234567','123','456',0);
+             INSERT INTO episode_map VALUES('123','456',1,2,1,20,0,'10-3+4');").unwrap();
+        let back=resolve(&db,Request::Anidb{
+            id:"123".into(),episode:10}).unwrap();
+        assert_eq!(back["count"],2);
+        assert_eq!(back["selected"],Value::Null);
+        assert_eq!(back["ambiguous"],true);
+        assert_eq!(back["matches"][0]["sid"],"tt1234567:2:3");
+        assert_eq!(back["matches"][1]["sid"],"tt1234567:2:4");
+    }
+
+    #[test]
     fn ambiguous_anidb_to_imdb_never_picks_first_series(){
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE anime_series_map(
