@@ -1884,8 +1884,8 @@ pub fn parse_title(
     // The upstream parser exposes empty season/episode arrays even when
     // nothing was recognized. Keep this established /parse API behavior,
     // but never let an empty layer override populated ancestor metadata.
-    merged.entry("seasons".into()).or_insert_with(||json!([]));
-    merged.entry("episodes".into()).or_insert_with(||json!([]));
+    merged.entry("seasons").or_insert_with(||json!([]));
+    merged.entry("episodes").or_insert_with(||json!([]));
     Ok(merged)
 }
 
