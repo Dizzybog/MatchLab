@@ -88,6 +88,17 @@ pub fn initialize(path: &Path) -> Result<(), String> {
                 duration_sum_ms=duration_sum_ms+NEW.duration_ms;
         END;
 
+        -- Keep the physical table bounded as new requests arrive. The
+        -- subquery uses the descending primary-key order and evicts only
+        -- one row; legacy bulk cleanup is handled by the background worker.
+        CREATE TRIGGER IF NOT EXISTS request_history_cap
+        AFTER INSERT ON requests
+        BEGIN
+            DELETE FROM requests WHERE id = (
+                SELECT id FROM requests ORDER BY id DESC LIMIT 1 OFFSET 1000
+            );
+        END;
+
         -- The history view uses recent IDs; status filtering only scans 1,000.
         DROP INDEX IF EXISTS requests_status;
         DROP INDEX IF EXISTS requests_created_at;
@@ -95,8 +106,9 @@ pub fn initialize(path: &Path) -> Result<(), String> {
     "#).map_err(|e| e.to_string())
 }
 
-/// Records request details and increments the minute aggregate atomically via
-/// the database trigger. Deletes never happen in the request transaction.
+/// Record details and increment minute aggregates atomically through triggers.
+/// A single oldest detail row is evicted once the 1,000-row cap is exceeded;
+/// large legacy purges and aggregate expiry remain background-only.
 pub fn record(
     path: &Path, title: &str, status: &str,
     selected: Option<&Value>, details: &Value, duration_ms: u64,
@@ -262,10 +274,12 @@ mod tests {
             ).unwrap();
         }
         drop(db);
-        // Even before maintenance, users cannot browse beyond latest 1,000.
+        // Even before maintenance the physical table holds only 1,000.
+        let db = connect(&path).unwrap();
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM requests",[],|r|r.get::<_,i64>(0)).unwrap(),1000);
+        drop(db);
         assert_eq!(history(&path,100,999,None).unwrap()["items"].as_array().unwrap().len(),1);
         assert_eq!(history(&path,100,1000,None).unwrap()["items"].as_array().unwrap().len(),0);
-        assert_eq!(prune(&path).unwrap(),15);
         assert_eq!(prune(&path).unwrap(),0);
         let db = connect(&path).unwrap();
         assert_eq!(db.query_row("SELECT COUNT(*) FROM requests",[],|r|r.get::<_,i64>(0)).unwrap(),1000);
