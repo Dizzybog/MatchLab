@@ -91,6 +91,22 @@ pub fn has_specific_alias(db:&Connection,imdb:&str,title:&str)->rusqlite::Result
     Ok(base.as_deref()!=Some(&best.0))
 }
 
+/// Resolve a single local episode using an exact anime *part* title when
+/// no explicit Sxx season is present. Unlike absolute episode numbering,
+/// "[Group] Amanchu! Advance - 01" starts again at episode 1 in this
+/// part. Do not guess: the alias must identify exactly one AniDB entry
+/// tied to this IMDb series and one mapped positive TVDB season.
+pub fn resolve_episode_from_exact_part_title(
+    db:&Connection,imdb:&str,title:&str,episode:i64,
+)->rusqlite::Result<Option<anime_resolver::Episode>>{
+    if episode<=0{return Ok(None);}
+    let Some(inferred_season)=season_from_title(db,imdb,title)? else{return Ok(None)};
+    // anime_title::resolve interprets season=1 as the FIRST season of
+    // the named AniDB part (not the series' absolute TVDB season).
+    let mapped=resolve(db,imdb,title,1,episode)?;
+    Ok(mapped.filter(|m|m.season==inferred_season))
+}
+
 /// Infer an IMDb/TVDB season from a title-specific AniDB alias without an episode.
 /// Only publish a season when one uniquely identified AniDB work maps to exactly
 /// one positive TVDB season. Never manufacture an episode or an ASID.
