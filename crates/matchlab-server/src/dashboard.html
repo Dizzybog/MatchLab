@@ -51,6 +51,8 @@ tr[data-id]:focus-visible{outline-offset:-2px}
 .paging{display:flex;gap:8px;white-space:nowrap}
 .history-footer{align-items:center}
 .history-footer .history-note{min-width:0;flex:1}
+.diagnostic-reason{white-space:nowrap;overflow-x:auto;overflow-wrap:normal;
+  overscroll-behavior-x:contain;scrollbar-width:thin}
 .history-title{overflow-x:auto;white-space:nowrap;max-width:100%;
   padding:2px 0 10px;font-weight:650;scrollbar-width:thin}
 .table-hint,.copy-mobile,.stat-label-short,.health-short,.history-note-short,
@@ -199,6 +201,6 @@ document.querySelectorAll('.stat.filter').forEach(button=>{
 });
 function setHealth(full,short,ok){const node=$('health');node.className='pill '+(ok?'good':'bad');node.title=full;node.setAttribute('aria-label',full);node.querySelector('.health-full').textContent=full;node.querySelector('.health-short').textContent=short}
 async function health(){try{const r=await fetch('/health');const v=await r.json();if(v.status==='ready'){setHealth('● Metadata ready','● Ready',r.ok)}else{setHealth('◌ Metadata initializing','◌ Initializing',r.ok)}}catch{setHealth('● Server unavailable','● Offline',false)}}
-$('form').onsubmit=async e=>{e.preventDefault();const b=$('submit');b.disabled=true;$('result').innerHTML='<p class="muted">Parsing and matching…</p>';const body={title:$('title').value};if($('year').value)body.year=Number($('year').value);if($('series').value)body.series=$('series').value==='true';try{const d=await json('/debug/match',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const selected=d.selected;const heading=selected?'<strong class="good">Matched: '+esc(selected.imdb_id||selected.sid)+'</strong>':'<strong class="bad">No match</strong>';$('result').innerHTML=heading+'<p class="muted">'+esc(d.reason)+'</p>'+rankResults(d)}catch(e){$('result').innerHTML='<strong class="bad">Request failed</strong><pre class="output">'+esc(e.message)+'</pre>'}finally{b.disabled=false;stats();offset=0;history()}};
+$('form').onsubmit=async e=>{e.preventDefault();const b=$('submit');b.disabled=true;$('result').innerHTML='<p class="muted">Parsing and matching…</p>';const body={title:$('title').value};if($('year').value)body.year=Number($('year').value);if($('series').value)body.series=$('series').value==='true';try{const d=await json('/debug/match',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const selected=d.selected;const heading=selected?'<strong class="good">Matched: '+esc(selected.imdb_id||selected.sid)+'</strong>':'<strong class="bad">No match</strong>';$('result').innerHTML=heading+'<p class="muted diagnostic-reason" title="'+esc(d.reason)+'">'+esc(d.reason)+'</p>'+rankResults(d)}catch(e){$('result').innerHTML='<strong class="bad">Request failed</strong><pre class="output">'+esc(e.message)+'</pre>'}finally{b.disabled=false;stats();offset=0;history()}};
 $('refresh').onclick=()=>{stats();history();health()};$('prev').onclick=()=>{offset=Math.max(0,offset-25);history()};$('next').onclick=()=>{offset+=25;history()};stats();history();health();setInterval(()=>{stats();health()},30000);
 </script></body></html>
