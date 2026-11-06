@@ -828,14 +828,18 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
     tracing::info!(max_matches,"MatchLab match concurrency configured");
     let history_db=env::var("MATCHLAB_HISTORY_DB").unwrap_or_else(|_|"/data/history.sqlite3".into());
     // Backfill existing 14-day statistics before the retention worker drops raw rows.
-    if let Err(error)=dashboard_history::initialize(std::path::Path::new(&history_db)) {
-        // Statistics are not part of the metadata matching critical path.
-        // A damaged history file must not prevent the core API from starting.
-        tracing::error!(%error,"history/statistics initialization failed; core matching remains available");
-    }
-    // Run retention off the HTTP request path. The first iteration executes at
-    // startup; subsequent passes run every five minutes even without traffic.
-    {
+    let history_ready=match dashboard_history::initialize(std::path::Path::new(&history_db)) {
+        Ok(())=>true,
+        Err(error)=>{
+            // Keep matching available, but never delete un-migrated history:
+            // those rows may be needed to rebuild the 14-day aggregates later.
+            tracing::error!(%error,"history/statistics initialization failed; retention disabled");
+            false
+        }
+    };
+    // Only prune after statistics were safely backfilled. On failure the
+    // history is left untouched so the migration can be retried at restart.
+    if history_ready {
         let history_path=PathBuf::from(&history_db);
         tokio::spawn(async move {
             loop {
