@@ -1191,7 +1191,8 @@ mod tests {
             "matchlab-one-piece-ambiguous-{}-{stamp}.sqlite3",std::process::id()));
         std::fs::copy(&path,&ambiguous_path).unwrap();
         let db=Connection::open(&ambiguous_path).unwrap();
-        db.execute_batch("INSERT INTO episode_map VALUES('1253','81797',1,-1,1,0,0,'');
+        db.execute_batch("UPDATE anime_series_map SET tvdb_id='81797' WHERE anidb_id='1253';
+            INSERT INTO episode_map VALUES('1253','81797',1,-1,1,0,0,'');
             INSERT INTO episode_map VALUES('1253','81797',1,21,892,1085,-891,'');
             INSERT INTO episode_map VALUES('1253','81797',1,22,1086,1155,-1085,'');").unwrap();
         tantivy_search::warmup(&db).unwrap();
