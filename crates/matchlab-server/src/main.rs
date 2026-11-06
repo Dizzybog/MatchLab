@@ -326,6 +326,16 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
             }
         }
     }
+    // The generic release parser may have interpreted 01-07 as a single
+    // episode even if no anime identity was verified. For an untrusted batch
+    // candidate, suppress that inference rather than publishing guessed
+    // coordinates for unrelated movies or ordinary TV titles.
+    if verified_anime_range_imdb.is_none()
+        && parsed_value.get("anime_episode_range_candidate").is_some()
+        && let Some(parsed)=parsed_value.as_object_mut(){
+        parsed.insert("episodes".into(),json!([]));
+        parsed.insert("seasons".into(),json!([]));
+    }
     let parsed=parsed_value.as_object().ok_or("parser returned no object")?;
     let parsed_title = parsed.get("title").and_then(Value::as_str).unwrap_or("");
     let title_owned = if explicit_absolute_episode(&req.title).is_some() && numbers(parsed.get("seasons")).is_empty() {
@@ -1089,6 +1099,11 @@ mod tests {
             title:"Example Show 01-07".into(),year:None,series:None}).unwrap();
         assert!(unrelated.parsed.get("anime_title_verified").is_none());
         assert!(unrelated.parsed.get("episode_start").is_none());
+        assert_eq!(unrelated.parsed["episodes"],json!([]));
+        if let Some(selected)=unrelated.selected {
+            assert!(selected["episode"].is_null(),
+                "unverified unmarked range must not invent an ordinary TV episode");
+        }
 
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
