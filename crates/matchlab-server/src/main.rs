@@ -280,11 +280,18 @@ fn candidate_has_episode(db:&Connection,imdb:&str,season:i64,episode:i64)->Resul
     Ok(season_episode_end(db,imdb,season)?.is_none_or(|max|episode<=max))
 }
 
+/// The MatchLab SID consumer accepts seasons 0..=9999 and episodes 0..=99999.
+/// Never promote an outlier from IMDb's user-contributed episode numbering into
+/// an entire season pack's endpoint.
+fn valid_sid_coordinate(season:i64,episode:i64)->bool{
+    (0..=9999).contains(&season)&&(0..=99999).contains(&episode)
+}
 fn season_episode_end(db:&Connection,imdb:&str,season:i64)->Result<Option<i64>,String>{
+    if !(1..=9999).contains(&season){return Ok(None);}
     match db.query_row("SELECT max_episode FROM season_episodes
         WHERE imdb_id=?1 AND season=?2",rusqlite::params![imdb,season],
         |row|row.get::<_,i64>(0)){
-        Ok(n) if n>0=>Ok(Some(n)),
+        Ok(n) if valid_sid_coordinate(season,n)&&n>0=>Ok(Some(n)),
         Ok(_)|Err(rusqlite::Error::QueryReturnedNoRows)=>Ok(None),
         Err(e)=>Err(e.to_string())
     }
@@ -768,11 +775,20 @@ fn public_match_response(selected: Option<Value>) -> Value {
         .or(if has_range {None}else{start_season});
     let end_episode=winner["episode_end"].as_i64()
         .or(if has_range {None}else{start_episode});
-    let sid_start=if imdb.is_empty(){Value::Null}
+    // Retain the valid IMDb identity while discarding impossible episode
+    // coordinates. A stale season_episodes snapshot or a bad parse must not
+    // make the public /match API rejectable by StremThru.
+    let invalid_coordinates=[(start_season,start_episode),(end_season,end_episode)]
+        .into_iter().any(|(season,episode)|{
+            matches!((season,episode),(Some(se),Some(ep)) if !valid_sid_coordinate(se,ep))
+        });
+    let sid_start=if invalid_coordinates{json!(imdb)}
+        else if imdb.is_empty(){Value::Null}
         else if let (Some(se),Some(ep))=(start_season,start_episode){
             json!(format!("{imdb}:{se}:{ep}"))
         }else if has_range{Value::Null}else{json!(imdb)};
-    let sid_end=if imdb.is_empty(){Value::Null}
+    let sid_end=if invalid_coordinates{json!(imdb)}
+        else if imdb.is_empty(){Value::Null}
         else if let (Some(se),Some(ep))=(end_season,end_episode){
             json!(format!("{imdb}:{se}:{ep}"))
         }else if has_range{Value::Null}else{json!(imdb)};
@@ -1427,6 +1443,36 @@ mod tests {
         assert_eq!(explicit_season_range("Supernatural S01-S02"),Some((1,2)));
         assert_eq!(explicit_season_range("Supernatural.S01E22"),None);
         assert_eq!(explicit_season_range("Supernatural S01-S12/S02E01"),None);
+    }
+    #[test]
+    fn imported_imdb_episode_outliers_do_not_poison_season_packs_or_public_sids(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+            episode_count INTEGER,max_episode INTEGER);
+            INSERT INTO season_episodes VALUES('tt29171927',1,12,121247);
+            INSERT INTO season_episodes VALUES('tt1561921',1,52,301085);
+            INSERT INTO season_episodes VALUES('tt1234567',1,12,12);").unwrap();
+        assert_eq!(season_episode_end(&db,"tt29171927",1).unwrap(),None);
+        assert_eq!(season_episode_end(&db,"tt1561921",1).unwrap(),None);
+        assert_eq!(season_episode_end(&db,"tt1234567",1).unwrap(),Some(12));
+        for (id,bad) in [("tt29171927",121247),("tt1561921",301085)]{
+            let selected=json!({"imdb_id":id,"season":1,"episode":1,
+                "season_end":1,"episode_end":bad});
+            let response=public_match_response(Some(selected));
+            assert_eq!(response["sid_start"],id);
+            assert_eq!(response["sid_end"],id);
+            assert_eq!(response["asid_start"],Value::Null);
+            assert_eq!(response["asid_end"],Value::Null);
+            let direct=public_match_response(Some(json!({"imdb_id":id,
+                "season":1,"episode":bad})));
+            assert_eq!(direct["sid_start"],id);
+            assert_eq!(direct["sid_end"],id);
+        }
+        let ordinary=public_match_response(Some(json!({
+            "imdb_id":"tt1234567","season":1,"episode":1,
+            "season_end":1,"episode_end":12})));
+        assert_eq!(ordinary["sid_start"],"tt1234567:1:1");
+        assert_eq!(ordinary["sid_end"],"tt1234567:1:12");
     }
     #[test]
     fn match_response_has_only_four_fields() {
