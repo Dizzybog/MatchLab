@@ -184,6 +184,29 @@ crosswalk entry, the matcher falls back to existing absolute-episode handling.
 It **never assumes all unmarked anime episodes start in season 1 or 2**.
 Explicit `SxxExx` coordinates always take precedence.
 
+#### AniDB alias collisions for long-running anime
+
+An exact normalized AniDB title can belong to multiple different works, such
+as the main `One Piece` TV series and films/OVAs also titled `One Piece`.
+For an **unmarked absolute episode batch**, MatchLab first collects the exact
+AniDB-title/IMDb associations from Tantivy. If only one IMDb association
+exists, the existing partial-range behavior is preserved.
+
+When several associations share the exact title, MatchLab checks the episode
+crosswalk for each identity. Only one IMDb identity must independently verify
+**every episode** in the requested interval before the batch is promoted from
+`anime_episode_range_candidate` to canonical `episode_start`/`episode_end`.
+This uses cheap endpoint checks before any full-range verification. A second
+fully mapped identity, missing crosswalk data, or too many ambiguous title
+associations leaves the unmarked range tentative. Neither IMDb ranking nor
+AniDB ID ordering is used to break a real tie.
+
+For example, with suitable Anime-Lists mappings, `One Piece - 0892 ~ 1089`
+spans TVDB-style season 21 episode 1 through season 22 episode 4; the public
+response reports those verified SID endpoints and the AniDB 69 absolute episode
+endpoints. The main title matcher still determines the selected IMDb title;
+a batch is never attached to an unrelated IMDb winner.
+
 #### AnimeTosho-style episode batches
 
 Anime release names often omit SxxExx notation. MatchLab recognizes numeric
