@@ -156,6 +156,7 @@ fn import_imdb_with_index_plan(
             let mut input=reader(episodes)?;
             let h=input.headers()?.clone();
             let mut malformed_rows=0u64;
+            let mut outlier_episode_rows=0u64;
             let (parent,season,episode)=(col(&h,"parentTconst")?,col(&h,"seasonNumber")?,col(&h,"episodeNumber")?);
             let mut insert=tx.prepare_cached("INSERT INTO seasons(imdb_id,max_season)
                 SELECT ?1,?2 WHERE EXISTS(SELECT 1 FROM titles
@@ -179,14 +180,26 @@ fn import_imdb_with_index_plan(
                     continue;
                 }
                 let se=r.get(season).unwrap_or("").parse::<i64>().unwrap_or(0);
+                if se>9999{
+                    outlier_episode_rows+=1;
+                    continue;
+                }
                 if se>0{
                     let parent_id=r.get(parent).unwrap_or("");
                     insert.execute(params![parent_id,se])?;
                     let ep=r.get(episode).unwrap_or("").parse::<i64>().unwrap_or(0);
-                    if ep>0{insert_episode.execute(params![parent_id,se,ep])?;}
+                    // IMDb episode numbers are user-contributed and can include
+                    // extreme outliers. StremThru's SID supports at most 99999.
+                    // Skip the bad observation, not the other episodes in its season.
+                    if ep>99999{outlier_episode_rows+=1;}
+                    else if ep>0{insert_episode.execute(params![parent_id,se,ep])?;}
                 }
             }
             if malformed_rows>0 {tracing::warn!(source="imdb_episodes",malformed_rows,"skipped malformed metadata TSV records");}
+            if outlier_episode_rows>0{
+                tracing::warn!(source="imdb_episodes",outlier_episode_rows,
+                    "ignored episode coordinates outside SID bounds");
+            }
             log_progress("imdb_episodes",processed,started);
         }
         let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
