@@ -108,8 +108,17 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
         }
         if !rows.is_empty(){stage="country_exact";}
     }
-    if rows.is_empty(){rows=prefix(db,&key,&release,series,year,required_season)?;}
     if rows.is_empty(){
+        // "S" or "Th" can be a damaged parser output, but prefix matching
+        // these against millions of Tantivy aliases is prohibitively broad.
+        // Keep legitimate short titles (Up, It, Her) eligible as exact hits.
+        rows=if key.len()<4 {
+            filter(db,exact(db,&key)?,&release,series,year,required_season)?
+        }else{
+            prefix(db,&key,&release,series,year,required_season)?
+        };
+    }
+    if rows.is_empty()&&key.len()>=4{
         for size in ((std::cmp::max(2,key.len()/2)+1)..key.len()).rev(){
             if !key.is_char_boundary(size){continue;}
             let short=&key[..size];
@@ -127,7 +136,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
         rows=prefix(db,half,&release,series,year,required_season)?;
         if !rows.is_empty(){stage="half_prefix";}
     }
-    if rows.is_empty()&&series{
+    if rows.is_empty()&&series&&key.len()>=4{
         let ids=crate::tantivy_search::anime_candidates(db,&key).map_err(index_error)?;
         if !ids.is_empty(){
             let aliases=crate::tantivy_search::titles_by_ids(db,&ids).map_err(index_error)?;
@@ -202,6 +211,30 @@ mod tests{
         assert_eq!(found[0].imdb_id,"tthigh");
     }
     #[test] fn normalization(){assert_eq!(clean_title("Pokémon and Ægir"),"pokemonaegir");}
+    #[test] fn short_titles_require_exact_match_instead_of_broad_tantivy_prefix(){
+        let db=Connection::open_in_memory().unwrap();
+        db.create_scalar_function("reverse",1,
+            rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC
+                |rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            |ctx|{let s:String=ctx.get(0)?;Ok(s.chars().rev().collect::<String>())}).unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            INSERT INTO titles VALUES('tt0000001','Up','up',2009,'movie','',1,0,'movie');
+            INSERT INTO titles VALUES('tt0000002','Upgrade','upgrade',2018,'movie','',1,0,'movie');
+            INSERT INTO titles VALUES('tt0000003','The 100','the100',2014,'series','',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt0000003',7);").unwrap();
+        let up=search(&db,"Up",Some(2009),false,0,"Up.2009",false,5).unwrap();
+        assert_eq!(up.len(),1);
+        assert_eq!(up[0].imdb_id,"tt0000001");
+        let partial=search(&db,"Th",None,true,1,"The100.s01",false,5).unwrap();
+        assert!(partial.is_empty(),"broken short title must not trigger broad prefix matching");
+        let full=search(&db,"The100",None,true,1,"The100.s01",false,5).unwrap();
+        assert_eq!(full[0].imdb_id,"tt0000003");
+    }
     #[test] fn country_specific_series_beats_generic_alias() {
         let db=Connection::open_in_memory().unwrap();
         db.create_scalar_function("reverse",1,
