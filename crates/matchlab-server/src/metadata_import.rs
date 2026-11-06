@@ -18,7 +18,34 @@ fn log_progress(source:&str,processed:u64,started:Instant){
 fn col(headers:&csv::StringRecord,name:&str)->Result<usize,Box<dyn Error>>{
     headers.iter().position(|h|h==name).ok_or_else(||format!("missing TSV header: {name}").into())
 }
+// Import-time mapping overrides need an AniDB-id lookup. Create this index
+// immediately before Anime-Lists ingestion, not during the IMDb title load.
+fn prepare_episode_import_index(db:&Connection)->rusqlite::Result<()>{
+    db.execute_batch("CREATE INDEX IF NOT EXISTS episode_lookup_idx
+        ON episode_map(anidb_id,anidb_season,start,end);")
+}
+
+// The remaining secondary indexes serve relational lookups and Tantivy's
+// AniDB alias join. Build them in the disposable staging database after bulk
+// inserts, and before ANALYZE / integrity verification / index publication.
+fn finish_relational_indexes(db:&Connection)->rusqlite::Result<()>{
+    db.execute_batch("
+        CREATE INDEX IF NOT EXISTS anime_series_by_anidb
+            ON anime_series_map(anidb_id);
+        CREATE INDEX IF NOT EXISTS episode_by_tvdb
+            ON episode_map(tvdb_id,tvdb_season,offset,start);
+        CREATE INDEX IF NOT EXISTS episode_by_anidb_order
+            ON episode_map(anidb_id,tvdb_season,offset,start);")
+}
+
+// Standalone 'import-imdb' keeps a fully indexed database. The full refresh
+// pipeline delays secondary index building until after each data source.
 pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<u64,Box<dyn Error>>{
+    import_imdb_with_index_plan(target,basics,akas,episodes,true)
+}
+fn import_imdb_with_index_plan(
+    target:&Path,basics:&Path,akas:&Path,episodes:&Path,complete_indexes:bool
+)->Result<u64,Box<dyn Error>>{
     let parent=target.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(parent)?;
     let stamp=SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
@@ -48,12 +75,7 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
             CREATE TABLE anidb_titles(anidb_id TEXT NOT NULL,title TEXT NOT NULL,
                 clean_title TEXT NOT NULL,title_type TEXT NOT NULL,language TEXT NOT NULL,
                 PRIMARY KEY(anidb_id,clean_title,title_type,language));
-            CREATE TABLE metadata_state(source TEXT PRIMARY KEY,updated_at TEXT NOT NULL,row_count INTEGER NOT NULL);
-            CREATE INDEX anime_series_by_anidb ON anime_series_map(anidb_id);
-            CREATE INDEX anime_lookup_idx ON anime_ids(type,value);
-            CREATE INDEX episode_lookup_idx ON episode_map(anidb_id,anidb_season,start,end);
-            CREATE INDEX episode_by_tvdb ON episode_map(tvdb_id,tvdb_season,offset,start);
-            CREATE INDEX episode_by_anidb_order ON episode_map(anidb_id,tvdb_season,offset,start);")?;
+            CREATE TABLE metadata_state(source TEXT PRIMARY KEY,updated_at TEXT NOT NULL,row_count INTEGER NOT NULL);")?;
         let tx=db.transaction()?;
         let mut count=0u64;
         {
@@ -164,6 +186,13 @@ pub fn import_imdb(target:&Path,basics:&Path,akas:&Path,episodes:&Path)->Result<
         tx.execute("INSERT INTO metadata_state VALUES('imdb',?1,?2)",params![now,count])?;
         // Do not mark full_refresh: anime datasets must also be imported and validated.
         tx.commit()?;
+        if complete_indexes {
+            // The standalone CLI still produces a complete relational index
+            // layout, despite having no anime rows yet.
+            prepare_episode_import_index(&db)?;
+            finish_relational_indexes(&db)?;
+            db.execute_batch("ANALYZE;")?;
+        }
         drop(db);
         fs::rename(&stage,target)?;
         Ok(count)
@@ -491,10 +520,20 @@ pub fn refresh_from_files_with_ratings(
     let stage=parent.join(format!(".matchlab-full-{}-{stamp}.sqlite3",std::process::id()));
     let result=(||{
         tracing::info!("metadata refresh: importing IMDb datasets");
-        let imdb=import_imdb(&stage,basics,akas,episodes)?;
+        let imdb=import_imdb_with_index_plan(&stage,basics,akas,episodes,false)?;
         if let Some(ratings)=ratings {import_ratings(&stage,ratings)?;}
         tracing::info!("metadata refresh: importing animeApi");
         let links=import_animeapi(&stage,animeapi)?;
+        // Anime-Lists applies mapping overrides using anidb_id and season.
+        // This index must exist before those UPDATE/DELETE operations;
+        // deferring it until the very end would risk quadratic scans.
+        {
+            let db=Connection::open(&stage)?;
+            let started=Instant::now();
+            prepare_episode_import_index(&db)?;
+            tracing::info!(elapsed_seconds=started.elapsed().as_secs_f64(),
+                "metadata refresh: created episode import index");
+        }
         tracing::info!("metadata refresh: importing Anime-Lists");
         let episodes_count=import_animelists(&stage,animelists)?;
         tracing::info!("metadata refresh: importing AniDB titles");
@@ -504,6 +543,11 @@ pub fn refresh_from_files_with_ratings(
         }
         {
             let db=Connection::open(&stage)?;
+            tracing::info!("metadata refresh: building final SQLite relation indexes");
+            let index_started=Instant::now();
+            finish_relational_indexes(&db)?;
+            tracing::info!(elapsed_seconds=index_started.elapsed().as_secs_f64(),
+                "metadata refresh: finished SQLite relation indexes");
             let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
             db.execute("INSERT OR REPLACE INTO metadata_state VALUES('full_refresh',?1,?2)",
                 params![now,imdb+links+episodes_count+aliases])?;
@@ -554,6 +598,103 @@ pub fn refresh_from_files_with_ratings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn full_refresh_publishes_all_required_indexes_after_aggregation(){
+        let folder=std::env::temp_dir().join(format!(
+            "matchlab-index-refresh-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&folder).unwrap();
+        let input=|name:&str,contents:&str|{
+            let file=folder.join(name);
+            fs::write(&file,contents).unwrap();
+            file
+        };
+        let basics=input("basics.tsv","tconst\ttitleType\tprimaryTitle\toriginalTitle\tstartYear\n\
+            tt1234567\ttvSeries\tExample Show\tExample Show\t2020\n");
+        let akas=input("akas.tsv","titleId\tordering\ttitle\tregion\tisOriginalTitle\n\
+            tt1234567\t1\tExample Show\tUS\t1\n");
+        let episodes=input("episodes.tsv","parentTconst\tseasonNumber\tepisodeNumber\n\
+            tt1234567\t1\t2\n");
+        let animeapi=input("animeapi.tsv","imdb\tanidb\tthetvdb\ttrakt_season\n\
+            tt1234567\t123\t456\t1\n");
+        let animelists=input("anime-list.xml",
+            "<anime-list><anime anidbid=\"123\" tvdbid=\"456\" imdbid=\"tt1234567\" \
+                defaulttvdbseason=\"1\" episodeoffset=\"0\"></anime></anime-list>");
+        let titles=input("anidb-titles.xml",
+            "<animetitles><anime aid=\"123\"><title type=\"main\" xml:lang=\"en\">Example Show</title></anime></animetitles>");
+        let db_path=folder.join("metadata.sqlite3");
+        let counts=refresh_from_files(&db_path,&basics,&akas,&episodes,
+            &animeapi,&animelists,&titles).unwrap();
+        assert!(counts.0>0 && counts.1>0 && counts.2>0 && counts.3>0);
+        let db=Connection::open(&db_path).unwrap();
+        let mut stmt=db.prepare("SELECT name FROM sqlite_master WHERE type='index'").unwrap();
+        let indexes=stmt.query_map([],|r|r.get::<_,String>(0)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert!(indexes.contains(&"episode_lookup_idx".to_owned()));
+        assert!(indexes.contains(&"episode_by_tvdb".to_owned()));
+        assert!(indexes.contains(&"episode_by_anidb_order".to_owned()));
+        assert!(indexes.contains(&"anime_series_by_anidb".to_owned()));
+        assert!(!indexes.contains(&"anime_lookup_idx".to_owned()));
+        assert!(indexes.iter().all(|name|!name.starts_with("titles_")));
+        let aliases:i64=db.query_row("SELECT COUNT(*) FROM anime_series_map",[],|r|r.get(0)).unwrap();
+        assert!(aliases>0);
+        drop(stmt);drop(db);
+        fs::remove_dir_all(folder).unwrap();
+    }
+    #[test]
+    fn staged_index_plan_retains_mapping_lookup_plans_without_title_indexes(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("
+            CREATE TABLE anime_ids(group_id TEXT NOT NULL,type TEXT NOT NULL,
+                value TEXT NOT NULL,PRIMARY KEY(group_id,type,value));
+            CREATE TABLE anime_series_map(imdb_id TEXT NOT NULL,anidb_id TEXT NOT NULL,
+                tvdb_id TEXT NOT NULL,trakt_season INTEGER NOT NULL,
+                PRIMARY KEY(imdb_id,anidb_id,tvdb_id,trakt_season));
+            CREATE TABLE episode_map(anidb_id TEXT NOT NULL,tvdb_id TEXT NOT NULL,
+                anidb_season INTEGER NOT NULL,tvdb_season INTEGER NOT NULL,
+                start INTEGER NOT NULL,end INTEGER NOT NULL,offset INTEGER NOT NULL,
+                map TEXT NOT NULL);").unwrap();
+        // Bulk animeApi ingestion initially maintains only primary keys.
+        let index_names=|table:&str|->Vec<String>{
+            let mut stmt=db.prepare(&format!("PRAGMA index_list('{table}')")).unwrap();
+            let rows=stmt.query_map([],|r|r.get::<_,String>(1)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert!(index_names("episode_map").is_empty());
+        prepare_episode_import_index(&db).unwrap();
+        assert_eq!(index_names("episode_map"),vec!["episode_lookup_idx"]);
+        finish_relational_indexes(&db).unwrap();
+        // These calls must be safe if an operator builds indexes twice.
+        prepare_episode_import_index(&db).unwrap();
+        finish_relational_indexes(&db).unwrap();
+        let indexes=index_names("episode_map");
+        assert_eq!(indexes.len(),3);
+        assert!(indexes.contains(&"episode_lookup_idx".to_string()));
+        assert!(indexes.contains(&"episode_by_tvdb".to_string()));
+        assert!(indexes.contains(&"episode_by_anidb_order".to_string()));
+        assert_eq!(index_names("anime_ids").len(),1,
+            "anime_ids already has the lookup prefix in its primary key");
+        assert_eq!(index_names("anime_series_map").len(),2);
+        let explain=|sql:&str|->String{
+            let mut stmt=db.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let rows=stmt.query_map([],|r|r.get::<_,String>(3)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap().join(" | ")
+        };
+        assert!(explain("SELECT * FROM episode_map
+            WHERE anidb_id='123' AND anidb_season>0")
+            .contains("episode_lookup_idx"));
+        assert!(explain("SELECT anidb_id FROM episode_map WHERE tvdb_id='456'")
+            .contains("episode_by_tvdb"));
+        assert!(explain("SELECT tvdb_season,offset,start FROM episode_map
+            WHERE anidb_id='123' AND tvdb_season>0
+            ORDER BY tvdb_season,offset,start")
+            .contains("episode_by_anidb_order"));
+        assert!(explain("SELECT imdb_id FROM anime_series_map WHERE anidb_id='123'")
+            .contains("anime_series_by_anidb"));
+        assert!(explain("SELECT value FROM anime_ids WHERE group_id='tt1' AND type='anidb'")
+            .contains("sqlite_autoindex_anime_ids"));
+    }
     #[test]
     fn animelists_preserves_explicit_mapping_text_and_overrides_default() {
         let folder=std::env::temp_dir().join(format!("matchlab-mapping-test-{}-{}",

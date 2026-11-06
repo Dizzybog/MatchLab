@@ -22,6 +22,16 @@ The index cache permits simultaneous readers of several generations and bounds i
 
 Exact IMDb title matching runs a Tantivy term query first, avoiding costly prefix enumeration in the common case. AniDB alias prefix lookups are combined into one Tantivy term-set query. Less common prefix/suffix fallbacks collect all candidates before deterministic ranking; there is no arbitrary TopDocs cutoff.
 
+SQLite indexes are deliberately restricted to relational lookups. The IMDb
+title-discovery paths do not use SQLite indexes: Tantivy owns both IMDb and
+AniDB alias retrieval. For staged metadata refreshes, only primary-key indexes
+are maintained during initial IMDb and animeApi ingestion; the AniDB episode
+import lookup index is installed before Anime-Lists overrides, and remaining
+relational indexes are built after all source rows are imported. `ANALYZE`
+runs before the Tantivy index is published. The airdate and request-history
+databases use covering primary-key and rowid scans, without their former
+duplicate secondary indexes. See [Metadata lifecycle](LOCAL_METADATA.md).
+
 Tantivy indexing uses a configured 64 MB writer buffer, but peak memory usage is higher due to reader caches and importer data. Budget disk space for simultaneous generations. Green CI alone does not establish capacity at the full IMDb catalog size. Test cold startup, sustained query throughput, refresh overlaps, crash recovery, p95/p99 latency and peak memory on production-like data before a high-volume rollout.
 
 ## Lessons from StremThru

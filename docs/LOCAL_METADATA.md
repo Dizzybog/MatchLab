@@ -20,6 +20,31 @@ Automatic initialization and refresh use seven built-in public HTTPS URLs. No en
 
 Alternatively, import six local files using `matchlab-server refresh-metadata <database.sqlite3> <basics.tsv.gz> <akas.tsv.gz> <episodes.tsv.gz> <animeapi.tsv> <anime-list.xml> <anidb-titles.xml.gz>`.
 
+## SQLite index lifecycle
+
+Tantivy handles all title and anime-alias discovery. SQLite maintains relational
+primary keys for IMDb IDs, season boundaries, anime identities, and episode mapping.
+The full metadata refresh stages the SQLite database without redundant search indexes,
+builds `episode_lookup_idx` immediately before Anime-Lists mapping overrides
+(which need efficient lookup while they update rows), and creates
+`anime_series_by_anidb`, `episode_by_tvdb`, and `episode_by_anidb_order`
+**after bulk ingestion** but **before** `ANALYZE`, integrity checks, Tantivy
+generation construction, and atomic publication.
+
+The `anime_ids(group_id,type,value)` primary-key index covers runtime anime-ID
+lookup; the old `anime_lookup_idx(type,value)` secondary index is omitted.
+The standalone `import-imdb` command still creates the complete relational
+index set after its own import; full multi-source refresh defers the later indexes.
+The separate request-history and Cinemeta airdate SQLite files shed duplicate
+indexes on their next initialization; existing metadata snapshots are immutable
+and adopt the revised index layout on their next successful refresh.
+
+These optimizations are checked with `EXPLAIN QUERY PLAN` regression tests.
+The importer logs the elapsed time spent constructing relational indexes, but
+those timings alone do not establish an overall speedup. Validate full-catalog
+import times, peak memory, and p95/p99 match latency on production-scale data
+before quantifying performance gains.
+
 The historical curated Anime-Lists overrides are preserved as `data/anime-list.override.xml` for reference. **They are not automatically applied by the current Rust refresh pipeline.** The default import consumes the supplied Anime-Lists XML only; integrate these overrides explicitly before relying on their special-case mappings.
 
 ## Verification
