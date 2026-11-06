@@ -86,7 +86,7 @@ fn resolve_season_preloaded(
 )->Option<Episode>{
     if season<=0||episode<=0{return None;}
     let mut candidates=vec![];
-    for link in &links {for m in &maps{
+    for link in links {for m in maps{
         if m.anidb!=link.anidb||(!link.tvdb.is_empty()&&link.tvdb!=m.tvdb){continue;}
         let is_split=split(link,m,&links,&maps);
         if is_split&&link.trakt!=season{continue;}
@@ -136,7 +136,7 @@ fn resolve_absolute_preloaded(
 )->Option<Episode>{
     if episode<=0{return None;}
     let mut candidates=BTreeSet::new();
-    for link in &links{
+    for link in links{
         let associated:Vec<_>=maps.iter().filter(|m|m.anidb==link.anidb&&(link.tvdb.is_empty()||m.tvdb==link.tvdb)).collect();
         let absolutes:Vec<_>=associated.iter().filter(|m|m.tv_season==-1).collect();
         let offset=if absolutes.len()==1{absolutes[0].offset}else{0};
