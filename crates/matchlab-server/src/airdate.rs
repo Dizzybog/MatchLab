@@ -48,13 +48,54 @@ fn open_cache(path:&Path)->Result<Connection,String>{
         .map_err(|e|e.to_string())?;
     Ok(conn)
 }
-fn lookup(conn:&Connection,id:&str,date:&str)->Result<Option<(i64,i64)>,String>{
+/// Preserve the difference between a missing exact airdate and an
+/// ambiguous one. An ambiguous exact date must never trigger a fallback.
+#[derive(Debug,PartialEq,Eq)]
+enum DateLookup {
+    Missing,
+    Unique(i64,i64),
+    Ambiguous,
+}
+
+fn lookup_exact(conn:&Connection,id:&str,date:&str)->Result<DateLookup,String>{
     let mut stmt=conn.prepare("SELECT DISTINCT season,episode FROM episode_airdates
         WHERE imdb_id=?1 AND air_date=?2 LIMIT 2").map_err(|e|e.to_string())?;
     let rows=stmt.query_map(params![id,date],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))
         .map_err(|e|e.to_string())?;
     let values=rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
-    Ok(if values.len()==1{Some(values[0])}else{None})
+    Ok(match values.as_slice() {
+        []=>DateLookup::Missing,
+        [(season,episode)]=>DateLookup::Unique(*season,*episode),
+        _=>DateLookup::Ambiguous,
+    })
+}
+
+/// Match the requested date first. Only if *no* episode aired on that date,
+/// check the preceding and following calendar days for timezone differences.
+/// Accept a fallback only if both adjacent days together identify exactly
+/// one distinct season/episode. Returns the actual metadata airdate to expose
+/// the offset in diagnostics without altering the torrent release date.
+fn lookup_with_day_tolerance(
+    conn:&Connection,id:&str,date:&str,
+)->Result<Option<(i64,i64,String)>,String>{
+    match lookup_exact(conn,id,date)? {
+        DateLookup::Unique(season,episode)=>
+            return Ok(Some((season,episode,date.to_owned()))),
+        DateLookup::Ambiguous=>return Ok(None),
+        DateLookup::Missing=>(),
+    }
+    // SQLite date modifiers handle month/year rollovers and leap days while
+    // preserving the primary-key prefix lookup for the IMDb series.
+    let mut stmt=conn.prepare("SELECT season,episode,MIN(air_date)
+        FROM episode_airdates
+        WHERE imdb_id=?1
+          AND air_date IN (date(?2,'-1 day'),date(?2,'+1 day'))
+        GROUP BY season,episode LIMIT 2").map_err(|e|e.to_string())?;
+    let rows=stmt.query_map(params![id,date],|r|Ok((
+        r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?)))
+        .map_err(|e|e.to_string())?;
+    let matches=rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    Ok(if matches.len()==1{Some(matches[0].clone())}else{None})
 }
 fn normalize_date(s:&str)->Option<&str>{
     let date=s.split('T').next()?;
@@ -88,13 +129,13 @@ fn fetch(id:&str)->Result<Vec<(String,i64,i64)>,String>{
     if out.is_empty(){return Err("Cinemeta returned no dated episodes".into());}
     Ok(out)
 }
-pub fn resolve(metadata:&Path,id:&str,date:&str)->Result<Option<(i64,i64)>,String>{
+pub fn resolve(metadata:&Path,id:&str,date:&str)->Result<Option<(i64,i64,String)>,String>{
     let mut db=open_cache(metadata)?;
     let refreshed:Option<i64>=match db.query_row("SELECT refreshed_at FROM episode_airdate_refresh WHERE imdb_id=?1",
         [id],|r|r.get(0)){
         Ok(v)=>Some(v),Err(rusqlite::Error::QueryReturnedNoRows)=>None,Err(e)=>return Err(e.to_string())
     };
-    if refreshed.is_some_and(|at|now()-at<TTL){return lookup(&db,id,date);}
+    if refreshed.is_some_and(|at|now()-at<TTL){return lookup_with_day_tolerance(&db,id,date);}
     match fetch(id){
         Ok(rows)=>{
             let tx=db.transaction().map_err(|e|e.to_string())?;
@@ -116,7 +157,7 @@ pub fn resolve(metadata:&Path,id:&str,date:&str)->Result<Option<(i64,i64)>,Strin
             // Stale cache is preferable to failing the ordinary matcher.
         }
     }
-    lookup(&db,id,date)
+    lookup_with_day_tolerance(&db,id,date)
 }
 
 #[cfg(test)]
@@ -148,7 +189,7 @@ mod tests{
              FROM episode_airdates WHERE imdb_id='tt1' AND air_date='2022-01-20' LIMIT 2",
             [],|r|r.get(3)).unwrap();
         assert!(plan.contains("COVERING INDEX sqlite_autoindex_episode_airdates"),"{plan}");
-        assert_eq!(lookup(&db,"tt1","2022-01-20").unwrap(),Some((27,45)));
+        assert_eq!(lookup_with_day_tolerance(&db,"tt1","2022-01-20").unwrap(),Some((27,45,"2022-01-20".into())));
         drop(db);
         std::fs::remove_dir_all(folder).unwrap();
     }
@@ -159,12 +200,68 @@ mod tests{
             Some(("The Daily Show".into(),"2022-01-20".into())));
         assert!(extract("The.Daily.Show.2022.02.30").is_none());
         assert!(extract("Supernatural.S02E03.1080p").is_none());
+        assert_eq!(extract("Jimmy.Kimmel.2024-09-16.WEB.x264-TORRENTGALAXY"),
+            Some(("Jimmy Kimmel".into(),"2024-09-16".into())));
     }
+    #[test]
+    fn exact_airdate_precedes_timezone_fallback_and_never_overrides_ambiguity(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE episode_airdates(
+            imdb_id TEXT,air_date TEXT,season INTEGER,episode INTEGER,
+            PRIMARY KEY(imdb_id,air_date,season,episode));
+            INSERT INTO episode_airdates VALUES('tt1','2024-09-15',22,10);
+            INSERT INTO episode_airdates VALUES('tt1','2024-09-16',22,11);
+            INSERT INTO episode_airdates VALUES('tt1','2024-09-17',22,12);
+            INSERT INTO episode_airdates VALUES('tt2','2024-09-16',5,1);
+            INSERT INTO episode_airdates VALUES('tt2','2024-09-16',5,2);
+            INSERT INTO episode_airdates VALUES('tt2','2024-09-17',5,3);").unwrap();
+        assert_eq!(lookup_with_day_tolerance(&db,"tt1","2024-09-16").unwrap(),
+            Some((22,11,"2024-09-16".into())),
+            "a precise airdate always beats both adjacent days");
+        assert_eq!(lookup_with_day_tolerance(&db,"tt2","2024-09-16").unwrap(),None,
+            "ambiguous exact dates must not fall back to one adjacent episode");
+    }
+
+    #[test]
+    fn neighboring_day_match_requires_one_unambiguous_episode(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE episode_airdates(
+            imdb_id TEXT,air_date TEXT,season INTEGER,episode INTEGER,
+            PRIMARY KEY(imdb_id,air_date,season,episode));
+            INSERT INTO episode_airdates VALUES('tt1','2024-09-17',22,7);
+            INSERT INTO episode_airdates VALUES('tt2','2024-09-15',1,10);
+            INSERT INTO episode_airdates VALUES('tt2','2024-09-17',1,11);
+            INSERT INTO episode_airdates VALUES('tt3','2024-09-15',1,10);
+            INSERT INTO episode_airdates VALUES('tt3','2024-09-17',1,10);
+            INSERT INTO episode_airdates VALUES('tt4','2025-01-01',1,1);
+            INSERT INTO episode_airdates VALUES('tt5','2024-02-29',1,2);").unwrap();
+        assert_eq!(lookup_with_day_tolerance(&db,"tt1","2024-09-16").unwrap(),
+            Some((22,7,"2024-09-17".into())),
+            "Jimmy Kimmel-style one-day-later metadata");
+        assert_eq!(lookup_with_day_tolerance(&db,"tt1","2024-09-18").unwrap(),
+            Some((22,7,"2024-09-17".into())),
+            "also accept a one-day-earlier airdate");
+        assert_eq!(lookup_with_day_tolerance(&db,"tt1","2024-09-15").unwrap(),None,
+            "never match two days away");
+        assert_eq!(lookup_with_day_tolerance(&db,"tt2","2024-09-16").unwrap(),None,
+            "distinct episodes on opposite adjacent dates are ambiguous");
+        assert_eq!(lookup_with_day_tolerance(&db,"tt3","2024-09-16").unwrap(),
+            Some((1,10,"2024-09-15".into())),
+            "duplicate metadata for the same episode on adjacent dates is safe");
+        assert_eq!(lookup_with_day_tolerance(&db,"tt4","2024-12-31").unwrap(),
+            Some((1,1,"2025-01-01".into())),"year boundary");
+        assert_eq!(lookup_with_day_tolerance(&db,"tt5","2024-02-28").unwrap(),
+            Some((1,2,"2024-02-29".into())),"leap day");
+        assert_eq!(lookup_with_day_tolerance(&db,"tt5","2024-03-01").unwrap(),
+            Some((1,2,"2024-02-29".into())),"leap day previous");
+        assert_eq!(lookup_with_day_tolerance(&db,"tt999","2024-09-16").unwrap(),None);
+    }
+
     #[test]fn ambiguous_dates_do_not_choose_first(){
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE episode_airdates(imdb_id TEXT,air_date TEXT,season INTEGER,episode INTEGER);
             INSERT INTO episode_airdates VALUES('tt1','2022-01-20',27,45);
             INSERT INTO episode_airdates VALUES('tt1','2022-01-20',27,46);").unwrap();
-        assert_eq!(lookup(&db,"tt1","2022-01-20").unwrap(),None);
+        assert_eq!(lookup_with_day_tolerance(&db,"tt1","2022-01-20").unwrap(),None);
     }
 }

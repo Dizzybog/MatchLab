@@ -71,11 +71,27 @@ curl 'http://127.0.0.1:8765/match?title=The.Daily.Show.2022.01.20.Francis.Nganno
 
 On a verified date match, the normal four-field response contains
 `ttID:season:episode` in both SID fields. Explicit SxxExx information
-takes precedence over a date. Cinemeta is accessed only when needed, and
-its episode list is cached for seven days in `/data/matchlab_airdates.sqlite3`.
-No API key is required. If the upstream feed fails or the date is missing
-or ambiguous, MatchLab does not invent episode coordinates. The existing
-IMDb metadata database is never modified by these lookups.
+takes precedence over a date.
+
+**Timezone tolerance (±1 day):** MatchLab always checks the requested
+release date first. Only when there is **no episode on that date**, it
+checks the preceding and following calendar days in the same locally
+cached Cinemeta episode list. It accepts the fallback only when both
+adjacent days together identify **one unique season/episode**. If the
+exact date contains conflicting episodes, or different episodes match
+the two neighboring days, it does not guess. No date more than one day
+away is eligible. For example, `Jimmy.Kimmel.2024-09-16.WEB.x264-TORRENTGALAXY`
+may match an episode dated September 17 when no September 16 episode exists.
+
+The debug response exposes the original `release_date`, the actual
+Cinemeta `air_date`, and `match_source=cinemeta_airdate_1day` for an
+adjacent-day match. The public `/match` response remains unchanged.
+
+Cinemeta is accessed only when needed, and its episode list is cached
+for seven days in `/data/matchlab_airdates.sqlite3`. No API key is required.
+If the upstream feed fails and the cache contains no suitable episodes,
+MatchLab does not invent episode coordinates. The existing IMDb metadata
+database is never modified by these lookups.
 
 ### Matching caches: exact-input parser and shared IMDb/AniDB lookup
 
