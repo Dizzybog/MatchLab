@@ -66,6 +66,25 @@ pub fn resolve_season(db:&Connection,imdb:&str,season:i64,episode:i64)->rusqlite
     if season<=0||episode<=0{return Ok(None);}
     let links=links(db,imdb)?;
     let maps=mappings(db,&links,false)?;
+    Ok(resolve_season_preloaded(imdb,season,episode,&links,&maps))
+}
+
+/// Resolve a season-specific batch with one snapshot of the crosswalk. This
+/// is used for S01E01-E12 and avoids repeated SQLite reads on one-core hosts.
+pub fn resolve_season_range(
+    db:&Connection,imdb:&str,season:i64,start:i64,end:i64,
+)->rusqlite::Result<Vec<Option<Episode>>>{
+    if season<=0||start<=0||end<start||end-start>=1_000{return Ok(Vec::new());}
+    let links=links(db,imdb)?;
+    let maps=mappings(db,&links,false)?;
+    Ok((start..=end).map(|episode|
+        resolve_season_preloaded(imdb,season,episode,&links,&maps)).collect())
+}
+
+fn resolve_season_preloaded(
+    imdb:&str,season:i64,episode:i64,links:&[Link],maps:&[Mapping],
+)->Option<Episode>{
+    if season<=0||episode<=0{return None;}
     let mut candidates=vec![];
     for link in &links {for m in &maps{
         if m.anidb!=link.anidb||(!link.tvdb.is_empty()&&link.tvdb!=m.tvdb){continue;}
@@ -86,16 +105,36 @@ pub fn resolve_season(db:&Connection,imdb:&str,season:i64,episode:i64)->rusqlite
         candidates.push((m.offset,m.start,link.anidb.clone(),ani));
     }}
     candidates.sort_by(|a,b|b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
-    let Some(best)=candidates.first()else{return Ok(None)};
+    let Some(best)=candidates.first()else{return None};
     if candidates.get(1).is_some_and(|second|second.0==best.0&&second.1==best.1&&(second.2!=best.2||second.3!=best.3)){
-        return Ok(None);
+        return None;
     }
-    Ok(Some(Episode{imdb_id:imdb.into(),season,episode,anidb_id:best.2.clone(),anidb_episode:best.3}))
+    Some(Episode{imdb_id:imdb.into(),season,episode,anidb_id:best.2.clone(),anidb_episode:best.3})
 }
 pub fn resolve_absolute(db:&Connection,imdb:&str,episode:i64)->rusqlite::Result<Option<Episode>>{
     if episode<=0{return Ok(None);}
     let links=links(db,imdb)?;
     let maps=mappings(db,&links,true)?;
+    Ok(resolve_absolute_preloaded(imdb,episode,&links,&maps))
+}
+
+/// Load the AniDB/TVDB crosswalk once per batch, not once per episode.
+/// This prevents a 300-episode torrent from issuing hundreds of SQLite reads
+/// while still checking every episode independently for ambiguous mappings.
+pub fn resolve_absolute_range(
+    db:&Connection,imdb:&str,start:i64,end:i64,
+)->rusqlite::Result<Vec<Option<Episode>>>{
+    if start<=0||end<start||end-start>9_999{return Ok(Vec::new());}
+    let links=links(db,imdb)?;
+    let maps=mappings(db,&links,true)?;
+    Ok((start..=end).map(|episode|resolve_absolute_preloaded(
+        imdb,episode,&links,&maps)).collect())
+}
+
+fn resolve_absolute_preloaded(
+    imdb:&str,episode:i64,links:&[Link],maps:&[Mapping],
+)->Option<Episode>{
+    if episode<=0{return None;}
     let mut candidates=BTreeSet::new();
     for link in &links{
         let associated:Vec<_>=maps.iter().filter(|m|m.anidb==link.anidb&&(link.tvdb.is_empty()||m.tvdb==link.tvdb)).collect();
@@ -136,9 +175,9 @@ pub fn resolve_absolute(db:&Connection,imdb:&str,episode:i64)->rusqlite::Result<
             }
         }
     }
-    if candidates.len()!=1{return Ok(None);}
+    if candidates.len()!=1{return None;}
     let (anidb_id,anidb_episode,season,episode)=candidates.into_iter().next().unwrap();
-    Ok(Some(Episode{imdb_id:imdb.into(),season,episode,anidb_id,anidb_episode}))
+    Some(Episode{imdb_id:imdb.into(),season,episode,anidb_id,anidb_episode})
 }
 #[cfg(test)]
 mod tests{
@@ -155,6 +194,41 @@ mod tests{
         let mapped=resolve_season(&db,"tt1234567",2,3).unwrap().unwrap();
         assert_eq!(mapped.anidb_episode,10);
         assert!(resolve_season(&db,"tt1234567",2,5).unwrap().is_none());
+    }
+
+    #[test]
+    fn batch_season_mapping_matches_each_individual_coordinate(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER,start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO anime_series_map VALUES('tt1234567','123','456',0);
+            INSERT INTO episode_map VALUES('123','456',1,2,1,7,0,'');").unwrap();
+        let batch=resolve_season_range(&db,"tt1234567",2,1,8).unwrap();
+        let singles=(1..=8).map(|ep|resolve_season(&db,"tt1234567",2,ep).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(batch,singles);
+        assert!(batch[7].is_none());
+    }
+
+    #[test]
+    fn batch_absolute_mapping_is_identical_to_individual_resolution(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE anime_series_map(
+            imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,
+            tvdb_season INTEGER,start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO anime_series_map VALUES('tt1234567','123','456',0);
+            INSERT INTO episode_map VALUES('123','456',1,1,1,2,0,'');
+            INSERT INTO episode_map VALUES('123','456',1,2,3,5,-2,'');").unwrap();
+        let batch=resolve_absolute_range(&db,"tt1234567",1,6).unwrap();
+        let individually=(1..=6).map(|n|resolve_absolute(&db,"tt1234567",n).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(batch,individually);
+        assert!(batch[5].is_none(),"unmapped episodes must remain unverified");
+        assert_eq!(batch[0].as_ref().unwrap().season,1);
+        assert_eq!(batch[2].as_ref().unwrap().season,2);
     }
 
     #[test]

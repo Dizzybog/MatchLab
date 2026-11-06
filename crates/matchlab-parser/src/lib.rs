@@ -1571,6 +1571,81 @@ fn absolute_episode_range(raw: &str) -> Option<(i64,i64)> {
     Some((start,end))
 }
 
+/// A plain 01-12 can also be part of a title, a season, a volume or a year.
+/// Expose only a candidate to the metadata matcher; it becomes an absolute
+/// anime episode interval only after an exact AniDB-linked title is verified.
+/// Never expand the whole interval into an episodes array.
+const MAX_NEW_EPISODE_RANGE: i64 = 1_000;
+static UNMARKED_ANIME_RANGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(
+    r"(?i)(?:^|[\s._(\[-])([0-9]{1,5})\s*[-~–—～]\s*([0-9]{1,5})(?=$|[^a-z0-9])"
+).expect("valid unmarked anime range regex"));
+
+static SEASON_EPISODE_RANGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(
+    r"(?i)(?:^|[^a-z0-9])s([0-9]{1,3})[ ._-]*e([0-9]{1,4})\s*[-~–—～]\s*(?:s([0-9]{1,3})[ ._-]*)?e?([0-9]{1,4})(?=$|[^a-z0-9])"
+).expect("valid explicit season episode range regex"));
+
+fn explicit_season_episode_range(raw: &str) -> Result<Option<(i64,i64,i64)>,ParseError> {
+    for candidate in SEASON_EPISODE_RANGE_RE.captures_iter(raw) {
+        let caps=candidate.map_err(|e|ParseError::Regex(e.to_string()))?;
+        let nums=[1,2,4].map(|i|caps.get(i).and_then(|m|m.as_str().parse::<i64>().ok()));
+        let (Some(season),Some(start),Some(end))=(nums[0],nums[1],nums[2]) else{continue;};
+        let next_season=caps.get(3).and_then(|m|m.as_str().parse::<i64>().ok());
+        if next_season.is_some_and(|s|s!=season){continue;}
+        if (1..=120).contains(&season) && start>0 && end>=start
+            && end-start < MAX_NEW_EPISODE_RANGE {
+            return Ok(Some((season,start,end)));
+        }
+    }
+    Ok(None)
+}
+
+/// Return a conservative interpretation of a numeric anime batch in a raw
+/// release title. No metadata is available here, so this is intentionally not
+/// written into the canonical episode_start/end fields.
+fn unmarked_anime_episode_candidate(
+    raw:&str,translate_languages:bool,
+)->Result<Option<Value>,ParseError>{
+    for candidate in UNMARKED_ANIME_RANGE_RE.captures_iter(raw){
+        let caps=candidate.map_err(|e|ParseError::Regex(e.to_string()))?;
+        let (Some(start_token),Some(end_token))=(caps.get(1),caps.get(2))else{continue;};
+        let (Ok(start),Ok(end))=(start_token.as_str().parse::<i64>(),
+            end_token.as_str().parse::<i64>()) else{continue;};
+        if start==0 || end<=start || end-start>=MAX_NEW_EPISODE_RANGE {continue;}
+        // Release years and technical dimensions are not anime episodes.
+        if (1900..=2100).contains(&start)|| (1900..=2100).contains(&end)
+            || [480,720,1080,1440,2160,4320].contains(&start)
+            || [480,720,1080,1440,2160,4320].contains(&end) {continue;}
+        let prefix=raw[..caps.get(0).expect("range match").start()]
+            .trim_end_matches(|c:char|c.is_whitespace()||matches!(c,'.'|'_'|'-'|'('|'['));
+        if prefix.is_empty(){continue;}
+        let final_word=prefix.split(|c:char|!c.is_ascii_alphanumeric())
+            .filter(|w|!w.is_empty()).last().unwrap_or_default();
+        if ["season","seasons","saison","sezon","staffel","vol","volume",
+            "volumes","part","parts","cour","disc","disk","cd","chapter","chapters",
+            "chap"].iter().any(|word|final_word.eq_ignore_ascii_case(word)){
+            continue;
+        }
+        // Require the candidate to stand at the end or precede ordinary
+        // release metadata, not prose belonging to the anime title.
+        let suffix=raw[end_token.end()..].trim_start_matches(|c:char|
+            c.is_whitespace()||matches!(c,')'|']'|'.'|'_'|'-'));
+        let suffix_lower=suffix.to_ascii_lowercase();
+        if !suffix.is_empty()
+            && !suffix.starts_with('[') && !suffix.starts_with('(')
+            && !["batch","complete","pack","collection","ova","special","1080p",
+                "720p","2160p","480p","web","bd","bdrip","bluray","mkv","mp4"]
+                .iter().any(|tag|suffix_lower.starts_with(tag))
+            && !suffix.starts_with('+') {continue;}
+        let candidate_title=ENGINE.parse(prefix,translate_languages)?
+            .get("title").and_then(Value::as_str).unwrap_or(prefix).trim().to_owned();
+        if candidate_title.is_empty(){continue;}
+        return Ok(Some(json!({
+            "title":candidate_title, "start":start, "end":end,
+            "numbering":"absolute","verified":false
+        })));
+    }
+    Ok(None)
+
 // Some common release conventions are more specific than the generic upstream
 // handlers. Apply these corrections to the leaf *after* normal parsing so we
 // never change the handler table or the fast regex prefilter.
@@ -1727,10 +1802,22 @@ pub fn parse_title(
         result.insert("episode_start".into(),json!(start));
         result.insert("episode_end".into(),json!(end));
         result.insert("episode_count".into(),json!(end-start+1));
+        result.insert("episode_range_numbering".into(),json!("absolute"));
         // The existing episodes field is deliberately not expanded.
         // Consumers must use episode_start/episode_end for range semantics.
     }
     patch_missing_coordinates(leaf, &mut result)?;
+    if let Some((season,start,end))=explicit_season_episode_range(leaf)? {
+        result.insert("seasons".into(),json!([season]));
+        result.insert("episodes".into(),json!([start]));
+        result.insert("episode_start".into(),json!(start));
+        result.insert("episode_end".into(),json!(end));
+        result.insert("episode_count".into(),json!(end-start+1));
+        result.insert("episode_range_numbering".into(),json!("season"));
+    } else if !result.contains_key("episode_start")
+        && let Some(candidate)=unmarked_anime_episode_candidate(leaf,translate_languages)? {
+        result.insert("anime_episode_range_candidate".into(),candidate);
+    }
     Ok(result)
 }
 
