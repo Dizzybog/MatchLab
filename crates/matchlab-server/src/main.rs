@@ -828,8 +828,11 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
     tracing::info!(max_matches,"MatchLab match concurrency configured");
     let history_db=env::var("MATCHLAB_HISTORY_DB").unwrap_or_else(|_|"/data/history.sqlite3".into());
     // Backfill existing 14-day statistics before the retention worker drops raw rows.
-    dashboard_history::initialize(std::path::Path::new(&history_db))
-        .map_err(std::io::Error::other)?;
+    if let Err(error)=dashboard_history::initialize(std::path::Path::new(&history_db)) {
+        // Statistics are not part of the metadata matching critical path.
+        // A damaged history file must not prevent the core API from starting.
+        tracing::error!(%error,"history/statistics initialization failed; core matching remains available");
+    }
     // Run retention off the HTTP request path. The first iteration executes at
     // startup; subsequent passes run every five minutes even without traffic.
     {
