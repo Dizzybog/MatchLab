@@ -4,14 +4,124 @@
 <style>
 :root{color-scheme:dark;--bg:#0b0e14;--panel:#141a24;--line:#283142;--muted:#9aa7ba;--accent:#65d6b2;--text:#e9edf5;--red:#ff8791}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}button,input,select{font:inherit}a{color:var(--accent)}.shell{max-width:1320px;margin:auto;padding:24px}.top{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:30px}.brand{font-size:22px;font-weight:800;letter-spacing:-.6px}.brand span{color:var(--accent)}.nav{display:flex;gap:8px}.nav a{padding:8px 12px;text-decoration:none;color:var(--muted);border-radius:8px}.nav a:hover{background:var(--panel);color:var(--text)}.pill{border:1px solid var(--line);border-radius:20px;padding:6px 12px;color:var(--muted)}h1{font-size:30px;margin:0 0 4px;letter-spacing:-.8px}h2{font-size:17px;margin:0 0 18px}.subtitle,.muted{color:var(--muted)}.subtitle{margin:0 0 24px}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:22px}.panel,.stat{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px}.stat{color:inherit;text-align:left;width:100%}.stat.filter{cursor:pointer;transition:border-color .15s,background .15s}.stat.filter:hover{border-color:var(--accent)}.stat.filter[aria-pressed="true"]{border-color:var(--accent);background:#142a29;box-shadow:inset 0 0 0 1px var(--accent)}.stat.filter:focus-visible{outline:2px solid var(--accent);outline-offset:3px}.stat .value{font-size:32px;font-weight:750;margin-top:6px}.stat .label{color:var(--muted)}.grid{display:grid;grid-template-columns:1.2fr 1fr;gap:18px;margin-bottom:22px}.field{display:flex;gap:10px;margin:12px 0}.field input,.field select{background:#0d121a;color:var(--text);border:1px solid #364156;border-radius:9px;padding:12px;min-width:0}.field input:first-child{flex:1}.field select{width:135px}.btn{border:0;border-radius:9px;background:var(--accent);color:#07130f;font-weight:750;padding:12px 20px;cursor:pointer}.btn:disabled{opacity:.5;cursor:wait}.btn.secondary{background:#273244;color:var(--text)}.output{white-space:pre-wrap;overflow-wrap:anywhere;max-height:460px;overflow:auto;background:#0b1018;padding:16px;border-radius:10px;font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace}.result{margin-top:16px}.good{color:var(--accent)}.bad{color:var(--red)}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:12px;border-bottom:1px solid var(--line)}th{color:var(--muted);font-weight:500}td.title{max-width:370px;overflow-wrap:anywhere}tr[data-id]{cursor:pointer}tr[data-id]:hover{background:#1c2633}.table-wrap{overflow-x:auto}.toolbar{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px}.small{font-size:12px}.chart{display:flex;align-items:flex-end;gap:7px;height:120px;margin-top:20px}.bar{flex:1;min-width:8px;background:#375e5b;border-radius:4px 4px 0 0;position:relative}.bar:hover{background:var(--accent)}.bar[title]{cursor:help}.empty{color:var(--muted);padding:20px 0}footer{color:var(--muted);margin-top:30px;font-size:12px}@media(max-width:850px){.stats{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:1fr}.shell{padding:14px}.top{flex-wrap:wrap}h1{font-size:25px}}@media(max-width:450px){.stats{grid-template-columns:1fr 1fr}.stat{padding:14px}.stat .value{font-size:24px}.field{flex-wrap:wrap}.field input{width:100%}.field select{flex:1}}
 .rank-list{display:grid;gap:10px;margin-top:16px}.rank-card{background:#0d121a;border:1px solid var(--line);border-radius:12px;padding:14px}.rank-card.winner{border-color:var(--accent);background:#10211f}.rank-top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.rank-name{font-size:16px;font-weight:700}.rank-tag{color:var(--accent);font-size:12px;font-weight:700}.rank-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:12px}.rank-field{min-width:0}.rank-field small{display:block;color:var(--muted);font-size:11px}.rank-field span{overflow-wrap:anywhere}.rank-meta{margin-top:10px;color:var(--muted);font-size:12px}@media(max-width:600px){.rank-fields{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+/* Layout and overflow contracts: no wrapped controls or metadata, and no
+   page-level horizontal scrolling. Full values remain available in details. */
+html{scroll-padding-top:16px}
+.shell,.top,.grid,.panel,.stat,.toolbar,.rank-card{min-width:0}
+.top .brand,.top .nav a,.pill,.btn,.stat .label,.stat .value,
+.toolbar h2,.toolbar .small,.rank-name,.rank-tag,.rank-meta,
+.rank-field small,.rank-field span{white-space:nowrap}
+.top .brand,.toolbar h2,.toolbar .small,.rank-name,.rank-meta,
+.rank-field small,.rank-field span,.stat .label{
+  overflow:hidden;text-overflow:ellipsis
+}
+.top .brand{flex-shrink:0}
+.nav{min-width:0;flex-wrap:nowrap}
+.nav a{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;min-height:44px}
+.pill{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;min-height:36px}
+.btn{min-height:44px;flex-shrink:0;white-space:nowrap}
+.btn:focus-visible,.nav a:focus-visible,.table-wrap:focus-visible,
+tr[data-id]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.stat{min-width:0}
+.stat .value{font-variant-numeric:tabular-nums}
+.field{min-width:0;flex-wrap:nowrap}
+.field input,.field select,.field .btn{min-width:0}
+.toolbar h2{margin:0}
+.toolbar > .btn,.toolbar > .paging{flex-shrink:0}
+.chart,.rank-list,.rank-top{min-width:0}
+.rank-top{flex-wrap:nowrap}
+.rank-name{min-width:0;display:block}
+.rank-tag{flex:0 0 auto}
+.rank-field span{display:block}
+.output{white-space:pre;overflow-wrap:normal;word-break:normal;overflow-x:auto}
+.table-wrap{max-width:100%;border:1px solid var(--line);border-radius:10px;
+  overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch}
+.table-wrap table{min-width:790px;font-variant-numeric:tabular-nums}
+.table-wrap th,.table-wrap td{white-space:nowrap}
+.table-wrap td.title{max-width:260px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+tr[data-id]:focus-visible{outline-offset:-2px}
+.paging{display:flex;gap:8px;white-space:nowrap}
+.history-footer{align-items:center}
+.history-footer .history-note{min-width:0;flex:1}
+.history-title{overflow-x:auto;white-space:nowrap;max-width:100%;
+  padding:2px 0 10px;font-weight:650;scrollbar-width:thin}
+.table-hint,.copy-mobile,.stat-label-short,.health-short,.history-note-short,
+.history-heading-short,.section-heading-short{display:none}
+
+@media(max-width:850px){
+  .top{display:grid;grid-template-columns:minmax(0,1fr) auto;
+    grid-template-rows:auto auto;gap:8px 12px;align-items:center;margin-bottom:22px}
+  .top .brand{grid-row:1;grid-column:1}
+  .top .pill{grid-row:1;grid-column:2;justify-self:end}
+  .top .nav{grid-row:2;grid-column:1/-1;display:flex;gap:4px;
+    overflow-x:auto;overscroll-behavior-x:contain;
+    -webkit-overflow-scrolling:touch;scrollbar-width:none}
+  .top .nav::-webkit-scrollbar{display:none}
+  .top .nav a{padding:9px 12px}
+  .health-full{display:none}
+  .health-short{display:inline}
+  .pill{max-width:124px;overflow:hidden;text-overflow:ellipsis}
+  .stats{gap:10px}
+}
+@media(max-width:600px){
+  h1{font-size:25px;white-space:nowrap}
+  h2{font-size:16px}
+  .shell{padding:12px}
+  .panel{padding:16px}
+  .stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-bottom:16px}
+  .stat{padding:13px;min-height:88px}
+  .stat .value{font-size:26px}
+  .stat-label-full,.copy-desktop,.history-note-full,.history-heading-full,
+  .section-heading-full{display:none}
+  .stat-label-short,.copy-mobile,.history-note-short,.history-heading-short,
+  .section-heading-short{display:inline}
+  .subtitle{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:18px}
+  .mobile-description{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .activity-description{display:none}
+  .grid{gap:14px;margin-bottom:16px}
+  .field.options{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);
+    align-items:stretch;gap:9px}
+  .field.options input,.field.options select{width:100%;font-size:16px}
+  .field.options .btn{width:100%;grid-column:1/-1}
+  .field #title{font-size:16px}
+  .toolbar{gap:10px}
+  .activity-toolbar{display:grid;justify-content:stretch;gap:3px}
+  .activity-toolbar > .small{display:block;min-width:0}
+  .rank-card{padding:12px}
+  .rank-name{font-size:14px}
+  .rank-fields{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+  .rank-tag{font-size:11px}
+  .history-toolbar{display:flex;align-items:center}
+  .history-toolbar h2{flex:1;min-width:0}
+  .history-toolbar .btn{padding-inline:14px}
+  .table-hint{display:block;margin:0 0 8px;font-size:12px;
+    color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .history-footer{display:grid;grid-template-columns:minmax(0,1fr);
+    justify-content:stretch;gap:10px}
+  .history-footer .history-note{white-space:nowrap;overflow:hidden;
+    text-overflow:ellipsis}
+  .paging{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
+  .paging .btn{width:100%}
+  footer{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+}
+@media(max-width:350px){
+  .shell{padding:10px}
+  .panel{padding:13px}
+  .stats{gap:8px}
+  .stat{padding:11px}
+  .stat .value{font-size:23px}
+  .top .brand{font-size:20px}
+  .pill{max-width:110px;font-size:12px;padding:6px 8px}
+}
 </style></head><body><div class="shell">
-<header class="top"><div class="brand">Match<span>Lab</span> <span class="small muted">/ Rust</span></div><nav class="nav"><a href="#tester">Matcher</a><a href="#history">History</a><a href="#statistics">Statistics</a></nav><div id="health" class="pill">Checking metadata…</div></header>
-<main><h1>Overview</h1><p class="subtitle">Torrent parsing, IMDb matching and diagnostics in one place. Statistics use the rolling last 14 days; search history is capped at 1,000 entries.</p>
-<h2>Matching statistics · last 14 days (UTC)</h2><section class="stats" id="statistics"><button class="stat filter" type="button" data-filter="all" aria-pressed="true" aria-controls="history"><div class="label">Requests · last 14 days</div><div class="value" id="total">—</div></button><button class="stat filter" type="button" data-filter="matched" aria-pressed="false" aria-controls="history"><div class="label">Matched · last 14 days</div><div class="value good" id="matched">—</div></button><button class="stat filter" type="button" data-filter="unmatched" aria-pressed="false" aria-controls="history"><div class="label">Unmatched · last 14 days</div><div class="value" id="unmatched">—</div></button><button class="stat filter" type="button" data-filter="error" aria-pressed="false" aria-controls="history"><div class="label">Errors · last 14 days</div><div class="value bad" id="errors">—</div></button></section>
-<div class="grid"><section class="panel" id="tester"><h2>Test a torrent title</h2><p class="muted">Submit a raw t_title to inspect parsing, candidate ranking and selected IMDb ID.</p><form id="form"><label for="title">Torrent title</label><div class="field"><input id="title" required maxlength="4096" placeholder="Example.Show.S01E02.1080p.WEB-DL.x265" autocomplete="off"></div><div class="field"><input id="year" type="number" min="1870" max="2100" placeholder="Year (optional)"><select id="series" aria-label="Content type"><option value="">Auto detect</option><option value="true">Series</option><option value="false">Movie</option></select><button class="btn" id="submit" type="submit">Parse & match</button></div></form><div id="result" class="result" aria-live="polite"><div class="empty">Submit a title to see the five highest-ranked matches.</div></div></section>
-<section class="panel"><div class="toolbar"><h2>Activity · last 14 days (UTC)</h2><span class="small muted" id="latency">Average latency · last 14 days: —</span></div><p class="muted">Daily totals are preserved independently of the 1,000 latest request details.</p><div id="chart" class="chart"></div><p class="small muted">Bars represent daily request volume.</p></section></div>
-<section class="panel" id="history"><div class="toolbar"><h2>Latest 1,000 requests <span class="small muted" id="active-filter">· All requests</span></h2><button class="btn secondary" id="refresh" type="button">Refresh</button></div><div class="table-wrap"><table><thead><tr><th>Time (UTC)</th><th>t_title</th><th>Status</th><th>IMDb ID</th><th>Source</th><th>ms</th></tr></thead><tbody id="rows"><tr><td colspan="6" class="muted">Loading…</td></tr></tbody></table></div><div class="toolbar" style="margin-top:14px"><span class="small muted">Only the latest 1,000 requests retain individual diagnostics. Statistics above include all requests over the last 14 days. Click a row for details.</span><div><button class="btn secondary" id="prev" type="button">Previous</button> <button class="btn secondary" id="next" type="button">Next</button></div></div><div id="history-details" class="result" hidden></div></section>
-</main><footer>MatchLab · Local SQLite history · No external analytics</footer></div>
+<header class="top"><div class="brand">Match<span>Lab</span> <span class="small muted">/ Rust</span></div><nav class="nav"><a href="#tester">Matcher</a><a href="#history">History</a><a href="#statistics">Statistics</a></nav><div id="health" class="pill" role="status" aria-live="polite"><span class="health-full">Checking metadata…</span><span class="health-short">Checking…</span></div></header>
+<main><h1>Overview</h1><p class="subtitle"><span class="copy-desktop">Torrent parsing, IMDb matching and diagnostics in one place. Statistics use the rolling last 14 days; search history is capped at 1,000 entries.</span><span class="copy-mobile">Parse torrents and inspect IMDb matches.</span></p>
+<h2><span class="section-heading-full">Matching statistics · last 14 days (UTC)</span><span class="section-heading-short">Last 14 days · UTC</span></h2><section class="stats" id="statistics"><button class="stat filter" type="button" data-filter="all" aria-pressed="true" aria-controls="history"><div class="label"><span class="stat-label-full">Requests · last 14 days</span><span class="stat-label-short">Requests</span></div><div class="value" id="total">—</div></button><button class="stat filter" type="button" data-filter="matched" aria-pressed="false" aria-controls="history"><div class="label"><span class="stat-label-full">Matched · last 14 days</span><span class="stat-label-short">Matched</span></div><div class="value good" id="matched">—</div></button><button class="stat filter" type="button" data-filter="unmatched" aria-pressed="false" aria-controls="history"><div class="label"><span class="stat-label-full">Unmatched · last 14 days</span><span class="stat-label-short">Unmatched</span></div><div class="value" id="unmatched">—</div></button><button class="stat filter" type="button" data-filter="error" aria-pressed="false" aria-controls="history"><div class="label"><span class="stat-label-full">Errors · last 14 days</span><span class="stat-label-short">Errors</span></div><div class="value bad" id="errors">—</div></button></section>
+<div class="grid"><section class="panel" id="tester"><h2>Test a torrent title</h2><p class="muted mobile-description"><span class="copy-desktop">Submit a raw t_title to inspect parsing, candidate ranking and selected IMDb ID.</span><span class="copy-mobile">Paste a torrent title to inspect matches.</span></p><form id="form"><label for="title">Torrent title</label><div class="field"><input id="title" required maxlength="4096" placeholder="Example.Show.S01E02.1080p.WEB-DL.x265" autocomplete="off"></div><div class="field options"><input id="year" type="number" min="1870" max="2100" placeholder="Year (optional)"><select id="series" aria-label="Content type"><option value="">Auto detect</option><option value="true">Series</option><option value="false">Movie</option></select><button class="btn" id="submit" type="submit">Parse & match</button></div></form><div id="result" class="result" aria-live="polite"><div class="empty">Submit a title to see the five highest-ranked matches.</div></div></section>
+<section class="panel"><div class="toolbar activity-toolbar"><h2><span class="section-heading-full">Activity · last 14 days (UTC)</span><span class="section-heading-short">Activity · 14 days</span></h2><span class="small muted" id="latency">Avg. latency: —</span></div><p class="muted activity-description">Daily totals are preserved independently of the 1,000 latest request details.</p><div id="chart" class="chart"></div><p class="small muted">Bars represent daily request volume.</p></section></div>
+<section class="panel" id="history"><div class="toolbar history-toolbar"><h2><span class="history-heading-full">Latest 1,000 requests</span><span class="history-heading-short">Requests</span> <span class="small muted" id="active-filter">· All requests</span></h2><button class="btn secondary" id="refresh" type="button">Refresh</button></div><p class="table-hint" id="history-scroll-hint">Swipe sideways for more columns · Tap a row for details</p><div class="table-wrap" role="region" aria-label="Recent matching requests; scroll horizontally to view all columns" aria-describedby="history-scroll-hint" tabindex="0"><table><thead><tr><th>Time (UTC)</th><th>t_title</th><th>Status</th><th>IMDb ID</th><th>Source</th><th>ms</th></tr></thead><tbody id="rows"><tr><td colspan="6" class="muted">Loading…</td></tr></tbody></table></div><div class="toolbar history-footer" style="margin-top:14px"><span class="small muted history-note"><span class="history-note-full">Only the latest 1,000 requests retain individual diagnostics. Statistics above include all requests over the last 14 days. Click a row for details.</span><span class="history-note-short">Tap a row for full diagnostics.</span></span><div class="paging"><button class="btn secondary" id="prev" type="button">Previous</button><button class="btn secondary" id="next" type="button">Next</button></div></div><div id="history-details" class="result" hidden></div></section>
+</main><footer><span class="copy-desktop">MatchLab · Local SQLite history · No external analytics</span><span class="copy-mobile">MatchLab · Local history</span></footer></div>
 <script>
 const $=id=>document.getElementById(id);let offset=0;let current=[];let statusFilter="all";
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -56,17 +166,17 @@ function rankResults(d){
   }
   if(!rows.length)return '<div class="empty">No matching candidates found.</div>';
   const val=v=>v===null||v===undefined||v===''?'—':esc(v);
-  const field=(label,value)=>'<div class="rank-field"><small>'+label+'</small><span>'+val(value)+'</span></div>';
+  const field=(label,value)=>'<div class="rank-field"><small>'+label+'</small><span title="'+val(value)+'">'+val(value)+'</span></div>';
   return '<div class="rank-list">'+rows.slice(0,5).map((r,i)=>
-    '<article class="rank-card'+(r.winner?' winner':'')+'"><div class="rank-top"><div class="rank-name">'+
+    '<article class="rank-card'+(r.winner?' winner':'')+'"><div class="rank-top"><div class="rank-name" title="'+val(r.title)+'">'+
     '#'+(i+1)+' · '+val(r.title)+'</div><span class="rank-tag">'+
     (r.winner?'WINNER':'RANK '+(i+1))+'</span></div><div class="rank-fields">'+
     field('IMDb ID',r.imdb_id)+field(r.winner?'IMDb season':'Parsed season',seasonEpisodeDisplay(r).seasons)+field(r.winner?'IMDb episode':'Parsed episode',seasonEpisodeDisplay(r).episodes)+
     field('AniDB ID',r.anime_id)+field('Anime episode',displayRange(r.anime_episode,r.anime_episode_end))+
-    field('Source',r.source)+'</div><div class="rank-meta">'+val(r.year)+' · '+val(r.type)+'</div></article>').join('')+'</div>';
+    field('Source',r.source)+'</div><div class="rank-meta" title="'+val(r.year)+' · '+val(r.type)+'">'+val(r.year)+' · '+val(r.type)+'</div></article>').join('')+'</div>';
 }
-async function stats(){try{const s=await json('/api/dashboard/stats');for(const k of ['total','matched','unmatched','errors'])$(k).textContent=Number(s[k]).toLocaleString();$('latency').textContent='Average latency · last 14 days: '+Math.round(s.average_duration_ms)+' ms';const days=[...(s.daily||[])].reverse();const max=Math.max(1,...days.map(d=>d.total));$('chart').innerHTML=days.length?days.map(d=>'<div class="bar" title="'+esc(d.day+': '+d.total+' requests')+'" style="height:'+Math.max(4,100*d.total/max)+'%"></div>').join(''):'<div class="empty">No activity yet</div>'}catch(e){$('latency').textContent='Statistics unavailable: '+e.message}}
-async function history(){try{const data=await json('/api/dashboard/history?limit=25&offset='+offset+(statusFilter==='all'?'':'&status='+encodeURIComponent(statusFilter)));current=data.items;$('rows').innerHTML=current.length?current.map((r,i)=>'<tr data-id="'+i+'"><td>'+esc(r.created_at.replace('T',' ').slice(0,19))+'</td><td class="title">'+esc(r.title)+'</td><td class="'+(r.status==='matched'?'good':r.status==='error'?'bad':'')+'">'+esc(r.status)+'</td><td>'+esc(r.imdb_id||'—')+'</td><td>'+esc(r.match_source||'—')+'</td><td>'+esc(r.duration_ms)+'</td></tr>').join(''):'<tr><td colspan="6" class="muted">No requests for this filter</td></tr>';$('prev').disabled=offset===0;$('next').disabled=current.length<25;$('rows').querySelectorAll('tr[data-id]').forEach(tr=>tr.onclick=()=>{const r=current[Number(tr.dataset.id)];$('history-details').hidden=false;$('history-details').innerHTML=rankResults(r.details)})}catch(e){$('rows').innerHTML='<tr><td colspan="6">'+esc(e.message)+'</td></tr>'}}
+async function stats(){try{const s=await json('/api/dashboard/stats');for(const k of ['total','matched','unmatched','errors'])$(k).textContent=Number(s[k]).toLocaleString();$('latency').textContent='Avg. latency: '+Math.round(s.average_duration_ms)+' ms';const days=[...(s.daily||[])].reverse();const max=Math.max(1,...days.map(d=>d.total));$('chart').innerHTML=days.length?days.map(d=>'<div class="bar" title="'+esc(d.day+': '+d.total+' requests')+'" style="height:'+Math.max(4,100*d.total/max)+'%"></div>').join(''):'<div class="empty">No activity yet</div>'}catch(e){$('latency').textContent='Statistics unavailable: '+e.message}}
+async function history(){try{const data=await json('/api/dashboard/history?limit=25&offset='+offset+(statusFilter==='all'?'':'&status='+encodeURIComponent(statusFilter)));current=data.items;$('rows').innerHTML=current.length?current.map((r,i)=>'<tr data-id="'+i+'" tabindex="0" aria-label="View diagnostics for '+esc(r.title)+'"><td>'+esc(r.created_at.replace('T',' ').slice(0,19))+'</td><td class="title" title="'+esc(r.title)+'">'+esc(r.title)+'</td><td class="'+(r.status==='matched'?'good':r.status==='error'?'bad':'')+'">'+esc(r.status)+'</td><td>'+esc(r.imdb_id||'—')+'</td><td>'+esc(r.match_source||'—')+'</td><td>'+esc(r.duration_ms)+'</td></tr>').join(''):'<tr><td colspan="6" class="muted">No requests for this filter</td></tr>';$('prev').disabled=offset===0;$('next').disabled=current.length<25;$('rows').querySelectorAll('tr[data-id]').forEach(tr=>{const show=()=>{const r=current[Number(tr.dataset.id)];$('history-details').hidden=false;$('history-details').innerHTML='<div class="history-title" title="'+esc(r.title)+'">'+esc(r.title)+'</div>'+rankResults(r.details)};tr.addEventListener('click',show);tr.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();show()}})})}catch(e){$('rows').innerHTML='<tr><td colspan="6">'+esc(e.message)+'</td></tr>'}}
 function setHistoryFilter(value){
   if(!['all','matched','unmatched','error'].includes(value))return;
   statusFilter=value;offset=0;current=[];
@@ -80,7 +190,8 @@ function setHistoryFilter(value){
 document.querySelectorAll('.stat.filter').forEach(button=>{
   button.addEventListener('click',()=>setHistoryFilter(button.dataset.filter));
 });
-async function health(){try{const r=await fetch('/health');const v=await r.json();$('health').textContent=v.status==='ready'?'● Metadata ready':'◌ Metadata initializing';$('health').className='pill '+(r.ok?'good':'bad')}catch{$('health').textContent='● Server unavailable'}}
+function setHealth(full,short,ok){const node=$('health');node.className='pill '+(ok?'good':'bad');node.title=full;node.setAttribute('aria-label',full);node.querySelector('.health-full').textContent=full;node.querySelector('.health-short').textContent=short}
+async function health(){try{const r=await fetch('/health');const v=await r.json();if(v.status==='ready'){setHealth('● Metadata ready','● Ready',r.ok)}else{setHealth('◌ Metadata initializing','◌ Initializing',r.ok)}}catch{setHealth('● Server unavailable','● Offline',false)}}
 $('form').onsubmit=async e=>{e.preventDefault();const b=$('submit');b.disabled=true;$('result').innerHTML='<p class="muted">Parsing and matching…</p>';const body={title:$('title').value};if($('year').value)body.year=Number($('year').value);if($('series').value)body.series=$('series').value==='true';try{const d=await json('/debug/match',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const selected=d.selected;const heading=selected?'<strong class="good">Matched: '+esc(selected.imdb_id||selected.sid)+'</strong>':'<strong class="bad">No match</strong>';$('result').innerHTML=heading+'<p class="muted">'+esc(d.reason)+'</p>'+rankResults(d)}catch(e){$('result').innerHTML='<strong class="bad">Request failed</strong><pre class="output">'+esc(e.message)+'</pre>'}finally{b.disabled=false;stats();offset=0;history()}};
 $('refresh').onclick=()=>{stats();history();health()};$('prev').onclick=()=>{offset=Math.max(0,offset-25);history()};$('next').onclick=()=>{offset+=25;history()};stats();history();health();setInterval(()=>{stats();health()},30000);
 </script></body></html>
