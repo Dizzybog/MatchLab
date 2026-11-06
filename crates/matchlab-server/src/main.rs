@@ -152,7 +152,16 @@ fn anime_candidate(db: &Connection, key: &str, season: Option<i64>, episode: i64
             else if anime_title::has_specific_alias(db,imdb,key)? { None }
             else { anime_resolver::resolve_season(db,imdb,season,episode)? }
         },
-        None => anime_resolver::resolve_absolute(db,imdb,episode)?,
+        None => {
+            // A named anime sequel/part (e.g. "Amanchu! Advance - 01")
+            // restarts local episode numbering. Prefer the exact, uniquely
+            // verified AniDB part title, then use absolute numbering only
+            // when no such mapping can be established.
+            let named=anime_title::resolve_episode_from_exact_part_title(
+                db,imdb,key,episode)?;
+            if named.is_some(){named}
+            else{anime_resolver::resolve_absolute(db,imdb,episode)?}
+        },
         _ => None,
     };
     Ok(mapped.map(|m|json!({"imdb_id":m.imdb_id,"season":m.season,
@@ -550,8 +559,15 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
                     else {anime_resolver::resolve_season(&db,&c.imdb_id,season,ep)
                         .map_err(|e|e.to_string())?}
                 }else{
-                    anime_resolver::resolve_absolute(&db,&c.imdb_id,ep)
-                        .map_err(|e|e.to_string())?
+                    // Without an Sxx marker, a verified exact anime part
+                    // title is stronger than a potentially ambiguous
+                    // absolute episode number.
+                    let named=anime_title::resolve_episode_from_exact_part_title(
+                        &db,&c.imdb_id,anime_resolve_title,ep)
+                        .map_err(|e|e.to_string())?;
+                    if named.is_some(){named}
+                    else{anime_resolver::resolve_absolute(&db,&c.imdb_id,ep)
+                        .map_err(|e|e.to_string())?}
                 };
                 if let Some(mapped)=mapped{
                     selected_season=Some(mapped.season);
@@ -1163,6 +1179,73 @@ mod tests {
                 "unverified unmarked range must not invent an ordinary TV episode");
         }
 
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
+    fn exact_anime_sequel_title_maps_unmarked_local_episode_to_its_season(){
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-amanchu-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
+            region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES('tt5871330','Amanchu!','amanchu',2016,
+                'series','',1,0,'tvSeries');
+            INSERT INTO titles VALUES('tt5871330','Amanchu! Advance','amanchuadvance',2018,
+                'series','',0,1,'tvSeries');
+            INSERT INTO seasons VALUES('tt5871330',2);
+            INSERT INTO season_episodes VALUES('tt5871330',1,12,12);
+            INSERT INTO season_episodes VALUES('tt5871330',2,12,12);
+            INSERT INTO anime_series_map VALUES('tt5871330','201','304900',0);
+            INSERT INTO anime_series_map VALUES('tt5871330','202','304900',0);
+            INSERT INTO anime_ids VALUES('tt5871330','anidb','201');
+            INSERT INTO anidb_titles VALUES('201','Amanchu!','amanchu','main','en');
+            INSERT INTO anidb_titles VALUES('202','Amanchu! Advance',
+                'amanchuadvance','main','en');
+            INSERT INTO episode_map VALUES('201','304900',1,1,1,12,0,'');
+            INSERT INTO episode_map VALUES('202','304900',1,2,1,12,0,'');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        let find=|title:&str|diagnose(&path,&MatchRequest{
+            title:title.into(),year:None,series:None}).unwrap();
+        let advance=find("[Erai-raws] Amanchu! Advance - 01 [1080p][Multiple Subtitle].mkv");
+        assert_eq!(advance.parsed["title"],"Amanchu! Advance");
+        assert_eq!(advance.parsed["episodes"],json!([1]));
+        assert_eq!(advance.parsed["seasons"],json!([]));
+        let mapped=advance.selected.expect("must match sequel");
+        assert_eq!(mapped["imdb_id"],"tt5871330");
+        assert_eq!(mapped["season"],2);
+        assert_eq!(mapped["episode"],1);
+        assert_eq!(mapped["anime"]["asid"],"202:1");
+        assert_eq!(public_match_response(Some(mapped)),json!({
+            "sid_start":"tt5871330:2:1","sid_end":"tt5871330:2:1",
+            "asid_start":"202:1","asid_end":"202:1"}));
+        // An exact base alias with its own verified episode numbering
+        // continues to map to season 1.
+        let base=find("[Erai-raws] Amanchu! - 01 [1080p].mkv")
+            .selected.unwrap();
+        assert_eq!(base["season"],1);
+        assert_eq!(base["episode"],1);
+        assert_eq!(base["anime"]["asid"],"201:1");
+        // Explicit SxxEyy still has priority over title-only inference.
+        let explicit=find("Amanchu! Advance S01E01.mkv").selected.unwrap();
+        assert_eq!(explicit["season"],2);
+        assert_eq!(explicit["episode"],1);
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
     }

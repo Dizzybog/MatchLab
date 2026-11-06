@@ -164,6 +164,26 @@ Anime matching uses the same local metadata snapshot as IMDb matching, supplemen
 
 **Important:** Episode mappings in this project are **TVDB-style** coordinates from Anime-Lists, not independently verified IMDb season assignments. Do not assume the returned season number always equals IMDb's own season numbering.
 
+#### Single anime-part episodes without an explicit season
+
+Release names such as `[Erai-raws] Amanchu! Advance - 01 [1080p].mkv`
+may restart episode numbering for a specific sequel/part, while omitting
+`S02E01`. The parser already reports `episodes: [1]`, `seasons: []`.
+
+When the matcher's AniDB alias index finds an **exact, unique title** mapped
+to the selected IMDb series **and exactly one positive TVDB season**, it
+interprets the release episode as local to that named part and verifies the
+result with the AniDB/TVDB episode crosswalk. Thus, where the mapping data
+supports it, `Amanchu! Advance - 01` maps to TVDB-style S02E01, while
+`Amanchu! - 01` remains S01E01. The AniDB episode ID is returned only
+when that same verified crosswalk provides it.
+
+If the exact title is absent, has multiple conflicting AniDB identities,
+belongs to multiple mapped seasons, or its requested episode has no verified
+crosswalk entry, the matcher falls back to existing absolute-episode handling.
+It **never assumes all unmarked anime episodes start in season 1 or 2**.
+Explicit `SxxExx` coordinates always take precedence.
+
 #### AnimeTosho-style episode batches
 
 Anime release names often omit SxxExx notation. MatchLab recognizes numeric
