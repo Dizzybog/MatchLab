@@ -541,7 +541,7 @@ impl ParserEngine {
                 if prefix.as_bytes().last().is_some_and(u8::is_ascii_alphanumeric){
                     let token=prefix.rsplit(|c:char|!c.is_ascii_alphanumeric())
                         .next().unwrap_or_default();
-                    let digits=token.strip_prefix(['s','S']);
+                    let digits=token.strip_prefix('s').or_else(||token.strip_prefix('S'));
                     if !digits.is_some_and(|d|!d.is_empty()&&d.len()<=3
                         &&d.bytes().all(|b|b.is_ascii_digit())){
                         return Ok(None);
