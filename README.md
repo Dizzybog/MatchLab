@@ -2,7 +2,7 @@
 
 **MatchLab** is a self-hosted Rust service that recognizes movies, TV series, and anime from torrent filenames. Send a release name to its HTTP API to get an **IMDb ID**, verified episode coordinates, and—when available—an **AniDB ID**.
 
-It can parse names such as `Breaking.Bad.S02E03.1080p.WEB-DL`, recognize season packs, and handle anime episode mapping. It **does not** search for or download torrents and does not need an AI model.
+It can parse names such as `Breaking.Bad.S02E03.1080p.WEB-DL`, recognize season packs, and handle anime episode mapping. It **does not** search for or download torrents.
 
 ## Features
 
@@ -11,6 +11,11 @@ It can parse names such as `Breaking.Bad.S02E03.1080p.WEB-DL`, recognize season 
 - **Full release parsing:** Extracts title, year, season, episodes, resolution, languages, release tags, and more. Supports filenames inside folder paths.
 - **Easy deployment:** Native Rust server with Docker, an HTTP API, a dashboard, and automatic metadata refresh.
 - **Safe updates:** SQLite stores metadata relationships; Tantivy generations are built and validated before metadata is switched.
+
+## Dashboard
+
+<img width="1434" height="4096" alt="1000502509" src="https://github.com/user-attachments/assets/e46326cc-3ce7-40ac-be87-4d14bf3ad952" />
+
 
 ## Quick start
 
