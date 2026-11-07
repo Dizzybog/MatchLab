@@ -1527,7 +1527,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn bare_jojo_episode_uses_exact_anime_alias_before_mapping(){
         let stamp=std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
@@ -1590,6 +1589,7 @@ mod tests {
         std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
     }
 
+    #[test]
     fn one_piece_batch_with_seven_anidb_aliases_uses_unique_complete_crosswalk(){
         let stamp=std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
