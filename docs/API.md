@@ -81,6 +81,12 @@ unchanged. A date in a daily-show filename (YYYY-MM-DD) remains an
 episode airdate, **not a production year**; the separate Cinemeta
 airdate resolver retains its own ±1-calendar-day timezone tolerance.
 
+### Chinese bilingual release paths and absolute episodes
+
+A release such as `【高清剧集网发布 …】少年白马醉春风2[第41集]…/少年白马醉春风.The.Young.Brewmasters.Adventure.S02E41.2024….mp4` contains both a Chinese **series-absolute episode number** and an explicit file `S02E41`. The parser retains the normal file coordinates (`seasons:[2], episodes:[41]`), the Latin alternative title and year, and adds `absolute_episode_candidate:41` to the structured parse result. This field is a **hint**, not a verified episode.
+
+The public matcher may reinterpret such a conflicting `S02E41` marker **only** when IMDb metadata proves that season 2 does not extend to episode 41, a unique verified AniDB/TVDB crosswalk maps absolute episode 41 into season 2, and the resulting canonical season/episode passes metadata bounds. For example, when that crosswalk yields season 2 episode 21, the returned SID is `ttID:2:21` and the ASID comes from the same verified mapping. An ambiguous or missing crosswalk does not justify inventing `S02E21`; a known valid canonical `S02E41` remains authoritative.
+
 ### Full parser API — `/parse`
 
 `GET /parse` and `POST /parse` return the **complete structured parser output** for the torrent title, without requiring an IMDb/AniDB database lookup.
