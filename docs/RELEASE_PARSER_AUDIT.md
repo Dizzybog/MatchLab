@@ -6,7 +6,7 @@
 
 ## Combined implementation
 
-- Retains 432 generated MatchLab handlers, PCRE2 JIT, Aho–Corasick prefilter
+- Retains 454 generated MatchLab handlers, PCRE2 JIT, Aho–Corasick prefilter
   and all original IMDb/AniDB/Tantivy matching and crosswalk verification.
 - Fansub hash release episodes including revision suffixes; explicit final
   episode "13 END"; labelled ranges with compact endpoints; CJK absolute hints.
@@ -15,6 +15,7 @@
   metadata and language/dub/subtitle tokens terminate the capture.
 - A deeper path component overwrites a different parent's episode title and
   candidate coordinate, preserving the original metadata-provenance rules.
+- Extended high-confidence provider/network handlers, pre-air tags and accessibility release types.
 - Regression tests include both real AIOStreams release-parser fixture ideas
   and negative cases. No code from AGPL-licensed AIOStreams is incorporated.
 
@@ -124,5 +125,5 @@ numbered movie titles and foreign-language season markers.
 
 The existing parser is already substantially feature-rich. A comparison of
 field names or handler counts alone is **not** proof of semantic coverage:
-the 439 AIOStreams handlers and 432 MatchLab handlers are different schemas
+the 439 AIOStreams handlers and 454 MatchLab handlers are different schemas
 and contain overlapping rules.
