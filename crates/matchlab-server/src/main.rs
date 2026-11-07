@@ -1051,19 +1051,33 @@ fn public_match_response(selected: Option<Value>) -> Value {
         else if let (Some(se),Some(ep))=(end_season,end_episode){
             json!(format!("{imdb}:{se}:{ep}"))
         }else if has_range{Value::Null}else{json!(imdb)};
-    let anime=winner.get("anime").filter(|v|v.is_object());
-    let direct_asid=anime.and_then(|a|a.get("asid")).cloned().unwrap_or(Value::Null);
+    // Public API is a trust boundary: even a stale or malformed crosswalk
+    // must never publish out-of-range ASIDs that make consumers retry a
+    // whole batch. A valid IMDb SID survives without the invalid ASID.
+    let direct_asid=winner.pointer("/anime/asid").and_then(Value::as_str)
+        .filter(|value|anime_resolver::valid_asid(value))
+        .map(str::to_owned);
     let segments=winner.pointer("/episode_range/segments").and_then(Value::as_array);
     let complete=winner.pointer("/episode_range/complete")
         .and_then(Value::as_bool).unwrap_or(true);
-    let asid_start=segments.filter(|_|complete).and_then(|v|v.first()).and_then(|v|{
-        Some(json!(format!("{}:{}",v["anidb_id"].as_str()?,
-            v["start_anime_episode"].as_i64()?)))
-    }).unwrap_or_else(||direct_asid.clone());
-    let asid_end=segments.filter(|_|complete).and_then(|v|v.last()).and_then(|v|{
-        Some(json!(format!("{}:{}",v["anidb_id"].as_str()?,
-            v["end_anime_episode"].as_i64()?)))
-    }).unwrap_or(direct_asid);
+    let range_asids=segments.filter(|_|complete).and_then(|entries|{
+        if entries.is_empty(){return None;}
+        let mapped=entries.iter().map(|segment|{
+            let id=segment["anidb_id"].as_str()?;
+            Some((
+                anime_resolver::canonical_asid(id,segment["start_anime_episode"].as_i64()?)?,
+                anime_resolver::canonical_asid(id,segment["end_anime_episode"].as_i64()?)?,
+            ))
+        }).collect::<Option<Vec<_>>>()?;
+        Some((mapped.first()?.0.clone(),mapped.last()?.1.clone()))
+    });
+    let (asid_start,asid_end)=if segments.is_some() {
+        // Ranges require every mapped segment to be valid and complete.
+        range_asids.map_or((Value::Null,Value::Null),|(start,end)|
+            (json!(start),json!(end)))
+    }else{
+        (json!(direct_asid),json!(direct_asid))
+    };
     json!({"sid_start":sid_start,"sid_end":sid_end,
         "asid_start":asid_start,"asid_end":asid_end})
 }
@@ -1371,6 +1385,41 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn public_match_rejects_invalid_anidb_asids_without_losing_imdb_identity(){
+        for malformed in ["732:190315","436:180525","6424:431078",
+            "732:0","732:foo","bad:3","732:3:4"]{
+            let selected=json!({"imdb_id":"tt1234567","category":"series",
+                "season":1,"episode":3,"anime":{"asid":malformed}});
+            assert_eq!(public_match_response(Some(selected)),json!({
+                "sid_start":"tt1234567:1:3","sid_end":"tt1234567:1:3",
+                "asid_start":null,"asid_end":null
+            }),"{malformed}");
+        }
+        let valid=json!({"imdb_id":"tt1234567","category":"series",
+            "season":1,"episode":3,"anime":{"asid":"732:99999"}});
+        let valid_response=public_match_response(Some(valid));
+        assert_eq!(valid_response["asid_start"],"732:99999");
+        assert_eq!(valid_response["asid_end"],"732:99999");
+
+        // Incomplete or out-of-bounds ranges must not leak just one
+        // endpoint. Keep the valid IMDb coordinates independent.
+        for (complete,episode) in [(true,190315),(false,3)] {
+            let winner=json!({"imdb_id":"tt1234567","category":"series",
+                "season":1,"episode":3,"season_end":1,"episode_end":7,
+                "anime":{"asid":"732:3"},
+                "episode_range":{"complete":complete,"segments":[{
+                    "anidb_id":"732","start_anime_episode":3,
+                    "end_anime_episode":episode
+                }]}});
+            let response=public_match_response(Some(winner));
+            assert_eq!(response["sid_start"],"tt1234567:1:3");
+            assert_eq!(response["sid_end"],"tt1234567:1:7");
+            assert!(response["asid_start"].is_null());
+            assert!(response["asid_end"].is_null());
+        }
+    }
+
     #[test]
     fn one_piece_batch_with_seven_anidb_aliases_uses_unique_complete_crosswalk(){
         let stamp=std::time::SystemTime::now()
