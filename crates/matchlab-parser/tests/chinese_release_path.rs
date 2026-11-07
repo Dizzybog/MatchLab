@@ -13,4 +13,17 @@ fn chinese_english_release_path_keeps_english_title_and_leaf_episode() {
     assert_eq!(result["seasons"], json!([2]));
     assert_eq!(result["episodes"], json!([41]));
     assert_eq!(result["year"], json!(2024));
+    assert_eq!(result["absolute_episode_candidate"], json!(41));
+}
+
+#[test]
+fn chinese_marker_is_only_a_hint_and_does_not_rewrite_explicit_coordinates() {
+    let source = "少年白马醉春风[第41集]/The.Young.Brewmasters.Adventure.S02E41.2024.mp4";
+    let result = parse_title(source, false).unwrap();
+    assert_eq!(result["seasons"], json!([2]));
+    assert_eq!(result["episodes"], json!([41]));
+    assert_eq!(result["absolute_episode_candidate"], json!(41));
+
+    let plain = parse_title("The.Young.Brewmasters.Adventure.S02E41.2024.mp4", false).unwrap();
+    assert!(plain.get("absolute_episode_candidate").is_none());
 }
