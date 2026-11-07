@@ -12,7 +12,18 @@ The API listens on port **8765**.
 curl http://127.0.0.1:8765/health
 ```
 
-The service returns HTTP `200` when the metadata is ready and `503` while it is initializing.
+The HTTP server starts immediately, **before Tantivy startup indexing**.
+`GET /health/live` returns HTTP `200` as soon as the listener is running.
+`GET /health` and `GET /health/ready` return HTTP `503` with JSON status
+`initializing` (waiting for imported metadata), `indexing` (building or
+opening Tantivy), or `error` (failed index initialization). Both return
+HTTP `200` and `{"status":"ready"}` when the current metadata and index
+are fully available. Dashboard health labels and a non-wrapping notice
+show the current phase; proxy HTML/503 responses no longer generate raw
+JSON parse exceptions. Until ready, `/match` and `/alias` return a
+structured HTTP `503` indexing response rather than attempting a
+request-time index build. A failed index remains visibly failed rather
+than silently reporting successful readiness.
 
 ### Minimal matching API — `/match`
 
@@ -41,7 +52,30 @@ Example response (assuming the selected IMDb identity is `tt0460681`):
 - **Anime:** ASID fields contain `anidb_id:episode` when verified mappings exist. An interval may cross AniDB IDs; the start and end can therefore have different prefixes.
 - **No reliable match:** all four fields are `null`. Missing individual mappings are `null`; no synthetic IDs are returned.
 
-For a URL query, use `GET /match?title=Supernatural.S01E01`. Both endpoints accept `title` or `t_title` as the request input. A supplied `year` can constrain matching.
+For a URL query, use `GET /match?title=Supernatural.S01E01`. Both
+endpoints accept `title` or `t_title` as the request input. A supplied
+`year` can constrain matching.
+
+**Production year policy:** A parsed or explicitly supplied torrent year
+must match the IMDb title's production year **exactly** (no ±1-year
+tolerance). When no year was parsed, or the candidate IMDb year is
+different, the candidate is eligible **only if at least one** separate
+identity signal is present:
+
+- a parsed **season** for a series, such as `S02` or `Season 2`
+- an imported **anime identity** linked to that IMDb candidate
+- a parsed **quality** value, for example `WEB-DL`, `WEBRip` or `BluRay`
+
+A parsed **resolution** such as `1080p` or `2160p` does **not** count.
+Neither codecs (such as `x265`) nor video extensions substitute for a
+quality value. The matcher checks the parser's `quality` field explicitly;
+this helps exclude unrelated video files that only advertise resolution.
+
+An unmarked episode number alone is not evidence. This rule is applied
+to each candidate before the winner is chosen, not just to the highest
+ranked title. A date in a daily-show filename (YYYY-MM-DD) remains an
+episode airdate, **not a production year**; the separate Cinemeta
+airdate resolver retains its own ±1-calendar-day timezone tolerance.
 
 ### Full parser API — `/parse`
 
@@ -328,9 +362,20 @@ when that same verified crosswalk provides it.
 
 If the exact title is absent, has multiple conflicting AniDB identities,
 belongs to multiple mapped seasons, or its requested episode has no verified
-crosswalk entry, the matcher falls back to existing absolute-episode handling.
-It **never assumes all unmarked anime episodes start in season 1 or 2**.
-Explicit `SxxExx` coordinates always take precedence.
+crosswalk entry, the matcher first attempts **absolute-episode mapping**.
+That takes precedence over any default season; for example, a verified
+`One Piece - 894` still maps to S21E03, not S01E894.
+
+If the chosen IMDb series has an imported anime identity but the episode
+has no verified crosswalk and no explicit season, the matcher may emit a
+**tentative S01 SID** for an ordinary local episode (for example,
+`Psycho-Pass - 04` → `tt2379308:1:4`), while leaving ASID `null`.
+A uniquely identified later part retains its verified season number.
+IMDb season-one episode bounds are checked where available; otherwise
+unmarked large absolute-looking episode numbers above 150 do not receive
+a guessed season 1. Neither the default season nor the SID is treated as
+proof of an AniDB mapping. Explicit `SxxExx` coordinates still take
+precedence.
 
 #### AniDB alias collisions for long-running anime
 

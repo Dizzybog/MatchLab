@@ -55,7 +55,7 @@ docker compose logs -f matchlab
 curl http://127.0.0.1:8765/health
 ```
 
-On first startup, MatchLab downloads **seven public metadata feeds** and builds its local SQLite database and Tantivy index. This requires outbound HTTPS access and sufficient free disk space. `/health` returns **503** while initialization is in progress and **200** when ready. Later metadata refreshes preserve the last published data if an import fails.
+On first startup, MatchLab downloads **seven public metadata feeds** and builds its local SQLite database and Tantivy index. This requires outbound HTTPS access and sufficient free disk space. The HTTP listener and dashboard are available while Tantivy is indexing, so `/health/live` can return **200** before matching is ready. `/health` and `/health/ready` return JSON with **503** and status `initializing`, `indexing` or `error` until the index is ready, then **200** and `ready`. The dashboard displays the phase. Matching and alias lookups are gated until ready; the client does not mistake proxy HTML for JSON. Later metadata refreshes preserve the last published data if an import fails.
 
 For updates, run `docker compose pull && docker compose up -d`.
 
@@ -94,6 +94,16 @@ Example response:
   "asid_end": null
 }
 ```
+
+**Strict production year:** Parsed torrent years must match the IMDb
+production year **exactly**, not within ±1. When the year is missing or
+different, a candidate requires a parsed series season, linked anime
+identity, or the parser's explicit **quality** field (for example WEB-DL,
+WEBRip or BluRay). **Resolution alone is insufficient**: 1080p/2160p,
+codecs and file extensions do not qualify. Anime filenames with only a local
+episode number can default to a tentative first-season SID when the
+crosswalk cannot resolve it, but never claim an unverified ASID.
+Verified absolute numbering and named anime parts take priority.
 
 `/match` **always returns exactly these four fields**. Movies use the IMDb title ID in both SID fields; TV episodes add season/episode coordinates. Verified anime episodes may also include AniDB IDs. If nothing can be matched reliably, the corresponding values are `null`.
 

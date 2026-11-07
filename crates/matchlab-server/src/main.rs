@@ -23,7 +23,38 @@ use tokio::sync::Semaphore;
 
 
 #[derive(Clone)]
-struct AppState { db: Arc<PathBuf>, history: Arc<PathBuf>, match_slots: Arc<Semaphore> }
+struct AppState {
+    db:Arc<PathBuf>,
+    history:Arc<PathBuf>,
+    match_slots:Arc<Semaphore>,
+    index_phase:Arc<Mutex<IndexPhase>>,
+}
+
+/// Index creation can take minutes on a populated volume. It must never
+/// prevent the HTTP listener, dashboard or liveness endpoint from starting.
+#[derive(Debug,Clone,PartialEq,Eq)]
+enum IndexPhase {
+    WaitingForMetadata,
+    Indexing,
+    Ready,
+    Failed(String),
+}
+fn index_phase(state:&Arc<Mutex<IndexPhase>>)->IndexPhase {
+    state.lock().unwrap_or_else(|poison|poison.into_inner()).clone()
+}
+fn set_index_phase(state:&Arc<Mutex<IndexPhase>>,phase:IndexPhase){
+    *state.lock().unwrap_or_else(|poison|poison.into_inner())=phase;
+}
+fn matching_available(state:&AppState)->bool{
+    index_phase(&state.index_phase)==IndexPhase::Ready
+}
+fn indexing_response()->(StatusCode,Json<Value>){
+    (StatusCode::SERVICE_UNAVAILABLE,Json(json!({
+        "status":"indexing",
+        "error":"Metadata indexing is in progress; retry when /health/ready is ready"
+    })))
+}
+
 
 #[derive(Debug, Deserialize)]
 struct MatchRequest {
@@ -284,6 +315,41 @@ fn mapped_season_episode_range(
 /// Reject candidates whose imported IMDb season cannot contain the
 /// explicitly requested episode. Missing season metadata is not evidence
 /// that an episode exists.
+/// If the torrent has no production year or it differs from this IMDb
+/// candidate's production year, require an independent identity signal:
+/// parsed season, indexed anime identity, or a parsed quality label.
+
+/// Year matching is EXACT; there is no +/-1 production-year tolerance.
+/// Episode numbers alone are too weak (the common "Title - 04" case).
+fn year_signal_eligible(
+    release_year:Option<i32>,candidate_year:i32,
+    has_parsed_season:bool,verified_anime:bool,has_parsed_quality:bool,
+)->bool{
+    let matching_year=release_year.is_some_and(|release|
+        candidate_year>0 && candidate_year==release);
+    matching_year||has_parsed_season||verified_anime||has_parsed_quality
+}
+fn parsed_quality_signal(parsed:&serde_json::Map<String,Value>)->bool{
+    // Resolution alone (1080p/2160p) is common in unrelated video files;
+    // only the parser's explicit release quality classification qualifies.
+    parsed.get("quality").and_then(Value::as_str)
+        .is_some_and(|quality|!quality.trim().is_empty())
+}
+/// Only anime confirmed by imported identity data may receive a fallback
+/// season=1 for a bare local episode. An episode beyond IMDb's known first
+/// season bounds can be an absolute episode from a later season.
+fn anime_local_episode_season_one(
+    db:&Connection,imdb:&str,episode:i64,has_anime_identity:bool,
+    proven_later_part:bool,
+)->Result<bool,String>{
+    if !has_anime_identity||proven_later_part||
+        !valid_sid_coordinate(1,episode)||episode==0{return Ok(false);}
+    // If season-one bounds exist they are authoritative. Otherwise, do not
+    // relabel a large absolute episode number as a first-season episode.
+    Ok(season_episode_end(db,imdb,1)?
+        .map_or(episode<=150,|max|episode<=max))
+}
+
 fn candidate_has_episode(db:&Connection,imdb:&str,season:i64,episode:i64)->Result<bool,String>{
     if season<=0||episode<=0{return Ok(true);}
     // Unknown bounds cannot prove the episode is invalid. Only reject when
@@ -440,6 +506,7 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
         if let Some(ep)=explicit_absolute_episode(&req.title){episodes.push(ep);}
     }
     let year = if airdate_only {req.year} else {req.year.or_else(||parsed.get("year").and_then(Value::as_i64).map(|n|n as i32))};
+    let parsed_quality=parsed_quality_signal(parsed);
     // An exact anime alias can identify a series even without SxxExx tokens.
     // Respect an explicitly supplied series=false override.
     let series = match req.series {
@@ -455,6 +522,16 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
     let imdb = matchlab_matcher::search(&db,title,year,series,seasons.iter().copied().max().unwrap_or(0),&req.title,
         !episodes.is_empty()||parsed.contains_key("episode_start"),20)
         .map_err(|e|e.to_string())?;
+    // The parsed release year must exactly match IMDb's production year.
+    // Missing or different years need independently parsed season/quality
+    // or imported anime identity. Only the parsed 'quality' field counts,
+    // never resolution, video codec, or file extension.
+    // Apply this to every candidate before
+    // winner selection; the winner may otherwise have a different year.
+    let imdb=imdb.into_iter().filter(|candidate|
+        year_signal_eligible(year,candidate.year,series&&!seasons.is_empty(),
+            !candidate.anime_ids.is_empty(),parsed_quality)
+    ).collect::<Vec<_>>();
     // Require every candidate for a multi-season pack to contain the final season.
     let imdb=if let Some((_,end))=season_range {
         imdb.into_iter().filter(|candidate|{
@@ -599,8 +676,25 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
                         &db,&c.imdb_id,anime_resolve_title,ep)
                         .map_err(|e|e.to_string())?;
                     if named.is_some(){named}
-                    else{anime_resolver::resolve_absolute(&db,&c.imdb_id,ep)
-                        .map_err(|e|e.to_string())?}
+                    else {
+                        let absolute=anime_resolver::resolve_absolute(
+                            &db,&c.imdb_id,ep).map_err(|e|e.to_string())?;
+                        if absolute.is_some(){absolute}
+                        else {
+                            // "Anime - 04" usually means S01E04. Keep
+                            // absolute numbering and named sequel parts
+                            // higher priority, and verify the season-one
+                            // crosswalk before filling an ASID.
+                            let later_part=anime_title::season_from_title(
+                                &db,&c.imdb_id,anime_resolve_title)
+                                .map_err(|e|e.to_string())?.is_some_and(|s|s>1);
+                            if anime_local_episode_season_one(
+                                &db,&c.imdb_id,ep,!c.anime_ids.is_empty(),later_part)?{
+                                anime_resolver::resolve_season(
+                                    &db,&c.imdb_id,1,ep).map_err(|e|e.to_string())?
+                            }else{None}
+                        }
+                    }
                 };
                 if let Some(mapped)=mapped{
                     selected_season=Some(mapped.season);
@@ -608,13 +702,36 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
                     anime_result=json!({"anidb_id":mapped.anidb_id,
                         "episode":mapped.anidb_episode,
                         "asid":format!("{}:{}",mapped.anidb_id,mapped.anidb_episode)});
-                } else if !c.anime_ids.is_empty() ||
-                    anime_title::has_specific_alias(&db,&c.imdb_id,anime_resolve_title)
-                        .map_err(|e|e.to_string())? {
-                    // Anime identity can be valid without a verified episode
-                    // crosswalk. Do not publish the raw release S/E as canonical.
-                    selected_season=None;
-                    selected_episode=None;
+                } else {
+                    let specific=anime_title::has_specific_alias(
+                        &db,&c.imdb_id,anime_resolve_title)
+                        .map_err(|e|e.to_string())?;
+                    let inferred=if selected_season.is_none(){
+                        anime_title::season_from_title(
+                            &db,&c.imdb_id,anime_resolve_title)
+                            .map_err(|e|e.to_string())?
+                    }else{None};
+                    if selected_season.is_none() && series &&
+                        anime_local_episode_season_one(
+                            &db,&c.imdb_id,ep,!c.anime_ids.is_empty(),
+                            inferred.is_some_and(|season|season>1))? {
+                        // Tentative local anime episode: emit SID S01E04,
+                        // but leave ASID null until independently verified.
+                        selected_season=Some(1);
+                    }else if selected_season.is_none() && series &&
+                        !c.anime_ids.is_empty() &&
+                        inferred.is_some_and(|season|season>1) &&
+                        candidate_has_episode(&db,&c.imdb_id,inferred.unwrap_or(1),ep)? {
+                        // Exact title identifies a later anime part even if
+                        // the particular episode has no verified ASID.
+                        selected_season=inferred;
+                    }else if !c.anime_ids.is_empty()||specific{
+                        // Explicit seasons and named sequel parts still
+                        // require a verified crosswalk; never rewrite their
+                        // coordinates into a guessed season-one episode.
+                        selected_season=None;
+                        selected_episode=None;
+                    }
                 }
             }
             Some(json!({"imdb_id":c.imdb_id,"title":c.title,"year":c.year,
@@ -845,14 +962,31 @@ async fn liveness() -> (StatusCode,Json<Value>) {
 }
 
 async fn readiness(State(state):State<AppState>) -> (StatusCode,Json<Value>) {
-    let ready=open_db(&state.db).ok().is_some_and(|db|{
-        let metadata=db.query_row(
-            "SELECT count(*) FROM metadata_state WHERE source='full_refresh'",
-            [],|row|row.get::<_,i64>(0)).map(|count|count>0).unwrap_or(false);
-        metadata&&tantivy_search::index_ready(&db)
-    });
-    (if ready {StatusCode::OK} else {StatusCode::SERVICE_UNAVAILABLE},
-        Json(json!({"status":if ready {"ready"} else {"initializing"}})))
+    let phase=index_phase(&state.index_phase);
+    let path=state.db.clone();
+    // Even the lightweight SQLite readiness probe runs off Tokio threads.
+    let exists=tokio::task::spawn_blocking(move || {
+        open_db(&path).ok().is_some_and(|db|{
+            let metadata=db.query_row(
+                "SELECT count(*) FROM metadata_state WHERE source='full_refresh'",
+                [],|row|row.get::<_,i64>(0)).map(|count|count>0).unwrap_or(false);
+            metadata&&tantivy_search::index_ready(&db)
+        })
+    }).await.unwrap_or(false);
+    let ready=exists&&phase==IndexPhase::Ready;
+    let (status,message)=if ready {
+        ("ready","Metadata and search index ready".to_owned())
+    }else{
+        match phase {
+            IndexPhase::Failed(error)=>("error",format!("Metadata indexing failed: {error}")),
+            IndexPhase::Indexing|IndexPhase::Ready=>
+                ("indexing","Metadata indexing in progress".to_owned()),
+            IndexPhase::WaitingForMetadata=>
+                ("initializing","Waiting for metadata import".to_owned()),
+        }
+    };
+    (if ready{StatusCode::OK}else{StatusCode::SERVICE_UNAVAILABLE},
+        Json(json!({"status":status,"message":message})))
 }
 
 /// Public response: winner coordinates plus the complete parser output.
@@ -938,6 +1072,7 @@ async fn run_match(state: AppState, req: MatchRequest)
 
 async fn match_response(state:AppState,req:MatchRequest,debug:bool)
     -> (StatusCode,Json<Value>){
+    if !matching_available(&state){return indexing_response();}
     match run_match(state,req).await{
         Ok(Ok(d))=>{
             let value=if debug{
@@ -1034,14 +1169,13 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
     }
     let db = env::var("MATCHLAB_DB").unwrap_or_else(|_|"/data/metadata.sqlite3".into());
     let host = env::var("MATCHLAB_HOST").unwrap_or_else(|_|"127.0.0.1:8766".into());
-    // Open the current metadata index at startup rather than on the first search.
-    // A fresh deployment may have no metadata yet; the refresh worker below
-    // initializes it and the search path can then open its index.
-    if std::path::Path::new(&db).is_file() {
-        let index_db=Connection::open_with_flags(&db,OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        tantivy_search::warmup(&index_db)
-            .map_err(|e|format!("Tantivy startup initialization failed: {e}"))?;
-    }
+    // Bind the HTTP listener before potentially expensive startup indexing.
+    // Keep the generation's completion marker authoritative for readiness.
+    let index_state=Arc::new(Mutex::new(
+        if std::path::Path::new(&db).is_file(){
+            IndexPhase::Indexing
+        }else{IndexPhase::WaitingForMetadata}
+    ));
 
     // Built-in HTTPS metadata feeds initialize a fresh Docker volume automatically.
     // MATCHLAB_METADATA_URLS can override all seven feeds (or six legacy URLs).
@@ -1053,6 +1187,7 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
             return Err("MATCHLAB_METADATA_REFRESH_HOURS must be between 1 and 720".into());
         }
         let target=PathBuf::from(&db);
+        let refresh_index_state=index_state.clone();
         tokio::spawn(async move {
             let refresh_seconds=hours*3600;
             loop {
@@ -1087,6 +1222,7 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
                         // Pre-open the new on-disk index off the async executor.
                         // This avoids leaving the first request after refresh to
                         // perform a full Tantivy build.
+                        set_index_phase(&refresh_index_state,IndexPhase::Indexing);
                         let warm_target=target.clone();
                         match tokio::task::spawn_blocking(move || -> Result<(),String> {
                             let conn=Connection::open_with_flags(
@@ -1094,9 +1230,20 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
                                 .map_err(|e|e.to_string())?;
                             tantivy_search::warmup(&conn)
                         }).await {
-                            Ok(Ok(())) => tracing::info!("refreshed Tantivy index ready"),
-                            Ok(Err(error)) => tracing::error!(%error,"Tantivy refresh warmup failed"),
-                            Err(error) => tracing::error!(%error,"Tantivy warmup task failed"),
+                            Ok(Ok(())) => {
+                                set_index_phase(&refresh_index_state,IndexPhase::Ready);
+                                tracing::info!("refreshed Tantivy index ready");
+                            },
+                            Ok(Err(error)) => {
+                                set_index_phase(&refresh_index_state,
+                                    IndexPhase::Failed(error.clone()));
+                                tracing::error!(%error,"Tantivy refresh warmup failed");
+                            },
+                            Err(error) => {
+                                set_index_phase(&refresh_index_state,
+                                    IndexPhase::Failed(error.to_string()));
+                                tracing::error!(%error,"Tantivy warmup task failed");
+                            },
                         }
                     },
                     Ok(Err(error)) => tracing::error!(%error,"scheduled metadata refresh failed; existing database preserved"),
@@ -1146,6 +1293,37 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
             }
         });
     }
+    // A pre-existing volume may need a fresh Tantivy schema generation.
+    // Start this in the blocking pool only after all service configuration is
+    // validated. /health/live and the dashboard remain reachable throughout.
+    let listener = tokio::net::TcpListener::bind(&host).await?;
+    if std::path::Path::new(&db).is_file(){
+        let startup_target=PathBuf::from(&db);
+        let startup_index_state=index_state.clone();
+        tokio::spawn(async move{
+            let warmup=tokio::task::spawn_blocking(move||->Result<(),String>{
+                let conn=Connection::open_with_flags(
+                    &startup_target,OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .map_err(|e|e.to_string())?;
+                tantivy_search::warmup(&conn)
+            }).await;
+            match warmup{
+                Ok(Ok(()))=>{
+                    set_index_phase(&startup_index_state,IndexPhase::Ready);
+                    tracing::info!("startup Tantivy indexing completed");
+                },
+                Ok(Err(error))=>{
+                    set_index_phase(&startup_index_state,IndexPhase::Failed(error.clone()));
+                    tracing::error!(%error,"startup Tantivy indexing failed");
+                },
+                Err(error)=>{
+                    set_index_phase(&startup_index_state,
+                        IndexPhase::Failed(error.to_string()));
+                    tracing::error!(%error,"startup Tantivy worker failed");
+                }
+            }
+        });
+    }
     let app = Router::new().route("/",get(dashboard))
         .route("/api/dashboard/history",get(dashboard_history_request))
         .route("/api/dashboard/stats",get(dashboard_stats_request))
@@ -1158,8 +1336,8 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         .route("/parse",get(get_parse_request).post(parse_request))
         .route("/debug/match",post(debug_request))
         .with_state(AppState{db:Arc::new(PathBuf::from(db)),history:Arc::new(PathBuf::from(history_db)),
-            match_slots:Arc::new(Semaphore::new(max_matches))});
-    let listener = tokio::net::TcpListener::bind(&host).await?;
+            match_slots:Arc::new(Semaphore::new(max_matches)),
+            index_phase:index_state});
     tracing::info!("Rust API listening on {host}");
     axum::serve(listener,app).await?;
     Ok(())
@@ -1366,6 +1544,69 @@ mod tests {
     }
 
     #[test]
+    fn production_year_requires_exact_match_or_independent_signal(){
+        // Missing years and mismatches -- including +/-1 year -- require
+        // independent evidence. An episode number alone is insufficient.
+        for (year,imdb) in [
+            (None,2024),(Some(2023),2024),(Some(2025),2024),
+            (Some(2010),2024),(Some(2024),0)
+        ]{
+            assert!(!year_signal_eligible(year,imdb,false,false,false));
+            assert!(year_signal_eligible(year,imdb,true,false,false));
+            assert!(year_signal_eligible(year,imdb,false,true,false));
+            assert!(year_signal_eligible(year,imdb,false,false,true));
+        }
+        assert!(year_signal_eligible(Some(2024),2024,false,false,false));
+        assert!(!year_signal_eligible(Some(2023),2024,false,false,false),
+            "a one-year offset must not be a special exception");
+        assert!(!year_signal_eligible(Some(2025),2024,false,false,false));
+        let object=|value:Value|value.as_object().unwrap().clone();
+        assert!(parsed_quality_signal(&object(json!({"quality":"WEB-DL"}))));
+        assert!(parsed_quality_signal(&object(json!({"quality":"WEB-DL"}))));
+        assert!(parsed_quality_signal(&object(json!({"quality":"BluRay"}))));
+        assert!(!parsed_quality_signal(&object(json!({"resolution":"1080p"}))));
+        assert!(!parsed_quality_signal(&object(json!({"resolution":"2160p"}))));
+        assert!(!parsed_quality_signal(&object(json!({"resolution":"1080p","codec":"x265"}))));
+        assert!(!parsed_quality_signal(&object(json!({"codec":"x265"}))));
+        assert!(!parsed_quality_signal(&object(json!({"quality":""}))));
+        assert!(!parsed_quality_signal(&object(json!({"quality":"   "}))));
+        assert!(!parsed_quality_signal(&object(json!({"quality":null}))));
+        assert!(!parsed_quality_signal(&object(json!({"quality":["WEB-DL"]}))));
+    }
+
+    #[test]
+    fn indexing_and_matching_readiness_states_are_independent(){
+        let phase=Arc::new(Mutex::new(IndexPhase::Indexing));
+        assert_eq!(index_phase(&phase),IndexPhase::Indexing);
+        set_index_phase(&phase,IndexPhase::Ready);
+        assert_eq!(index_phase(&phase),IndexPhase::Ready);
+        set_index_phase(&phase,IndexPhase::Failed("bad metadata".into()));
+        assert!(matches!(index_phase(&phase),IndexPhase::Failed(_)));
+    }
+
+    #[tokio::test]
+    async fn server_health_and_json_errors_work_while_metadata_is_indexing(){
+        let state=AppState{
+            db:Arc::new(PathBuf::from("/nonexistent/matchlab-metadata-test.sqlite3")),
+            history:Arc::new(PathBuf::from("/nonexistent/matchlab-history-test.sqlite3")),
+            match_slots:Arc::new(Semaphore::new(2)),
+            index_phase:Arc::new(Mutex::new(IndexPhase::Indexing)),
+        };
+        let (status,Json(live))=liveness().await;
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(live["status"],"alive");
+        let (status,Json(ready))=readiness(State(state.clone())).await;
+        assert_eq!(status,StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(ready["status"],"indexing");
+        let (status,Json(matched))=match_response(state,MatchRequest{
+            title:"One Piece S21E03".into(),year:None,series:None
+        },false).await;
+        assert_eq!(status,StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(matched["status"],"indexing");
+        assert!(matched["error"].as_str().unwrap().contains("indexing"));
+    }
+
+    #[test]
     fn match_single_anime_season_episode_publishes_sid_and_asid(){
         let stamp=std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
@@ -1389,16 +1630,23 @@ mod tests {
             INSERT INTO titles VALUES
                 ('tt0388629','One Piece','onepiece',1999,
                     'series','',1,0,'tvSeries'),
+                ('tt2379308','Psycho-Pass','psychopass',2012,
+                    'series','',1,0,'tvSeries'),
                 ('tt2222222','Example Show','exampleshow',2020,
                     'series','',1,0,'tvSeries');
             INSERT INTO seasons VALUES('tt0388629',23);
+            INSERT INTO seasons VALUES('tt2379308',1);
             INSERT INTO seasons VALUES('tt2222222',1);
             INSERT INTO season_episodes VALUES('tt0388629',21,194,194);
+            INSERT INTO season_episodes VALUES('tt2379308',1,22,22);
             INSERT INTO season_episodes VALUES('tt2222222',1,12,12);
             INSERT INTO anime_series_map VALUES('tt0388629','69','81797',1);
             INSERT INTO anime_ids VALUES('tt0388629','anidb','69');
+            INSERT INTO anime_ids VALUES('tt2379308','anidb','777');
             INSERT INTO anidb_titles VALUES('69','One Piece',
                 'onepiece','main','en');
+            INSERT INTO anidb_titles VALUES('777','Psycho-Pass',
+                'psychopass','main','en');
             INSERT INTO episode_map VALUES('69','81797',1,-1,1,0,0,'');
             INSERT INTO episode_map VALUES('69','81797',1,21,892,1085,-891,'');
             INSERT INTO episode_map VALUES('69','81797',1,22,1086,1155,-1085,'');").unwrap();
@@ -1416,6 +1664,32 @@ mod tests {
         assert_eq!(public_match_response(Some(winner)),json!({
             "sid_start":"tt0388629:21:3","sid_end":"tt0388629:21:3",
             "asid_start":"69:894","asid_end":"69:894"}));
+        // No Sxx token must not overwrite an absolute episode that can
+        // be verified to belong to a later season of One Piece.
+        let absolute=diagnose(&path,&MatchRequest{
+            title:"One Piece - 894".into(),year:None,series:None}).unwrap();
+        let abs_response=public_match_response(absolute.selected);
+        assert_eq!(abs_response["sid_start"],"tt0388629:21:3");
+        assert_eq!(abs_response["asid_start"],"69:894");
+        // A local anime episode without a mapped AniDB episode retains a
+        // tentative S01 episode SID; never invent its ASID.
+        let local=diagnose(&path,&MatchRequest{
+            title:"[Commie] Psycho-Pass - 04 [F79C11D9].mkv".into(),
+            year:None,series:None}).unwrap();
+        assert_eq!(local.parsed["episodes"],json!([4]));
+        assert_eq!(local.parsed["seasons"],json!([]));
+        let local_api=public_match_response(local.selected);
+        assert_eq!(local_api["sid_start"],"tt2379308:1:4");
+        assert_eq!(local_api["sid_end"],"tt2379308:1:4");
+        assert!(local_api["asid_start"].is_null());
+        // A 900+ absolute episode that does not have a crosswalk must never
+        // be relabeled as a small local first-season episode.
+        let mut extreme=json!({"imdb_id":"tt2379308","category":"series",
+            "season":null,"episode":894,"anime":null});
+        assert!(!anime_local_episode_season_one(
+            &db,"tt2379308",894,true,false).unwrap());
+        enrich_selected_anime_episode(&db,&mut extreme).unwrap();
+        assert!(extreme["anime"].is_null());
         // The final enrichment also handles coordinates assigned after
         // candidate matching (such as dates) without relying on titles.
         let mut late=json!({"imdb_id":"tt0388629","category":"series",
