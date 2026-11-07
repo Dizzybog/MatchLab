@@ -1980,6 +1980,13 @@ fn episode_title_is_metadata(token: &str) -> bool {
     {
         return true;
     }
+    if let Some(version) = word.strip_prefix("rs").or_else(|| word.strip_prefix('v'))
+        && !version.is_empty()
+        && version.len() <= 2
+        && version.chars().all(|c| c.is_ascii_digit())
+    {
+        return true;
+    }
     if word.ends_with("fps") && word[..word.len()-3].chars().all(|c| c.is_ascii_digit()) {
         return true;
     }
