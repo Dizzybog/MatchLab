@@ -1791,17 +1791,33 @@ fn patch_missing_coordinates(raw: &str, result: &mut Map<String, Value>) -> Resu
 // hints, not an instruction to rewrite a season/episode coordinate. The
 // database matcher can only convert them through a verified anime crosswalk.
 static EAST_ASIAN_EPISODE_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?:第\s*([1-9][0-9]{0,4})\s*[集話话]|제\s*([1-9][0-9]{0,4})\s*[화회])")
+    Regex::new(r"(?:第\s*([0-9０-９]{1,5})\s*[集話话]|제\s*([0-9０-９]{1,5})\s*[화회])")
         .expect("valid East Asian episode marker")
 });
 
+// Normalize ASCII/fullwidth decimal ordinals, allowing 第04話 but
+// refusing all-zero and oversized episode markers.
+fn parse_release_ordinal(token: &str) -> Option<i64> {
+    let mut number = 0i64;
+    for c in token.chars() {
+        let digit = if c.is_ascii_digit() {
+            (c as u32) - ('0' as u32)
+        } else if ('０'..='９').contains(&c) {
+            (c as u32) - ('０' as u32)
+        } else {
+            return None;
+        };
+        number = number.checked_mul(10)?.checked_add(i64::from(digit))?;
+    }
+    (1..=99_999).contains(&number).then_some(number)
+}
 fn marked_absolute_episode_candidate(raw: &str) -> Result<Option<i64>, ParseError> {
     let Some(caps) = EAST_ASIAN_EPISODE_RE
         .captures(raw).map_err(|e| ParseError::Regex(e.to_string()))? else {
         return Ok(None);
     };
     Ok(caps.get(1).or_else(|| caps.get(2))
-        .and_then(|value| value.as_str().parse::<i64>().ok()))
+        .and_then(|value| parse_release_ordinal(value.as_str())))
 }
 
 // Rakun-style fansub episode markers are explicit only in a release context.
@@ -2085,7 +2101,7 @@ static CYRILLIC_EPISODE_E_RE: Lazy<Regex> = Lazy::new(|| {
         .expect("valid Cyrillic E release coordinate")
 });
 static CYRILLIC_RESOLUTION_P_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(480|576|720|1080|2160)р\b")
+    Regex::new(r"(?i)(480|576|720|1080|2160)[рР]")
         .expect("valid Cyrillic p resolution marker")
 });
 fn normalize_release_confusables(raw: &str) -> Cow<'_, str> {
@@ -2234,7 +2250,12 @@ fn patch_half_episode(raw: &str, result: &mut Map<String, Value>) -> Result<(), 
         let Some(number) = caps.get(1).and_then(|m| m.as_str().parse::<i64>().ok()) else {
             continue;
         };
-        if current.is_some_and(|existing| existing != number) { continue; }
+        if current.is_some_and(|existing| existing != number)
+            && EXPLICIT_EPISODE_SHAPE_RE.is_match(raw)
+                .map_err(|e| ParseError::Regex(e.to_string()))?
+        {
+            continue;
+        }
         let Some(marker) = caps.get(0) else { continue };
         if !half_episode_tail_is_release_metadata(&raw[marker.end()..]) {
             continue;
@@ -2244,7 +2265,7 @@ fn patch_half_episode(raw: &str, result: &mut Map<String, Value>) -> Result<(), 
         {
             continue;
         }
-        if current.is_none() { result.insert("episodes".into(), json!([number])); }
+        if current != Some(number) { result.insert("episodes".into(), json!([number])); }
         result.insert("half_episode".into(), json!(true));
         return Ok(());
     }
