@@ -1783,10 +1783,30 @@ fn patch_missing_coordinates(raw: &str, result: &mut Map<String, Value>) -> Resu
     Ok(())
 }
 
+// Explicit CJK episode marker, e.g. "[第41集]". It can denote an
+// absolute series episode while the file supplies S02E41. Preserve it as a
+// *candidate*, never as a verified season/episode coordinate: only the matcher
+// can resolve it through a trusted AniDB/TVDB crosswalk.
+static CHINESE_EPISODE_MARKER_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"第\\s*([1-9][0-9]{0,4})\\s*集")
+        .expect("valid Chinese episode marker regex")
+});
+
+fn chinese_absolute_episode_candidate(raw: &str) -> Result<Option<i64>, ParseError> {
+    let Some(caps) = CHINESE_EPISODE_MARKER_RE
+        .captures(raw).map_err(|e| ParseError::Regex(e.to_string()))? else {
+        return Ok(None);
+    };
+    Ok(caps.get(1).and_then(|value| value.as_str().parse::<i64>().ok()))
+}
+
 // Parse each directory entry independently. The path-level merge below
 // never concatenates release names (which could confuse episode coordinates).
 fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<String,Value>,ParseError> {
     let mut result=ENGINE.parse(raw,translate_languages)?;
+    if let Some(episode)=chinese_absolute_episode_candidate(raw)? {
+        result.insert("absolute_episode_candidate".into(), json!(episode));
+    }
     if let Some((start,end))=absolute_episode_range(raw){
         result.insert("episode_start".into(),json!(start));
         result.insert("episode_end".into(),json!(end));
