@@ -166,6 +166,8 @@ curl -X POST http://127.0.0.1:8765/debug/match \
 
 The full parser exposes all recognized release details. Debug output explains the selected title, alternatives, and episode conversions. MatchLab also supports title inheritance from folder paths and airdate-based TV matching via Cinemeta when verified episode information is available.
 
+Unmarked numeric anime releases, such as `Jojo's bizarre adventure stone ocean 27`, now expose an **unverified** candidate in `/parse`. `/match` promotes it only after an exact, unambiguous anime alias is found in the Tantivy index and reuses the existing canonical IMDb/AniDB episode checks. Movie titles with trailing numbers are not treated as verified episodes by the parser alone.
+
 The optional Torrentio-inspired parsing compatibility layer recognizes selective Unicode release-marker variants (`S01Е02`, `720р`), written Chinese season ordinals and conservatively detected fractional anime episodes (`12.5`), without changing the native Rust engine or adding runtime dependencies. A `half_episode` flag is descriptive and does not itself prove a canonical IMDb/AniDB episode.
 
 The native Rust release parser now includes AIOStreams-inspired TV/anime episode-title extraction, Rakun fansub release conventions, extra network/provider tags, accessibility/description metadata and extended language guards. It keeps the existing parser/matcher split, without a JavaScript runtime. See the [full parser audit](docs/RELEASE_PARSER_AUDIT.md) and [anime research](docs/ANIME_PARSER_RESEARCH.md) for exact coverage and documented exceptions.
