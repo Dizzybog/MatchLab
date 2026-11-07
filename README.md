@@ -95,7 +95,7 @@ Example response:
 }
 ```
 
-**Strict production year:** Parsed torrent years must match the IMDb
+**Strict production year on `/match` only:** Parsed torrent years must match the IMDb
 production year **exactly**, not within ±1. When the year is missing or
 different, a candidate requires a parsed series season, linked anime
 identity, or the parser's explicit **quality** field (for example WEB-DL,
@@ -104,6 +104,12 @@ codecs and file extensions do not qualify. Anime filenames with only a local
 episode number can default to a tentative first-season SID when the
 crosswalk cannot resolve it, but never claim an unverified ASID.
 Verified absolute numbering and named anime parts take priority.
+
+**Dashboard behavior:** The dashboard tester (`POST /debug/match`) intentionally
+does not apply the public API's production-year/quality eligibility gate.
+Entering `Fight Club` alone will still return ranked title matches without
+requiring a year, season, anime identity or release-quality tag. The public
+`GET/POST /match` endpoints retain all the strict checks.
 
 `/match` **always returns exactly these four fields**. Movies use the IMDb title ID in both SID fields; TV episodes add season/episode coordinates. Verified anime episodes may also include AniDB IDs. If nothing can be matched reliably, the corresponding values are `null`.
 

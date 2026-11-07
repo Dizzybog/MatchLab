@@ -435,7 +435,17 @@ fn verified_unmarked_anime_range_imdb(
     Ok(verified)
 }
 
+/// Public requests apply the release identity gate; dashboard diagnostics
+/// deliberately allow a bare title so its candidates can be inspected.
+#[derive(Clone,Copy)]
+enum MatchPolicy { PublicApi, DashboardDiagnostic }
+
 fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> {
+    diagnose_with_policy(db_path,req,MatchPolicy::PublicApi)
+}
+fn diagnose_with_policy(
+    db_path:&PathBuf,req:&MatchRequest,policy:MatchPolicy
+)->Result<Diagnostic,String>{
     if req.title.trim().is_empty() || req.title.len() > 4096 { return Err("title must be 1–4096 bytes".into()); }
     let mut parsed_value=parse_cached(&req.title)?;
     let db=open_db(db_path).map_err(|e|e.to_string())?;
@@ -522,16 +532,15 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
     let imdb = matchlab_matcher::search(&db,title,year,series,seasons.iter().copied().max().unwrap_or(0),&req.title,
         !episodes.is_empty()||parsed.contains_key("episode_start"),20)
         .map_err(|e|e.to_string())?;
-    // The parsed release year must exactly match IMDb's production year.
-    // Missing or different years need independently parsed season/quality
-    // or imported anime identity. Only the parsed 'quality' field counts,
-    // never resolution, video codec, or file extension.
-    // Apply this to every candidate before
-    // winner selection; the winner may otherwise have a different year.
-    let imdb=imdb.into_iter().filter(|candidate|
-        year_signal_eligible(year,candidate.year,series&&!seasons.is_empty(),
-            !candidate.anime_ids.is_empty(),parsed_quality)
-    ).collect::<Vec<_>>();
+    // Enforce strict production-year/quality identity only for GET/POST /match.
+    // The dashboard's /debug/match must still rank plain titles like "Fight Club".
+    // Other season/episode, anime and ranking checks remain shared.
+    let imdb=if matches!(policy,MatchPolicy::PublicApi){
+        imdb.into_iter().filter(|candidate|
+            year_signal_eligible(year,candidate.year,series&&!seasons.is_empty(),
+                !candidate.anime_ids.is_empty(),parsed_quality)
+        ).collect::<Vec<_>>()
+    }else{imdb};
     // Require every candidate for a multi-season pack to contain the final season.
     let imdb=if let Some((_,end))=season_range {
         imdb.into_iter().filter(|candidate|{
@@ -912,9 +921,13 @@ fn enrich_selected_anime_episode(
     Ok(())
 }
 
-fn diagnose_logged(state:&AppState,req:&MatchRequest)->Result<Diagnostic,String>{
+fn diagnose_logged(state:&AppState,req:&MatchRequest,debug:bool)->Result<Diagnostic,String>{
     let start=Instant::now();
-    let result=diagnose(&state.db,req);
+    let result=if debug{
+        diagnose_with_policy(&state.db,req,MatchPolicy::DashboardDiagnostic)
+    }else{
+        diagnose(&state.db,req)
+    };
     let elapsed=start.elapsed().as_millis() as u64;
     match &result {
         Ok(d)=>{
@@ -1060,20 +1073,20 @@ async fn parse_response(req:MatchRequest)->(StatusCode,Json<Value>){
 /// Bound CPU-heavy matching before it enters Tokio's blocking thread pool.
 /// This preserves full candidate ranking while protecting the process against
 /// request bursts during metadata imports and index-generation changes.
-async fn run_match(state: AppState, req: MatchRequest)
+async fn run_match(state: AppState, req: MatchRequest, debug:bool)
     -> Result<Result<Diagnostic,String>,String> {
     let permit=state.match_slots.clone().acquire_owned().await
         .map_err(|e|e.to_string())?;
     tokio::task::spawn_blocking(move ||{
         let _permit=permit;
-        diagnose_logged(&state,&req)
+        diagnose_logged(&state,&req,debug)
     }).await.map_err(|e|e.to_string())
 }
 
 async fn match_response(state:AppState,req:MatchRequest,debug:bool)
     -> (StatusCode,Json<Value>){
     if !matching_available(&state){return indexing_response();}
-    match run_match(state,req).await{
+    match run_match(state,req,debug).await{
         Ok(Ok(d))=>{
             let value=if debug{
                 serde_json::to_value(d).unwrap_or(Value::Null)
@@ -1572,6 +1585,68 @@ mod tests {
         assert!(!parsed_quality_signal(&object(json!({"quality":"   "}))));
         assert!(!parsed_quality_signal(&object(json!({"quality":null}))));
         assert!(!parsed_quality_signal(&object(json!({"quality":["WEB-DL"]}))));
+    }
+
+
+    #[tokio::test]
+    async fn dashboard_finds_bare_fight_club_but_public_api_enforces_year_policy(){
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-dashboard-year-policy-{}-{stamp}.sqlite3",std::process::id()));
+        let history=std::env::temp_dir().join(format!(
+            "matchlab-dashboard-year-policy-history-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+                imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,
+                category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            CREATE TABLE metadata_state(source TEXT PRIMARY KEY,
+                updated_at TEXT NOT NULL,row_count INTEGER NOT NULL);
+            INSERT INTO titles VALUES('tt0137523','Fight Club','fightclub',
+                1999,'movie','US',1,0,'movie');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        dashboard_history::initialize(&history).unwrap();
+        let state=AppState{
+            db:Arc::new(path.clone()),history:Arc::new(history.clone()),
+            match_slots:Arc::new(Semaphore::new(2)),
+            index_phase:Arc::new(Mutex::new(IndexPhase::Ready)),
+        };
+        // Dashboard diagnosis keeps all candidate rankings, even without
+        // release metadata, without weakening the public /match contract.
+        for title in ["Fight Club","Fight.Club.1080p.x265.mkv",
+            "Fight.Club.2000.mkv"]{
+            let request=||MatchRequest{
+                title:title.into(),year:None,series:None};
+            let (status,Json(debug))=match_response(
+                state.clone(),request(),true).await;
+            assert_eq!(status,StatusCode::OK,"{title}");
+            assert_eq!(debug["selected"]["imdb_id"],"tt0137523","{title}");
+            let (status,Json(api))=match_response(
+                state.clone(),request(),false).await;
+            assert_eq!(status,StatusCode::OK,"{title}");
+            assert!(api["sid_start"].is_null(),
+                "public API must enforce production-year signal for {title}");
+        }
+        let (status,Json(api))=match_response(state,
+            MatchRequest{title:"Fight.Club.1999.mkv".into(),
+                year:None,series:None},false).await;
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(api["sid_start"],"tt0137523");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+        std::fs::remove_file(&history).unwrap();
     }
 
     #[test]

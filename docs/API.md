@@ -56,7 +56,7 @@ For a URL query, use `GET /match?title=Supernatural.S01E01`. Both
 endpoints accept `title` or `t_title` as the request input. A supplied
 `year` can constrain matching.
 
-**Production year policy:** A parsed or explicitly supplied torrent year
+**Production year policy for the public `GET/POST /match` API only:** A parsed or explicitly supplied torrent year
 must match the IMDb title's production year **exactly** (no ±1-year
 tolerance). When no year was parsed, or the candidate IMDb year is
 different, the candidate is eligible **only if at least one** separate
@@ -73,7 +73,11 @@ this helps exclude unrelated video files that only advertise resolution.
 
 An unmarked episode number alone is not evidence. This rule is applied
 to each candidate before the winner is chosen, not just to the highest
-ranked title. A date in a daily-show filename (YYYY-MM-DD) remains an
+ranked title. **It does not apply to `POST /debug/match` or the dashboard
+tester.** Entering `Fight Club` in the dashboard without a year or release
+quality still returns ranked IMDb match candidates. Other matching
+constraints, including season bounds and verified AniDB mappings, remain
+unchanged. A date in a daily-show filename (YYYY-MM-DD) remains an
 episode airdate, **not a production year**; the separate Cinemeta
 airdate resolver retains its own ±1-calendar-day timezone tolerance.
 
