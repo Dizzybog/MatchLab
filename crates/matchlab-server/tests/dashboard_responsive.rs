@@ -23,7 +23,7 @@ fn history_scroll_keeps_unwrapped_titles_retrievable(){
     assert!(DASHBOARD.contains(".table-wrap td.title{max-width:260px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}"));
     assert!(DASHBOARD.contains(r#"class="title" title="'+esc(r.title)+'""#));
     assert!(DASHBOARD.contains(r#"class="history-title copy-title copy-title-detail""#));
-    assert!(DASHBOARD.contains(r#"e.key==='Enter'||e.key===' '"#));
+    assert!(DASHBOARD.contains(r#"event.key==='Enter'||event.key===' '"#));
 }
 
 #[test]
