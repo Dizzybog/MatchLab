@@ -1788,11 +1788,11 @@ fn patch_missing_coordinates(raw: &str, result: &mut Map<String, Value>) -> Resu
 // delimited episode context. Keep them as a fallback after the ordinary
 // release handlers, so titles such as "The #1 Movie" are left untouched.
 static ANIME_HASH_EPISODE_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)^\\[[^\\]]{2,64}\\][ ._-]*.+?[ ._-]+#([0-9]{1,4})(?:$|[ ._\\[(])")
+    Regex::new(r"(?i)^(\[[^\]]{2,64}\][ ._-]*.+?)[ ._-]+#([0-9]{1,4})(?:$|[ ._\[(])")
         .expect("valid bracketed fansub hash-episode pattern")
 });
 static ANIME_FINAL_EPISODE_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)[ ._-]+-[ ._-]+([0-9]{1,4})[ ._-]+END(?:$|[ ._\\[(])")
+    Regex::new(r"(?i)[ ._-]+-[ ._-]+([0-9]{1,4})[ ._-]+END(?:$|[ ._\[(])")
         .expect("valid anime final-episode pattern")
 });
 
@@ -1802,25 +1802,29 @@ fn patch_anime_release_episode(raw: &str, result: &mut Map<String, Value>) -> Re
     {
         return Ok(());
     }
-    for pattern in [&*ANIME_HASH_EPISODE_RE, &*ANIME_FINAL_EPISODE_RE] {
+    for (pattern, hash_style) in [
+        (&*ANIME_HASH_EPISODE_RE, true),
+        (&*ANIME_FINAL_EPISODE_RE, false),
+    ] {
         let Some(caps) = pattern.captures(raw).map_err(|e| ParseError::Regex(e.to_string()))?
         else {
             continue;
         };
-        let (Some(marker), Some(number)) = (caps.get(0), caps.get(1)) else {
+        let Some(marker) = caps.get(0) else {
             continue;
         };
-        let Some(episode) = number.as_str().parse::<i64>().ok() else {
+        let (prefix, number) = if hash_style {
+            (caps.get(1).map(|m| m.as_str()).unwrap_or(""), caps.get(2))
+        } else {
+            (&raw[..marker.start()], caps.get(1))
+        };
+        let Some(episode) = number.and_then(|m| m.as_str().parse::<i64>().ok()) else {
             continue;
         };
-        if !(1..=9999).contains(&episode) {
+        if !(1..=9999).contains(&episode) || prefix.chars().filter(|c| c.is_alphabetic()).count() < 3 {
             continue;
         }
-        let prefix = raw[..marker.start()].trim();
-        if prefix.chars().filter(|c| c.is_alphabetic()).count() < 3 {
-            continue;
-        }
-        let candidate = ENGINE.parse(prefix, false)?;
+        let candidate = ENGINE.parse(prefix.trim(), false)?;
         let Some(title) = candidate.get("title").and_then(Value::as_str) else {
             continue;
         };
@@ -1839,7 +1843,7 @@ fn patch_anime_release_episode(raw: &str, result: &mut Map<String, Value>) -> Re
 // ordinary bare numbers, technical tags and unmatched group names do not.
 static EPISODE_TITLE_MARKER_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)(?:^|[ ._\\[(\\-])(?:s[0-9]{1,3}[ ._-]*e[0-9]{1,4}|[0-9]{1,2}[xх][0-9]{1,4}|episod(?:e|io)[ ._-]*[0-9]{1,4}|ep[ ._-]*[0-9]{1,4})"
+        r"(?i)(?:^|[ ._\(\[\-])(?:s[0-9]{1,3}[ ._-]*e[0-9]{1,4}|[0-9]{1,2}[xх][0-9]{1,4}|episod(?:e|io)[ ._-]*[0-9]{1,4}|ep[ ._-]*[0-9]{1,4})"
     ).expect("valid structured episode-title marker")
 });
 
@@ -1863,7 +1867,7 @@ fn episode_title_technical_word(raw: &str) -> bool {
     ].contains(&word.as_str()) {
         return true;
     }
-    if let Some(res) = word.strip_suffix(['p', 'i'])
+    if let Some(res) = word.strip_suffix('p').or_else(|| word.strip_suffix('i'))
         && res.parse::<u32>().is_ok_and(|n| (240..=4320).contains(&n))
     {
         return true;
@@ -1914,18 +1918,18 @@ fn extract_structured_episode_title(raw: &str, result: &Map<String, Value>) -> R
             continue;
         }
         let tail = &raw[marker.end()..];
-        if !tail.starts_with([' ', '.', '_', '-', ']', '–']) {
+        if !tail.chars().next().is_some_and(|c| matches!(c, ' ' | '.' | '_' | '-' | ']' | '–')) {
             continue;
         }
         let tail = tail.trim_start_matches(|c: char|
             matches!(c, ' ' | '.' | '_' | '-' | ']' | '–'));
-        if tail.is_empty() || tail.starts_with(['[', '(']) {
+        if tail.is_empty() || tail.starts_with('[') || tail.starts_with('(') {
             continue;
         }
         // Bracketed metadata or a second episode coordinate terminates the
         // candidate. Keep intra-word punctuation in the extracted title.
-        let end = tail.find(['[', '(', ')', '{', '}', '/', '\\']).unwrap_or(tail.len());
-        let text = tail[..end].replace(['.', '_'], " ");
+        let end = tail.find(|c: char| matches!(c, '[' | '(' | ')' | '{' | '}' | '/' | '\\')).unwrap_or(tail.len());
+        let text = tail[..end].replace(&['.', '_'][..], " ");
         let mut words = Vec::new();
         for token in text.split_whitespace() {
             let stripped = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '!');
