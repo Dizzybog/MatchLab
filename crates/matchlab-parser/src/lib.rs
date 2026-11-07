@@ -1867,7 +1867,9 @@ fn episode_title_technical_word(raw: &str) -> bool {
         "subbed", "dubbed", "preair", "pre-air", "atmos", "amzn",
         "nf", "dsnp", "hulu", "synced", "complete", "mp4", "mkv",
         "srt", "avi", "ass", "vtt", "dl", "dts-hd",
-    ].contains(&technical_part) {
+    ].contains(&technical_part) || [
+        "pre-air", "dts-hd", "web-dl", "audio-description",
+    ].contains(&word.as_str()) {
         return true;
     }
     if let Some(res) = word.strip_suffix('p').or_else(|| word.strip_suffix('i'))
