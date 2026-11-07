@@ -1133,6 +1133,14 @@ fn public_match_response(selected: Option<Value>) -> Value {
     if !metadata_import::valid_imdb_id(imdb){
         return json!({"sid_start":null,"sid_end":null,"asid_start":null,"asid_end":null});
     }
+    // A release labelled E12.5 is not necessarily IMDb episode E12.
+    // Preserve the verified show identity, but never publish a guessed
+    // SxxExx/ASID for a fractional recap or special without a dedicated
+    // metadata crosswalk for the fraction itself.
+    if winner.pointer("/parsed/half_episode").and_then(Value::as_bool)==Some(true) {
+        return json!({"sid_start":imdb,"sid_end":imdb,
+            "asid_start":null,"asid_end":null});
+    }
     let has_range=winner.get("episode_range").is_some();
     let start_season=winner["season"].as_i64();
     let start_episode=winner["episode"].as_i64();
@@ -1524,6 +1532,23 @@ mod tests {
             assert!(response["asid_start"].is_null());
             assert!(response["asid_end"].is_null());
         }
+    }
+
+    #[test]
+    fn fractional_anime_episode_does_not_publish_base_episode_sid_or_asid(){
+        let fractional=json!({"imdb_id":"tt1234567","category":"series",
+            "season":1,"episode":12,"anime":{"asid":"123:12"},
+            "parsed":{"half_episode":true,"episodes":[12]}});
+        assert_eq!(public_match_response(Some(fractional)),json!({
+            "sid_start":"tt1234567","sid_end":"tt1234567",
+            "asid_start":null,"asid_end":null
+        }));
+        let ordinary=json!({"imdb_id":"tt1234567","category":"series",
+            "season":1,"episode":12,"anime":{"asid":"123:12"},
+            "parsed":{"episodes":[12]}});
+        let normal=public_match_response(Some(ordinary));
+        assert_eq!(normal["sid_start"],"tt1234567:1:12");
+        assert_eq!(normal["asid_start"],"123:12");
     }
 
     #[test]
