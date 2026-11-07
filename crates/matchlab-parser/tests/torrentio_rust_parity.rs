@@ -17,7 +17,7 @@ fn cyrillic_confusables_only_affect_release_coordinates() {
         let output = parsed(name);
         assert_eq!(output["seasons"], json!([1]), "{name}: {output:?}");
         assert_eq!(output["episodes"], json!([2]), "{name}: {output:?}");
-        assert_eq!(output["resolution"], json!("720p"), "{name}: {output:?}");
+        assert_eq!(output.get("resolution"), Some(&json!("720p")), "{name}: {output:?}");
     }
     let ordinary = parsed("Семья.2024.1080p.WEB-DL.mkv");
     assert!(ordinary["title"].as_str().is_some_and(|s| s.contains("Семья")),
@@ -47,7 +47,7 @@ fn russian_worded_season_and_episode_are_independent_of_release_quality() {
     let output = parsed(name);
     assert_eq!(output["seasons"], json!([1]), "{output:?}");
     assert_eq!(output["episodes"], json!([5]), "{output:?}");
-    assert_eq!(output["resolution"], json!("720p"), "{output:?}");
+    assert_eq!(output.get("resolution"), Some(&json!("720p")), "{output:?}");
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn fractional_anime_episodes_are_marked_without_fractional_coordinates() {
     ] {
         let output = parsed(name);
         assert_eq!(output["episodes"], json!([episode]), "{name}: {output:?}");
-        assert_eq!(output["half_episode"], json!(true), "{name}: {output:?}");
+        assert_eq!(output.get("half_episode"), Some(&json!(true)), "{name}: {output:?}");
         if let Some(season) = season {
             assert_eq!(output["seasons"], json!([season]), "{name}: {output:?}");
         }
