@@ -1936,7 +1936,7 @@ fn patch_anime_final_episode(
 // deliberately uses the already-validated numeric coordinates instead.
 static EPISODE_TITLE_ANCHOR_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)(?:^|[ ._\(\[\-])(?:s[0-9]{1,4}[ ._-]*e([0-9]{1,4})(?:[+&][ ._-]*e?[0-9]{1,4}|[-~][0-9]{1,4})*|[0-9]{1,4}[xх]([0-9]{1,4})|(?:episod(?:e|io)|ep)[ ._-]*([0-9]{1,4})|-[ ._-]*([0-9]{1,4})[ ._-]*-)"
+        r"(?i)(?:^|[ ._\(\[\-])(?:s[0-9]{1,4}[ ._-]*e([0-9]{1,4})(?:[+&][ ._-]*e?[0-9]{1,4}|[-~][0-9]{1,4})*|[0-9]{1,4}[xх]([0-9]{1,4})|(?:episod(?:e|io)|ep)[ ._-]*([0-9]{1,4})|([0-9]{1,4})[ ._-]*of[ ._-]*[0-9]{1,4}|-[ ._-]*([0-9]{1,4})[ ._-]*-)"
     ).expect("valid episode title anchor")
 });
 
@@ -2011,7 +2011,7 @@ fn extract_release_episode_title(
     for caps in EPISODE_TITLE_ANCHOR_RE.captures_iter(raw) {
         let caps = caps.map_err(|e| ParseError::Regex(e.to_string()))?;
         let Some(marker) = caps.get(0) else { continue; };
-        let number = (1..=4).find_map(|i| caps.get(i))
+        let number = (1..=5).find_map(|i| caps.get(i))
             .and_then(|m| m.as_str().parse::<i64>().ok());
         if number != Some(expected) { continue; }
         if raw[..marker.start()].chars().filter(|c| c.is_alphanumeric()).count() < 2 {
