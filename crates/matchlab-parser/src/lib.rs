@@ -2241,7 +2241,7 @@ fn half_episode_tail_is_release_metadata(raw: &str) -> bool {
     ].contains(&first.as_str())
 }
 
-fn patch_half_episode(raw: &str, result: &mut Map<String, Value>) -> Result<(), ParseError> {
+fn patch_half_episode(raw: &str, translate_languages: bool, result: &mut Map<String, Value>) -> Result<(), ParseError> {
     if !raw.contains(".5") { return Ok(()); }
     let current = result.get("episodes").and_then(Value::as_array)
         .and_then(|eps| (eps.len() == 1).then(|| eps[0].as_i64()).flatten());
@@ -2274,7 +2274,6 @@ fn patch_half_episode(raw: &str, result: &mut Map<String, Value>) -> Result<(), 
     if !raw.trim_start().starts_with('[')
         || EXPLICIT_EPISODE_SHAPE_RE.is_match(raw)
             .map_err(|e| ParseError::Regex(e.to_string()))?
-        || current.is_none()
     {
         return Ok(());
     }
@@ -2284,8 +2283,23 @@ fn patch_half_episode(raw: &str, result: &mut Map<String, Value>) -> Result<(), 
             caps.get(1),
             caps.get(1).and_then(|m| m.as_str().parse::<i64>().ok()),
         ) else { continue };
-        if number == 0 || Some(number) != current { continue; }
+        if number == 0 || current.is_some_and(|episode| episode != number) {
+            continue;
+        }
         let before = &raw[..found.start()];
+        let unparsed = current.is_none();
+        if unparsed {
+            // A bracketed fansub release's explicit "Title - 12.5v2"
+            // can supply the missing integer coordinate. A bare "2.5"
+            // inside the title ("2.5 Dimensional Seduction") cannot.
+            if result.get("episodes").and_then(Value::as_array)
+                .is_some_and(|eps| !eps.is_empty())
+                || !before.trim_end().ends_with('-')
+                || before.chars().filter(|c| c.is_alphabetic()).count() < 3
+            {
+                continue;
+            }
+        }
         let last_word = before
             .split(|c: char| !c.is_alphanumeric())
             .filter(|word| !word.is_empty()).next_back().unwrap_or_default();
@@ -2295,6 +2309,12 @@ fn patch_half_episode(raw: &str, result: &mut Map<String, Value>) -> Result<(), 
             .iter().any(|word| last_word.eq_ignore_ascii_case(word))
         {
             continue;
+        }
+        if unparsed {
+            result.insert("episodes".into(), json!([number]));
+            set_title_from_release_prefix(
+                raw, found.start(), translate_languages, result,
+            )?;
         }
         result.insert("half_episode".into(), json!(true));
         return Ok(());
@@ -2371,7 +2391,7 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
             set_title_from_release_prefix(raw, marker_start, translate_languages, &mut result)?;
         }
     }
-    patch_half_episode(raw, &mut result)?;
+    patch_half_episode(raw, translate_languages, &mut result)?;
     if let Some(episode_title) = extract_release_episode_title(raw, &result)? {
         result.insert("episode_title".into(), json!(episode_title));
     }
