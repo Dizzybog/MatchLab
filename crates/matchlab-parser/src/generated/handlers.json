@@ -5492,6 +5492,292 @@
       "transform": "value('Cartoon Network')"
     },
     {
+      "name": "network",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": false,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\b(?:SKST|SKYSHO(?:WTIME)?)\\b",
+      "flags": 2,
+      "transform": "value('SkyShowtime')"
+    },
+    {
+      "name": "network",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": true,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\b(?:PMNT|PMTP|Paramount(?:\\+|[ .-]?Plus))\\b",
+      "flags": 2,
+      "transform": "value('Paramount+')"
+    },
+    {
+      "name": "network",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": false,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\bPCOK\\b",
+      "flags": 2,
+      "transform": "value('Peacock')"
+    },
+    {
+      "name": "network",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": false,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\bCRAV\\b",
+      "flags": 2,
+      "transform": "value('Crave')"
+    },
+    {
+      "name": "network",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": false,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\bBCORE\\b",
+      "flags": 2,
+      "transform": "value('Sony Pictures Core')"
+    },
+    {
+      "name": "network",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": false,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\bHMAX\\b|\\bHBOMAX\\b",
+      "flags": 2,
+      "transform": "value('HBO Max')"
+    },
+    {
+      "name": "network",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": true,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\b(?:iTunes|iT)\\b",
+      "flags": 2,
+      "transform": "value('iTunes')"
+    },
+    {
+      "name": "network",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": true,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\bSHO\\b|\\bSHOWTIME\\b",
+      "flags": 2,
+      "transform": "value('Showtime')"
+    },
+    {
+      "name": "network",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": true,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\b(?:CRIT|Criterion[ ._-]?Channel)\\b",
+      "flags": 2,
+      "transform": "value('Criterion Channel')"
+    },
+    {
+      "name": "network",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": true,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\bROKU\\b",
+      "flags": 2,
+      "transform": "value('The Roku Channel')"
+    },
+    {
+      "name": "network",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": false,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\bDCU\\b",
+      "flags": 2,
+      "transform": "value('DC Universe')"
+    },
+    {
+      "name": "network",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": true,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\bSYFY\\b",
+      "flags": 2,
+      "transform": "value('SYFY')"
+    },
+    {
+      "name": "network",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": false,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\b(?:MGM[+P]|EPIX)\\b",
+      "flags": 2,
+      "transform": "value('MGM+')"
+    },
+    {
+      "name": "network",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": true,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\b(?:Apple[ ._-]?TV\\+?|APTV)\\b",
+      "flags": 2,
+      "transform": "value('Apple TV')"
+    },
+    {
+      "name": "network",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": true,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\bDisney\\+\\b",
+      "flags": 2,
+      "transform": "value('Disney+')"
+    },
+    {
+      "name": "network",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": true,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\bPeacock\\b",
+      "flags": 2,
+      "transform": "value('Peacock')"
+    },
+    {
+      "name": "network",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": true,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\bCrave\\b",
+      "flags": 2,
+      "transform": "value('Crave')"
+    },
+    {
+      "name": "network",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": true,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\bStan\\b",
+      "flags": 2,
+      "transform": "value('Stan')"
+    },
+    {
+      "name": "release_types",
+      "options": {
+        "skipIfAlreadyFound": false,
+        "skipFromTitle": false,
+        "skipIfFirst": false,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\b(?:Audio[ ._-]?Description|Descriptive[ ._-]?Audio)\\b",
+      "flags": 2,
+      "transform": "uniq_concat(value('Audio Description'))"
+    },
+    {
+      "name": "release_types",
+      "options": {
+        "skipIfAlreadyFound": false,
+        "skipFromTitle": false,
+        "skipIfFirst": false,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\bASL\\b",
+      "flags": 2,
+      "transform": "uniq_concat(value('ASL'))"
+    },
+    {
+      "name": "release_types",
+      "options": {
+        "skipIfAlreadyFound": false,
+        "skipFromTitle": false,
+        "skipIfFirst": false,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\b(?:OAD|OAV|ODA|ONA)\\b",
+      "flags": 2,
+      "transform": "uniq_concat(value('Anime Special'))"
+    },
+    {
+      "name": "preair",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": false,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\b(?:PRE[ ._-]?AIR(?:ED)?)\\b",
+      "flags": 2,
+      "transform": "boolean"
+    },
+    {
       "name": "extension",
       "options": {
         "skipIfAlreadyFound": true,
