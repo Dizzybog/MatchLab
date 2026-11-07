@@ -5500,7 +5500,7 @@
         "remove": true
       },
       "kind": "regex",
-      "pattern": "\\b(?:SKST|SKYSHO(?:WTIME)?)\\b",
+      "pattern": "\\b(?:SKST|SKYSHO(?:W(?:TIME)?)?)\\b",
       "flags": 2,
       "transform": "value('SkyShowtime')"
     },
@@ -5756,13 +5756,65 @@
       "options": {
         "skipIfAlreadyFound": false,
         "skipFromTitle": false,
-        "skipIfFirst": false,
+        "skipIfFirst": true,
         "remove": true
       },
       "kind": "regex",
-      "pattern": "\\b(?:OAD|OAV|ODA|ONA)\\b",
+      "pattern": "\\bOAD(?:[ ._-]*\\d{1,3})?(?:v\\d{1,2})?\\b",
       "flags": 2,
-      "transform": "uniq_concat(value('Anime Special'))"
+      "transform": "uniq_concat(value('OAD'))"
+    },
+    {
+      "name": "release_types",
+      "options": {
+        "skipIfAlreadyFound": false,
+        "skipFromTitle": false,
+        "skipIfFirst": true,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\bOAV(?:[ ._-]*\\d{1,3})?(?:v\\d{1,2})?\\b",
+      "flags": 2,
+      "transform": "uniq_concat(value('OAV'))"
+    },
+    {
+      "name": "release_types",
+      "options": {
+        "skipIfAlreadyFound": false,
+        "skipFromTitle": false,
+        "skipIfFirst": true,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\bODA(?:[ ._-]*\\d{1,3})?(?:v\\d{1,2})?\\b",
+      "flags": 2,
+      "transform": "uniq_concat(value('ODA'))"
+    },
+    {
+      "name": "release_types",
+      "options": {
+        "skipIfAlreadyFound": false,
+        "skipFromTitle": false,
+        "skipIfFirst": true,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\bONA(?:[ ._-]*\\d{1,3})?(?:v\\d{1,2})?\\b",
+      "flags": 2,
+      "transform": "uniq_concat(value('ONA'))"
+    },
+    {
+      "name": "release_types",
+      "options": {
+        "skipIfAlreadyFound": false,
+        "skipFromTitle": false,
+        "skipIfFirst": true,
+        "remove": true
+      },
+      "kind": "regex",
+      "pattern": "\\bOVA(?:[ ._-]*\\d{1,3})?(?:v\\d{1,2})?\\b",
+      "flags": 2,
+      "transform": "uniq_concat(value('OVA'))"
     },
     {
       "name": "preair",
