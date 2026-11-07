@@ -146,3 +146,43 @@ fn a_single_torrent_path_does_not_mix_parent_and_child_episode_titles() {
     assert_eq!(p["episodes"], json!([2]));
     assert!(p.get("episode_title").is_none(), "{p:?}");
 }
+
+
+#[test]
+fn aiostreams_extended_provider_and_accessibility_tags() {
+    for (raw, provider) in [
+        ("Some.Show.S01E01.1080p.PMNT.WEB-DL.mkv", "Paramount+"),
+        ("Some.Show.S01E01.1080p.PCOK.WEB-DL.mkv", "Peacock"),
+        ("Some.Show.S01E01.1080p.SKYSHOW.WEB-DL.mkv", "SkyShowtime"),
+        ("Some.Show.S01E01.1080p.ROKU.WEB-DL.mkv", "The Roku Channel"),
+        ("Some.Show.S01E01.1080p.SYFY.WEB-DL.mkv", "SYFY"),
+    ] {
+        let output = parsed(raw);
+        assert_eq!(output["network"], json!(provider), "{raw}: {output:?}");
+    }
+    let accessibility = parsed("Example.Documentary.2024.1080p.WEB-DL.Audio.Description");
+    assert!(accessibility["release_types"].as_array().is_some_and(|v|
+        v.contains(&json!("Audio Description"))), "{accessibility:?}");
+    let accessibility = parsed("Example.Documentary.2024.1080p.WEB-DL.ASL");
+    assert!(accessibility["release_types"].as_array().is_some_and(|v|
+        v.contains(&json!("ASL"))), "{accessibility:?}");
+    let preair = parsed("Example.Show.S01E01.PREAIR.1080p.WEB-DL");
+    assert_eq!(preair["preair"], json!(true), "{preair:?}");
+}
+
+#[test]
+fn aiostreams_more_episode_title_anchor_cases() {
+    for (raw, title) in [
+        ("[ACX]El_Cazador_de_la_Bruja_-_19_-_A_Man_Who_Protects_[SSJ_Saiyan_Elite]_[9E199846].mkv",
+            "A Man Who Protects"),
+        ("[a-s]_fairy_tail_-_003_-_infiltrate_the_everlue_mansion__rs2_[1080p_bd-rip][4CB16872].mkv",
+            "infiltrate the everlue mansion"),
+        ("Naruto Shippuden Ep 107 - Strange Bedfellows.mkv", "Strange Bedfellows"),
+        ("The Office S07E25+E26 Search Committee.mp4", "Search Committee"),
+        ("Marvel's.Agents.of.S.H.I.E.L.D.S02E01-03.Shadows.1080p.WEB-DL.DD5.1", "Shadows"),
+        ("BBC Indian Ocean with Simon Reeve 5of6 Sri Lanka to Bangladesh.avi", "Sri Lanka to Bangladesh"),
+    ] {
+        let output = parsed(raw);
+        assert_eq!(output.get("episode_title"), Some(&json!(title)), "{raw}: {output:?}");
+    }
+}
