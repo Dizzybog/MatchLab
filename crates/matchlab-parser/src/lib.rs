@@ -1936,7 +1936,7 @@ fn patch_anime_final_episode(
 // deliberately uses the already-validated numeric coordinates instead.
 static EPISODE_TITLE_ANCHOR_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)(?:^|[ ._\(\[\-])(?:s[0-9]{1,4}[ ._-]*e([0-9]{1,4})(?:[+&][ ._-]*e?[0-9]{1,4}|[-~][0-9]{1,4})*|[0-9]{1,2}[xх]([0-9]{1,4})|(?:episod(?:e|io)|ep)[ ._-]*([0-9]{1,4})|-[ ._-]*([0-9]{1,4})[ ._-]*-)"
+        r"(?i)(?:^|[ ._\(\[\-])(?:s[0-9]{1,4}[ ._-]*e([0-9]{1,4})(?:[+&][ ._-]*e?[0-9]{1,4}|[-~][0-9]{1,4})*|[0-9]{1,4}[xх]([0-9]{1,4})|(?:episod(?:e|io)|ep)[ ._-]*([0-9]{1,4})|-[ ._-]*([0-9]{1,4})[ ._-]*-)"
     ).expect("valid episode title anchor")
 });
 
