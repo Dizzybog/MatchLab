@@ -16,7 +16,7 @@ an invented AniDB/TVDB episode identity.
 | Area | AIOStreams | Rakun | MatchLab decision |
 | --- | --- | --- | --- |
 | Handler engine | Ordered patterns with transforms, validators, `skipIfFirst`, `skipFromTitle`, `keepMatching`, `retryPastTitle`, and `mustEndTitle` | Ordered extraction followed by cleaners | Preserve the native Rust engine and handler priorities |
-| Fast regex filtering | Bitset/gram prefilter, incremental updates after removing tokens | Simple regex sequence | Preserve MatchLab's Aho-Corasick/PCR​E2 prefilter; parity tests must not sacrifice speed |
+| Fast regex filtering | Bitset/gram prefilter, incremental updates after removing tokens | Simple regex sequence | Preserve MatchLab's Aho-Corasick/PCRE2 prefilter; parity tests must not sacrifice speed |
 | Movie/series title | Prevent year/quality tokens from cutting a real title, distinguish bracketed groups and alternate scripts | End-first cleanup of trailing square-bracket tags; retain all-bracket titles | Use existing title cleaning and mixed-script normalization |
 | Year/date | Multiple calendars, ranges, ordinal dates, country-specific naming | Minimal | Keep existing year/date handlers and safeguards for numeric titles |
 | Seasons | `Sxx`, `x`, season words in several languages, lists/ranges, and cross-language names | Season/Part/Movie markers, including ordinal season language | Existing MatchLab handlers plus conservative coordinate corrections; season pack is not an episode pack |
