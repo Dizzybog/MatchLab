@@ -97,7 +97,7 @@ curl -X POST http://127.0.0.1:8765/parse \
   -d '{"title":"Supernatural.S02E03.1080p.WEB-DL"}'
 ```
 
-The JSON contains every field the parser recognizes, such as `title`, `seasons`, `episodes`, `year`, `resolution`, `quality`, `codec`, `languages` and release metadata. Fields not recognized in the input are omitted; the exact set depends on the title. `GET /parse?title=...` is also supported.
+The JSON contains every field the parser recognizes, such as `title`, `seasons`, `episodes`, `year`, `resolution`, `quality`, `codec`, `languages` and release metadata. An optional `episode_title` field identifies descriptive text immediately after an explicitly marked episode (for example, `Show.S01E03.Pilot.1080p.WEB-DL` produces `episode_title: "Pilot"`). This is informational metadata: it never replaces the canonical show title, episode coordinates, or metadata-verified IMDb/AniDB mapping. Ambiguous bare anime episode numbers, group names, codecs, resolutions, subtitle tags, and language codes do not produce an episode title. Fields not recognized in the input are omitted; the exact set depends on the title. `GET /parse?title=...` is also supported.
 
 ### Alias lookup: `GET /alias`, `POST /alias`
 
