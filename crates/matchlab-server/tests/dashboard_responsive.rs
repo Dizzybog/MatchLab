@@ -22,8 +22,8 @@ fn history_scroll_keeps_unwrapped_titles_retrievable(){
     assert!(DASHBOARD.contains(r#"tabindex="0"><table>"#));
     assert!(DASHBOARD.contains(".table-wrap td.title{max-width:260px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}"));
     assert!(DASHBOARD.contains(r#"class="title" title="'+esc(r.title)+'""#));
-    assert!(DASHBOARD.contains(r#"class="history-title" title="'+esc(r.title)+'""#));
-    assert!(DASHBOARD.contains(r#"e.key==='Enter'||e.key===' '"#));
+    assert!(DASHBOARD.contains(r#"class="history-title copy-title copy-title-detail""#));
+    assert!(DASHBOARD.contains(r#"event.key==='Enter'||event.key===' '"#));
 }
 
 #[test]
@@ -31,7 +31,21 @@ fn responsive_labels_preserve_information_and_health_status(){
     assert!(DASHBOARD.contains("Matching statistics · last 14 days (UTC)"));
     assert!(DASHBOARD.contains("Last 14 days · UTC"));
     assert!(DASHBOARD.contains("Latest 1,000 requests"));
-    assert!(DASHBOARD.contains("Tap a row for full diagnostics."));
+    assert!(DASHBOARD.contains("Tap t_title to copy; tap other cells for details."));
     assert!(DASHBOARD.contains("node.querySelector('.health-short').textContent=short"));
     assert!(DASHBOARD.contains("node.setAttribute('aria-label',full)"));
+}
+
+#[test]
+fn history_t_title_is_a_separate_accessible_copy_action(){
+    // Clicking other cells still opens diagnostics. The t_title is an
+    // independent keyboard-accessible copy button, also in detail view.
+    assert!(DASHBOARD.contains(r#"<button type="button" class="copy-title" aria-label="Copy t_title:"#));
+    assert!(DASHBOARD.contains("bindCopyTitle(tr.querySelector('.copy-title'),row.title)"));
+    assert!(DASHBOARD.contains(r#"class="history-title copy-title copy-title-detail""#));
+    assert!(DASHBOARD.contains("event.stopPropagation()"));
+    assert!(DASHBOARD.contains("if(event.target!==tr)return"));
+    assert!(DASHBOARD.contains("navigator.clipboard.writeText(title)"));
+    assert!(DASHBOARD.contains("document.execCommand('copy')"));
+    assert!(DASHBOARD.contains(r#"id="copy-feedback" class="copy-feedback" role="status" aria-live="polite""#));
 }
