@@ -10,6 +10,26 @@ struct Link {anidb:String,tvdb:String,trakt:i64}
 struct Mapping {anidb:String,tvdb:String,tv_season:i64,start:i64,end:i64,offset:i64,map:String}
 #[derive(Clone,Debug,PartialEq,Eq,Serialize)]
 pub struct Episode {pub imdb_id:String,pub season:i64,pub episode:i64,pub anidb_id:String,pub anidb_episode:i64}
+
+/// AniDB episode coordinates in public ASIDs must fit the consumer's
+/// five-digit coordinate contract. Crosswalk rows can be open-ended or
+/// contain explicit outliers, so validate *resolved* values, not just input.
+pub(crate) fn canonical_asid(anidb_id:&str,episode:i64)->Option<String>{
+    if !(1..=99_999).contains(&episode)
+        || anidb_id.is_empty()
+        || !anidb_id.bytes().all(|byte|byte.is_ascii_digit()){
+        return None;
+    }
+    let id=anidb_id.parse::<u64>().ok()?;
+    if !(1..=99_999).contains(&id){return None;}
+    Some(format!("{anidb_id}:{episode}"))
+}
+
+pub(crate) fn valid_asid(asid:&str)->bool{
+    let Some((id,ep))=asid.split_once(':')else{return false};
+    let Some(episode)=ep.parse::<i64>().ok()else{return false};
+    canonical_asid(id,episode).as_deref()==Some(asid)
+}
 fn links(db:&Connection,imdb:&str)->rusqlite::Result<Vec<Link>>{
     let mut stmt=db.prepare("SELECT anidb_id,tvdb_id,trakt_season FROM anime_series_map WHERE imdb_id=?1")?;
     let mut out=stmt.query_map([imdb],|r|Ok(Link{anidb:r.get(0)?,tvdb:r.get(1)?,trakt:r.get(2)?}))?
@@ -104,6 +124,8 @@ fn resolve_season_preloaded(
         if ani<m.start.max(1)||(m.end>0&&ani>m.end){continue;}
         candidates.push((m.offset,m.start,link.anidb.clone(),ani));
     }}
+    // Invalid alternatives must not compete with a valid mapping.
+    candidates.retain(|(_,_,anidb,ani)|canonical_asid(anidb,*ani).is_some());
     candidates.sort_by(|a,b|b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
     let Some(best)=candidates.first()else{return None};
     if candidates.get(1).is_some_and(|second|second.0==best.0&&second.1==best.1&&(second.2!=best.2||second.3!=best.3)){
@@ -152,7 +174,7 @@ pub fn resolve_absolute_range(
 fn resolve_absolute_preloaded(
     imdb:&str,episode:i64,links:&[Link],maps:&[Mapping],
 )->Option<Episode>{
-    if episode<=0{return None;}
+    if !(1..=99_999).contains(&episode){return None;}
     let mut candidates=BTreeSet::new();
     for link in links{
         let associated:Vec<_>=maps.iter().filter(|m|m.anidb==link.anidb&&(link.tvdb.is_empty()||m.tvdb==link.tvdb)).collect();
@@ -193,6 +215,12 @@ fn resolve_absolute_preloaded(
             }
         }
     }
+    // An explicit AniDB pair or offset may yield a six-digit local episode
+    // even when the IMDb coordinates look valid. Never publish such an ASID.
+    candidates.retain(|(id,ani,season,tv)|
+        canonical_asid(id,*ani).is_some()
+        && (1..=9_999).contains(season)
+        && (1..=99_999).contains(tv));
     if candidates.len()!=1{return None;}
     let (anidb_id,anidb_episode,season,episode)=candidates.into_iter().next().unwrap();
     Some(Episode{imdb_id:imdb.into(),season,episode,anidb_id,anidb_episode})
@@ -208,7 +236,7 @@ fn resolve_absolute_preloaded(
 pub fn resolve_anidb(
     db:&Connection,anidb_id:&str,episode:i64,
 )->rusqlite::Result<Vec<Episode>>{
-    if episode<=0||episode>99_999{return Ok(Vec::new());}
+    if canonical_asid(anidb_id,episode).is_none(){return Ok(Vec::new());}
     let mut stmt=db.prepare(
         "SELECT DISTINCT imdb_id FROM anime_series_map
            WHERE anidb_id=?1
@@ -321,6 +349,41 @@ mod tests{
         assert_eq!(batch[2].as_ref().unwrap().season,2);
     }
 
+    #[test]
+    fn invalid_six_digit_anidb_episodes_are_never_resolved(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(
+                anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,
+                tvdb_season INTEGER,start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO anime_series_map VALUES
+                ('tt1234567','732','123',0),
+                ('tt1234567','436','124',0),
+                ('tt1234567','6424','125',0);
+            INSERT INTO episode_map VALUES
+                ('732','123',1,1,1,0,0,''),
+                ('436','124',1,2,1,0,0,'180525-3'),
+                ('6424','125',1,3,1,0,-431075,'');").unwrap();
+
+        // Open-ended rows and explicit maps must not leak invalid ASIDs.
+        assert!(resolve_season(&db,"tt1234567",1,190315).unwrap().is_none());
+        assert!(resolve_season(&db,"tt1234567",2,3).unwrap().is_none());
+        assert!(resolve_season(&db,"tt1234567",3,3).unwrap().is_none());
+        assert!(resolve_absolute(&db,"tt1234567",190315).unwrap().is_none());
+        assert!(resolve_anidb(&db,"732",190315).unwrap().is_empty());
+
+        // Valid episodes still resolve and preserve their AniDB identity.
+        let valid=resolve_season(&db,"tt1234567",1,3).unwrap().unwrap();
+        assert_eq!(canonical_asid(&valid.anidb_id,valid.anidb_episode).as_deref(),
+            Some("732:3"));
+        assert!(valid_asid("732:99999"));
+        for bad in ["732:190315","436:180525","6424:431078",
+                    "732:0","732:-1","732:abc","bad:3","0:3","732:3:4"]{
+            assert!(!valid_asid(bad),"{bad}");
+        }
+    }
     #[test]
     fn explicit_absolute_pairs_override_inferred_bounds(){
         let db=Connection::open_in_memory().unwrap();
