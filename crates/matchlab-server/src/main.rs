@@ -512,6 +512,31 @@ fn diagnose_with_policy(
         parsed.insert("episodes".into(),json!([]));
         parsed.insert("seasons".into(),json!([]));
     }
+    // A bare final number ("Stone Ocean 27") is not a trusted episode:
+    // require an exact and unambiguous anime alias in Tantivy before
+    // changing the parsed show title or promoting the episode coordinate.
+    // This shares the same crosswalk verification as "Stone Ocean - 27".
+    if req.series != Some(false)
+        && let Some(candidate) = parsed_value.get("anime_episode_candidate")
+        && let (Some(title),Some(episode)) = (
+            candidate.get("title").and_then(Value::as_str),
+            candidate.get("episode").and_then(Value::as_i64),
+        )
+    {
+        let candidate_title = title.to_owned();
+        let candidate_key = matchlab_matcher::clean_title(&candidate_title);
+        if (1..=99_999).contains(&episode)
+            && verified_unmarked_anime_range_imdb(
+                &db,&candidate_key,episode,episode
+            )?.is_some()
+            && let Some(parsed)=parsed_value.as_object_mut()
+        {
+            parsed.insert("title".into(),json!(candidate_title));
+            parsed.insert("episodes".into(),json!([episode]));
+            parsed.insert("seasons".into(),json!([]));
+            parsed.insert("anime_title_verified".into(),json!(true));
+        }
+    }
     let parsed=parsed_value.as_object().ok_or("parser returned no object")?;
     let parsed_title = parsed.get("title").and_then(Value::as_str).unwrap_or("");
     let title_owned = if explicit_absolute_episode(&req.title).is_some() && numbers(parsed.get("seasons")).is_empty() {
@@ -1108,6 +1133,14 @@ fn public_match_response(selected: Option<Value>) -> Value {
     if !metadata_import::valid_imdb_id(imdb){
         return json!({"sid_start":null,"sid_end":null,"asid_start":null,"asid_end":null});
     }
+    // A release labelled E12.5 is not necessarily IMDb episode E12.
+    // Preserve the verified show identity, but never publish a guessed
+    // SxxExx/ASID for a fractional recap or special without a dedicated
+    // metadata crosswalk for the fraction itself.
+    if winner.pointer("/parsed/half_episode").and_then(Value::as_bool)==Some(true) {
+        return json!({"sid_start":imdb,"sid_end":imdb,
+            "asid_start":null,"asid_end":null});
+    }
     let has_range=winner.get("episode_range").is_some();
     let start_season=winner["season"].as_i64();
     let start_episode=winner["episode"].as_i64();
@@ -1499,6 +1532,86 @@ mod tests {
             assert!(response["asid_start"].is_null());
             assert!(response["asid_end"].is_null());
         }
+    }
+
+    #[test]
+    fn fractional_anime_episode_does_not_publish_base_episode_sid_or_asid(){
+        let fractional=json!({"imdb_id":"tt1234567","category":"series",
+            "season":1,"episode":12,"anime":{"asid":"123:12"},
+            "parsed":{"half_episode":true,"episodes":[12]}});
+        assert_eq!(public_match_response(Some(fractional)),json!({
+            "sid_start":"tt1234567","sid_end":"tt1234567",
+            "asid_start":null,"asid_end":null
+        }));
+        let ordinary=json!({"imdb_id":"tt1234567","category":"series",
+            "season":1,"episode":12,"anime":{"asid":"123:12"},
+            "parsed":{"episodes":[12]}});
+        let normal=public_match_response(Some(ordinary));
+        assert_eq!(normal["sid_start"],"tt1234567:1:12");
+        assert_eq!(normal["asid_start"],"123:12");
+    }
+
+    #[test]
+    fn bare_jojo_episode_uses_exact_anime_alias_before_mapping(){
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-jojo-bare-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
+            region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES('tt1234567',
+                'Jojo''s bizarre adventure stone ocean',
+                'jojosbizarreadventurestoneocean',2021,
+                'series','',1,0,'tvSeries');
+            INSERT INTO titles VALUES('tt0133093','District 9','district9',2009,
+                'movie','',1,0,'movie');
+            INSERT INTO seasons VALUES('tt1234567',1);
+            INSERT INTO season_episodes VALUES('tt1234567',1,39,39);
+            INSERT INTO anime_series_map VALUES('tt1234567','123','98765',1);
+            INSERT INTO anime_ids VALUES('tt1234567','anidb','123');
+            INSERT INTO episode_map VALUES('123','98765',1,1,1,39,0,'');
+            INSERT INTO anidb_titles VALUES('123',
+                'Jojo''s bizarre adventure stone ocean',
+                'jojosbizarreadventurestoneocean','main','en');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        for name in [
+            "Jojo's bizarre adventure stone ocean - 27",
+            "Jojo's bizarre adventure stone ocean 27",
+            "Jojo's bizarre adventure stone ocean 27.mkv",
+        ] {
+            let result=diagnose(&path,&MatchRequest{
+                title:name.into(),year:None,series:None}).unwrap();
+            assert_eq!(result.parsed["episodes"],json!([27]),
+                "{name}: {:?}",result.parsed);
+            let selected=result.selected.expect("metadata-verified JoJo episode");
+            let public=public_match_response(Some(selected));
+            assert_eq!(public["sid_start"],json!("tt1234567:1:27"),
+                "{name}: {public}");
+            assert_eq!(public["asid_start"],json!("123:27"),
+                "{name}: {public}");
+        }
+        let ordinary=diagnose(&path,&MatchRequest{
+            title:"District 9".into(),year:None,series:None}).unwrap();
+        assert!(ordinary.parsed.get("anime_title_verified").is_none());
+        let ordinary_public=public_match_response(ordinary.selected);
+        assert!(ordinary_public["sid_start"].is_null(),
+            "a bare movie number without anime verification must not publish: {ordinary_public}");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
     }
 
     #[test]
