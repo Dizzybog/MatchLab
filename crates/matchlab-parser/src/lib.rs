@@ -1853,9 +1853,12 @@ fn episode_title_technical_word(raw: &str) -> bool {
         return true;
     }
     let word = token.to_ascii_lowercase();
+    // Scene groups often attach directly to a codec: xvid-AFG, h264-GRP.
+    // This must not turn a hyphenated episode name (Spider-Man) into a tag.
+    let technical_part = word.split_once('-').map_or(word.as_str(), |(part, _)| part);
     if [
         "web", "webdl", "webrip", "bluray", "bdrip", "bd", "hdtv",
-        "dvdrip", "dvd", "remux", "hevc", "avc", "x264", "x265",
+        "dvdrip", "dvd", "remux", "hevc", "avc", "x264", "x265", "xvid",
         "h264", "h265", "av1", "aac", "ac3", "ddp", "dts", "flac",
         "hdr", "hdr10", "hdr10+", "dv", "uhd", "fhd", "4k", "8k",
         "multi", "dual", "nordic", "repack", "proper", "rerip",
@@ -1864,7 +1867,7 @@ fn episode_title_technical_word(raw: &str) -> bool {
         "subbed", "dubbed", "preair", "pre-air", "atmos", "amzn",
         "nf", "dsnp", "hulu", "synced", "complete", "mp4", "mkv",
         "srt", "avi", "ass", "vtt", "dl", "dts-hd",
-    ].contains(&word.as_str()) {
+    ].contains(&technical_part) {
         return true;
     }
     if let Some(res) = word.strip_suffix('p').or_else(|| word.strip_suffix('i'))
@@ -1909,7 +1912,9 @@ fn extract_structured_episode_title(raw: &str, result: &Map<String, Value>) -> R
             continue;
         }
         let before = &raw[..marker.start()];
-        if before.chars().filter(|c| c.is_alphabetic()).count() < 3 {
+        // Numeric series titles such as "1923" and "24" are valid when
+        // the episode marker is structured; only reject an empty prefix.
+        if before.trim_matches(|c: char| !c.is_alphanumeric()).is_empty() {
             continue;
         }
         // Leading [S01E01] markers describe the file, not a separate
