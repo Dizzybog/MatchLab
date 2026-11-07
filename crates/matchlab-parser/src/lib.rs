@@ -1787,24 +1787,114 @@ fn patch_missing_coordinates(raw: &str, result: &mut Map<String, Value>) -> Resu
 // absolute series episode while the file supplies S02E41. Preserve it as a
 // *candidate*, never as a verified season/episode coordinate: only the matcher
 // can resolve it through a trusted AniDB/TVDB crosswalk.
-static CHINESE_EPISODE_MARKER_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"第\s*([1-9][0-9]{0,4})\s*集")
-        .expect("valid Chinese episode marker regex")
+// Explicit Japanese/Chinese/Korean episode words are *absolute* episode
+// hints, not an instruction to rewrite a season/episode coordinate. The
+// database matcher can only convert them through a verified anime crosswalk.
+static EAST_ASIAN_EPISODE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?:第\s*([1-9][0-9]{0,4})\s*[集話话]|제\s*([1-9][0-9]{0,4})\s*[화회])")
+        .expect("valid East Asian episode marker")
 });
 
-fn chinese_absolute_episode_candidate(raw: &str) -> Result<Option<i64>, ParseError> {
-    let Some(caps) = CHINESE_EPISODE_MARKER_RE
+fn marked_absolute_episode_candidate(raw: &str) -> Result<Option<i64>, ParseError> {
+    let Some(caps) = EAST_ASIAN_EPISODE_RE
         .captures(raw).map_err(|e| ParseError::Regex(e.to_string()))? else {
         return Ok(None);
     };
-    Ok(caps.get(1).and_then(|value| value.as_str().parse::<i64>().ok()))
+    Ok(caps.get(1).or_else(|| caps.get(2))
+        .and_then(|value| value.as_str().parse::<i64>().ok()))
+}
+
+// Rakun-style fansub episode markers are explicit only in a release context.
+// A bare "Room #5" or "Movie #05" must remain a title, not a TV episode.
+static FAN_SUB_HASH_EPISODE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)(?:^|[\s._-])#([0-9]{1,4})(?:v[1-9][0-9]?)?(?=$|[^a-z0-9])")
+        .expect("valid fansub hash episode marker")
+});
+
+fn fansub_hash_episode(raw: &str, result: &Map<String, Value>)
+    -> Result<Option<(i64, usize)>, ParseError>
+{
+    if S_E_COORDS_RE.is_match(raw).map_err(|e| ParseError::Regex(e.to_string()))?
+        || SEASON_EPISODE_RANGE_RE.is_match(raw).map_err(|e| ParseError::Regex(e.to_string()))?
+    {
+        return Ok(None);
+    }
+    for caps in FAN_SUB_HASH_EPISODE_RE.captures_iter(raw) {
+        let caps = caps.map_err(|e| ParseError::Regex(e.to_string()))?;
+        let (Some(marker), Some(number)) = (caps.get(0), caps.get(1)) else {
+            continue;
+        };
+        let Some(episode) = number.as_str().parse::<i64>().ok() else {
+            continue;
+        };
+        if !(1..=9999).contains(&episode) {
+            continue;
+        }
+        let prefix = raw[..marker.start()].trim_end();
+        let last_word = prefix.split(|c: char| !c.is_alphabetic())
+            .filter(|word| !word.is_empty()).next_back().unwrap_or_default();
+        if ["movie", "film", "part", "volume", "vol", "chapter", "season"]
+            .iter().any(|word| last_word.eq_ignore_ascii_case(word))
+        {
+            continue;
+        }
+        let looks_like_fansub = raw.trim_start().starts_with(['[', '【'])
+            || prefix.ends_with('-');
+        let has_title = result.get("title").and_then(Value::as_str)
+            .is_some_and(|title| title.chars().filter(|c| c.is_alphabetic()).count() >= 3);
+        if looks_like_fansub && has_title {
+            return Ok(Some((episode, marker.start())));
+        }
+    }
+    Ok(None)
+}
+
+// A labelled release range is stronger than an unmarked "01-12" candidate.
+// Preserve the two endpoints without allocating a possibly huge episode list.
+// A season marker, when present, determines season-relative numbering.
+static LABELED_EPISODE_RANGE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?i)(?:^|[^a-z0-9])(?:e(?:p(?:s|isodes?)?)?|epis[oó]dios?)\s*[.:#_-]?\s*([0-9]{1,4})\s*[-~–—～&]\s*(?:e(?:p(?:s|isodes?)?)?|epis[oó]dios?)?\s*[.:#_-]?\s*([0-9]{1,4})(?=$|[^a-z0-9])"
+    ).expect("valid labelled episode range")
+});
+
+fn labeled_episode_range(raw: &str) -> Result<Option<(i64, i64, usize)>, ParseError> {
+    for caps in LABELED_EPISODE_RANGE_RE.captures_iter(raw) {
+        let caps = caps.map_err(|e| ParseError::Regex(e.to_string()))?;
+        let (Some(marker), Some(first), Some(last)) =
+            (caps.get(0), caps.get(1), caps.get(2)) else { continue; };
+        let (Ok(start), Ok(end)) = (first.as_str().parse::<i64>(),
+            last.as_str().parse::<i64>()) else { continue; };
+        if start > 0 && end >= start && end - start < MAX_NEW_EPISODE_RANGE {
+            return Ok(Some((start, end, marker.start())));
+        }
+    }
+    Ok(None)
+}
+
+fn set_title_from_release_prefix(
+    raw: &str, marker_start: usize, translate_languages: bool,
+    result: &mut Map<String, Value>
+) -> Result<(), ParseError> {
+    let prefix = raw[..marker_start]
+        .trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '.' | '_' | '-'));
+    if prefix.is_empty() {
+        return Ok(());
+    }
+    let clean = ENGINE.parse(prefix, translate_languages)?;
+    if let Some(title) = clean.get("title").and_then(Value::as_str)
+        && title.chars().filter(|c| c.is_alphabetic()).count() >= 3
+    {
+        result.insert("title".into(), json!(title));
+    }
+    Ok(())
 }
 
 // Parse each directory entry independently. The path-level merge below
 // never concatenates release names (which could confuse episode coordinates).
 fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<String,Value>,ParseError> {
     let mut result=ENGINE.parse(raw,translate_languages)?;
-    if let Some(episode)=chinese_absolute_episode_candidate(raw)? {
+    if let Some(episode)=marked_absolute_episode_candidate(raw)? {
         result.insert("absolute_episode_candidate".into(), json!(episode));
     }
     if let Some((start,end))=absolute_episode_range(raw){
@@ -1821,9 +1911,35 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
         result.insert("episode_end".into(),json!(end));
         result.insert("episode_count".into(),json!(end-start+1));
         result.insert("episode_range_numbering".into(),json!("season"));
-    }else if !result.contains_key("episode_start")
-        && let Some(candidate)=unmarked_anime_episode_candidate(raw,translate_languages)?{
-        result.insert("anime_episode_range_candidate".into(),candidate);
+    } else if !result.contains_key("episode_start") {
+        if let Some((start, end, marker_start)) = labeled_episode_range(raw)? {
+            // "Episodio 93~94" / "Ep01~Ep07" has explicit episode syntax.
+            // A plain 01-07 still uses metadata-verified anime candidates.
+            let has_season = result.get("seasons").and_then(Value::as_array)
+                .is_some_and(|seasons| !seasons.is_empty());
+            result.insert("episodes".into(), json!([start]));
+            result.insert("episode_start".into(), json!(start));
+            result.insert("episode_end".into(), json!(end));
+            result.insert("episode_count".into(), json!(end - start + 1));
+            result.insert("episode_range_numbering".into(),
+                json!(if has_season { "season" } else { "absolute" }));
+            set_title_from_release_prefix(raw, marker_start, translate_languages, &mut result)?;
+        } else if let Some(candidate)=unmarked_anime_episode_candidate(raw,translate_languages)? {
+            result.insert("anime_episode_range_candidate".into(), candidate);
+        }
+    }
+    // "#05" is an explicit fansub episode marker, not a CRC tag or a
+    // standalone movie/part number. Do not override a parsed SxxExx episode.
+    if !result.contains_key("episode_start")
+        && let Some((episode, marker_start)) = fansub_hash_episode(raw, &result)?
+    {
+        let existing = result.get("episodes").and_then(Value::as_array);
+        if existing.is_none_or(|values| values.is_empty() ||
+            (values.len() == 1 && values[0].as_i64() == Some(episode)))
+        {
+            result.insert("episodes".into(), json!([episode]));
+            set_title_from_release_prefix(raw, marker_start, translate_languages, &mut result)?;
+        }
     }
     Ok(result)
 }
@@ -1845,17 +1961,27 @@ fn path_has_coordinates(layer:&Map<String,Value>, field:&str)->bool{
 fn merge_path_metadata(merged:&mut Map<String,Value>, layer:&Map<String,Value>){
     let new_episodes=path_has_coordinates(layer,"episodes")
         ||path_has_coordinates(layer,"episode_start")
-        ||path_has_coordinates(layer,"anime_episode_range_candidate");
+        ||path_has_coordinates(layer,"anime_episode_range_candidate")
+        ||path_has_coordinates(layer,"absolute_episode_candidate");
     let new_season=path_has_coordinates(layer,"seasons");
     if new_episodes||new_season {
-        // A more specific episode or season supersedes a parent collection.
-        // Never leak the parent's range endpoints into a child single-episode
-        // file, or combine conflicting parent/leaf episode lists.
+        // A deeper episode overrides a parent batch's range. A parent's
+        // East Asian absolute hint is retained ONLY when it agrees with the
+        // child coordinate: e.g. 第41集/Show.S02E41 can be crosswalk-resolved,
+        // but 第41集/Show.S02E05 cannot claim an absolute episode 41.
+        let keep_parent_absolute = merged.get("absolute_episode_candidate")
+            .and_then(Value::as_i64).is_some_and(|candidate|
+                layer.get("episodes").and_then(Value::as_array)
+                    .is_some_and(|eps| eps.len() == 1
+                        && eps[0].as_i64() == Some(candidate)));
         for key in ["episode_start","episode_end","episode_count",
             "episode_range_numbering","anime_episode_range_candidate"] {
             merged.remove(key);
         }
-        if new_episodes||new_season {merged.remove("episodes");}
+        if !keep_parent_absolute {
+            merged.remove("absolute_episode_candidate");
+        }
+        merged.remove("episodes");
     }
     // An empty value from the generic parser means "not detected", not an
     // instruction to erase metadata that was detected in an ancestor.
