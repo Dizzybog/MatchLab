@@ -98,7 +98,9 @@ Example response:
 **Strict production year:** Parsed torrent years must match the IMDb
 production year **exactly**, not within ±1. When the year is missing or
 different, a candidate requires a parsed series season, linked anime
-identity, or parsed quality/resolution. Anime filenames with only a local
+identity, or the parser's explicit **quality** field (for example WEB-DL,
+WEBRip or BluRay). **Resolution alone is insufficient**: 1080p/2160p,
+codecs and file extensions do not qualify. Anime filenames with only a local
 episode number can default to a tentative first-season SID when the
 crosswalk cannot resolve it, but never claim an unverified ASID.
 Verified absolute numbering and named anime parts take priority.

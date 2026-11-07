@@ -64,7 +64,12 @@ identity signal is present:
 
 - a parsed **season** for a series, such as `S02` or `Season 2`
 - an imported **anime identity** linked to that IMDb candidate
-- parsed **quality or resolution** such as `WEB-DL` or `1080p`
+- a parsed **quality** value, for example `WEB-DL`, `WEBRip` or `BluRay`
+
+A parsed **resolution** such as `1080p` or `2160p` does **not** count.
+Neither codecs (such as `x265`) nor video extensions substitute for a
+quality value. The matcher checks the parser's `quality` field explicitly;
+this helps exclude unrelated video files that only advertise resolution.
 
 An unmarked episode number alone is not evidence. This rule is applied
 to each candidate before the winner is chosen, not just to the highest

@@ -317,7 +317,8 @@ fn mapped_season_episode_range(
 /// that an episode exists.
 /// If the torrent has no production year or it differs from this IMDb
 /// candidate's production year, require an independent identity signal:
-/// parsed season, indexed anime identity, or parsed quality/resolution.
+/// parsed season, indexed anime identity, or a parsed quality label.
+
 /// Year matching is EXACT; there is no +/-1 production-year tolerance.
 /// Episode numbers alone are too weak (the common "Title - 04" case).
 fn year_signal_eligible(
@@ -329,13 +330,10 @@ fn year_signal_eligible(
     matching_year||has_parsed_season||verified_anime||has_parsed_quality
 }
 fn parsed_quality_signal(parsed:&serde_json::Map<String,Value>)->bool{
-    ["quality","resolution"].iter().any(|name|{
-        match parsed.get(*name) {
-            Some(Value::String(s))=>!s.trim().is_empty(),
-            Some(Value::Array(values))=>!values.is_empty(),
-            _=>false,
-        }
-    })
+    // Resolution alone (1080p/2160p) is common in unrelated video files;
+    // only the parser's explicit release quality classification qualifies.
+    parsed.get("quality").and_then(Value::as_str)
+        .is_some_and(|quality|!quality.trim().is_empty())
 }
 /// Only anime confirmed by imported identity data may receive a fallback
 /// season=1 for a bare local episode. An episode beyond IMDb's known first
@@ -526,7 +524,9 @@ fn diagnose(db_path: &PathBuf, req: &MatchRequest) -> Result<Diagnostic,String> 
         .map_err(|e|e.to_string())?;
     // The parsed release year must exactly match IMDb's production year.
     // Missing or different years need independently parsed season/quality
-    // or imported anime identity. Apply this to every candidate before
+    // or imported anime identity. Only the parsed 'quality' field counts,
+    // never resolution, video codec, or file extension.
+    // Apply this to every candidate before
     // winner selection; the winner may otherwise have a different year.
     let imdb=imdb.into_iter().filter(|candidate|
         year_signal_eligible(year,candidate.year,series&&!seasons.is_empty(),
@@ -1562,9 +1562,16 @@ mod tests {
         assert!(!year_signal_eligible(Some(2025),2024,false,false,false));
         let object=|value:Value|value.as_object().unwrap().clone();
         assert!(parsed_quality_signal(&object(json!({"quality":"WEB-DL"}))));
-        assert!(parsed_quality_signal(&object(json!({"resolution":"1080p"}))));
+        assert!(parsed_quality_signal(&object(json!({"quality":"WEB-DL"}))));
+        assert!(parsed_quality_signal(&object(json!({"quality":"BluRay"}))));
+        assert!(!parsed_quality_signal(&object(json!({"resolution":"1080p"}))));
+        assert!(!parsed_quality_signal(&object(json!({"resolution":"2160p"}))));
+        assert!(!parsed_quality_signal(&object(json!({"resolution":"1080p","codec":"x265"}))));
         assert!(!parsed_quality_signal(&object(json!({"codec":"x265"}))));
         assert!(!parsed_quality_signal(&object(json!({"quality":""}))));
+        assert!(!parsed_quality_signal(&object(json!({"quality":"   "}))));
+        assert!(!parsed_quality_signal(&object(json!({"quality":null}))));
+        assert!(!parsed_quality_signal(&object(json!({"quality":["WEB-DL"]}))));
     }
 
     #[test]
