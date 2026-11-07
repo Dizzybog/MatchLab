@@ -1788,7 +1788,7 @@ fn patch_missing_coordinates(raw: &str, result: &mut Map<String, Value>) -> Resu
 // *candidate*, never as a verified season/episode coordinate: only the matcher
 // can resolve it through a trusted AniDB/TVDB crosswalk.
 static CHINESE_EPISODE_MARKER_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"第\\s*([1-9][0-9]{0,4})\\s*集")
+    Regex::new(r"第\s*([1-9][0-9]{0,4})\s*集")
         .expect("valid Chinese episode marker regex")
 });
 
