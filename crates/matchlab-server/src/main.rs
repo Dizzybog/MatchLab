@@ -606,15 +606,21 @@ fn diagnose_with_policy(
     }else{imdb};
     // A verified anime absolute-to-season crosswalk is stronger than a
     // same-named live-action candidate whose episode bounds are unknown.
-    // However, never trump a candidate with a verified *canonical* S02E41.
-    // Conflicting crosswalk identities are not a reason to reorder ranking.
+    // Competing verified identities are ambiguous: never select an arbitrary
+    // S02E21 conversion. A known *canonical* S02E41 wins over a conversion.
     let mut imdb=imdb;
+    if chinese_absolute_by_imdb.len()>1 {
+        imdb.retain(|candidate|!chinese_absolute_by_imdb.contains_key(&candidate.imdb_id));
+        chinese_absolute_by_imdb.clear();
+    }
     if chinese_absolute_by_imdb.len()==1 && seasons.len()==1 && episodes.len()==1 {
-        let strong_canonical=imdb.iter().any(|candidate|{
-            season_episode_end(&db,&candidate.imdb_id,seasons[0]).ok()
-                .flatten().is_some_and(|end|end>=episodes[0])
-        });
-        if !strong_canonical {
+        let confirmed:std::collections::HashSet<String>=imdb.iter()
+            .filter(|candidate|season_episode_end(&db,&candidate.imdb_id,seasons[0])
+                .ok().flatten().is_some_and(|end|end>=episodes[0]))
+            .map(|candidate|candidate.imdb_id.clone()).collect();
+        if !confirmed.is_empty(){
+            imdb.sort_by_key(|candidate|!confirmed.contains(&candidate.imdb_id));
+        }else{
             let verified_id=chinese_absolute_by_imdb.keys().next().unwrap();
             imdb.sort_by_key(|candidate|candidate.imdb_id.as_str()!=verified_id.as_str());
         }
