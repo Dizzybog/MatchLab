@@ -2214,7 +2214,7 @@ static MARKED_HALF_EPISODE_RE: Lazy<Regex> = Lazy::new(|| {
 });
 static FANSUB_HALF_EPISODE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)(?:^|[ ._\[(\-])([1-9][0-9]{0,3})\.5(?:v[1-9][0-9]?)?(?=$|[ ._\]\)\[(])"
+        r"(?i)(?:^|[ ._\[(\-])([0-9]{1,4})\.5(?:v[1-9][0-9]?)?(?=$|[ ._\]\)\[(])"
     ).expect("valid fansub half episode")
 });
 static EXPLICIT_EPISODE_SHAPE_RE: Lazy<Regex> = Lazy::new(|| {
@@ -2284,7 +2284,7 @@ fn patch_half_episode(raw: &str, result: &mut Map<String, Value>) -> Result<(), 
             caps.get(1),
             caps.get(1).and_then(|m| m.as_str().parse::<i64>().ok()),
         ) else { continue };
-        if Some(number) != current { continue; }
+        if number == 0 || Some(number) != current { continue; }
         let before = &raw[..found.start()];
         let last_word = before
             .split(|c: char| !c.is_alphanumeric())
@@ -2305,9 +2305,23 @@ fn patch_half_episode(raw: &str, result: &mut Map<String, Value>) -> Result<(), 
 // Parse each directory entry independently. The path-level merge below
 // never concatenates release names (which could confuse episode coordinates).
 fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<String,Value>,ParseError> {
+    let original_raw = raw;
     let normalized = normalize_release_confusables(raw);
     let raw = normalized.as_ref();
     let mut result=ENGINE.parse(raw,translate_languages)?;
+    // The generic handler engine can miss non-ASCII release resolutions
+    // even after normalization. Preserve the explicit numeric marker.
+    if original_raw.contains(['р', 'Р'])
+        && result.get("resolution").is_none()
+    {
+        for caps in CYRILLIC_RESOLUTION_P_RE.captures_iter(original_raw) {
+            let caps = caps.map_err(|e| ParseError::Regex(e.to_string()))?;
+            if let Some(height) = caps.get(1) {
+                result.insert("resolution".into(), json!(format!("{}p", height.as_str())));
+                break;
+            }
+        }
+    }
     if let Some(episode)=marked_absolute_episode_candidate(raw)? {
         result.insert("absolute_episode_candidate".into(), json!(episode));
     }
