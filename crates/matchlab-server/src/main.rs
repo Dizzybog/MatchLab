@@ -374,6 +374,29 @@ fn season_episode_end(db:&Connection,imdb:&str,season:i64)->Result<Option<i64>,S
     }
 }
 
+// Some Chinese releases label the *absolute* episode in a parent directory
+// ("第41集"), but encode that number as S02E41 in the file name.
+// Never guess a season offset. Only reinterpret the file coordinate when
+// IMDb explicitly rules it out and a unique AniDB/TVDB crosswalk verifies
+// that the absolute episode belongs to the SAME advertised season.
+fn verified_chinese_absolute_fallback(
+    db:&Connection,imdb:&str,season:i64,episode:i64,absolute_hint:Option<i64>,
+)->Result<Option<anime_resolver::Episode>,String>{
+    if absolute_hint!=Some(episode)||season<=0||episode<=0{
+        return Ok(None);
+    }
+    if candidate_has_episode(db,imdb,season,episode)?{
+        return Ok(None);
+    }
+    let Some(mapped)=anime_resolver::resolve_absolute(db,imdb,episode)
+        .map_err(|error|error.to_string())? else {return Ok(None)};
+    if mapped.season!=season||mapped.episode==episode
+        ||!candidate_has_episode(db,imdb,mapped.season,mapped.episode)?{
+        return Ok(None);
+    }
+    Ok(Some(mapped))
+}
+
 /// A child directory can identify an anime cour/part more precisely than the
 /// release filename. Title selection here is intentionally *anime-only*:
 /// resolve the nearest parent that is an exact, unique AniDB title alias for
@@ -549,21 +572,46 @@ fn diagnose_with_policy(
                 .is_ok_and(|max|max>=end)
         }).collect::<Vec<_>>()
     }else{imdb};
+    let chinese_absolute_hint=parsed.get("absolute_episode_candidate").and_then(Value::as_i64);
+    let mut chinese_absolute_by_imdb=HashMap::<String,anime_resolver::Episode>::new();
     let imdb=if seasons.len()==1 && episodes.len()==1 {
         let season=seasons[0];
         let episode=episodes[0];
-        imdb.into_iter().filter_map(|candidate|
+        imdb.into_iter().filter_map(|candidate|{
             match candidate_has_episode(&db,&candidate.imdb_id,season,episode) {
                 Ok(true)=>Some(candidate),
-                Ok(false)=>None,
+                Ok(false)=>{
+                    match verified_chinese_absolute_fallback(
+                        &db,&candidate.imdb_id,season,episode,chinese_absolute_hint
+                    ){
+                        Ok(Some(mapped))=>{
+                            chinese_absolute_by_imdb.insert(candidate.imdb_id.clone(),mapped);
+                            Some(candidate)
+                        }
+                        Ok(None)=>None,
+                        Err(error)=>{
+                            tracing::warn!(imdb_id=%candidate.imdb_id,%error,
+                                "Chinese absolute episode crosswalk unavailable");
+                            None
+                        }
+                    }
+                },
                 Err(error)=>{
                     tracing::warn!(imdb_id=%candidate.imdb_id,%error,
                         "season episode metadata unavailable for candidate");
                     None
                 }
             }
-        ).collect::<Vec<_>>()
+        }).collect::<Vec<_>>()
     }else{imdb};
+    // Preserve parsed /parse coordinates for auditing. For the ranked IMDb
+    // winner only, use a uniquely verified absolute-to-season conversion.
+    // No crosswalk means the original S02E41 is still rejected.
+    let verified_chinese_override=imdb.first()
+        .and_then(|candidate|chinese_absolute_by_imdb.get(&candidate.imdb_id).cloned());
+    if let Some(mapped)=&verified_chinese_override {
+        if !episodes.is_empty(){episodes[0]=mapped.episode;}
+    }
     let imdb: Vec<Candidate> = imdb.into_iter().map(|m|Candidate{
         imdb_id:m.imdb_id,title:m.title,year:m.year,media_type:m.media_type,
         matched_title:m.matched_title,anime_ids:m.anime_ids,source:"imdb"}).collect();
@@ -575,7 +623,11 @@ fn diagnose_with_policy(
     }else {None};
     let anime_resolve_title=anime_subfolder_title.as_deref().unwrap_or(title);
     let anime_resolve_key=matchlab_matcher::clean_title(anime_resolve_title);
-    let anime = if series {
+    let anime = if verified_chinese_override.is_some() {
+        // The validated IMDb candidate owns this crosswalk; do not select
+        // an unrelated anime with the same alias through anime_priority.
+        None
+    } else if series {
         if let Some(ep)=episodes.first(){
             anime_candidate(&db,&anime_resolve_key,seasons.first().copied(),*ep)
                 .map_err(|e|e.to_string())?
@@ -669,7 +721,9 @@ fn diagnose_with_policy(
             let mut anime_result=Value::Null;
 
             if let Some(ep)=selected_episode {
-                let mapped=if let Some(season)=selected_season {
+                let mapped=if let Some(ref verified)=verified_chinese_override {
+                    if verified.imdb_id==c.imdb_id {Some(verified.clone())} else {None}
+                }else if let Some(season)=selected_season {
                     let titled=anime_title::resolve(&db,&c.imdb_id,anime_resolve_title,season,ep)
                         .map_err(|e|e.to_string())?;
                     if titled.is_some(){titled}
@@ -766,6 +820,12 @@ fn diagnose_with_policy(
                     "parsed":parsed_value.clone()}))
         }else{None}
     };
+    if let (Some(mapped),Some(winner))=(verified_chinese_override.as_ref(),selected.as_mut()){
+        if winner["imdb_id"]==mapped.imdb_id {
+            winner["match_source"]=json!("verified_chinese_absolute_crosswalk");
+            winner["absolute_episode_input"]=json!(chinese_absolute_hint);
+        }
+    }
     // Date-only releases use Cinemeta; explicit SxxExx coordinates take precedence.
     if airdate_only {
         if let (Some((_,date)),Some(winner))=(dated.as_ref(),selected.as_mut()){
