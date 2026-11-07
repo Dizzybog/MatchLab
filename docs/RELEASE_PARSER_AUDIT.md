@@ -6,7 +6,7 @@
 
 ## Combined implementation
 
-- Retains 454 generated MatchLab handlers, PCRE2 JIT, Aho–Corasick prefilter
+- Retains 458 generated MatchLab handlers, PCRE2 JIT, Aho–Corasick prefilter
   and all original IMDb/AniDB/Tantivy matching and crosswalk verification.
 - Fansub hash release episodes including revision suffixes; explicit final
   episode "13 END"; labelled ranges with compact endpoints; CJK absolute hints.
@@ -125,5 +125,5 @@ numbered movie titles and foreign-language season markers.
 
 The existing parser is already substantially feature-rich. A comparison of
 field names or handler counts alone is **not** proof of semantic coverage:
-the 439 AIOStreams handlers and 454 MatchLab handlers are different schemas
+the 439 AIOStreams handlers and 458 MatchLab handlers are different schemas
 and contain overlapping rules.
