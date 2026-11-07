@@ -604,6 +604,21 @@ fn diagnose_with_policy(
             }
         }).collect::<Vec<_>>()
     }else{imdb};
+    // A verified anime absolute-to-season crosswalk is stronger than a
+    // same-named live-action candidate whose episode bounds are unknown.
+    // However, never trump a candidate with a verified *canonical* S02E41.
+    // Conflicting crosswalk identities are not a reason to reorder ranking.
+    let mut imdb=imdb;
+    if chinese_absolute_by_imdb.len()==1 && seasons.len()==1 && episodes.len()==1 {
+        let strong_canonical=imdb.iter().any(|candidate|{
+            season_episode_end(&db,&candidate.imdb_id,seasons[0]).ok()
+                .flatten().is_some_and(|end|end>=episodes[0])
+        });
+        if !strong_canonical {
+            let verified_id=chinese_absolute_by_imdb.keys().next().unwrap();
+            imdb.sort_by_key(|candidate|candidate.imdb_id!=*verified_id);
+        }
+    }
     // Preserve parsed /parse coordinates for auditing. For the ranked IMDb
     // winner only, use a uniquely verified absolute-to-season conversion.
     // No crosswalk means the original S02E41 is still rejected.
@@ -821,7 +836,7 @@ fn diagnose_with_policy(
         }else{None}
     };
     if let (Some(mapped),Some(winner))=(verified_chinese_override.as_ref(),selected.as_mut()){
-        if winner["imdb_id"]==mapped.imdb_id {
+        if winner["imdb_id"].as_str()==Some(mapped.imdb_id.as_str()) {
             winner["match_source"]=json!("verified_chinese_absolute_crosswalk");
             winner["absolute_episode_input"]=json!(chinese_absolute_hint);
         }
