@@ -2205,6 +2205,26 @@ static EXPLICIT_EPISODE_SHAPE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)(?:^|[^a-z0-9])s[0-9]{1,3}[ ._-]*e[0-9]{1,4}|(?:^|[^a-z0-9])[0-9]{1,2}[xх][0-9]{1,4}")
         .expect("valid explicit episode guard")
 });
+fn half_episode_tail_is_release_metadata(raw: &str) -> bool {
+    let suffix = raw.trim_start_matches(|c: char|
+        matches!(c, ' ' | '.' | '_' | '-' | '\t'));
+    if suffix.is_empty() || suffix.starts_with(['[', '(', '{']) {
+        return true;
+    }
+    let first = suffix.split(|c: char| !c.is_ascii_alphanumeric())
+        .next().unwrap_or_default().to_ascii_lowercase();
+    // If a .5 is followed by a prose episode title ("5 Ways", "5-Year
+    // Storm", "5.00 P.M."), it is not a fractional coordinate.
+    [
+        "mkv","mp4","avi","ts","m2ts","webm","wmv","flv","1080p",
+        "720p","2160p","480p","576p","4k","hevc","avc","x264",
+        "x265","h264","h265","av1","bdrip","bluray","webrip",
+        "webdl","web","vostfr","vosta","english","subfrench",
+        "subbed","dubbed","subs","multi","dual","flac","aac",
+        "opus","dts","ddp","hdr","dv","bd","remux","proper",
+    ].contains(&first.as_str())
+}
+
 fn patch_half_episode(raw: &str, result: &mut Map<String, Value>) -> Result<(), ParseError> {
     if !raw.contains(".5") { return Ok(()); }
     let current = result.get("episodes").and_then(Value::as_array)
@@ -2215,6 +2235,10 @@ fn patch_half_episode(raw: &str, result: &mut Map<String, Value>) -> Result<(), 
             continue;
         };
         if current.is_some_and(|existing| existing != number) { continue; }
+        let Some(marker) = caps.get(0) else { continue };
+        if !half_episode_tail_is_release_metadata(&raw[marker.end()..]) {
+            continue;
+        }
         if current.is_none() && result.get("episodes").and_then(Value::as_array)
             .is_some_and(|eps| !eps.is_empty())
         {
