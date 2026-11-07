@@ -734,10 +734,22 @@ fn diagnose_with_policy(
                         // Exact title identifies a later anime part even if
                         // the particular episode has no verified ASID.
                         selected_season=inferred;
+                    }else if selected_season.is_some() && series &&
+                        seasons.len()==1 && episodes.len()==1 &&
+                        matchlab_matcher::clean_title(&c.title)==key &&
+                        season_episode_end(&db,&c.imdb_id,
+                            selected_season.unwrap_or(0))?
+                            .is_some_and(|last|ep<=last){
+                        // A canonical IMDb title with an explicit season and
+                        // episode may retain its verified IMDb SID even when
+                        // the separate AniDB/TVDB crosswalk lacks an episode.
+                        // Only known IMDb season bounds qualify; do not use
+                        // this fallback for named sequel/part aliases, which
+                        // can map the same local S01E03 into a later season.
+                        // No crosswalk: ASID intentionally stays null.
                     }else if !c.anime_ids.is_empty()||specific{
-                        // Explicit seasons and named sequel parts still
-                        // require a verified crosswalk; never rewrite their
-                        // coordinates into a guessed season-one episode.
+                        // Never infer anime part or absolute numbering without
+                        // a verified crosswalk and identity: leave SID at title.
                         selected_season=None;
                         selected_episode=None;
                     }
@@ -1708,16 +1720,24 @@ mod tests {
                 ('tt2379308','Psycho-Pass','psychopass',2012,
                     'series','',1,0,'tvSeries'),
                 ('tt2222222','Example Show','exampleshow',2020,
+                    'series','',1,0,'tvSeries'),
+                ('tt4644488','Dragon Ball Super','dragonballsuper',2015,
                     'series','',1,0,'tvSeries');
             INSERT INTO seasons VALUES('tt0388629',23);
             INSERT INTO seasons VALUES('tt2379308',1);
             INSERT INTO seasons VALUES('tt2222222',1);
+            INSERT INTO seasons VALUES('tt4644488',1);
+            INSERT INTO season_episodes VALUES('tt4644488',1,131,131);
             INSERT INTO season_episodes VALUES('tt0388629',21,194,194);
             INSERT INTO season_episodes VALUES('tt2379308',1,22,22);
             INSERT INTO season_episodes VALUES('tt2222222',1,12,12);
             INSERT INTO anime_series_map VALUES('tt0388629','69','81797',1);
             INSERT INTO anime_ids VALUES('tt0388629','anidb','69');
             INSERT INTO anime_ids VALUES('tt2379308','anidb','777');
+            INSERT INTO anime_ids VALUES('tt4644488','anidb','11210');
+            INSERT INTO anime_series_map VALUES('tt4644488','11210','295068',0);
+            INSERT INTO anidb_titles VALUES('11210','Dragon Ball Super',
+                'dragonballsuper','main','en');
             INSERT INTO anidb_titles VALUES('69','One Piece',
                 'onepiece','main','en');
             INSERT INTO anidb_titles VALUES('777','Psycho-Pass',
@@ -1739,6 +1759,30 @@ mod tests {
         assert_eq!(public_match_response(Some(winner)),json!({
             "sid_start":"tt0388629:21:3","sid_end":"tt0388629:21:3",
             "asid_start":"69:894","asid_end":"69:894"}));
+        // Real-world regression: the parser and IMDb match are correct,
+        // but the AniDB episode crosswalk is incomplete. Explicit S01E03
+        // must still give a valid IMDb SID and never invent an ASID.
+        let dragon=diagnose(&path,&MatchRequest{
+            title:"Dragon.Ball.Super.S01E03.DUBBED".into(),
+            year:None,series:None}).unwrap();
+        assert_eq!(dragon.parsed["title"],"Dragon Ball Super");
+        assert_eq!(dragon.parsed["seasons"],json!([1]));
+        assert_eq!(dragon.parsed["episodes"],json!([3]));
+        assert_eq!(dragon.parsed["dubbed"],true);
+        let winner=dragon.selected.expect("Dragon Ball Super must match");
+        assert_eq!(winner["imdb_id"],"tt4644488");
+        assert_eq!(winner["season"],1);
+        assert_eq!(winner["episode"],3);
+        assert!(winner["anime"].is_null());
+        assert_eq!(public_match_response(Some(winner)),json!({
+            "sid_start":"tt4644488:1:3","sid_end":"tt4644488:1:3",
+            "asid_start":null,"asid_end":null
+        }));
+        let unavailable=diagnose(&path,&MatchRequest{
+            title:"Dragon.Ball.Super.S01E999.DUBBED".into(),
+            year:None,series:None}).unwrap();
+        assert!(unavailable.selected.is_none(),
+            "IMDb season bounds must still reject nonexistent episodes");
         // No Sxx token must not overwrite an absolute episode that can
         // be verified to belong to a later season of One Piece.
         let absolute=diagnose(&path,&MatchRequest{
