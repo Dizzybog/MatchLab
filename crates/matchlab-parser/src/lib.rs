@@ -2106,13 +2106,13 @@ static CYRILLIC_RESOLUTION_P_RE: Lazy<Regex> = Lazy::new(|| {
 });
 fn normalize_release_confusables(raw: &str) -> Cow<'_, str> {
     let episode = if raw.contains(['Е', 'е']) {
-        CYRILLIC_EPISODE_E_RE.replace_all(raw, "1E")
+        CYRILLIC_EPISODE_E_RE.replace_all(raw, "${1}E")
     } else {
         Cow::Borrowed(raw)
     };
     if episode.contains(['р', 'Р']) {
         Cow::Owned(CYRILLIC_RESOLUTION_P_RE
-            .replace_all(&episode, "1p").into_owned())
+            .replace_all(&episode, "${1}p").into_owned())
     } else {
         episode
     }
@@ -2283,7 +2283,13 @@ fn patch_half_episode(raw: &str, translate_languages: bool, result: &mut Map<Str
             caps.get(1),
             caps.get(1).and_then(|m| m.as_str().parse::<i64>().ok()),
         ) else { continue };
-        if number == 0 || current.is_some_and(|episode| episode != number) {
+        // A bare bracketed anime fractional episode may have been parsed
+        // incorrectly as season=09, episode=5. "[09.5]" is one token.
+        let bracketed = found.start() > 0
+            && raw.as_bytes()[found.start() - 1] == b'['
+            && caps.get(0).is_some_and(|m|
+                raw.get(m.end()..).is_some_and(|s| s.starts_with(']')));
+        if number == 0 || (current.is_some_and(|episode| episode != number) && !bracketed) {
             continue;
         }
         let before = &raw[..found.start()];
@@ -2312,9 +2318,20 @@ fn patch_half_episode(raw: &str, translate_languages: bool, result: &mut Map<Str
         }
         if unparsed {
             result.insert("episodes".into(), json!([number]));
-            set_title_from_release_prefix(
-                raw, found.start(), translate_languages, result,
-            )?;
+            if !bracketed {
+                set_title_from_release_prefix(
+                    raw, found.start(), translate_languages, result,
+                )?;
+            }
+        } else if current != Some(number) && bracketed {
+            result.insert("episodes".into(), json!([number]));
+        }
+        if bracketed && result.get("seasons") == Some(&json!([number]))
+            && !raw.to_ascii_lowercase().contains("season")
+            && !EXPLICIT_EPISODE_SHAPE_RE.is_match(raw)
+                .map_err(|e| ParseError::Regex(e.to_string()))?
+        {
+            result.insert("seasons".into(), json!([]));
         }
         result.insert("half_episode".into(), json!(true));
         return Ok(());
