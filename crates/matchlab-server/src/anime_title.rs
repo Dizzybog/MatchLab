@@ -68,6 +68,11 @@ pub fn resolve(db:&Connection,imdb:&str,title:&str,season:i64,episode:i64)
         .map(|(tv,offset,_,_)|(*tv,local+offset)).collect();
     if coordinates.len()!=1{return Ok(None);}
     let (tv,ep)=*coordinates.iter().next().unwrap();
+    // A named anime part can use an open-ended or offset crosswalk too.
+    // Refuse out-of-range AniDB episodes before creating an ASID.
+    if anime_resolver::canonical_asid(&target.id,local).is_none()
+        || !(1..=9_999).contains(&tv)
+        || !(1..=99_999).contains(&ep){return Ok(None);}
     Ok(Some(anime_resolver::Episode{imdb_id:imdb.into(),season:tv,
         episode:ep,anidb_id:target.id.clone(),anidb_episode:local}))
 }
