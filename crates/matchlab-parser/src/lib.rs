@@ -1783,6 +1783,180 @@ fn patch_missing_coordinates(raw: &str, result: &mut Map<String, Value>) -> Resu
     Ok(())
 }
 
+
+// Rakun-style anime release markers are meaningful only in a strongly
+// delimited episode context. Keep them as a fallback after the ordinary
+// release handlers, so titles such as "The #1 Movie" are left untouched.
+static ANIME_HASH_EPISODE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)^\\[[^\\]]{2,64}\\][ ._-]*.+?[ ._-]+#([0-9]{1,4})(?:$|[ ._\\[(])")
+        .expect("valid bracketed fansub hash-episode pattern")
+});
+static ANIME_FINAL_EPISODE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)[ ._-]+-[ ._-]+([0-9]{1,4})[ ._-]+END(?:$|[ ._\\[(])")
+        .expect("valid anime final-episode pattern")
+});
+
+fn patch_anime_release_episode(raw: &str, result: &mut Map<String, Value>) -> Result<(), ParseError> {
+    if result.get("episodes").and_then(Value::as_array).is_some_and(|v| !v.is_empty())
+        || result.contains_key("episode_start")
+    {
+        return Ok(());
+    }
+    for pattern in [&*ANIME_HASH_EPISODE_RE, &*ANIME_FINAL_EPISODE_RE] {
+        let Some(caps) = pattern.captures(raw).map_err(|e| ParseError::Regex(e.to_string()))?
+        else {
+            continue;
+        };
+        let (Some(marker), Some(number)) = (caps.get(0), caps.get(1)) else {
+            continue;
+        };
+        let Some(episode) = number.as_str().parse::<i64>().ok() else {
+            continue;
+        };
+        if !(1..=9999).contains(&episode) {
+            continue;
+        }
+        let prefix = raw[..marker.start()].trim();
+        if prefix.chars().filter(|c| c.is_alphabetic()).count() < 3 {
+            continue;
+        }
+        let candidate = ENGINE.parse(prefix, false)?;
+        let Some(title) = candidate.get("title").and_then(Value::as_str) else {
+            continue;
+        };
+        if title.trim().len() < 3 {
+            continue;
+        }
+        result.insert("episodes".to_owned(), json!([episode]));
+        result.insert("title".to_owned(), json!(title));
+        return Ok(());
+    }
+    Ok(())
+}
+
+// AIOStreams/release-parser finds episode titles separately from the show
+// name. Only a structured episode marker anchors this optional value:
+// ordinary bare numbers, technical tags and unmatched group names do not.
+static EPISODE_TITLE_MARKER_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?i)(?:^|[ ._\\[(\\-])(?:s[0-9]{1,3}[ ._-]*e[0-9]{1,4}|[0-9]{1,2}[xх][0-9]{1,4}|episod(?:e|io)[ ._-]*[0-9]{1,4}|ep[ ._-]*[0-9]{1,4})"
+    ).expect("valid structured episode-title marker")
+});
+
+fn episode_title_technical_word(raw: &str) -> bool {
+    let token = raw.trim_matches(|c: char| !c.is_alphanumeric() && c != '+');
+    if token.is_empty() {
+        return true;
+    }
+    let word = token.to_ascii_lowercase();
+    if [
+        "web", "webdl", "webrip", "bluray", "bdrip", "bd", "hdtv",
+        "dvdrip", "dvd", "remux", "hevc", "avc", "x264", "x265",
+        "h264", "h265", "av1", "aac", "ac3", "ddp", "dts", "flac",
+        "hdr", "hdr10", "hdr10+", "dv", "uhd", "fhd", "4k", "8k",
+        "multi", "dual", "nordic", "repack", "proper", "rerip",
+        "jpn", "jap", "eng", "ger", "deu", "ita", "fre", "fra",
+        "spa", "nor", "swe", "dan", "fin", "rus", "subs", "sub",
+        "subbed", "dubbed", "preair", "pre-air", "atmos", "amzn",
+        "nf", "dsnp", "hulu", "synced", "complete", "mp4", "mkv",
+        "srt", "avi", "ass", "vtt", "dl", "dts-hd",
+    ].contains(&word.as_str()) {
+        return true;
+    }
+    if let Some(res) = word.strip_suffix(['p', 'i'])
+        && res.parse::<u32>().is_ok_and(|n| (240..=4320).contains(&n))
+    {
+        return true;
+    }
+    if word.starts_with("ddp") && word[3..].chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return true;
+    }
+    false
+}
+
+fn episode_title_language_word(raw: &str) -> bool {
+    [
+        "english", "french", "german", "spanish", "japanese",
+        "italian", "norwegian", "chinese", "korean", "swedish",
+        "danish", "finnish", "russian", "portuguese", "castellano",
+    ].contains(&raw.to_ascii_lowercase().as_str())
+}
+
+fn extract_structured_episode_title(raw: &str, result: &Map<String, Value>) -> Result<Option<String>, ParseError> {
+    let Some(episodes) = result.get("episodes").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+    if episodes.len() != 1 {
+        return Ok(None);
+    }
+    let Some(expected) = episodes[0].as_i64() else {
+        return Ok(None);
+    };
+    for capture in EPISODE_TITLE_MARKER_RE.captures_iter(raw) {
+        let caps = capture.map_err(|e| ParseError::Regex(e.to_string()))?;
+        let Some(marker) = caps.get(0) else {
+            continue;
+        };
+        let marker_text = marker.as_str();
+        // Reuse exactly the coordinates accepted by the release parser.
+        let marker_episode = marker_text.rsplit(|c: char| !c.is_ascii_digit())
+            .find_map(|part| part.parse::<i64>().ok());
+        if marker_episode != Some(expected) {
+            continue;
+        }
+        let before = &raw[..marker.start()];
+        if before.chars().filter(|c| c.is_alphabetic()).count() < 3 {
+            continue;
+        }
+        // Leading [S01E01] markers describe the file, not a separate
+        // episode title; do not mistake the subsequent show title for one.
+        if before.trim().is_empty() {
+            continue;
+        }
+        let tail = &raw[marker.end()..];
+        if !tail.starts_with([' ', '.', '_', '-', ']', '–']) {
+            continue;
+        }
+        let tail = tail.trim_start_matches(|c: char|
+            matches!(c, ' ' | '.' | '_' | '-' | ']' | '–'));
+        if tail.is_empty() || tail.starts_with(['[', '(']) {
+            continue;
+        }
+        // Bracketed metadata or a second episode coordinate terminates the
+        // candidate. Keep intra-word punctuation in the extracted title.
+        let end = tail.find(['[', '(', ')', '{', '}', '/', '\\']).unwrap_or(tail.len());
+        let text = tail[..end].replace(['.', '_'], " ");
+        let mut words = Vec::new();
+        for token in text.split_whitespace() {
+            let stripped = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '!');
+            if stripped.is_empty() {
+                break;
+            }
+            if episode_title_technical_word(stripped) {
+                break;
+            }
+            // A second episode marker is not part of the title.
+            if stripped.eq_ignore_ascii_case("ep") || stripped.eq_ignore_ascii_case("episode") {
+                break;
+            }
+            words.push(stripped);
+        }
+        if words.is_empty() {
+            continue;
+        }
+        if episode_title_language_word(words[0])
+            && (words.len() == 1 || words.get(1).is_some_and(|w| episode_title_technical_word(w)))
+        {
+            continue;
+        }
+        let title = words.join(" ");
+        if title.chars().any(|c| c.is_alphabetic()) {
+            return Ok(Some(title));
+        }
+    }
+    Ok(None)
+}
+
 // Explicit CJK episode marker, e.g. "[第41集]". It can denote an
 // absolute series episode while the file supplies S02E41. Preserve it as a
 // *candidate*, never as a verified season/episode coordinate: only the matcher
@@ -1814,6 +1988,7 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
         result.insert("episode_range_numbering".into(),json!("absolute"));
     }
     patch_missing_coordinates(raw,&mut result)?;
+    patch_anime_release_episode(raw,&mut result)?;
     if let Some((season,start,end))=explicit_season_episode_range(raw)?{
         result.insert("seasons".into(),json!([season]));
         result.insert("episodes".into(),json!([start]));
@@ -1824,6 +1999,9 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
     }else if !result.contains_key("episode_start")
         && let Some(candidate)=unmarked_anime_episode_candidate(raw,translate_languages)?{
         result.insert("anime_episode_range_candidate".into(),candidate);
+    }
+    if let Some(episode_title) = extract_structured_episode_title(raw, &result)? {
+        result.insert("episode_title".to_owned(), json!(episode_title));
     }
     Ok(result)
 }
@@ -1852,7 +2030,7 @@ fn merge_path_metadata(merged:&mut Map<String,Value>, layer:&Map<String,Value>){
         // Never leak the parent's range endpoints into a child single-episode
         // file, or combine conflicting parent/leaf episode lists.
         for key in ["episode_start","episode_end","episode_count",
-            "episode_range_numbering","anime_episode_range_candidate"] {
+            "episode_range_numbering","anime_episode_range_candidate","episode_title"] {
             merged.remove(key);
         }
         if new_episodes||new_season {merged.remove("episodes");}
