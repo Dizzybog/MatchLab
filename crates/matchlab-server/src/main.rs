@@ -512,6 +512,31 @@ fn diagnose_with_policy(
         parsed.insert("episodes".into(),json!([]));
         parsed.insert("seasons".into(),json!([]));
     }
+    // A bare final number ("Stone Ocean 27") is not a trusted episode:
+    // require an exact and unambiguous anime alias in Tantivy before
+    // changing the parsed show title or promoting the episode coordinate.
+    // This shares the same crosswalk verification as "Stone Ocean - 27".
+    if req.series != Some(false)
+        && let Some(candidate) = parsed_value.get("anime_episode_candidate")
+        && let (Some(title),Some(episode)) = (
+            candidate.get("title").and_then(Value::as_str),
+            candidate.get("episode").and_then(Value::as_i64),
+        )
+    {
+        let candidate_title = title.to_owned();
+        let candidate_key = matchlab_matcher::clean_title(&candidate_title);
+        if (1..=99_999).contains(&episode)
+            && verified_unmarked_anime_range_imdb(
+                &db,&candidate_key,episode,episode
+            )?.is_some()
+            && let Some(parsed)=parsed_value.as_object_mut()
+        {
+            parsed.insert("title".into(),json!(candidate_title));
+            parsed.insert("episodes".into(),json!([episode]));
+            parsed.insert("seasons".into(),json!([]));
+            parsed.insert("anime_title_verified".into(),json!(true));
+        }
+    }
     let parsed=parsed_value.as_object().ok_or("parser returned no object")?;
     let parsed_title = parsed.get("title").and_then(Value::as_str).unwrap_or("");
     let title_owned = if explicit_absolute_episode(&req.title).is_some() && numbers(parsed.get("seasons")).is_empty() {
