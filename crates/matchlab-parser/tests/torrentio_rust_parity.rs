@@ -93,3 +93,38 @@ fn path_parent_half_episode_does_not_leak_into_other_file() {
     assert_eq!(p["episodes"], json!([13]), "{p:?}");
     assert!(p.get("half_episode").is_none(), "{p:?}");
 }
+
+
+#[test]
+fn bare_trailing_anime_number_is_a_tentative_candidate_not_a_guessed_episode() {
+    for name in [
+        "Jojo's bizarre adventure stone ocean 27",
+        "Jojo's bizarre adventure stone ocean 27.mkv",
+        "One Piece 1090",
+        "Naruto 027",
+    ] {
+        let output = parsed(name);
+        let hint = output.get("anime_episode_candidate")
+            .unwrap_or_else(|| panic!("no anime hint for {name}: {output:?}"));
+        let expected = if name.contains("1090") { 1090 }
+            else if name.contains("Naruto") { 27 } else { 27 };
+        assert_eq!(hint["episode"], json!(expected), "{name}: {output:?}");
+        assert_eq!(hint["verified"], json!(false), "{name}: {output:?}");
+        assert!(output.get("anime_title_verified").is_none(), "{name}: {output:?}");
+    }
+}
+
+#[test]
+fn bare_numbers_do_not_overwrite_titles_or_canonical_coordinates() {
+    for name in [
+        "District 9", "The 100", "Studio 54",
+        "Anime Season 2", "Anime Part 3", "Anime Volume 27",
+        "Anime 2024", "Anime 1080", "Anime S01E03",
+    ] {
+        let output = parsed(name);
+        assert!(output.get("anime_episode_candidate").is_none(),
+            "{name}: {output:?}");
+    }
+    let explicit = parsed("Jojo's bizarre adventure stone ocean - 27");
+    assert_eq!(explicit["episodes"], json!([27]), "{explicit:?}");
+}
