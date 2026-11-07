@@ -1527,6 +1527,69 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn bare_jojo_episode_uses_exact_anime_alias_before_mapping(){
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-jojo-bare-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
+            region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES('tt1234567',
+                'Jojo''s bizarre adventure stone ocean',
+                'jojosbizarreadventurestoneocean',2021,
+                'series','',1,0,'tvSeries');
+            INSERT INTO titles VALUES('tt0133093','District 9','district9',2009,
+                'movie','',1,0,'movie');
+            INSERT INTO seasons VALUES('tt1234567',1);
+            INSERT INTO season_episodes VALUES('tt1234567',1,39,39);
+            INSERT INTO anime_series_map VALUES('tt1234567','123','98765',1);
+            INSERT INTO anime_ids VALUES('tt1234567','anidb','123');
+            INSERT INTO episode_map VALUES('123','98765',1,1,1,39,0,'');
+            INSERT INTO anidb_titles VALUES('123',
+                'Jojo''s bizarre adventure stone ocean',
+                'jojosbizarreadventurestoneocean','main','en');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        for name in [
+            "Jojo's bizarre adventure stone ocean - 27",
+            "Jojo's bizarre adventure stone ocean 27",
+            "Jojo's bizarre adventure stone ocean 27.mkv",
+        ] {
+            let result=diagnose(&path,&MatchRequest{
+                title:name.into(),year:None,series:None}).unwrap();
+            assert_eq!(result.parsed["episodes"],json!([27]),
+                "{name}: {:?}",result.parsed);
+            let selected=result.selected.expect("metadata-verified JoJo episode");
+            let public=public_match_response(Some(selected));
+            assert_eq!(public["sid_start"],json!("tt1234567:1:27"),
+                "{name}: {public}");
+            assert_eq!(public["asid_start"],json!("123:27"),
+                "{name}: {public}");
+        }
+        let ordinary=diagnose(&path,&MatchRequest{
+            title:"District 9".into(),year:None,series:None}).unwrap();
+        assert!(ordinary.parsed.get("anime_title_verified").is_none());
+        let ordinary_public=public_match_response(ordinary.selected);
+        assert!(ordinary_public["sid_start"].is_null(),
+            "a bare movie number without anime verification must not publish: {ordinary_public}");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
     fn one_piece_batch_with_seven_anidb_aliases_uses_unique_complete_crosswalk(){
         let stamp=std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
