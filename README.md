@@ -201,6 +201,15 @@ CI runs the Rust workspace tests and builds the production Docker image. Perform
 
 ## Credits and license
 
-MatchLab is an independent project informed by [Comet](https://github.com/g0ldyy/comet) for release parsing/airdate concepts and [StremThru](https://github.com/MunifTanjim/stremthru) for metadata ingestion and matching architecture. Their original projects and licenses remain credited; MatchLab is not officially affiliated with either team.
+MatchLab is an independent project informed by these open-source projects:
+
+- **[Comet](https://github.com/g0ldyy/comet)** — release parsing and airdate concepts.
+- **[StremThru](https://github.com/MunifTanjim/stremthru)** — metadata ingestion and matching architecture.
+- **[AIOStreams](https://github.com/Viren070/AIOStreams)** and its **[@aiostreams/release-parser](https://github.com/AIOStreams/release-parser)** (MIT) — comprehensive release-name handling, ordered parser handlers, match validators, season/episode safeguards, title cleanup, and file/folder metadata merging.
+- **[Rakun](https://github.com/lowlighter/rakun)** (MIT) — anime fansub naming conventions, `#episode` markers, multilingual labelled episode ranges, bracketed group/CRC metadata, and distinction between seasons, parts, volumes, and episodes.
+
+The anime-specific improvements in this repository are **independently implemented in Rust**, not copied TypeScript code. See the [parser research and regression coverage](docs/ANIME_PARSER_RESEARCH.md) for the techniques studied, changes implemented, and intentionally excluded heuristics.
+
+Original authors and their projects retain their respective licenses and credit. MatchLab is **not officially affiliated** with these projects or maintainers.
 
 Licensed under **GPL-3.0-or-later**. External metadata sources have their own terms.
