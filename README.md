@@ -166,6 +166,8 @@ curl -X POST http://127.0.0.1:8765/debug/match \
 
 The full parser exposes all recognized release details. Debug output explains the selected title, alternatives, and episode conversions. MatchLab also supports title inheritance from folder paths and airdate-based TV matching via Cinemeta when verified episode information is available.
 
+The native Rust release parser now includes AIOStreams-inspired TV/anime episode-title extraction, Rakun fansub release conventions, extra network/provider tags, accessibility/description metadata and extended language guards. It keeps the existing parser/matcher split, without a JavaScript runtime. See the [full parser audit](docs/RELEASE_PARSER_AUDIT.md) and [anime research](docs/ANIME_PARSER_RESEARCH.md) for exact coverage and documented exceptions.
+
 **[Detailed API documentation](docs/API.md)** covers response fields, season packs, episode ranges, anime, airdate matching, and missing/ambiguous metadata.
 
 ## Metadata and settings
@@ -201,6 +203,15 @@ CI runs the Rust workspace tests and builds the production Docker image. Perform
 
 ## Credits and license
 
-MatchLab is an independent project informed by [Comet](https://github.com/g0ldyy/comet) for release parsing/airdate concepts and [StremThru](https://github.com/MunifTanjim/stremthru) for metadata ingestion and matching architecture. Their original projects and licenses remain credited; MatchLab is not officially affiliated with either team.
+MatchLab is an independent project informed by these open-source projects:
+
+- **[Comet](https://github.com/g0ldyy/comet)** — release parsing and airdate concepts.
+- **[StremThru](https://github.com/MunifTanjim/stremthru)** — metadata ingestion and matching architecture.
+- **[AIOStreams](https://github.com/Viren070/AIOStreams)** and its **[@aiostreams/release-parser](https://github.com/AIOStreams/release-parser)** (MIT) — comprehensive release-name handling, ordered parser handlers, match validators, season/episode safeguards, title cleanup, and file/folder metadata merging.
+- **[Rakun](https://github.com/lowlighter/rakun)** (MIT) — anime fansub naming conventions, `#episode` markers, multilingual labelled episode ranges, bracketed group/CRC metadata, and distinction between seasons, parts, volumes, and episodes.
+
+The anime-specific improvements in this repository are **independently implemented in Rust**, not copied TypeScript code. See the [parser research and regression coverage](docs/ANIME_PARSER_RESEARCH.md) for the techniques studied, changes implemented, and intentionally excluded heuristics.
+
+Original authors and their projects retain their respective licenses and credit. MatchLab is **not officially affiliated** with these projects or maintainers.
 
 Licensed under **GPL-3.0-or-later**. External metadata sources have their own terms.
