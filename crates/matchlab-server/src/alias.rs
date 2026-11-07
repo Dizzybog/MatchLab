@@ -237,6 +237,9 @@ fn lookup(db:&rusqlite::Connection,request:&Validated)->Result<Value,String>{
 }
 
 async fn alias_response(state:AppState,request:AliasRequest)->(StatusCode,Json<Value>){
+    if !crate::matching_available(&state){
+        return crate::indexing_response();
+    }
     let request=match validated(request){
         Ok(v)=>v,
         Err(error)=>return (StatusCode::BAD_REQUEST,Json(json!({"error":error}))),
