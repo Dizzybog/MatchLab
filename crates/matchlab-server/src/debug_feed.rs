@@ -493,7 +493,7 @@ mod tests {
     #[test]
     fn explicit_coordinate_changes_are_flagged_without_verified_crosswalk() {
         let example=json!({
-            "parsed":{"seasons":[3],"episodes":[9]},
+            "parsed":{"title":"Example","seasons":[3],"episodes":[9]},
             "selected":{"category":"series","season":3,"episode":9}
         });
         let findings=alerts("Example.S03E08.mkv","matched",&example);
@@ -515,7 +515,7 @@ mod tests {
         ] {
             let selected=json!({"imdb_id":"tt1234567","category":"series",
                 "season":season,"episode":episode});
-            let details=json!({"parsed":{"seasons":[1],"episodes":[episode]},
+            let details=json!({"parsed":{"title":"Show","seasons":[1],"episodes":[episode]},
                 "selected":selected,"reason":"fixture"});
             dashboard_history::record(&path,title,"matched",Some(&selected),&details,4);
         }
