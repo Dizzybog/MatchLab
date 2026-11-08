@@ -79,6 +79,76 @@ fn audio_channels(raw:&str)->Option<&'static str>{
     }
     None
 }
+/// A parser/matcher discrepancy is only an *observation*. In particular,
+/// the filename year may be an episode's air year or a remaster year rather
+/// than the IMDb premiere year. Never automatically turn these into labels.
+fn candidate_num(value:&Value)->Option<i64>{
+    value.as_i64().filter(|v|*v>0)
+}
+fn includes_number(value:&Value,number:i64)->bool{
+    value.as_array().is_some_and(|items|
+        items.iter().any(|v|v.as_i64()==Some(number)))
+}
+fn verified_anime_remap(selected:&Value)->bool{
+    selected["anime"].is_object()
+        || selected["episode_range"]["complete"]==true
+}
+fn compare_parsed_to_selected(parsed:&Value,selected:&Value)->Vec<Value>{
+    let mut issues=Vec::new();
+    if !selected.is_object(){return issues;}
+    let is_series=selected["category"]=="series";
+    let verified_remap=verified_anime_remap(selected);
+    if is_series {
+        // Packs have a starting and ending coordinate: the first parsed
+        // number need only occur within the selected interval, not be equal
+        // to every representative number.
+        for (field,selected_field) in [("seasons","season"),("episodes","episode")] {
+            let Some(parsed_values)=parsed[field].as_array().filter(|v|!v.is_empty())else{continue};
+            if parsed_values.len()>16 || !parsed_values.iter()
+                .all(|v|v.as_i64().is_some_and(|n|(1..=99_999).contains(&n))){
+                continue;
+            }
+            let actual=selected[selected_field].as_i64();
+            if actual.is_none() {
+                issues.push(json!({
+                    "code":format!("field_unresolved_{selected_field}"),
+                    "field":selected_field,"confidence":"review","severity":"review",
+                    "signal":"parsed_has_coordinate",
+                    "message":"Parser has an episode/season coordinate but selected match has none"
+                }));
+            }else if !verified_remap && parsed_values.len()==1
+                && let Some(n)=actual
+                && !includes_number(&parsed[field],n)
+            {
+                issues.push(json!({
+                    "code":format!("field_mismatch_{selected_field}"),
+                    "field":selected_field,"confidence":"review","severity":"review",
+                    "signal":"parsed_and_selected_disagree",
+                    "message":"Parser and matcher selected different episode/season coordinates"
+                }));
+            }
+        }
+    }
+    // IMDb 'year' normally means a title's first release; a torrent year
+    // might describe its air date or a later edition. Suppress TV series
+    // and never treat this observation alone as proof.
+    if !is_series
+        && let (Some(parsed_year),Some(selected_year))=(
+            candidate_num(&parsed["year"]),candidate_num(&selected["year"]))
+        && (1880..=2100).contains(&parsed_year)
+        && (1880..=2100).contains(&selected_year)
+        && parsed_year!=selected_year
+    {
+        issues.push(json!({
+            "code":"field_mismatch_year","field":"year",
+            "confidence":"review","severity":"review",
+            "signal":"release_year_differs_from_imdb_start_year",
+            "message":"Parsed release year differs from IMDb title start year; this may be legitimate"
+        }));
+    }
+    issues
+}
+
 pub fn audit(raw:&str,parsed:&Value,selected:&Value)->Vec<Value>{
     // Requests can contain full relative paths. Only inspect the basename;
     // never emit arbitrary user-provided tokens as the diagnostic signal.
@@ -167,6 +237,7 @@ pub fn audit(raw:&str,parsed:&Value,selected:&Value)->Vec<Value>{
             "severity":"review",
             "message":"Parsed absolute anime episode candidate has no verified selected anime coordinate"}));
     }
+    out.extend(compare_parsed_to_selected(parsed,selected));
     out
 }
 #[cfg(test)]
@@ -196,6 +267,40 @@ mod tests{
         let c=codes("German Connection",json!({"title":"German Connection",
             "languages":["de"]}),Value::Null);
         assert!(c.is_empty(),"{c:?}");
+    }
+    #[test]
+    fn missing_matcher_coordinates_are_distinct_from_missing_parser_fields(){
+        let flags=codes("Example.S02E07",json!({"title":"Example",
+            "seasons":[2],"episodes":[7]}),json!({
+                "category":"series","imdb_id":"tt1234567",
+                "season":null,"episode":null}));
+        assert!(flags.contains(&"field_unresolved_season".into()),"{flags:?}");
+        assert!(flags.contains(&"field_unresolved_episode".into()),"{flags:?}");
+        assert!(!flags.contains(&"field_missing_seasons".into()));
+        assert!(!flags.contains(&"field_missing_episodes".into()));
+    }
+    #[test]
+    fn year_mismatches_are_review_signals_not_certain_errors(){
+        let flags=codes("Example.2024.WEB-DL",json!({
+            "title":"Example","year":2024,"quality":"WEB-DL"
+        }),json!({"category":"movie","year":2020,"imdb_id":"tt1234567"}));
+        assert!(flags.contains(&"field_mismatch_year".into()),"{flags:?}");
+        let flags=codes("Example.S02E07.2024",json!({
+            "title":"Example","year":2024,"seasons":[2],"episodes":[7]
+        }),json!({"category":"series","year":2020,"season":2,"episode":7}));
+        assert!(!flags.contains(&"field_mismatch_year".into()),"{flags:?}");
+    }
+    #[test]
+    fn verified_anime_episode_remaps_must_not_generate_false_disagreements(){
+        let flags=codes("Bleach.300",json!({"title":"Bleach","episodes":[300]}),
+            json!({"category":"series","season":14,"episode":1,
+                "anime":{"anidb_id":"100","episode":300}}));
+        assert!(!flags.contains(&"field_mismatch_episode".into()),"{flags:?}");
+        let flags=codes("Show.S02E07",json!({"title":"Show","seasons":[2],
+            "episodes":[7]}),json!({"category":"series","season":2,
+                "episode":8}));
+        assert!(flags.contains(&"field_mismatch_episode".into()),"{flags:?}");
+        assert!(!flags.contains(&"field_unresolved_episode".into()));
     }
     #[test]
     fn season_only_and_absolute_anime_stay_separate(){
