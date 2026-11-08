@@ -577,7 +577,8 @@ pub fn status() -> Value {
             "active_rule_count":active.len(),"active_rules_by_field":fields,
             "revision":format!("{:016x}",revision()),
             "training_source":"canonical_rust_parser_and_allowlisted_raw_markers",
-            "model":"fixed_bootstrap_anomaly_ranker",
+            "model":"rust_ftrl_proximal",
+            "online_learner":crate::online_model::OnlineModel::status(),
             "identity_and_coordinate_override":"separate_metadata_verification"});
     }
     json!({"enabled":crate::local_learning::active(),
