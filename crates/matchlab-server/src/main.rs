@@ -2615,6 +2615,73 @@ mod tests {
         std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
     }
     #[test]
+    fn imdb_episode_bounds_only_filter_when_more_than_two_season_candidates_remain() {
+        // IMDb can list fewer episodes than aired: Cops S36E41 must match
+        // when the title+season search has 1 or 2 plausible identities.
+        // Three identities are disambiguated by the episode maximum.
+        // The final case starts with three title IDs but only two pass the
+        // season filter: the episode filter must remain inactive.
+        for (tag,records,expected_ids) in [
+            ("single",vec![(36,22)],vec!["tt0000001"]),
+            ("two",vec![(36,22),(36,30)],
+                vec!["tt0000001","tt0000002"]),
+            ("three",vec![(36,22),(36,30),(36,55)],
+                vec!["tt0000003"]),
+            ("season_filter_first",vec![(36,22),(36,30),(1,55)],
+                vec!["tt0000001","tt0000002"]),
+        ] {
+            let stamp=std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+            let path=std::env::temp_dir().join(format!(
+                "matchlab-cops-{}-{tag}-{stamp}.sqlite3",std::process::id()));
+            let db=Connection::open(&path).unwrap();
+            db.execute_batch("CREATE TABLE titles(
+                    imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,
+                    category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+                CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+                CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                    episode_count INTEGER,max_episode INTEGER);
+                CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+                CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                    tvdb_id TEXT,trakt_season INTEGER);
+                CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                    anidb_season INTEGER,tvdb_season INTEGER,
+                    start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+                CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);").unwrap();
+            for (index,(max_season,max_episode)) in records.into_iter().enumerate() {
+                let id=format!("tt{:07}",index+1);
+                db.execute("INSERT INTO titles VALUES(?1,'Cops','cops',1989,
+                    'series','US',1,0,'tvSeries')",[&id]).unwrap();
+                db.execute("INSERT INTO seasons VALUES(?1,?2)",
+                    rusqlite::params![id,max_season]).unwrap();
+                db.execute("INSERT INTO season_episodes VALUES(?1,36,?2,?2)",
+                    rusqlite::params![id,max_episode]).unwrap();
+            }
+            tantivy_search::warmup(&db).unwrap();
+            drop(db);
+            for release in ["Cops.S36.E41","Cops.S36E41"] {
+                let result=diagnose(&path,&MatchRequest{
+                    title:release.into(),year:None,series:None}).unwrap();
+                assert_eq!(result.parsed["seasons"],json!([36]),
+                    "{tag} {release}: {:?}",result.parsed);
+                assert_eq!(result.parsed["episodes"],json!([41]),
+                    "{tag} {release}: {:?}",result.parsed);
+                let ids=result.imdb_candidates.iter()
+                    .map(|candidate|candidate.imdb_id.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(ids,expected_ids,"{tag} {release}: {ids:?}");
+                let selected=result.selected.expect("Cops title+season candidate retained");
+                let response=public_match_response(Some(selected));
+                assert_eq!(response["sid_start"],format!("{}:36:41",expected_ids[0]),
+                    "{tag} {release}");
+                assert_eq!(response["sid_end"],response["sid_start"]);
+            }
+            std::fs::remove_file(&path).unwrap();
+            std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+        }
+    }
+
+    #[test]
     fn requested_episode_must_exist_within_known_season_bounds() {
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
