@@ -1609,6 +1609,8 @@ mod tests {
             INSERT INTO episode_map VALUES
                 ('100','bleachtv',1,-1,1,366,0,''),
                 ('100','bleachtv',1,2,22,42,-21,''),
+                ('100','bleachtv',1,15,320,340,-319,''),
+                ('100','bleachtv',1,16,341,366,-340,''),
                 ('200','duketv',1,-1,13,24,0,''),
                 ('200','duketv',1,2,13,24,-12,''),
                 ('300','chaostv',1,-1,1,12,0,''),
@@ -1622,6 +1624,20 @@ mod tests {
         assert_eq!(public_match_response(Some(selected)),json!({
             "sid_start":"tt0000101:2:1","sid_end":"tt0000101:2:21",
             "asid_start":"100:22","asid_end":"100:42"
+        }));
+        // Absolute episode batches can cross IMDb seasons without becoming
+        // a season-local episode range or requiring a separate "E" marker.
+        let d=diagnose(&path,&MatchRequest{
+            title:"Bleach_320-360".into(),year:None,series:None}).unwrap();
+        assert_eq!(d.parsed["anime_title_verified"],true);
+        assert_eq!(d.parsed["episode_range_numbering"],"absolute");
+        let selected=d.selected.expect("Bleach absolute batch identity");
+        assert_eq!(selected["episode_range"]["complete"],true,"{selected}");
+        assert_eq!(selected["episode_range"]["segments"]
+            .as_array().expect("range segments").len(),2);
+        assert_eq!(public_match_response(Some(selected)),json!({
+            "sid_start":"tt0000101:15:1","sid_end":"tt0000101:16:20",
+            "asid_start":"100:320","asid_end":"100:360"
         }));
         // No English IMDb alias appears anywhere in the romanized release.
         let d=diagnose(&path,&MatchRequest{
