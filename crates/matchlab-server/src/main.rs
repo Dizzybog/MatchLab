@@ -16,6 +16,7 @@ mod field_audit;
 mod field_learning;
 mod community_learning;
 mod local_learning;
+mod online_model;
 mod learning_cache;
 mod learned_regex;
 #[cfg(feature="ml-ort")]
@@ -1533,6 +1534,11 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         if args.len()!=3 {return Err("usage: matchlab-server emit-ml-model <output.onnx>".into());}
         tiny_onnx::ensure(std::path::Path::new(&args[2]))
             .map_err(std::io::Error::other)?;
+        return Ok(());
+    }
+    if args.get(1).is_some_and(|arg|arg=="verify-native-ml") {
+        local_learning::verify_native_model().map_err(std::io::Error::other)?;
+        println!("native Rust FTRL model self-test passed");
         return Ok(());
     }
     #[cfg(feature="ml-ort")]
