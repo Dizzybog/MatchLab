@@ -17,6 +17,7 @@ mod field_learning;
 mod community_learning;
 mod local_learning;
 mod online_model;
+mod candidate_discovery;
 mod learning_cache;
 mod learned_regex;
 mod query_cache;
