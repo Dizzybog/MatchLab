@@ -594,9 +594,12 @@ The JSON fields include `enabled`, `active_rule_count`,
 `active_rules_by_field`, `revision`, `training_source`, `model`,
 and `identity_and_coordinate_override`. The `training_source` value
 now distinguishes the canonical Rust parser and independently allowlisted
-raw filename markers for missing technical fields; this is not proof of
-ML model retraining or permission to infer IMDb IDs. The safe in-memory status
-does not query SQLite or run ONNX inference on HTTP requests.
+raw filename markers for missing technical fields. The `model` value is
+`rust_ftrl_proximal`; `online_learner` exposes only the bounded model
+type, parameter size and trusted label counts (no release names or IDs).
+The native online model trains in the background but its score remains
+shadow-only and never authorizes an IMDb, episode or regex override.
+The in-memory status does not query SQLite or run inference.
 
 Set `MATCHLAB_ML_ENABLED=true` on the MatchLab container to opt in.
 Absolute-anime episode rules and technical-field overlays operate under
