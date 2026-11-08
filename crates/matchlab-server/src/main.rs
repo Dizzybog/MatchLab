@@ -1552,6 +1552,89 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     #[test]
+    fn season_only_anime_packs_expose_complete_imdb_and_anidb_ranges() {
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-anime-packs-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+                imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,
+                category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES
+                ('tt0000101','Bleach','bleach',2004,'series','',1,0,'tvSeries'),
+                ('tt0000202','The Duke of Death and His Maid',
+                  'thedukeofdeathandhismaid',2021,'series','',1,0,'tvSeries'),
+                ('tt0000303','Chaos;Head','chaoshead',2008,'series','',1,0,'tvSeries');
+            INSERT INTO seasons VALUES ('tt0000101',16),('tt0000202',3),('tt0000303',1);
+            INSERT INTO season_episodes VALUES
+                ('tt0000101',2,21,21),('tt0000202',2,12,12),
+                ('tt0000303',1,12,12);
+            INSERT INTO anime_series_map VALUES
+                ('tt0000101','100','bleachtv',0),
+                ('tt0000202','200','duketv',0),
+                ('tt0000303','300','chaostv',0);
+            INSERT INTO anime_ids VALUES
+                ('tt0000101','anidb','100'),
+                ('tt0000202','anidb','200'),
+                ('tt0000303','anidb','300');
+            INSERT INTO anidb_titles VALUES
+                ('100','Bleach','bleach','main','en'),
+                ('200','Shinigami Bocchan to Kuro Maid',
+                 'shinigamibocchantokuromaid','synonym','ja'),
+                ('300','Chaos Head','chaoshead','main','en');
+            INSERT INTO episode_map VALUES
+                ('100','bleachtv',1,-1,1,366,0,''),
+                ('100','bleachtv',1,2,22,42,-21,''),
+                ('200','duketv',1,-1,13,24,0,''),
+                ('200','duketv',1,2,13,24,-12,''),
+                ('300','chaostv',1,-1,1,12,0,''),
+                ('300','chaostv',1,1,1,12,0,'');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        let d=diagnose(&path,&MatchRequest{
+            title:"Bleach_S02".into(),year:None,series:None}).unwrap();
+        let selected=d.selected.expect("Bleach season pack IMDb");
+        assert_eq!(selected["episode_range"]["complete"],true,"{selected}");
+        assert_eq!(public_match_response(Some(selected)),json!({
+            "sid_start":"tt0000101:2:1","sid_end":"tt0000101:2:21",
+            "asid_start":"100:22","asid_end":"100:42"
+        }));
+        // No English IMDb alias appears anywhere in the romanized release.
+        let d=diagnose(&path,&MatchRequest{
+            title:"[orion origin] Shinigami Bocchan to Kuro Maid S2 [13-24]  [WebRip] [1080p] [H265 AAC] [CHS＆JPN]".into(),
+            year:None,series:None}).unwrap();
+        let selected=d.selected.expect("romanized AniDB alias matched to English IMDb title");
+        assert_eq!(selected["episode_range"]["complete"],true,"{selected}");
+        assert_eq!(public_match_response(Some(selected)),json!({
+            "sid_start":"tt0000202:2:1","sid_end":"tt0000202:2:12",
+            "asid_start":"200:13","asid_end":"200:24"
+        }));
+        let d=diagnose(&path,&MatchRequest{
+            title:"[HKG&SumiSora&CASO][Chaos_Head][BDRip]".into(),
+            year:None,series:None}).unwrap();
+        let selected=d.selected.expect("exact anime pack identity");
+        assert_eq!(public_match_response(Some(selected)),json!({
+            "sid_start":"tt0000303:1:1","sid_end":"tt0000303:1:12",
+            "asid_start":"300:1","asid_end":"300:12"
+        }));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
     fn public_match_rejects_invalid_anidb_asids_without_losing_imdb_identity(){
         for malformed in ["732:190315","436:180525","6424:431078",
             "732:0","732:foo","bad:3","732:3:4"]{
