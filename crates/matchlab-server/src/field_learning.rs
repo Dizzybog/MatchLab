@@ -171,7 +171,19 @@ fn context_valid(raw: &str, field: &str, signal: &str) -> bool {
         let lower = title.to_ascii_lowercase();
         let release_context = ["1080p", "2160p", "720p", "web", "bluray",
             "bdrip", "hdtv", "x264", "x265", "hevc", "mkv", "mp4"];
-        if !release_context.iter().any(|item| lower.contains(item)) { return false; }
+        // A language word in the title itself (e.g. "The Danish Girl")
+        // is not a release-language tag merely because 1080p follows.
+        if !release_context.iter().any(|item|
+            lower.find(item).is_some_and(|index|index < matched.start())) {
+            return false;
+        }
+    }
+    if field == "channels" {
+        let lower=title.to_ascii_lowercase();
+        let audio=["aac","ac3","eac3","ddp","dts","flac","truehd","opus"];
+        // Numeric titles such as "Show 5.1" are common. Do not infer
+        // audio layout without an actual codec token in the release.
+        if !audio.iter().any(|item|lower.contains(item)){return false;}
     }
     true
 }
@@ -501,6 +513,15 @@ mod tests {
         // and independently supplied the exact same value.
         let original=matchlab_parser::parse_title("Example.x265.WEB-DL",false).unwrap();
         assert_eq!(n>0,original["codec"].as_str().is_some_and(|value|normalize(value)=="x265"));
+    }
+    #[test]
+    fn title_words_and_bare_numbers_are_not_release_tags() {
+        assert!(!context_valid("The Danish Girl.1080p.WEB-DL",
+            "languages","danish"));
+        assert!(context_valid("Film.1080p.Danish.WEB-DL",
+            "languages","danish"));
+        assert!(!context_valid("Film.5.1.WEB-DL","channels","5.1"));
+        assert!(context_valid("Film.AAC.5.1.WEB-DL","channels","5.1"));
     }
     #[test]
     fn requires_diverse_label_agreement_before_activation() {
