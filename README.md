@@ -12,121 +12,92 @@ It can parse names such as `Breaking.Bad.S02E03.1080p.WEB-DL`, recognize season 
 - **Easy deployment:** Native Rust server with Docker, an HTTP API, a dashboard, and automatic metadata refresh.
 - **Safe updates:** SQLite stores metadata relationships; Tantivy generations are built and validated before metadata is switched.
 
-## Community-powered Machine Learning — help MatchLab learn
+## Machine Learning — learn new rules and improve existing regex
 
-**Every opt-in MatchLab installation can help identify new torrent filename
-patterns.** For example, a release such as `Bleach_EPIS338` may contain an
-absolute anime episode that a general-purpose parser misses or interprets
-incorrectly. MatchLab can observe the discrepancy, compare independent
-IMDb/AniDB/TVDB mappings, and—after enough diverse, reproducible examples—
-activate a narrowly scoped regex exception locally **without restarting**.
-When community sharing is also enabled, sufficiently validated proposals can
-be sent to GitHub for independent review and inclusion in a future image.
+MatchLab's optional **Machine Learning (ML)** subsystem learns from real
+torrent-release filenames while the normal parser and IMDb/AniDB matcher keep
+working in Rust. All model training and regex validation happen in a
+background worker. **The model is not invoked for each HTTP request.**
+No GPU, Python service, ONNX Runtime, Ollama or external ML provider is needed.
 
-**Local learning needs no GitHub account, API token, hosted AI service or
-runtime model download.** The official AMD64/ARM64 image includes a compact,
-trainable **FTRL-Proximal online model implemented entirely in Rust**. No
-ONNX Runtime, Python backend, external ML API, GPU or model download is needed.
-Ordinary parsing and matching remain available when learning is disabled. MatchLab's existing *metadata importer* still
-requires public metadata feeds for first-time initialization and refresh;
-"offline learning" does not mean the entire application can bootstrap
-IMDb/AniDB metadata without downloads.
+### What can it learn?
 
-**This is an evolving system, not a general-purpose AI that invents regex.**
-The Rust worker now supports two local rule families:
-(1) restricted absolute-anime episode markers, which require a current
-AniDB/TVDB crosswalk before changing the selected episode; and
-(2) conservative *field-specific technical release tags* (resolution, codec,
-quality, audio, bit depth, HDR, channels, languages, subtitle/dub flags and
-file extension). The second family learns bounded literal-marker regexes from both
-**canonical, non-ML parser results** and a separate evidence stream for
-**missing fields with explicit, independently readable technical markers**.
-For example, a missing `resolution` can still generate evidence from
-`2160p` in the raw title when the parser misses it. It can fill a missing
-field with 8 concordant examples / 4 distinct title identities. Overriding
-an existing field additionally requires 16 / 6 **and at least two direct
-canonical-parser confirmations**. Unknown markers, ambiguous technical tags
-and contradicting evidence are not automatically treated as correct labels.
-Neither stream may train on previously learned parser overlays. Title, production year, season,
-ordinary TV episode and IMDb/AniDB IDs are observed, **not blindly replaced**
-by technical-field regexes: those require separate authoritative validators.
-The native Rust FTRL model **does update its weights** from independently
-validated local examples. Counterfactual wrong-field examples supply explicit
-negative training labels. Its score is uncalibrated and **shadow-only**:
-it never approves a rule or establishes an IMDb ID.
+The learner audits **every parsed field**: title, year, seasons, episodes,
+resolution, codec, quality, audio, languages, HDR, subtitle/dub flags, file
+extension and additional release metadata. It also examines selected IMDb
+and AniDB matches for discrepancies. An observed disagreement is **not**
+automatically a correct label: torrent filenames, parser output and IMDb
+original-release years can each be misleading.
 
-**Want to help?** Set `MATCHLAB_ML_ENABLED=true` to learn privately.
-To contribute proposals to the shared GitHub review pipeline, also enable
-`MATCHLAB_COMMUNITY_LEARNING_ENABLED=true` and provide your **own**
-`MATCHLAB_COMMUNITY_GITHUB_TOKEN`. Reporting is voluntary and public;
-review your privacy requirements before enabling it. Contributions are
-batched at most once every 24 hours per installation, deduplicated, and
-replayed against the latest parser. No automated PR is merged without
-maintainer review.
-
-[**Community Learning setup, architecture and contribution guide**](docs/COMMUNITY_LEARNING.md)
-
-## Machine Learning — local learning, better matching for everyone
-
-MatchLab can **learn repeatable patterns from torrent names** without a
-cloud AI service. Local learning is disabled by default: enable it with
-`MATCHLAB_ML_ENABLED=true` and a background Rust worker examines parser
-fields and metadata-backed IMDb/AniDB matches. It can **hot-load safe regex
-exceptions** for overlooked or incorrectly parsed absolute anime episodes
-and technical release-field markers. Every anime ID/episode change must
-still pass the current AniDB/TVDB crosswalk, and technical fields require diverse concordant observations with
-explicit independent raw-marker validation for initially missing fields.
-Previously learned outputs never become their own training labels.
-Normal matching works without ML.
-
-The official Linux AMD64/ARM64 Docker image contains the **native online
-FTRL model and CPU-only learning worker**, with no external ML runtime
-or downloads. The model uses 16,384 hashed feature slots (128 KiB of
-z/n parameters), trains incrementally from independently validated raw
-technical markers and canonical-parser evidence, and persists its weights
-atomically with the learning cursor. Predictions are used only to prioritize
-observations; the model is **not** a calibrated probability estimator and
-cannot authorize regex, IMDb identity, or episode changes. Verification,
-diverse evidence and negative regression probes remain mandatory.
-
-| Stage | What happens |
+| Learning area | What is enabled today |
 | --- | --- |
-| **Observe** | Identify mismatches in season, episode, year, title, quality and other parser fields |
-| **Learn offline** | Train a compact Rust FTRL-Proximal model from independently validated labels and collect bounded SQL evidence |
-| **Validate** | Verify exact episode crosswalks, diverse examples, restricted linear-time regex and negative tests |
-| **Activate live** | Hot-load verified local episode and technical-field rules; allow narrow, independently checked overrides of existing regex |
-| **Preserve** | Keep obsolete learning evidence as cache, but recompute stale completed parse/match answers |
-| **Share optionally** | Upload one deduplicated daily GitHub batch containing high-evidence rules and qualifying anomalies |
-| **Review upstream** | GitHub Actions screens the current Rust parser, runs regression tests and opens at most one human-review PR per day |
+| **All parser fields** | Detect omitted, unusual or conflicting values; record bounded, hashed observations for review |
+| **Technical release fields** | Learn literal-marker regexes that fill missing fields or, with stronger evidence, correct existing values |
+| **Ordinary TV seasons and episodes** | Learn explicit `S02E07`, `2x07` and `Season 2 Episode 7` conventions; fill missing values and conditionally correct a conflicting single coordinate |
+| **Absolute anime episodes** | Learn new marker conventions, subject to independent AniDB/TVDB verification before they affect a selected match |
+| **Existing parser regex** | Inspect the full generated handler catalogue and safely compile selected, evidence-backed broader replacement patterns in the background |
+| **Title, year, unmarked episode, IMDb/AniDB identity** | Detect and rank inconsistencies; do **not** invent an identity or automatically rewrite an ambiguous result without independent verification |
 
-**Opt-in configuration:**
+For technical fields, at least **8 concordant examples from 4 different
+titles** can activate a missing-field rule; replacing a value requires
+**16 examples, 6 titles, and 2 original-parser confirmations**. The
+ordinary-TV learner additionally requires at least two confirmations
+from the original parser, with stronger evidence to correct an existing
+single season or episode. It never overwrites episode packs or ambiguous
+multi-marker releases.
 
-~~~yaml
-environment:
-  MATCHLAB_ML_ENABLED: "true"  # local only: no GitHub traffic
-  # MATCHLAB_COMMUNITY_LEARNING_ENABLED: "true"
-  # MATCHLAB_COMMUNITY_GITHUB_TOKEN: ${MATCHLAB_COMMUNITY_GITHUB_TOKEN}
-~~~
+MatchLab can use learned rules in **two ways**. An *additional rule*
+recognizes a pattern the original parser missed. A *source-handler
+improvement* broadens a verified existing regex while preserving that
+handler's field, transformation, ordering and original matching branch.
+For simple technical patterns, the worker can compile and atomically
+hot-swap the improved handler; the old compiled parser remains available
+as canonical training truth. More complex or ambiguous regex changes
+remain review-only. A trained model score alone never authorizes a change.
 
-Locally activated episode-marker rules require at least **8 separately
-verified examples from two IMDb identities and three episodes**.
-Community PR proposals require **12 examples, four identities and five
-episodes**. Technical release fields can learn restricted local literal-marker
-regexes after 8 concordant examples across 4 identities, including strict
-raw-marker clues when the base parser leaves the field empty. Replacing an
-existing technical field needs 16 across 6, including two independent
-canonical-parser confirmations. Conflicting evidence is quarantined. Title, year, normal season/episode and identity signals
-remain audit-only until independent, field-specific verification exists.
-Community GitHub rule PRs still currently target absolute-anime markers.
-PRs **never auto-merge**.
+### How it works
 
-The two switches are independent: ordinary MatchLab requires neither,
-local learning requires only `MATCHLAB_ML_ENABLED`, and sharing requires
-both switches plus a user-owned GitHub token. Opt-in shared examples
-appear in public GitHub Issues; filenames may be sensitive.
+1. **Observe** the original filename and original parser output, not a
+   cached or ML-modified answer.
+2. **Learn** with a small online FTRL-Proximal model implemented in Rust,
+   supplemented by explicit marker and metadata validators.
+3. **Compare** any candidate against existing source regex, independent
+   title identities, conflicting markers and negative examples.
+4. **Compile once** in the background and hot-load only acceptable rules.
+   Ordinary requests use precompiled regex, with no ML inference.
+5. **Version the cache.** A parser, learned-rule or metadata change
+   invalidates completed answers. The next query reparses and rematches;
+   training evidence never becomes a cached ground-truth answer.
+6. **Optionally contribute** verified proposals through GitHub. Community
+   sharing is separate from local ML and never auto-merges a PR.
 
-**[Read the Community Learning guide](docs/COMMUNITY_LEARNING.md)** for
-contributing, technical limits, security and maintainer setup.
+### Simple Docker Compose settings
+
+Set `MATCHLAB_ML_ENABLED=true` in your `.env` to turn learning on:
+
+```dotenv
+MATCHLAB_ML_ENABLED=true
+MATCHLAB_ML_TRAINING_MAX_EXAMPLES=500000
+MATCHLAB_ML_MAX_STORAGE_GB=10
+MATCHLAB_ML_CACHE_MAX_ENTRIES=200000
+```
+
+The supplied [compose.yaml](compose.yaml) reads these four settings
+automatically. **Only the enabled switch is required**; the other
+settings have defaults. `MATCHLAB_ML_TRAINING_MAX_EXAMPLES` controls
+retained validated *field observations*, not a fixed RAM allocation or
+the number of distinct torrent titles. The cache uses exact keyed SQLite
+lookups, while normal IMDb search remains in Tantivy. Successes and
+no-matches have separate TTLs; stale results are recomputed.
+
+For the learning status, inspect `GET /api/ml/status`. Local learning
+never posts to GitHub. If you also want to contribute publicly, enable
+`MATCHLAB_COMMUNITY_LEARNING_ENABLED=true` and provide your own private
+`MATCHLAB_COMMUNITY_GITHUB_TOKEN`. The upstream PR-review pipeline
+currently supports separately verified absolute-anime marker proposals;
+other field proposals still require community intake validation.
+
+**[Full learning architecture, limitations and contribution guide](docs/COMMUNITY_LEARNING.md)**
 
 ## Dashboard
 
@@ -309,7 +280,7 @@ IMDb basics, alternative titles, episodes, ratings, animeApi, Anime-Lists, and A
 | `MATCHLAB_COMMUNITY_GITHUB_TOKEN` | Unset | Contributor-owned GitHub token with permission to comment on public upstream Issues; members may use fine-grained PAT, outsiders need classic `public_repo` |
 | `MATCHLAB_ML_ENABLED` | `false` | Opt in to the Rust-only local learning worker (never enables sharing by itself) |
 | `MATCHLAB_ML_MAX_STORAGE_GB` | `1` | Shared best-effort learning DB disk budget in GiB (1–128); separate from training example count | 
-| `MATCHLAB_ML_TRAINING_MAX_EXAMPLES` | `12000` | Retain up to 100–2,000,000 current-build verified technical field observations; unpromoted old evidence rotates when full |
+| `MATCHLAB_ML_TRAINING_MAX_EXAMPLES` | `12000` | Retain 100–2,000,000 current-build validated field observations; unpromoted old evidence rotates when full |
 | `MATCHLAB_ML_CACHE_MAX_ENTRIES` | `100000` | Maximum persistent parse/match cache rows (100–2,000,000), enforced by background cleanup |
 | `MATCHLAB_ML_CACHE_TTL_HOURS` | `720` | Repeated successful parse/match response lifetime (1–720 h); build/rule/metadata changes invalidate earlier |
 | `MATCHLAB_ML_UNMATCHED_CACHE_TTL_MINUTES` | `30` | Short no-match result lifetime (1–1440 min); changes invalidate earlier |
@@ -361,10 +332,11 @@ normal API or worker.
 
 The native Rust FTRL-Proximal model uses hashed character n-grams, field/marker
 relationships, release context and token position. It trains only from original
-Rust parser results or independently interpretable raw technical markers, with
-counterfactual **wrong field** negatives. The model remains **shadow-only**:
-neither a model score nor repeated occurrence can establish an IMDb ID,
-ordinary TV episode, or an unsupported technical value.
+Rust parser results or independently interpretable raw technical and explicit TV markers, with
+counterfactual **wrong field** negatives. The model remains **shadow-only**: a model score or a repeated
+observation cannot establish an IMDb ID, a season/episode coordinate, or
+an unsupported technical value. Separately confirmed explicit TV marker
+rules can now fill missing coordinates or correct a conflicting single value.
 
 An approximately 20% deterministic title-group holdout evaluates whether the
 model ranks each independently checked field above an intentionally wrong field.
@@ -397,8 +369,6 @@ environment:
   MATCHLAB_ML_TRAINING_MAX_EXAMPLES: "500000"
   MATCHLAB_ML_CACHE_ENABLED: "true"
   MATCHLAB_ML_CACHE_MAX_ENTRIES: "200000"
-  MATCHLAB_ML_CACHE_TTL_HOURS: "720"
-  MATCHLAB_ML_UNMATCHED_CACHE_TTL_MINUTES: "30"
 ~~~
 
 The same SQLite database under `/data/local-learning.sqlite3` stores
