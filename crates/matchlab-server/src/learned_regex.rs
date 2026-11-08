@@ -11,7 +11,7 @@ use regex::{Regex,RegexBuilder};
 use rusqlite::{params,Connection,OptionalExtension};
 use serde_json::{json,Value};
 use sha2::{Digest,Sha256};
-use std::sync::{OnceLock,RwLock};
+use std::sync::{OnceLock,RwLock,atomic::{AtomicU64,Ordering}};
 
 const EPOCH:u32=1;
 const MIN_EXAMPLES:i64=8;
@@ -23,6 +23,10 @@ const MAX_EVIDENCE:i64=2048;
 const MAX_REGEX_BYTES:usize=160;
 static ACTIVE:OnceLock<RwLock<Vec<ActiveRule>>>=OnceLock::new();
 static CANDIDATE:OnceLock<Regex>=OnceLock::new();
+static RULESET_REVISION:AtomicU64=AtomicU64::new(0);
+
+/// Stable fingerprint of currently active overlays, included in cache keys.
+pub fn revision()->u64{RULESET_REVISION.load(Ordering::Relaxed)}
 
 struct ActiveRule {marker:String,pattern:Regex}
 fn rules()->&'static RwLock<Vec<ActiveRule>> {
@@ -99,7 +103,17 @@ fn match_release<'a>(re:&Regex,title:&'a str)->Option<(&'a str,i64)>{
     (1..=99999).contains(&episode).then_some((name,episode))
 }
 fn install(rows:Vec<ActiveRule>){
-    if let Ok(mut active)=rules().write(){*active=rows;}
+    // Stable across repeated reloads and process restarts. New or retired
+    // overlays change the cache namespace without a global cache lock.
+    let mut markers=rows.iter().map(|r|r.marker.as_str()).collect::<Vec<_>>();
+    markers.sort_unstable();
+    let fingerprint=Sha256::digest(markers.join("\n").as_bytes());
+    let mut bits=[0u8;8];
+    bits.copy_from_slice(&fingerprint[..8]);
+    if let Ok(mut active)=rules().write(){
+        *active=rows;
+        RULESET_REVISION.store(u64::from_le_bytes(bits),Ordering::Release);
+    }
 }
 /// Hot path: only a tiny set of precompiled linear-time expressions and an
 /// uncontended read lock; completely inactive when MATCHLAB_ML_ENABLED=false.
