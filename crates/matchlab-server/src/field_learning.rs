@@ -356,6 +356,15 @@ fn propose_from(title: &str, parsed: &mut Value, active: &[FieldRule]) {
             || rule.titles < MIN_OVERRIDE_TITLES) {
             continue;
         }
+        // A release may carry multiple conflicting specifications (e.g.
+        // WEB-DL plus WEBRip). The existing parse has explicit evidence
+        // too; never let population frequency decide which is correct.
+        if !empty && current.as_str().is_some_and(|old| {
+            let token = normalize(old);
+            !token.is_empty() && normalize(leaf(title)).contains(&token)
+        }) {
+            continue;
+        }
         // A multilingual release may legitimately have many languages;
         // never overwrite an already populated language list.
         if field=="languages" && !empty { continue; }
@@ -403,6 +412,16 @@ mod tests {
         assert_eq!(parsed["episodes"],json!([5]));
         assert_eq!(parsed["year"],2024);
         assert_eq!(parsed["learned_field_overrides"].as_array().unwrap().len(),2);
+    }
+    #[test]
+    fn existing_explicit_release_marker_defeats_a_conflicting_learned_rule() {
+        let mut parsed=json!({"quality":"WEBRip","codec":"x264"});
+        propose_from("Film.WEBRip.WEB-DL.x264",&mut parsed,&[
+            rule("quality","web_dl",json!("WEB-DL"),64,20),
+            rule("codec","x265",json!("x265"),64,20)
+        ]);
+        assert_eq!(parsed["quality"],"WEBRip");
+        assert_eq!(parsed["codec"],"x264");
     }
     #[test]
     fn competing_signals_fail_closed() {
