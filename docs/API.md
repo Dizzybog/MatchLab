@@ -566,10 +566,11 @@ retention cap caused a data gap; reset to the earliest available history and
 record the gap. The feed is not a permanent historical archive.
 
 The anomaly flags are **conservative review hints**, not automatic corrections.
-Current checks cover explicit `SxxEyy` disagreement with selected or parsed
-coordinates, unmatched explicitly episodic releases, impossible nonpositive
-coordinates, unusually large seasons, reversed episode ranges, and matching
-errors. A verified AniDB mapping that deliberately changes an explicit episode
+Current checks cover explicit `SxxEyy` and Spanish `Cap.103` / `Cap.1004`
+marker disagreement with selected or parsed coordinates, unresolved absolute
+anime episode hints (such as `Stone Ocean 27`), unmatched explicitly episodic
+releases, impossible nonpositive coordinates, unusually large seasons,
+reversed episode ranges, and matching errors. A verified AniDB mapping that deliberately changes an explicit episode
 is not reported as an explicit-marker mismatch.
 
 **Security:** Only the HTTPS `Authorization: Bearer` header is accepted,
