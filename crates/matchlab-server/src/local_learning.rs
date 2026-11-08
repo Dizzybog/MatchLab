@@ -177,18 +177,18 @@ impl OptionalModel {
                 let library=env::var("ORT_DYLIB_PATH")
                     .map_err(|_|"ORT_DYLIB_PATH is unset")?;
                 let location=env::var("MATCHLAB_ML_MODEL_PATH")
-                    .map_err(|_|"MATCHLAB_ML_MODEL_PATH is unset")?;
+                    .unwrap_or_else(|_|"/data/learning-model.onnx".into());
                 let path=Path::new(&location);
+                if env::var("MATCHLAB_ML_MODEL_PATH").is_err() {
+                    crate::tiny_onnx::ensure(path)?;
+                }
                 if !path.is_file()||path.metadata().map_err(|e|e.to_string())?.len()>4*1024*1024{
                     return Err("ONNX model must be a local file <=4MiB".into());
                 }
-                // CPU only, single thread, no downloads, no runtime loading
-                // unless the user explicitly enabled local learning.
-                let env=ort::init_from(&library).map_err(|e|e.to_string())?
-                    .with_intra_threads(1).map_err(|e|e.to_string())?
-                    .with_inter_threads(1).map_err(|e|e.to_string())?
+                // Single CPU inference thread, no downloads and no GPU EP.
+                let environment=ort::init_from(&library).map_err(|e|e.to_string())?
                     .build().map_err(|e|e.to_string())?;
-                Session::builder(&env).map_err(|e|e.to_string())?
+                Session::builder(&environment).map_err(|e|e.to_string())?
                     .with_intra_threads(1).map_err(|e|e.to_string())?
                     .with_inter_threads(1).map_err(|e|e.to_string())?
                     .commit_from_file(path).map_err(|e|e.to_string())
