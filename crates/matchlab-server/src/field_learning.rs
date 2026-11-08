@@ -152,7 +152,7 @@ fn validated_value(field: &str, signal: &str, value: &Value) -> bool {
 // result, supply IMDb coordinates, or learn an unknown label by repetition.
 fn independent_marker_value(field:&str,signal:&str)->Option<Value>{
     let value=match (field,signal){
-        ("resolution","4320p"|"2160p"|"1080p"|"720p"|"576p"|"480p")=>json!(signal),
+        ("resolution",value) if crate::field_audit::supported_pixel_height(value)=>json!(value),
         ("codec","x264"|"x265"|"h264"|"h265"|"hevc"|"av1")=>json!(signal),
         ("quality","web_dl"|"webdl")=>json!("WEB-DL"),
         ("quality","webrip")=>json!("WEBRip"),
@@ -174,7 +174,9 @@ fn conflict_patterns()->&'static BTreeMap<&'static str,Vec<(&'static str,Regex)>
         =OnceLock::new();
     INDEX.get_or_init(||{
         let families:&[(&'static str,&[&'static str])]=&[
-            ("resolution",&["4320p","2160p","1080p","720p","576p","480p","4k","8k"]),
+            ("resolution",&["4320p","3200p","2880p","2160p","1800p","1600p","1440p",
+                "1200p","1080p","1024p","960p","900p","864p","800p","720p",
+                "640p","600p","576p","540p","480p","360p","240p","4k","8k"]),
             ("codec",&["x264","x265","h264","h265","hevc","av1","vp9"]),
             ("quality",&["web_dl","webdl","webrip","bluray","bdrip","brrip","hdtv","dvdrip"]),
             ("audio",&["aac","ac3","eac3","ddp","dts","flac","truehd","opus"]),
@@ -730,6 +732,9 @@ mod tests {
         let empty=serde_json::Map::new();
         assert_eq!(training_label("Film.2160p.WEB-DL","resolution","2160p",&empty),
             Some((json!("2160p"),true)));
+        assert_eq!(training_label("Film.1440p.WEB-DL","resolution","1440p",&empty),
+            Some((json!("1440p"),true)));
+        assert!(training_label("Film.1440p.1080p","resolution","1440p",&empty).is_none());
         assert_eq!(training_label("Film.x265.WEB-DL","codec","x265",&empty),
             Some((json!("x265"),true)));
         assert_eq!(training_label("Film.1080p.DUBBED","dubbed","dubbed",&empty),
