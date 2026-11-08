@@ -395,6 +395,58 @@ mod tests{
         let _=&mut db;
     }
     #[test]
+    fn image_upgrade_revalidates_and_removes_untrusted_basis_atomically(){
+        let mut local=Connection::open_in_memory().unwrap();
+        local.execute_batch("CREATE TABLE settings(k TEXT PRIMARY KEY,v TEXT NOT NULL);").unwrap();
+        init(&local).unwrap();
+        let meta=Connection::open_in_memory().unwrap();
+        meta.execute_batch("CREATE TABLE metadata_state(
+             source TEXT PRIMARY KEY,updated_at TEXT NOT NULL,row_count INTEGER);
+             INSERT INTO metadata_state VALUES('full_refresh','test-revision',1);
+             CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                 tvdb_id TEXT,trakt_season INTEGER);
+             CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+             CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                 anidb_season INTEGER,tvdb_season INTEGER,
+                 start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+             INSERT INTO anime_series_map VALUES('tt1234567','100','200',0);
+             INSERT INTO episode_map VALUES('100','200',1,2,1,30,0,'');").unwrap();
+        local.execute("INSERT INTO learned_regex_candidates VALUES('epis',1)",[]).unwrap();
+        local.execute("INSERT INTO learned_regex_evidence VALUES(
+             'epis','key','tt1234567',300,14,1,'100',300)",[]).unwrap();
+        local.execute("INSERT INTO learned_regex_active VALUES(
+             'epis','old-regex','old-build','old-metadata',1)",[]).unwrap();
+        // The prior image trusted absolute episode 300. Current metadata
+        // cannot reproduce it; remove both the rule and the observation.
+        reconcile(&mut local,&meta).unwrap();
+        for table in ["learned_regex_candidates","learned_regex_evidence",
+             "learned_regex_active"]{
+            let query=format!("SELECT count(*) FROM {table}");
+            assert_eq!(local.query_row(&query,[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        }
+    }
+    #[test]
+    fn incompatible_rule_epoch_clears_all_rules_and_supporting_examples(){
+        let mut local=Connection::open_in_memory().unwrap();
+        local.execute_batch("CREATE TABLE settings(k TEXT PRIMARY KEY,v TEXT NOT NULL);
+             INSERT INTO settings VALUES('learned_regex_epoch','0');").unwrap();
+        init(&local).unwrap();
+        local.execute("INSERT INTO learned_regex_candidates VALUES('epis',1)",[]).unwrap();
+        local.execute("INSERT INTO learned_regex_evidence VALUES(
+             'epis','key','tt1234567',300,14,1,'100',300)",[]).unwrap();
+        let meta=Connection::open_in_memory().unwrap();
+        meta.execute_batch("CREATE TABLE metadata_state(
+             source TEXT PRIMARY KEY,updated_at TEXT NOT NULL,row_count INTEGER);
+             INSERT INTO metadata_state VALUES('full_refresh','valid',1);").unwrap();
+        reconcile(&mut local,&meta).unwrap();
+        let count:i64=local.query_row("SELECT count(*) FROM learned_regex_evidence",
+            [],|r|r.get(0)).unwrap();
+        assert_eq!(count,0);
+        let count:i64=local.query_row("SELECT count(*) FROM learned_regex_candidates",
+            [],|r|r.get(0)).unwrap();
+        assert_eq!(count,0);
+    }
+    #[test]
     fn disabled_rules_never_patch_parser_outputs(){
         install(vec![]);
         let mut parsed=json!({"title":"Bleach","episodes":[],"seasons":[]});
