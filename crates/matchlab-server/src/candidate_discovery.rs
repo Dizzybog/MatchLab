@@ -102,7 +102,8 @@ pub fn observe(db:&Connection,title:&str,parsed:&Value,
     if !(4..=120).contains(&name.len()) {return Ok(());}
     let identity=hash(&name);
     for marker in unknown_tokens(title){
-        if remaining.examples>=MAX_EXAMPLES
+        if remaining.examples>=MAX_EXAMPLES.min(
+            crate::learning_cache::training_max_examples())
             && !reclaim_unqualified(db,remaining)?{break;}
         // Learning predictions are only for review prioritization. The
         // actual value and regex are never used in a parser or matcher.
