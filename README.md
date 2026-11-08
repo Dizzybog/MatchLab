@@ -335,6 +335,34 @@ directly replaces an IMDb/AniDB result, changes episode coordinates or
 authorizes a regex. Rule promotion still requires separate verifiers.
 GitHub reporting additionally requires its own explicit opt-in and token.
 
+### Online model evaluation and unknown-pattern review
+
+The native Rust FTRL-Proximal model uses hashed character n-grams, field/marker
+relationships, release context and token position. It trains only from original
+Rust parser results or independently interpretable raw technical markers, with
+counterfactual **wrong field** negatives. The model remains **shadow-only**:
+neither a model score nor repeated occurrence can establish an IMDb ID,
+ordinary TV episode, or an unsupported technical value.
+
+An approximately 20% deterministic title-group holdout evaluates whether the
+model ranks each independently checked field above an intentionally wrong field.
+The status API returns `holdout_pair_accuracy`, recent pairwise accuracy and
+`drift_review_suggested`; **these are not calibrated probabilities or
+measurements of total parsing/matching accuracy**.
+
+A separate, bounded **review-only candidate discovery** stage identifies
+unfamiliar release suffixes after known technical context. It groups candidates
+across different normalized title identities and ranks them with the model.
+The locally stored candidates cannot run as regex or enter GitHub proposals
+without additional independent labeling and reviewer validation. The public
+`GET /api/ml/status` returns aggregate candidate counts only, not raw names,
+private tokens, example hashes or IMDb IDs.
+
+Novel **independently recognizable** pixel-height markers (for example
+`900p`, `1440p`, `2880p`) can instead collect safe, literal evidence
+and generate field-specific local regex under the existing 8/4 fill and
+16/6-plus-canonical override gates.
+
 ### Local learning storage and cache
 
 MatchLab can keep up to **10 GiB** of local learning data and reusable
