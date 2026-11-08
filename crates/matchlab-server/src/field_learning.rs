@@ -27,6 +27,7 @@ const MAX_RULES: usize = 96;
 const MAX_TITLE_BYTES: usize = 240;
 static ACTIVE:OnceLock<RwLock<ActiveRules>>=OnceLock::new();
 static REVISION: AtomicU64 = AtomicU64::new(0);
+static ORIGINAL_HANDLER_COUNT:OnceLock<usize>=OnceLock::new();
 
 #[derive(Clone)]
 struct FieldRule {
@@ -705,7 +706,7 @@ pub fn status() -> Value {
             "online_learner":crate::online_model::OnlineModel::status(),
             "candidate_discovery":crate::candidate_discovery::status(),
             "tv_coordinate_learning":crate::tv_learning::status(),
-            "original_handler_rules":matchlab_parser::existing_regex_rules().len(),
+            "original_handler_rules":*ORIGINAL_HANDLER_COUNT.get_or_init(||matchlab_parser::existing_regex_rules().len()),
             "source_rule_patch_revision":format!("{:016x}",matchlab_parser::handler_patch_revision()),
             "identity_and_coordinate_override":"separate_metadata_verification"});
     }
