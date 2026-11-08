@@ -634,6 +634,34 @@ mod tests{
         assert!(match_release(&regex,"Movie/EPIS300").is_none());
     }
     #[test]
+    fn verified_local_rule_can_propose_fixing_an_existing_wrong_parser_field(){
+        let active=vec![ActiveRule{
+            marker:"epis".into(),pattern:regex_for("epis").unwrap()
+        }];
+        let mut parsed=json!({
+            "title":"Bleach","seasons":[3],"episodes":[7]
+        });
+        propose_from("Bleach.EPIS.300",&mut parsed,&active);
+        assert_eq!(parsed["learned_regex_candidate"]["episode"],300);
+        assert_eq!(parsed["learned_regex_candidate"]["needs_crosswalk_verification"],true);
+        // The parser's original value is never overwritten here; the
+        // current matcher must independently verify the proposal first.
+        assert_eq!(parsed["episodes"],json!([7]));
+        let mut explicit=json!({"title":"Bleach","seasons":[3],"episodes":[7]});
+        propose_from("Bleach.S03E07.EPIS300",&mut explicit,&active);
+        assert!(explicit.get("learned_regex_candidate").is_none());
+    }
+    #[test]
+    fn ambiguous_competing_regex_patterns_never_modify_fields(){
+        let active=vec![
+            ActiveRule{marker:"epis".into(),pattern:regex_for("epis").unwrap()},
+            ActiveRule{marker:"epic".into(),pattern:regex_for("epic").unwrap()}
+        ];
+        let mut parsed=json!({"title":"Bleach","episodes":[],"seasons":[]});
+        propose_from("Bleach.EPIS300.EPIC301",&mut parsed,&active);
+        assert!(parsed.get("learned_regex_candidate").is_none());
+    }
+    #[test]
     fn obsolete_rule_and_supporting_evidence_cascade_together(){
         let mut db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE settings(k TEXT PRIMARY KEY,v TEXT NOT NULL);").unwrap();
