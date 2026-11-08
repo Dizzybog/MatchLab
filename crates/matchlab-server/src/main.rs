@@ -1518,6 +1518,19 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_|"matchlab_server=info".into())).init();
     let args:Vec<String>=env::args().collect();
+    #[cfg(feature="ml-ort")]
+    if args.get(1).is_some_and(|arg|arg=="emit-ml-model") {
+        if args.len()!=3 {return Err("usage: matchlab-server emit-ml-model <output.onnx>".into());}
+        tiny_onnx::ensure(std::path::Path::new(&args[2]))
+            .map_err(std::io::Error::other)?;
+        return Ok(());
+    }
+    #[cfg(feature="ml-ort")]
+    if args.get(1).is_some_and(|arg|arg=="verify-ml-image") {
+        local_learning::verify_image_assets().map_err(std::io::Error::other)?;
+        println!("Bundled ONNX model + CPU runtime verified");
+        return Ok(());
+    }
     if args.get(1).is_some_and(|arg|arg=="import-imdb") {
         if args.len()!=6 {
             return Err("usage: matchlab-server import-imdb <database.sqlite3> <title.basics.tsv.gz> <title.akas.tsv.gz> <title.episode.tsv.gz>".into());
