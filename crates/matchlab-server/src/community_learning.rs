@@ -83,7 +83,7 @@ fn report(title:&str,status:&str,details:&Value)->Option<Value>{
             "matching_error"|"invalid_selected_coordinate"|"unusual_season_number"|
             "unmatched_explicit_episode"|"explicit_episode_mismatch"|
             "parser_marker_disagreement"|"unresolved_absolute_anime_episode"|
-            "incomplete_anime_episode_range"|"reversed_selected_range")).map(str::to_owned)).collect();
+            "incomplete_anime_episode_range"|"reversed_selected_range"|"field_missing_title"|"field_missing_resolution"|"field_missing_codec"|"field_missing_quality"|"field_missing_audio"|"field_missing_bit_depth"|"field_missing_hdr"|"field_missing_channels"|"field_missing_languages"|"field_missing_subbed"|"field_missing_dubbed"|"field_missing_seasons"|"field_missing_episodes"|"field_missing_extension"|"field_missing_year"|"field_missing_anime_episode")).map(str::to_owned)).collect();
     codes.sort();codes.dedup();
     if codes.is_empty(){return None;}
     let parsed=&details["parsed"];
