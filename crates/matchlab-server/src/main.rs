@@ -523,6 +523,26 @@ fn verified_unmarked_single_anime_imdb(
     Ok(Some(winner.imdb_id.clone()))
 }
 
+/// An independent AniDB result can stand alone without IMDb. However,
+/// when *both* IDs are returned together, require a documented link; the
+/// same normalized release title is not itself evidence that two different
+/// works share an identity. This function only guards *new* AniDB enrichment
+/// and never invalidates a pre-existing verified IMDb crosswalk.
+fn anidb_related_to_selected_imdb(
+    db:&Connection,winner:&Value,anidb_id:&str,
+)->Result<bool,String>{
+    let Some(imdb)=winner["imdb_id"].as_str()else{return Ok(false)};
+    if !metadata_import::valid_imdb_id(imdb){return Ok(false);}
+    let link:i64=db.query_row("SELECT
+        EXISTS(SELECT 1 FROM anime_series_map
+               WHERE imdb_id=?1 AND anidb_id=?2)
+        OR EXISTS(SELECT 1 FROM anime_ids
+               WHERE group_id=?1 AND type='anidb' AND value=?2)",
+        rusqlite::params![imdb,anidb_id],|r|r.get(0))
+        .map_err(|e|e.to_string())?;
+    Ok(link!=0)
+}
+
 /// Public requests apply the release identity gate; dashboard diagnostics
 /// deliberately allow a bare title so its candidates can be inspected.
 #[derive(Clone,Copy)]
@@ -1285,9 +1305,15 @@ fn diagnose_with_policy(
                             "independent":independent_asid,"imdb_crosswalk":existing});
                     },
                     _ => {
-                        winner["anime"]=json!({"anidb_id":item.anidb_id,
-                            "episode":item.episode,"asid":independent_asid});
-                        winner["anidb_independent_verified"]=json!(true);
+                        if anidb_related_to_selected_imdb(&db,winner,&item.anidb_id)?{
+                            winner["anime"]=json!({"anidb_id":item.anidb_id,
+                                "episode":item.episode,"asid":independent_asid});
+                            winner["anidb_independent_verified"]=json!(true);
+                        }else{
+                            winner["anidb_conflict"]=json!({
+                                "independent":independent_asid,
+                                "reason":"no IMDb-to-AniDB relationship"});
+                        }
                     }
                 }
             }
@@ -1300,9 +1326,16 @@ fn diagnose_with_policy(
                 "parsed":parsed_value.clone()}));
         }
         if let Some(winner)=selected.as_mut(){
-            winner["anidb_independent_verified"]=json!(true);
-            winner["anidb_range"]=json!({"anidb_id":item.anidb_id,
-                "start":item.start,"end":item.end});
+            if winner["imdb_id"].is_null()
+                || anidb_related_to_selected_imdb(&db,winner,&item.anidb_id)?{
+                winner["anidb_independent_verified"]=json!(true);
+                winner["anidb_range"]=json!({"anidb_id":item.anidb_id,
+                    "start":item.start,"end":item.end});
+            }else{
+                winner["anidb_conflict"]=json!({
+                    "anidb_id":item.anidb_id,
+                    "reason":"no IMDb-to-AniDB relationship"});
+            }
         }
     }
     let reason = if anidb_candidate.is_some() && selected.as_ref()
@@ -2204,6 +2237,26 @@ mod tests {
             assert!(response["asid_start"].is_null());
             assert!(response["asid_end"].is_null());
         }
+    }
+
+    #[test]
+    fn independently_verified_anidb_id_cannot_be_combined_with_unrelated_imdb(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO anime_series_map VALUES
+                ('tt2359704','16187','262954',0),
+                ('tt0434665','2369','74796',0);
+            INSERT INTO anime_ids VALUES('tt2359704','anidb','16187');").unwrap();
+        let jojo=json!({"imdb_id":"tt2359704","category":"series"});
+        let bleach=json!({"imdb_id":"tt0434665","category":"series"});
+        assert!(anidb_related_to_selected_imdb(&db,&jojo,"16187").unwrap());
+        assert!(anidb_related_to_selected_imdb(&db,&bleach,"2369").unwrap());
+        assert!(!anidb_related_to_selected_imdb(&db,&bleach,"16187").unwrap());
+        assert!(!anidb_related_to_selected_imdb(&db,&jojo,"2369").unwrap());
+        assert!(!anidb_related_to_selected_imdb(
+            &db,&json!({"imdb_id":null}),"16187").unwrap());
     }
 
     #[test]
