@@ -2822,12 +2822,26 @@ mod tests {
             assert_eq!(status,StatusCode::OK,"{title}");
             assert!(api["sid_start"].is_null(),
                 "public API must enforce production-year signal for {title}");
+            // Regression: /debug/match must apply exactly the same
+            // production eligibility filter as /match. The separate
+            // dashboard route above remains intentionally permissive.
+            let (debug_status,Json(integration_debug))=debug_request(
+                State(state.clone()),Json(request())).await;
+            assert_eq!(debug_status,StatusCode::OK,"{title}");
+            assert!(integration_debug["selected"].is_null(),
+                "debug published a candidate excluded by /match for {title}: {integration_debug}");
         }
-        let (status,Json(api))=match_response(state,
+        let (status,Json(api))=match_response(state.clone(),
             MatchRequest{title:"Fight.Club.1999.mkv".into(),
                 year:None,series:None},false,false).await;
         assert_eq!(status,StatusCode::OK);
         assert_eq!(api["sid_start"],"tt0137523");
+        let (status,Json(debug))=debug_request(State(state),Json(MatchRequest{
+            title:"Fight.Club.1999.mkv".into(),year:None,series:None,
+        })).await;
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(debug["selected"]["imdb_id"],"tt0137523");
+        assert_eq!(api["sid_start"],debug["selected"]["imdb_id"]);
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
         std::fs::remove_file(&history).unwrap();
