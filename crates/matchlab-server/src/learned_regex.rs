@@ -142,15 +142,15 @@ fn propose_from(title:&str,parsed:&mut Value,active:&[ActiveRule]){
     let explicit=EXPLICIT.get_or_init(||Regex::new(
         r"(?i)(?:^|[ ._-])s[0-9]{1,3}[ ._-]*e[0-9]{1,4}(?:$|[ ._-])"
     ).expect("explicit episode guard"));
-    if explicit.is_match(title) || map["anime_title_verified"]==true
+    if explicit.is_match(title) || map.get("anime_title_verified").and_then(Value::as_bool)==Some(true)
         || map.get("learned_regex_candidate").is_some(){return;}
     let mut winner=None;
     for rule in active{
         let Some((name,episode))=match_release(&rule.pattern,title)else{continue;};
         // Built-in already got the exact coordinate: no learned override.
-        if map["episodes"].as_array().is_some_and(|episodes|
+        if map.get("episodes").and_then(Value::as_array).is_some_and(|episodes|
             episodes.len()==1&&episodes[0].as_i64()==Some(episode))
-            && map["seasons"].as_array().is_none_or(|seasons|seasons.is_empty()){
+            && map.get("seasons").and_then(Value::as_array).is_none_or(|seasons|seasons.is_empty()){
             return;
         }
         if winner.replace((name.to_owned(),episode,rule.marker.clone())).is_some(){
