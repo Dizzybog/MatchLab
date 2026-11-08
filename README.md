@@ -37,11 +37,16 @@ The Rust worker now supports two local rule families:
 AniDB/TVDB crosswalk before changing the selected episode; and
 (2) conservative *field-specific technical release tags* (resolution, codec,
 quality, audio, bit depth, HDR, channels, languages, subtitle/dub flags and
-file extension). The second family learns bounded literal-marker regexes
-from the canonical parser's raw, non-ML output, not from its own corrections.
-It can fill a missing field with 8 concordant examples / 4 distinct title
-identities, or override a conflicting field with 16 / 6, but rejects
-ambiguous or contradicting markers. Title, production year, season,
+file extension). The second family learns bounded literal-marker regexes from both
+**canonical, non-ML parser results** and a separate evidence stream for
+**missing fields with explicit, independently readable technical markers**.
+For example, a missing `resolution` can still generate evidence from
+`2160p` in the raw title when the parser misses it. It can fill a missing
+field with 8 concordant examples / 4 distinct title identities. Overriding
+an existing field additionally requires 16 / 6 **and at least two direct
+canonical-parser confirmations**. Unknown markers, ambiguous technical tags
+and contradicting evidence are not automatically treated as correct labels.
+Neither stream may train on previously learned parser overlays. Title, production year, season,
 ordinary TV episode and IMDb/AniDB IDs are observed, **not blindly replaced**
 by technical-field regexes: those require separate authoritative validators.
 The bundled ONNX bootstrap ranker has fixed weights and is not retrained
@@ -66,8 +71,10 @@ cloud AI service. Local learning is disabled by default: enable it with
 fields and metadata-backed IMDb/AniDB matches. It can **hot-load safe regex
 exceptions** for overlooked or incorrectly parsed absolute anime episodes
 and technical release-field markers. Every anime ID/episode change must
-still pass the current AniDB/TVDB crosswalk, and technical fields require
-multiple concordant base-parser observations. Normal matching works without ML.
+still pass the current AniDB/TVDB crosswalk, and technical fields require diverse concordant observations with
+explicit independent raw-marker validation for initially missing fields.
+Previously learned outputs never become their own training labels.
+Normal matching works without ML.
 
 The official Linux AMD64/ARM64 Docker image includes the tiny ONNX model
 and CPU runtime. **No extra downloads or model mounts are needed.** Inference
@@ -100,9 +107,10 @@ Locally activated episode-marker rules require at least **8 separately
 verified examples from two IMDb identities and three episodes**.
 Community PR proposals require **12 examples, four identities and five
 episodes**. Technical release fields can learn restricted local literal-marker
-regexes after 8 concordant examples across 4 identities; replacing an
-existing technical field needs 16 across 6. Conflicting evidence is
-quarantined. Title, year, normal season/episode and identity signals
+regexes after 8 concordant examples across 4 identities, including strict
+raw-marker clues when the base parser leaves the field empty. Replacing an
+existing technical field needs 16 across 6, including two independent
+canonical-parser confirmations. Conflicting evidence is quarantined. Title, year, normal season/episode and identity signals
 remain audit-only until independent, field-specific verification exists.
 Community GitHub rule PRs still currently target absolute-anime markers.
 PRs **never auto-merge**.
