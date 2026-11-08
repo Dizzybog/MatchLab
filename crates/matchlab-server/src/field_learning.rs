@@ -301,14 +301,14 @@ pub fn init(db: &Connection) -> Result<(), String> {
             identity_hash TEXT NOT NULL, canonical TEXT NOT NULL,
             source_build TEXT NOT NULL, first_seen INTEGER NOT NULL,
             PRIMARY KEY(field,signal,example_hash));
-         CREATE INDEX IF NOT EXISTS learned_field_cohort
+         CREATE INDEX IF NOT EXISTS learned_field_build_cohort
             ON learned_field_evidence(source_build,field,signal,canonical,identity_hash);
          CREATE TABLE IF NOT EXISTS learned_field_gap_evidence(
              field TEXT NOT NULL,signal TEXT NOT NULL,example_hash TEXT NOT NULL,
              identity_hash TEXT NOT NULL,canonical TEXT NOT NULL,
              source_build TEXT NOT NULL,first_seen INTEGER NOT NULL,
              PRIMARY KEY(field,signal,example_hash));
-         CREATE INDEX IF NOT EXISTS learned_field_gap_cohort
+         CREATE INDEX IF NOT EXISTS learned_field_gap_build_cohort
              ON learned_field_gap_evidence(source_build,field,signal,canonical,identity_hash);
          CREATE TABLE IF NOT EXISTS learned_field_rules(
             field TEXT NOT NULL,signal TEXT NOT NULL,canonical TEXT NOT NULL,
@@ -350,12 +350,14 @@ pub fn observe_with_budget(db:&Connection,title:&str,details:&Value,
         if *count>=MAX_EVIDENCE{
             let lookup=if from_gap{
                 "SELECT count(*) FROM learned_field_gap_evidence
-                 WHERE field=?1 AND signal=?2 AND example_hash=?3"
+                 WHERE field=?1 AND signal=?2 AND example_hash=?3
+                   AND source_build=?4"
             }else{
                 "SELECT count(*) FROM learned_field_evidence
-                 WHERE field=?1 AND signal=?2 AND example_hash=?3"
+                 WHERE field=?1 AND signal=?2 AND example_hash=?3
+                   AND source_build=?4"
             };
-            let known:i64=db.query_row(lookup,params![field,signal,key],
+            let known:i64=db.query_row(lookup,params![field,signal,key,source_build],
                 |row|row.get(0)).map_err(|e|e.to_string())?;
             if known==0{continue;}
         }
@@ -379,11 +381,13 @@ pub fn observe_with_budget(db:&Connection,title:&str,details:&Value,
         let previously_known:i64=db.query_row(
             if from_gap {
                 "SELECT EXISTS(SELECT 1 FROM learned_field_gap_evidence
-                 WHERE field=?1 AND signal=?2 AND example_hash=?3)"
+                 WHERE field=?1 AND signal=?2 AND example_hash=?3
+                   AND source_build=?4)"
             }else{
                 "SELECT EXISTS(SELECT 1 FROM learned_field_evidence
-                 WHERE field=?1 AND signal=?2 AND example_hash=?3)"
-            },params![field,signal,key],|row|row.get(0)).map_err(|e|e.to_string())?;
+                 WHERE field=?1 AND signal=?2 AND example_hash=?3
+                   AND source_build=?4)"
+            },params![field,signal,key,source_build],|row|row.get(0)).map_err(|e|e.to_string())?;
         db.execute(sql,params![field,signal,key,identity,canonical,source_build])
             .map_err(|e|e.to_string())?;
         if previously_known==0{
