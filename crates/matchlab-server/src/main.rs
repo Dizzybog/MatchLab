@@ -2202,7 +2202,21 @@ mod tests {
     }
 
     #[test]
-    fn independent_anidb_range_conflict_cannot_fall_back_to_wrong_imdb_asid(){
+    fn independent_anidb_evidence_never_weakens_existing_valid_imdb_match(){
+        let baseline=json!({"imdb_id":"tt0434665","category":"series",
+            "season":15,"episode":4,"anime":{"anidb_id":"2369",
+                "episode":320,"asid":"2369:320"}});
+        // An independent title alias could point at another AniDB work.
+        // The canonical IMDb-selected crosswalk remains the trusted result.
+        let mut candidate=baseline.clone();
+        candidate["anidb_conflict"]=json!({
+            "independent":"17765:4","imdb_crosswalk":"2369:320"});
+        assert_eq!(public_match_response(Some(candidate)),
+            public_match_response(Some(baseline)));
+    }
+
+    #[test]
+    fn independent_anidb_range_conflict_preserves_existing_verified_imdb_range(){
         let winner=json!({"imdb_id":"tt1234567","category":"series",
             "season":1,"episode":1,"season_end":1,"episode_end":2,
             "anidb_independent_verified":true,
@@ -2214,6 +2228,19 @@ mod tests {
         let response=public_match_response(Some(winner));
         assert_eq!(response["sid_start"],"tt1234567:1:1");
         assert_eq!(response["sid_end"],"tt1234567:1:2");
+        assert_eq!(response["asid_start"],"17765:1");
+        assert_eq!(response["asid_end"],"17765:2");
+        // Incomplete legacy crosswalks still publish no ASID, even when
+        // independent evidence suggests a range is complete.
+        let incomplete=json!({"imdb_id":"tt1234567","category":"series",
+            "season":1,"episode":1,"season_end":null,"episode_end":null,
+            "anidb_independent_verified":true,
+            "anidb_range":{"anidb_id":"2369","start":1,"end":2},
+            "episode_range":{"complete":false,"segments":[{
+                "anidb_id":"17765","start_anime_episode":1,
+                "end_anime_episode":1
+            }]}});
+        let response=public_match_response(Some(incomplete));
         assert!(response["asid_start"].is_null());
         assert!(response["asid_end"].is_null());
     }
