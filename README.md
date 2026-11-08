@@ -12,6 +12,44 @@ It can parse names such as `Breaking.Bad.S02E03.1080p.WEB-DL`, recognize season 
 - **Easy deployment:** Native Rust server with Docker, an HTTP API, a dashboard, and automatic metadata refresh.
 - **Safe updates:** SQLite stores metadata relationships; Tantivy generations are built and validated before metadata is switched.
 
+## Community-powered Machine Learning — help MatchLab learn
+
+**Every opt-in MatchLab installation can help identify new torrent filename
+patterns.** For example, a release such as `Bleach_EPIS338` may contain an
+absolute anime episode that a general-purpose parser misses or interprets
+incorrectly. MatchLab can observe the discrepancy, compare independent
+IMDb/AniDB/TVDB mappings, and—after enough diverse, reproducible examples—
+activate a narrowly scoped regex exception locally **without restarting**.
+When community sharing is also enabled, sufficiently validated proposals can
+be sent to GitHub for independent review and inclusion in a future image.
+
+**Local learning needs no GitHub account, API token, hosted AI service or
+runtime model download.** The official AMD64/ARM64 image bundles its tiny
+ONNX model and CPU runtime. Ordinary parsing and matching remain available
+when learning is disabled. MatchLab's existing *metadata importer* still
+requires public metadata feeds for first-time initialization and refresh;
+"offline learning" does not mean the entire application can bootstrap
+IMDb/AniDB metadata without downloads.
+
+**This is an evolving system, not a general-purpose AI that invents regex.**
+The current live rule generator covers carefully restricted absolute anime
+episode markers. Other fields (title, year, season, episode, quality and
+language) are monitored for anomalies, but broad automatic regex patching
+for those fields is not yet implemented. The bundled ONNX bootstrap ranker
+has fixed weights and is not retrained online; a high score cannot by
+itself approve a rule or establish a correct IMDb ID.
+
+**Want to help?** Set `MATCHLAB_ML_ENABLED=true` to learn privately.
+To contribute proposals to the shared GitHub review pipeline, also enable
+`MATCHLAB_COMMUNITY_LEARNING_ENABLED=true` and provide your **own**
+`MATCHLAB_COMMUNITY_GITHUB_TOKEN`. Reporting is voluntary and public;
+review your privacy requirements before enabling it. Contributions are
+batched at most once every 24 hours per installation, deduplicated, and
+replayed against the latest parser. No automated PR is merged without
+maintainer review.
+
+[**Community Learning setup, architecture and contribution guide**](docs/COMMUNITY_LEARNING.md)
+
 ## Machine Learning — local learning, better matching for everyone
 
 MatchLab can **learn repeatable patterns from torrent names** without a
