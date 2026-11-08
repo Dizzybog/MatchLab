@@ -263,6 +263,62 @@ impl OnlineModel{
                 i64::from(self.recent_count)]).map_err(|e|e.to_string())?;
         Ok(())
     }
+    /// Shadow-train across *all* ordinary parser fields, not only codec,
+    /// resolution and anime markers. Labels are replayed from the unmodified
+    /// canonical parser. They are advisory, never rule-promotion truth.
+    /// A fixed per-release cap bounds SQLite writes and CPU use.
+    pub fn observe_canonical_fields(
+        &mut self,db:&Connection,title:&str,canonical:&Value
+    )->Result<usize,String>{
+        let Some(fields)=canonical.as_object()else{return Ok(0);};
+        let mut examples=Vec::new();
+        for (field,value) in fields {
+            if field.starts_with("learned_")
+                ||field=="path_title_candidates"
+                ||field.len()>40 || value.is_null(){continue;}
+            let signal=match value {
+                Value::Bool(true)=>"present".to_owned(),
+                Value::Number(n)=>{
+                    if field=="year" && n.as_i64()
+                        .is_some_and(|y|(1880..=2100).contains(&y)){
+                        "four_digit_year".to_owned()
+                    }else{"number".to_owned()}
+                }
+                Value::String(v) if !v.trim().is_empty()=>{
+                    if field=="title" {
+                        // Never turn a particular IMDb work name into a
+                        // reusable field token or a source for regex rules.
+                        "title_boundary".to_owned()
+                    }else{
+                        v.chars().filter(char::is_ascii_alphanumeric)
+                            .flat_map(char::to_lowercase).take(24).collect()
+                    }
+                }
+                Value::Array(values) if !values.is_empty()=>{
+                    if field=="seasons"{"season_coordinates".to_owned()}
+                    else if field=="episodes"{"episode_coordinates".to_owned()}
+                    else if field=="languages"{"language_list".to_owned()}
+                    else if values.iter().all(Value::is_string) {
+                        "string_list".to_owned()
+                    }else{"coordinates_or_list".to_owned()}
+                }
+                _=>continue,
+            };
+            if !signal.is_empty() && signal.len()<=32 {
+                examples.push((field.as_str(),signal));
+            }
+        }
+        // Rotate the deterministic cohort by title hash: otherwise sorted
+        // field names would starve e.g. year/quality/episode from training.
+        if examples.is_empty(){return Ok(0);}
+        let rotation=hash(title)%examples.len();
+        examples.rotate_left(rotation);
+        let mut seen=0;
+        for (field,signal) in examples.into_iter().take(6){
+            if self.observe(db,title,field,&signal)?{seen+=1;}
+        }
+        Ok(seen)
+    }
     pub fn observe(&mut self,db:&Connection,title:&str,field:&str,
         signal:&str)->Result<bool,String>{
         if self.positives>=MAX_EXAMPLES||title.len()>240
