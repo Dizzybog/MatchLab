@@ -123,6 +123,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
     let mut model=crate::online_model::OnlineModel::load(local)?;
     let tx=local.transaction().map_err(|e|e.to_string())?;
     let mut evidence=crate::field_learning::count_evidence(&tx)?;
+    let mut discovery=crate::candidate_discovery::budget(&tx)?;
     let mut samples=count(&tx,"samples")?;
     let mut patterns=count(&tx,"patterns")?;
     let now=chrono::Utc::now().timestamp();
@@ -137,6 +138,8 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
             &tx,&title,&details,&mut evidence)?{
             newly_trained|=model.observe(&tx,&title,&field,&signal)?;
         }
+        crate::candidate_discovery::observe(&tx,&title,&details["parsed"],
+            &model,&mut discovery)?;
         let flags=crate::field_audit::audit(
             &title,&details["parsed"],&details["selected"]);
         for flag in flags{
@@ -178,6 +181,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
     put(&tx,"after_id",&after.to_string())?;
     tx.commit().map_err(|e|e.to_string())?;
     model.publish_status();
+    crate::candidate_discovery::publish(local)?;
     if let Some(ref metadata)=meta{
         crate::learned_regex::reconcile(local,metadata)?;
     }
