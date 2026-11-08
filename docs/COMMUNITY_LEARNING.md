@@ -26,8 +26,8 @@ patterns by release markers, media fields and matching outcomes. Examples:
 | `Film.2024` | Torrent year differs from IMDb original release year | Record a possible mismatch; NOT proof of incorrect matching |
 | Other codecs, languages, resolution, quality | Technical tag absent or conflicts with the core parser | Induce a field-specific literal-marker regex from concordant parser results **or separately checked missing-field markers**; quarantine ambiguity |
 
-Two complementary **local live learning rule families** are implemented
-in Rust using `regex` with bounded, linear-time expressions:
+Three **local live learning rule families** are implemented in Rust
+using bounded, linear-time regex templates and background-only validation:
 
 - **Absolute anime episodes:** an unusual marker can supersede a wrong
   built-in episode/season interpretation, but the current AniDB/TVDB
@@ -46,6 +46,10 @@ in Rust using `regex` with bounded, linear-time expressions:
   stream learns to fill omissions; it cannot independently authorize
   overwriting existing values. Already learned outputs never train
   themselves.
+- **Ordinary TV coordinates:** explicit `S02E07`, `2x07` and
+  `Season 2 Episode 7` patterns can fill missing season/episode
+  fields after diverse observations, with stricter evidence needed
+  before correcting an existing single coordinate.
 
 Regexes are synthesized from a small literal-marker grammar, never from
 user/model-supplied regex bytes. Technical labels are marker-grounded and
@@ -385,13 +389,16 @@ sanitized basenames, so review privacy before opting into sharing.
 
 ### How a high-evidence regex becomes a PR
 
-A local regex must be **active and independently revalidated** on the
-current source and metadata before it can be exported. Upstream PR
-screening has additional requirements: at least **12** independently
-verified observations, **4** distinct IMDb identities, **5** episode
-numbers, and multiple non-private example filenames. The uploader
-sends a generated, restricted regex plus bounded evidence — not raw
-user-authored PCRE2 expressions.
+A local regex must be **active and evidence-gated** before export.
+For *absolute anime episode* rules specifically, upstream requires at
+least 12 independently revalidated observations, 4 IMDb identities,
+5 distinct episodes and sanitized filenames, plus current crosswalk
+verification. Technical-field, ordinary-TV and existing-handler
+proposals have their own strict evidence-count and grammar validations.
+Those three types are **review-only** because aggregate observations
+alone cannot prove correct parsing across the full metadata corpus.
+The uploader sends a generated, restricted regex (and original pattern
+for source changes), not arbitrary model-authored PCRE2 expressions.
 
 The daily trusted GitHub Actions workflow:
 
@@ -400,18 +407,21 @@ The daily trusted GitHub Actions workflow:
    and already seen fingerprints.
 2. Regenerates the canonical regex from its allowlisted release
    marker. Checks sufficient evidence diversity and sanitized names.
-3. Uses a Rust **current-parser** screening program to reject
-   redundant or unsafe rules, and negative probes to catch obvious
-   collisions. It adds at most **one** rule to a proposed versioned
-   `learning/community_rules.json` per daily run.
+3. Screens anime proposals using the current Rust parser and negative
+   probes. Non-anime and existing-handler proposals are checked
+   against their trusted template or original source catalogue and
+   recorded in `learning/community_regex_proposals.json` as
+   **non-executable review data**. The bot chooses at most one
+   proposal per category per daily PR run.
 4. Runs the Rust test and all-target check on the candidate before
    opening a GitHub pull request. The bot account must have
    permission to create PRs. **All PRs require human review** of the
    claimed IMDb/AniDB evidence and are **never auto-merged**.
-5. Once the maintainer merges a verified rule, it is compiled into
-   the next official image. These community-curated patterns work
-   even without local ML; final IMDb/AniDB episode values still pass
-   the current crosswalk and normal production gates.
+5. Approved anime markers can be packaged into the next image as
+   curated rules after a reviewed merge. Technical/TV/source-handler
+   records are **not installed by merely merging their review queue**:
+   maintainers must first integrate and validate the exact parser
+   change in a separate code review.
 
 **Important limitation:** GitHub currently replays parser output
 against the current code but does not independently download a
