@@ -413,7 +413,7 @@ pub fn observe(db:&Connection,metadata:&Connection,title:&str,details:&Value)->R
         let marker=marker.as_str().to_ascii_lowercase();
         if !safe_marker(&marker) {continue;}
         let Some(re)=regex_for(&marker)else{continue;};
-        let Some((name,absolute))=match_release(&re,title)else{continue;}
+        let Some((name,absolute))=match_release(&re,title)else{continue;};
         // Learn an *exception* only if the built-in parser missed or
         // misinterpreted this actual absolute coordinate. This also lets
         // the model correct existing context-dependent regex handlers.
