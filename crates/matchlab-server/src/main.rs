@@ -636,6 +636,42 @@ fn diagnose_with_policy(
             parsed.insert("anime_title_verified".into(),json!(true));
         }
     }
+    // Exception overlay: a learned marker can supersede a wrong built-in
+    // episode/season regex, but only for this specific release when the
+    // *current* AniDB/TVDB crosswalk uniquely verifies its identity and
+    // absolute coordinate. Unverified proposals remain diagnostics only.
+    if req.series!=Some(false)
+        && parsed_value.get("episode_end").is_none()
+        && parsed_value.get("season_end").is_none()
+        && parsed_value.get("anime_episode_range_candidate").is_none()
+        && let Some(candidate)=parsed_value.get("learned_regex_candidate")
+        && let (Some(candidate_title),Some(absolute))=(
+            candidate["title"].as_str(),candidate["episode"].as_i64())
+        && (1..=99_999).contains(&absolute)
+    {
+        let proposed_title=candidate_title.to_owned();
+        let proposed_key=matchlab_matcher::clean_title(&proposed_title);
+        if let Some(verified_imdb)=verified_unmarked_anime_range_imdb(
+            &db,&proposed_key,absolute,absolute
+        )?
+            && let Some(parsed)=parsed_value.as_object_mut()
+        {
+            let previous=json!({
+                "title":parsed.get("title"),
+                "seasons":parsed.get("seasons"),
+                "episodes":parsed.get("episodes")
+            });
+            parsed.insert("title".into(),json!(proposed_title));
+            parsed.insert("seasons".into(),json!([]));
+            parsed.insert("episodes".into(),json!([absolute]));
+            parsed.insert("anime_title_verified".into(),json!(true));
+            parsed.insert("learned_regex_override_verified".into(),json!({
+                "imdb_id":verified_imdb,
+                "absolute_episode":absolute,
+                "previous_parser":previous
+            }));
+        }
+    }
     let parsed=parsed_value.as_object().ok_or("parser returned no object")?;
     let parsed_title = parsed.get("title").and_then(Value::as_str).unwrap_or("");
     let title_owned = if explicit_absolute_episode(&req.title).is_some() && numbers(parsed.get("seasons")).is_empty() {
