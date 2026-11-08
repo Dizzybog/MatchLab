@@ -1271,7 +1271,8 @@ fn enrich_selected_anime_episode(
 
 fn diagnose_logged(state:&AppState,req:&MatchRequest,debug:bool)->Result<Diagnostic,String>{
     let start=Instant::now();
-    let result=if debug{
+    let before=learning_cache::match_namespace(&state.db);
+    let mut result=if debug{
         // Diagnostics intentionally bypass the persistent match cache.
         diagnose_with_policy(&state.db,req,MatchPolicy::DashboardDiagnostic)
     }else if let Some(snapshot)=learning_cache::get_match(
@@ -1283,7 +1284,19 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,debug:bool)->Result<Diagnos
     }else{
         diagnose(&state.db,req)
     };
-    if !debug && let Ok(ref diagnostic)=result
+    // An image/metadata/learned-rule update can happen mid-request.
+    // Do not return the cached diagnostic from the older namespace.
+    if !debug && before!=learning_cache::match_namespace(&state.db){
+        result=diagnose(&state.db,req); // recompute under current source
+    }
+    let after=learning_cache::match_namespace(&state.db);
+    if !debug && before!=after {
+        // We may have re-matched with a new source. If source keeps changing,
+        // do not publish a result that spans two metadata generations.
+        // Cache writes below require a stable namespace.
+        tracing::debug!("match cache generation changed during request; using fresh matching");
+    }
+    if !debug && before==after && let Ok(ref diagnostic)=result
         && diagnostic.selected.is_some()
         && let Ok(snapshot)=serde_json::to_value(diagnostic){
         learning_cache::put_match(
