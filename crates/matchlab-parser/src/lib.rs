@@ -1703,10 +1703,11 @@ static S_E_COORDS_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)(?:^|[ ._-])s([1-9]\d{0,2})[ ._-]*e(\d{1,4})(?=$|[^0-9])")
         .expect("valid explicit SxxExxx regex")
 });
-// Some Spanish series encode season and episode as "Cap.103" = S01E03.
-// Keep it separate from "capítulo 103", which is often absolute episode 103.
+// Spanish CAP shorthand: Cap.103 -> S01E03; Cap.1004 -> S10E04.
+// The final two digits are the episode; the preceding 1-2 digits are the
+// season. Keep separate from "capítulo 1004": that may mean absolute ep. 1004.
 static SPANISH_CAP_COORDS_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)(?:^|[^a-z0-9])cap[ ._-]*([1-9])([0-9]{2})(?=$|[^a-z0-9])")
+    Regex::new(r"(?i)(?:^|[^a-z0-9])cap[ ._-]*([1-9][0-9]?)([0-9]{2})(?=$|[^a-z0-9])")
         .expect("valid Spanish CAP season/episode marker")
 });
 
@@ -1799,9 +1800,9 @@ fn patch_missing_coordinates(raw: &str, translate_languages: bool, result: &mut 
             }
         }
     }
-    // Spanish CAP.NNN packs a one-digit season and two-digit episode.
-    // A stronger SxxExx/1x03/EP03 coordinate always wins, and "capítulo"
-    // is deliberately excluded because it can mean an absolute episode.
+    // Spanish CAP.NNN or CAP.NNNN packs a one- or two-digit season and
+    // a two-digit episode. A stronger SxxExx/1x03/EP03 coordinate wins;
+    // "capítulo" is excluded because it can mean an absolute episode.
     if contains_ascii_fold(raw, "cap")
         && let Some(caps) = SPANISH_CAP_COORDS_RE
             .captures(raw).map_err(|e| ParseError::Regex(e.to_string()))?
@@ -1814,7 +1815,12 @@ fn patch_missing_coordinates(raw: &str, translate_languages: bool, result: &mut 
         let season = caps.get(1).and_then(|m| m.as_str().parse::<i64>().ok());
         let episode = caps.get(2).and_then(|m| m.as_str().parse::<i64>().ok());
         if let (Some(season), Some(episode)) = (season, episode)
-            && (1..=9).contains(&season) && (1..=99).contains(&episode)
+            && (1..=99).contains(&season) && (1..=99).contains(&episode)
+            // A spelled-out "Temporada 10" must agree with Cap.1004.
+            && SEASON_WORD_COORDS_RE.captures(raw)
+                .map_err(|e| ParseError::Regex(e.to_string()))?
+                .and_then(|caps| caps.get(1).and_then(|m| m.as_str().parse::<i64>().ok()))
+                .is_none_or(|explicit| explicit == season)
         {
             result.insert("seasons".into(), json!([season]));
             result.insert("episodes".into(), json!([episode]));
