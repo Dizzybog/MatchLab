@@ -123,6 +123,22 @@ class CommunityTests(unittest.TestCase):
         corrupted["body"]+="x"*20000
         self.assertIsNone(cl.validate_comment(corrupted,LATEST,lambda *_:True))
 
+    def test_current_source_replay_clears_fixed_parser_field_hypotheses(self):
+        row=make_report("Example.1080p.x265",["field_missing_codec",
+            "field_missing_resolution"])
+        row["parsed"]={"title":"Example","seasons":[],"episodes":[]}
+        payload=[make_comment([row])]
+        resolved=lambda title,_:{"title":"Example","resolution":"1080p","codec":"hevc"}
+        result,seen=cl.intake(payload,LATEST,datetime.now(timezone.utc),
+            set(),"unused",lambda *_:True,resolved)
+        self.assertEqual((result,seen),([],set()))
+        still_missing=lambda title,_:{"title":"Example","resolution":"1080p"}
+        result,seen=cl.intake(payload,LATEST,datetime.now(timezone.utc),
+            set(),"unused",lambda *_:True,still_missing)
+        self.assertEqual(len(result),1)
+        self.assertEqual(result[0]["status"],"possible_missing_field_in_current_parser")
+        self.assertEqual(len(seen),1)
+
     def test_no_shadow_ml_without_independent_labels(self):
         self.assertIsNone(cl.train([],LATEST))
         self.assertIsNone(cl.fit([]))
