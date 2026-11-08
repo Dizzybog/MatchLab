@@ -533,6 +533,66 @@ fn install(mut incoming: Vec<FieldRule>) {
         REVISION.store(u64::from_le_bytes(id),Ordering::Release);
     }
 }
+/// This is the source-aware part of ML learning: the worker examines every
+/// generated Rust-parser handler, not just an external list of overlay tags.
+/// It can construct a broader, bounded replacement for an exact existing
+/// handler while retaining its field, transform, flags and priority.
+/// Restrict live source patches to clear technical markers; risky title,
+/// year, IMDb and unmarked episode regex remain review-only.
+fn source_handler_patches(active:&[FieldRule])
+    ->Vec<matchlab_parser::HandlerPatch> {
+    let catalog=matchlab_parser::existing_regex_rules();
+    let mut patches=Vec::new();
+    let mut replaced=std::collections::BTreeSet::new();
+    for rule in active {
+        if !may_override(rule) ||
+            !matches!(rule.field.as_str(),"resolution"|"codec"|"bit_depth") {
+            continue;
+        }
+        let Some(canonical)=rule.value.as_str()else{continue;};
+        let expected_transform=format!("value('{canonical}')");
+        let raw_marker=rule.signal.replace('_',".");
+        let probe=format!("Example.{raw_marker}.WEB-DL");
+        // If the original parser already recognizes the exact marker and
+        // value, a rewrite adds no benefit and would only spend CPU.
+        let already=matchlab_parser::parse_title_canonical(&probe,false)
+            .ok().and_then(|v|v.get(&rule.field).cloned())
+            .is_some_and(|v|v==rule.value);
+        if already{continue;}
+        for source in &catalog {
+            let (Some(index),Some(pattern))=(
+                source["index"].as_u64().map(|n|n as usize),
+                source["pattern"].as_str()
+            )else{continue;};
+            if source["field"]!=rule.field ||
+                source["transform"].as_str()!=Some(expected_transform.as_str())
+                ||pattern.len()>180||replaced.contains(&index){continue;}
+            // Keep old behavior as one branch, then add the newly verified
+            // literal marker. This grows a handler rather than deleting a
+            // working rule, and only ever compiles linear-time Rust regexes.
+            let replacement=format!("(?:{pattern})|(?:{})",rule.regex.as_str());
+            let Ok(test)=RegexBuilder::new(&replacement)
+                .size_limit(256*1024).build()else{continue;};
+            if !test.is_match(&probe){continue;}
+            if [
+                "The Danish Girl.2015", "Doctor Who 2005", "Film 1917",
+                "Example.S01E03", "Episode 300 Explained"
+            ].iter().any(|negative| {
+                test.is_match(negative) && !Regex::new(pattern)
+                    .is_ok_and(|original|original.is_match(negative))
+            }) {continue;}
+            patches.push(matchlab_parser::HandlerPatch{
+                index,original_pattern:pattern.to_string(),
+                replacement_pattern:replacement
+            });
+            replaced.insert(index);
+            break;
+        }
+        if patches.len()==8{break;}
+    }
+    patches
+}
+
 pub fn reconcile(db: &Connection) -> Result<(), String> {
     init(db)?;
     let current = build();
@@ -562,6 +622,11 @@ pub fn reconcile(db: &Connection) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())?;
+    let patches=source_handler_patches(&active);
+    // Compile a complete parser engine in the learning worker and swap it
+    // atomically. On validation failure no existing handler is modified.
+    matchlab_parser::install_handler_patches(&patches)
+        .map_err(|e|format!("live source handler patch rejected: {e}"))?;
     install(active);
     Ok(())
 }
@@ -640,6 +705,8 @@ pub fn status() -> Value {
             "online_learner":crate::online_model::OnlineModel::status(),
             "candidate_discovery":crate::candidate_discovery::status(),
             "tv_coordinate_learning":crate::tv_learning::status(),
+            "original_handler_rules":matchlab_parser::existing_regex_rules().len(),
+            "source_rule_patch_revision":format!("{:016x}",matchlab_parser::handler_patch_revision()),
             "identity_and_coordinate_override":"separate_metadata_verification"});
     }
     json!({"enabled":crate::local_learning::active(),
