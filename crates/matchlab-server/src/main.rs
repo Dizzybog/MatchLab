@@ -1732,15 +1732,7 @@ mod tests {
                 ('tt0000404','Reborn as a Vending Machine',
                  'rebornasavendingmachine',2023,'series','',1,0,'tvSeries'),
                 ('tt0000505','Bleach side story','bleachsidestory',2005,
-                 'movie','',1,0,'movie'),
-                ('tt0000606','Bleach film A','bleachfilma',2008,
-                 'movie','',1,0,'movie'),
-                ('tt0000707','Bleach film B','bleachfilmb',2009,
-                 'movie','',1,0,'movie'),
-                ('tt0000808','Bleach OVA C','bleachovac',2010,
-                 'movie','',1,0,'movie'),
-                ('tt0000909','Bleach special D','bleachspeciald',2011,
-                 'movie','',1,0,'tvMovie');
+                 'movie','',1,0,'movie');
             INSERT INTO seasons VALUES ('tt0000101',16),('tt0000202',3),
                 ('tt0000303',1),('tt0000404',3);
             INSERT INTO season_episodes VALUES
@@ -1751,12 +1743,6 @@ mod tests {
                 ('tt0000101','100','bleachtv',0),
                 ('tt0000101','101','otherbleachtv',0),
                 ('tt0000505','500','sidebleachtv',0),
-                -- Production-like AniDB 2369 relationship: one title's
-                -- absolute episode maps to five different IMDb identities.
-                ('tt0000606','100','bleachtv',0),
-                ('tt0000707','100','bleachtv',0),
-                ('tt0000808','100','bleachtv',0),
-                ('tt0000909','100','bleachtv',0),
                 ('tt0000202','200','duketv',0),
                 ('tt0000303','300','chaostv',0),
                 ('tt0000404','400','jihankitv',0);
@@ -1823,12 +1809,6 @@ mod tests {
                 "asid_start":"100:300","asid_end":"100:300"
             }),"{title}");
         }
-        // Five verified IMDb IDs for a single AniDB episode is normal in
-        // Anime-Lists, but only one exact canonical Bleach TV-series title
-        // survives disambiguation. Refuse to select a random movie/OVA.
-        let imdb=verified_unmarked_single_anime_imdb(
-            &Connection::open(&path).unwrap(),"Bleach","Bleach 320",None,320).unwrap();
-        assert_eq!(imdb.as_deref(),Some("tt0000101"));
         // Regression for production's 'Bleach 320': shared TVDB sibling
         // defaults must not suppress a uniquely bounded episode mapping.
         // Fixture coordinates are synthetic: absolute 320 -> S15E01.
@@ -1906,6 +1886,73 @@ mod tests {
             "sid_start":"tt0000404:3:8","sid_end":"tt0000404:3:8",
             "asid_start":"400:8","asid_end":"400:8"
         }));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
+    fn bleach_absolute_episode_uses_ranked_winner_despite_five_anime_list_imdb_ids(){
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-bleach-five-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+                imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,
+                category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES
+                ('tt0434665','Bleach','bleach',2004,'series','',1,0,'tvSeries'),
+                ('tt1105263','Bleach OVA A','bleachovaa',2008,'movie','',1,0,'movie'),
+                ('tt1148261','Bleach Film B','bleachfilmb',2009,'movie','',1,0,'movie'),
+                ('tt1339302','Bleach Film C','bleachfilmc',2010,'movie','',1,0,'movie'),
+                ('tt1785394','Bleach Special D','bleachspeciald',2011,'movie','',1,0,'tvMovie');
+            INSERT INTO seasons VALUES ('tt0434665',16);
+            INSERT INTO season_episodes VALUES ('tt0434665',15,26,26);
+            INSERT INTO anime_series_map VALUES
+                ('tt0434665','2369','74796',0),
+                ('tt1105263','2369','74796',0),
+                ('tt1148261','2369','74796',0),
+                ('tt1339302','2369','74796',0),
+                ('tt1785394','2369','74796',0);
+            INSERT INTO anidb_titles VALUES('2369','Bleach','bleach','main','en');
+            INSERT INTO episode_map VALUES
+                ('2369','74796',1,-1,1,366,0,''),
+                ('2369','74796',1,15,317,342,-316,'');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        // The Anime-Lists crosswalk really resolves all five IMDb IDs;
+        // reverse lookup must remain ambiguous, but /match must use the
+        // already-ranked original TV-series winner.
+        for id in ["tt0434665","tt1105263","tt1148261",
+            "tt1339302","tt1785394"] {
+            let mapped=anime_resolver::resolve_absolute(&db,id,320).unwrap()
+                .expect("crosswalk must map episode 320");
+            assert_eq!((mapped.season,mapped.episode),(15,4));
+        }
+        drop(db);
+        for title in ["Bleach 320","Bleach_320","Bleach.320"] {
+            let d=diagnose(&path,&MatchRequest{
+                title:title.into(),year:None,series:None}).unwrap();
+            let selected=d.selected.expect("ranked Bleach series winner");
+            assert_eq!(selected["imdb_id"],"tt0434665");
+            assert_eq!(selected["match_source"],"imdb");
+            assert_eq!(public_match_response(Some(selected)),json!({
+                "sid_start":"tt0434665:15:4",
+                "sid_end":"tt0434665:15:4",
+                "asid_start":"2369:320","asid_end":"2369:320"
+            }),"{title}");
+        }
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
     }
