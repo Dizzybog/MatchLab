@@ -498,21 +498,32 @@ fn verified_unmarked_single_anime_imdb(
         .map(|alias|alias.imdb_id)
         .collect::<std::collections::BTreeSet<_>>();
     if ids.is_empty()||ids.len()>32{return Ok(None);}
-    let mut unique=None;
+    let mut verified=Vec::new();
     for imdb in ids {
         let Some(mapped)=anime_resolver::resolve_absolute(db,&imdb,episode)
             .map_err(|e|e.to_string())? else {continue};
         // The requested coordinate must also be possible for this IMDb
         // season when reliable season bounds exist.
-        if !candidate_has_episode(db,&imdb,mapped.season,mapped.episode)?{
-            continue;
-        }
-        if unique.replace(imdb).is_some(){
-            // Colliding anime series both verify this episode: no guessing.
-            return Ok(None);
+        if candidate_has_episode(db,&imdb,mapped.season,mapped.episode)?{
+            verified.push(imdb);
         }
     }
-    Ok(unique)
+    if verified.len()==1{return Ok(verified.pop());}
+    if verified.is_empty(){return Ok(None);}
+    // Anime-Lists can link the same AniDB title to several movie/OVA IMDb
+    // identities, all of which mechanically resolve the same episode.
+    // Their shared crosswalk does not make those works equally plausible
+    // for an unmarked "Bleach 320" release. Require one canonical, exact
+    // *television-series title* among the independently verified IDs.
+    // Do not infer a year or guess between multiple equal TV series.
+    let exact_series=tantivy_search::titles_by_ids(db,&verified)?
+        .into_iter()
+        .filter(|title|title.clean==key
+            && matches!(title.media_type.as_str(),"tvSeries"|"tvMiniSeries"))
+        .map(|title|title.imdb_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    if exact_series.len()==1{Ok(exact_series.into_iter().next())}
+    else{Ok(None)}
 }
 
 /// Public requests apply the release identity gate; dashboard diagnostics
@@ -1723,7 +1734,15 @@ mod tests {
                 ('tt0000404','Reborn as a Vending Machine',
                  'rebornasavendingmachine',2023,'series','',1,0,'tvSeries'),
                 ('tt0000505','Bleach side story','bleachsidestory',2005,
-                 'movie','',1,0,'movie');
+                 'movie','',1,0,'movie'),
+                ('tt0000606','Bleach film A','bleachfilma',2008,
+                 'movie','',1,0,'movie'),
+                ('tt0000707','Bleach film B','bleachfilmb',2009,
+                 'movie','',1,0,'movie'),
+                ('tt0000808','Bleach OVA C','bleachovac',2010,
+                 'movie','',1,0,'movie'),
+                ('tt0000909','Bleach special D','bleachspeciald',2011,
+                 'movie','',1,0,'tvMovie');
             INSERT INTO seasons VALUES ('tt0000101',16),('tt0000202',3),
                 ('tt0000303',1),('tt0000404',3);
             INSERT INTO season_episodes VALUES
@@ -1734,6 +1753,12 @@ mod tests {
                 ('tt0000101','100','bleachtv',0),
                 ('tt0000101','101','otherbleachtv',0),
                 ('tt0000505','500','sidebleachtv',0),
+                -- Production-like AniDB 2369 relationship: one title's
+                -- absolute episode maps to five different IMDb identities.
+                ('tt0000606','100','bleachtv',0),
+                ('tt0000707','100','bleachtv',0),
+                ('tt0000808','100','bleachtv',0),
+                ('tt0000909','100','bleachtv',0),
                 ('tt0000202','200','duketv',0),
                 ('tt0000303','300','chaostv',0),
                 ('tt0000404','400','jihankitv',0);
@@ -1800,6 +1825,12 @@ mod tests {
                 "asid_start":"100:300","asid_end":"100:300"
             }),"{title}");
         }
+        // Five verified IMDb IDs for a single AniDB episode is normal in
+        // Anime-Lists, but only one exact canonical Bleach TV-series title
+        // survives disambiguation. Refuse to select a random movie/OVA.
+        let imdb=verified_unmarked_single_anime_imdb(
+            &Connection::open(&path).unwrap(),"bleach",320).unwrap();
+        assert_eq!(imdb.as_deref(),Some("tt0000101"));
         // Regression for production's 'Bleach 320': shared TVDB sibling
         // defaults must not suppress a uniquely bounded episode mapping.
         // Fixture coordinates are synthetic: absolute 320 -> S15E01.
