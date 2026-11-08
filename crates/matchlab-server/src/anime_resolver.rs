@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 
 #[derive(Clone,Debug)]
-struct Link {anidb:String,tvdb:String,trakt:i64}
+struct Link {anidb:String,tvdb:String,trakt:i64,direct:bool}
 #[derive(Clone,Debug)]
 struct Mapping {anidb:String,tvdb:String,tv_season:i64,start:i64,end:i64,offset:i64,map:String}
 #[derive(Clone,Debug,PartialEq,Eq,Serialize)]
@@ -32,13 +32,13 @@ pub(crate) fn valid_asid(asid:&str)->bool{
 }
 fn links(db:&Connection,imdb:&str)->rusqlite::Result<Vec<Link>>{
     let mut stmt=db.prepare("SELECT anidb_id,tvdb_id,trakt_season FROM anime_series_map WHERE imdb_id=?1")?;
-    let mut out=stmt.query_map([imdb],|r|Ok(Link{anidb:r.get(0)?,tvdb:r.get(1)?,trakt:r.get(2)?}))?
+    let mut out=stmt.query_map([imdb],|r|Ok(Link{anidb:r.get(0)?,tvdb:r.get(1)?,trakt:r.get(2)?,direct:true}))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     if out.is_empty(){
         let mut stmt=db.prepare("SELECT DISTINCT value FROM anime_ids WHERE group_id=?1 AND type='anidb'")?;
         let ids=stmt.query_map([imdb],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         if ids.len()!=1{return Ok(vec![]);}
-        out.push(Link{anidb:ids[0].clone(),tvdb:String::new(),trakt:0});
+        out.push(Link{anidb:ids[0].clone(),tvdb:String::new(),trakt:0,direct:true});
     }
     let tvdbs:BTreeSet<String>=out.iter().filter(|l|!l.tvdb.is_empty()).map(|l|l.tvdb.clone()).collect();
     for tvdb in tvdbs {
@@ -46,7 +46,7 @@ fn links(db:&Connection,imdb:&str)->rusqlite::Result<Vec<Link>>{
         for id in stmt.query_map([&tvdb],|r|r.get::<_,String>(0))? {
             let id=id?;
             if !out.iter().any(|l|l.anidb==id&&l.tvdb==tvdb){
-                out.push(Link{anidb:id,tvdb:tvdb.clone(),trakt:0});
+                out.push(Link{anidb:id,tvdb:tvdb.clone(),trakt:0,direct:false});
             }
         }
     }
@@ -208,6 +208,10 @@ fn resolve_absolute_preloaded(
                 continue;
             }
             if local<m.start.max(1)||(m.end>0&&local>m.end){continue;}
+            // Related AniDB works from the same TVDB family are not proof
+            // that this IMDb title owns every episode of an open-ended
+            // sequel. Indirect links require a finite range or exact pair.
+            if !link.direct && (m.start<=0 || m.end<=0){continue;}
             let is_split=split(link,m,links,maps);
             let season=if is_split{link.trakt}else{m.tv_season};
             let tv=if is_split{
@@ -337,6 +341,9 @@ mod tests{
             assert_eq!((ep.season,ep.episode,ep.anidb_episode),(15,number-316,number));
             assert_eq!(ep.anidb_id,"2369");
         }
+        // No bounded mapping covers a later sequel episode. Related
+        // unbounded default rows cannot claim it for the 2004 IMDb series.
+        assert!(resolve_absolute(&db,"tt0434665",400).unwrap().is_none());
         // Two independently bounded works remain ambiguous even when they
         // share the same TVDB family; never pick one by name or ID ordering.
         db.execute("INSERT INTO episode_map VALUES
