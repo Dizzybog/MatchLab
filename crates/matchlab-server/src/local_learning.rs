@@ -134,8 +134,14 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
         // Reparse once from raw history using the current trusted Rust
         // parser. Never use completed, potentially obsolete ML responses
         // as the label source; share this immutable base between learners.
-        let base=Value::Object(matchlab_parser::parse_title(&title,false)
-            .map_err(|e|e.to_string())?);
+        let Ok(canonical)=matchlab_parser::parse_title(&title,false)else{
+            // A malformed historical release is not allowed to poison the
+            // learning cursor and indefinitely replay the entire batch.
+            // Never print private torrent names to error logs.
+            tracing::debug!("skipping unparseable local learning history row");
+            continue;
+        };
+        let base=Value::Object(canonical);
         if let Some(ref metadata)=meta{
             crate::learned_regex::observe(&tx,metadata,&title,&details,&base)?;
         }
