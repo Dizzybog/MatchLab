@@ -1,5 +1,6 @@
-//! MatchLab anime episode mapping and coordinate validation.
-//! Only verified crosswalk data establishes episode identity.
+//! Crosswalk between already identified IMDb and AniDB works.
+//! AniDB title discovery is handled separately by anidb_matcher; this
+//! module converts IMDb season coordinates using verified mapping data.
 use rusqlite::{Connection};
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -11,25 +12,9 @@ struct Mapping {anidb:String,tvdb:String,tv_season:i64,start:i64,end:i64,offset:
 #[derive(Clone,Debug,PartialEq,Eq,Serialize)]
 pub struct Episode {pub imdb_id:String,pub season:i64,pub episode:i64,pub anidb_id:String,pub anidb_episode:i64}
 
-/// AniDB episode coordinates in public ASIDs must fit the consumer's
-/// five-digit coordinate contract. Crosswalk rows can be open-ended or
-/// contain explicit outliers, so validate *resolved* values, not just input.
-pub(crate) fn canonical_asid(anidb_id:&str,episode:i64)->Option<String>{
-    if !(1..=99_999).contains(&episode)
-        || anidb_id.is_empty()
-        || !anidb_id.bytes().all(|byte|byte.is_ascii_digit()){
-        return None;
-    }
-    let id=anidb_id.parse::<u64>().ok()?;
-    if !(1..=99_999).contains(&id){return None;}
-    Some(format!("{anidb_id}:{episode}"))
-}
+// Pure SID/ASID validation belongs to identifiers, not the bridge.
+pub(crate) use crate::identifiers::{canonical_asid,valid_asid};
 
-pub(crate) fn valid_asid(asid:&str)->bool{
-    let Some((id,ep))=asid.split_once(':')else{return false};
-    let Some(episode)=ep.parse::<i64>().ok()else{return false};
-    canonical_asid(id,episode).as_deref()==Some(asid)
-}
 fn links(db:&Connection,imdb:&str)->rusqlite::Result<Vec<Link>>{
     let mut stmt=db.prepare("SELECT anidb_id,tvdb_id,trakt_season FROM anime_series_map WHERE imdb_id=?1")?;
     let mut out=stmt.query_map([imdb],|r|Ok(Link{anidb:r.get(0)?,tvdb:r.get(1)?,trakt:r.get(2)?,direct:true}))?

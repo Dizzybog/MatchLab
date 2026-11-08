@@ -1,16 +1,11 @@
-//! MatchLab's deterministic IMDb title matcher.
+//! Deterministic IMDb title matcher (independent of AniDB identity selection).
 //! Ordered stages prioritize exact aliases, then title and season eligibility,
 //! year proximity and stable tie-breaking. Source metadata comes from Tantivy.
 use rusqlite::{params, Connection};
 use std::collections::{BTreeMap, HashSet};
-use unicode_normalization::UnicodeNormalization;
 use serde::Serialize;
 
-pub fn clean_title(input: &str) -> String {
-    let lower = input.to_lowercase().replace('æ',"ae").replace('ø',"o").replace('œ',"oe").replace('ß',"ss");
-    let ascii: String = lower.nfkd().filter(|c| c.is_ascii()).collect();
-    ascii.split(|c:char| !c.is_ascii_alphanumeric()).filter(|word| !word.is_empty() && *word != "and").collect()
-}
+pub use crate::title_normalization::clean_title;
 
 #[derive(Clone,Debug)]
 struct Aka {
@@ -290,7 +285,7 @@ mod tests{
         let found=search(&db,"The Voice US",None,true,3,"The.Voice.US.S03E02.1080p",true,10).unwrap();
         assert_eq!(found[0].imdb_id,"tt100");
     }
-    #[test] fn v4_exact_year_and_series_cap() {
+    #[test] fn imdb_exact_year_and_series_cap() {
         let db=Connection::open_in_memory().unwrap();
         db.create_scalar_function("reverse",1,
             rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC|rusqlite::functions::FunctionFlags::SQLITE_UTF8,
