@@ -60,6 +60,13 @@ fn namespace(kind:&str,metadata:Option<&Path>)->Option<String>{
     let stamp=if kind=="match" {metadata_stamp(metadata?)?}else{String::new()};
     Some(digest(&format!("{kind}:{}:{stamp}",revision())))
 }
+/// Snapshot of the exact parser/regex/metadata version that produced a
+/// match. Callers use it to avoid publishing or caching an answer computed
+/// across a concurrent ruleset or metadata refresh.
+pub fn match_namespace(metadata:&Path)->Option<String>{
+    if !enabled(){return None;}
+    namespace("match",Some(metadata))
+}
 fn key(namespace:&str,title:&str,year:Option<i32>,series:Option<bool>)->String{
     digest(&format!("{namespace}\0{title}\0{year:?}\0{series:?}"))
 }
