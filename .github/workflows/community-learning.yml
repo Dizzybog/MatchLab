@@ -90,13 +90,22 @@ jobs:
       - name: Screen at most one rule against latest trusted Rust parser
         run: |
           cp learning/community_rules.json "$RUNNER_TEMP/community-rules-before.json"
+          cp learning/community_regex_proposals.json "$RUNNER_TEMP/community-extended-before.json"
           cargo run --release --locked -p matchlab-parser \
             --example screen_community_rules -- \
             "$RUNNER_TEMP/community-rule-candidates.json" \
             learning/community_rules.json \
             "$RUNNER_TEMP/curated-rules-next.json"
           cp "$RUNNER_TEMP/curated-rules-next.json" learning/community_rules.json
-          if git diff --quiet -- learning/community_rules.json; then
+          # Source-aware field and TV proposals are reviewed as DATA first.
+          # Never execute an Issue-supplied regex or update handlers.json
+          # without independent verification by a maintainer.
+          python3 scripts/review_community_regex.py \
+            "$RUNNER_TEMP/community-rule-candidates.json" \
+            learning/community_regex_proposals.json \
+            "$RUNNER_TEMP/community-regex-next.json"
+          cp "$RUNNER_TEMP/community-regex-next.json" learning/community_regex_proposals.json
+          if git diff --quiet -- learning/community_rules.json learning/community_regex_proposals.json; then
             echo "COMMUNITY_RULE_CHANGED=false" >> "$GITHUB_ENV"
           else
             echo "COMMUNITY_RULE_CHANGED=true" >> "$GITHUB_ENV"
@@ -122,7 +131,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "$branch"
-          git add learning/community_rules.json
+          git add learning/community_rules.json learning/community_regex_proposals.json
           git commit -m "feat(parser): propose a verified community regex rule"
           git push origin "HEAD:refs/heads/$branch"
           cat > "$RUNNER_TEMP/community-pr-body.md" <<'EOF'
@@ -141,8 +150,11 @@ jobs:
           crosswalk verification on matching. The parser and matcher remain
           fully functional without any ML opt-in or GitHub connection.
 
-          Regex entries cannot contain arbitrary code: only one restricted
-          release-marker grammar is accepted. Existing rules are preserved.
+          Regex additions and proposed changes to existing handlers use
+          strict trusted grammars and carry the exact original/new regex.
+          Technical/TV/source-handler proposals are REVIEW DATA ONLY until
+          a maintainer independently validates and integrates them. They
+          cannot modify production merely by appearing in this PR.
           EOF
           gh pr create --repo "$GH_REPO" \
             --base main --head "$branch" \
@@ -159,11 +171,17 @@ jobs:
           before = json.loads((temp / "community-rules-before.json").read_text())
           after = json.loads(Path("learning/community_rules.json").read_text())
           old_markers = {r["marker"] for r in before}
+          before_extended = json.loads((temp / "community-extended-before.json").read_text())
+          after_extended = json.loads(Path("learning/community_regex_proposals.json").read_text())
+          old_extended = {r["fingerprint"] for r in before_extended}
           ledger = temp / "fingerprints-final.txt"
           seen = set(ledger.read_text().splitlines())
           for rule in after:
               if rule["marker"] not in old_markers:
                   seen.add(hashlib.sha256(("community-regex:" + rule["marker"]).encode()).hexdigest())
+          for proposal in after_extended:
+              if proposal["fingerprint"] not in old_extended:
+                  seen.add(proposal["fingerprint"])
           ledger.write_text("\n".join(sorted(seen)) + ("\n" if seen else ""))
           PY
       - name: Persist global dedup ledger (no changes to main or production)
