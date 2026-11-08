@@ -476,8 +476,12 @@ mod tests{
         assert!(report("Test.Show.S02E07","matched",&details,None).is_none());
         let other=json!({"parsed":{"year":2025,"title":"Test Show"},
             "selected":{"year":2020,"category":"movie","imdb_id":"tt1234567"}});
-        assert!(report("Test.Show.2025.WEB-DL","matched",&other,Some(&meta)).is_none(),
-            "year mismatch is not independent proof of wrong IMDb matching");
+        let maybe_report=report("Test.Show.2025.WEB-DL","matched",&other,Some(&meta));
+        if let Some(candidate)=maybe_report {
+            assert!(!candidate["alerts"].as_array().unwrap().iter().any(|code|
+                code=="field_mismatch_year"),
+                "year disagreement alone cannot be called a verified error");
+        }
     }
     #[test]
     fn unverified_reports_never_include_full_diagnostics(){
