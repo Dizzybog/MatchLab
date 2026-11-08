@@ -16,6 +16,8 @@ mod field_audit;
 mod community_learning;
 mod local_learning;
 mod learned_regex;
+#[cfg(feature="ml-ort")]
+mod tiny_onnx;
 mod query_cache;
 use axum::{extract::{Query, State}, http::{StatusCode,header}, routing::{get,post}, Json, Router};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
