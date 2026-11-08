@@ -1537,6 +1537,42 @@ fn public_match_response(selected: Option<Value>) -> Value {
         else if let (Some(se),Some(ep))=(end_season,end_episode){
             json!(format!("{imdb}:{se}:{ep}"))
         }else if has_range{Value::Null}else{json!(imdb)};
+    // StremThru accepts a pair only when both sides have the same ID,
+    // both are either bare titles or episode coordinates, and coordinate
+    // end is not before coordinate start. A malformed range must never
+    // poison an entire torrent's deferred mapping batch.
+    let sid_components=|raw:&str|->Option<(i64,i64)>{
+        let mut parts=raw.split(':');
+        if parts.next()!=Some(imdb){return None;}
+        let season=parts.next()?.parse::<i64>().ok()?;
+        let episode=parts.next()?.parse::<i64>().ok()?;
+        if parts.next().is_some() || !valid_sid_coordinate(season,episode){
+            return None;
+        }
+        Some((season,episode))
+    };
+    if let (Some(start),Some(end))=(sid_start.as_str(),sid_end.as_str()){
+        let start_coords=sid_components(start);
+        let end_coords=sid_components(end);
+        let inconsistent=if start==imdb || end==imdb{
+            start!=end
+        }else{
+            match (start_coords,end_coords){
+                (Some(a),Some(b))=>b<a,
+                _=>true,
+            }
+        };
+        if inconsistent{
+            // Retain a verified range start if the end is missing/bad.
+            // Do not infer an end episode or attach a potentially
+            // mismatched ASID to this partial range.
+            let (safe_start,safe_end)=if has_range && start_coords.is_some(){
+                (sid_start,Value::Null)
+            }else{(json!(imdb),json!(imdb))};
+            return json!({"sid_start":safe_start,"sid_end":safe_end,
+                "asid_start":null,"asid_end":null});
+        }
+    }
     // Public API is a trust boundary: even a stale or malformed crosswalk
     // must never publish out-of-range ASIDs that make consumers retry a
     // whole batch. A valid IMDb SID survives without the invalid ASID.
@@ -3410,6 +3446,31 @@ mod tests {
         assert_eq!(ordinary["sid_start"],"tt1234567:1:1");
         assert_eq!(ordinary["sid_end"],"tt1234567:1:12");
     }
+    #[test]
+    fn public_sid_endpoints_never_publish_reversed_or_mixed_shapes(){
+        let reversed=public_match_response(Some(json!({
+            "imdb_id":"tt1234567","category":"series","season":3,
+            "episode":8,"season_end":2,"episode_end":9,
+            "episode_range":{"complete":true,"segments":[]}
+        })));
+        assert_eq!(reversed["sid_start"],"tt1234567:3:8");
+        assert!(reversed["sid_end"].is_null());
+        assert!(reversed["asid_start"].is_null());
+        let mixed=public_match_response(Some(json!({
+            "imdb_id":"tt1234567","category":"series","season":2,
+            "episode":8,"season_end":3,"anime":{"asid":"2369:8"}
+        })));
+        assert_eq!(mixed["sid_start"],"tt1234567");
+        assert_eq!(mixed["sid_end"],"tt1234567");
+        assert!(mixed["asid_start"].is_null());
+        let valid=public_match_response(Some(json!({
+            "imdb_id":"tt1234567","category":"series","season":2,
+            "episode":8,"season_end":3,"episode_end":2
+        })));
+        assert_eq!(valid["sid_start"],"tt1234567:2:8");
+        assert_eq!(valid["sid_end"],"tt1234567:3:2");
+    }
+
     #[test]
     fn stremthru_strict_debug_matches_production_policy(){
         assert!(matches!(request_policy(false,false),MatchPolicy::PublicApi));
