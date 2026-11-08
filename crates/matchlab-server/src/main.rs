@@ -667,7 +667,7 @@ fn diagnose_with_policy(
         imdb.into_iter().filter(|candidate|
             year_signal_eligible(year,candidate.year,series&&!seasons.is_empty(),
                 !candidate.anime_ids.is_empty()
-                    || verified_anime_range_imdb.as_deref()==Some(&candidate.imdb_id),
+                    || verified_anime_range_imdb.as_deref()==Some(candidate.imdb_id.as_str()),
                 parsed_quality)
         ).collect::<Vec<_>>()
     }else{imdb};
