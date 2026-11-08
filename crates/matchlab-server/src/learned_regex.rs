@@ -384,6 +384,83 @@ fn reserve_space(db:&Connection,marker:&str,new_candidate:bool,
     }
     Ok(false)
 }
+/// Export only high-evidence, independently revalidated *rule candidates*.
+/// This is not a calibrated ML probability. At least 12 distinct examples,
+/// 4 independent IMDb identities and 5 different episodes are required.
+/// Actual GitHub merge still requires independent main-branch validation.
+pub fn proposals(db:&Connection,metadata:&Connection)->Result<Vec<Value>,String>{
+    let revision=metadata_revision(metadata)?;
+    let mut stmt=db.prepare("SELECT a.marker FROM learned_regex_active a
+        JOIN learned_regex_candidates c ON c.marker=a.marker
+        WHERE a.verified_build=?1 AND a.verified_metadata=?2
+          AND c.obsolete=0 ORDER BY a.marker LIMIT 32")
+        .map_err(|e|e.to_string())?;
+    let markers=stmt.query_map(params![build(),revision],|r|r.get::<_,String>(0))
+        .map_err(|e|e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;
+    let mut out=Vec::new();
+    for marker in markers{
+        let Some(pattern)=pattern_for(&marker)else{continue;};
+        if !negative_probes(&marker,&regex_for(&marker).ok_or("invalid compiled pattern")?){
+            continue;
+        }
+        let (n,series,episodes):(i64,i64,i64)=db.query_row(
+            "SELECT count(*),count(DISTINCT imdb_id),
+               count(DISTINCT absolute_episode)
+             FROM learned_regex_evidence
+             WHERE marker=?1 AND epoch=?2",
+            params![marker,EPOCH],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))
+            .map_err(|e|e.to_string())?;
+        if n<12||series<4||episodes<5||!validate_examples(db,metadata,&marker)?{
+            continue;
+        }
+        let mut statement=db.prepare(
+            "SELECT release_title,imdb_id,absolute_episode,season,episode,
+                    anidb_id,anidb_episode
+             FROM learned_regex_evidence
+             WHERE marker=?1 AND epoch=?2
+             ORDER BY example_hash LIMIT 12"
+        ).map_err(|e|e.to_string())?;
+        let evidence=statement.query_map(params![marker,EPOCH],|r|Ok((
+            r.get::<_,String>(0)?,r.get::<_,String>(1)?,
+            r.get::<_,i64>(2)?,r.get::<_,i64>(3)?,
+            r.get::<_,i64>(4)?,r.get::<_,String>(5)?,
+            r.get::<_,i64>(6)?)))
+            .map_err(|e|e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;
+        let mut examples=Vec::new();
+        for (title,imdb,absolute,season,episode,anidb,anidb_ep) in evidence{
+            // Public Issues are never an appropriate place for paths,
+            // credentials or personally identifying filenames.
+            if title.len()>180||title.contains(['/', '\\','@','\n','\r','\0']){continue;}
+            let lower=title.to_lowercase();
+            if ["http:","https:","magnet:","token=","password=",
+                "apikey=","secret="].iter().any(|part|lower.contains(part)){continue;}
+            if !check_verified(metadata,&imdb,absolute,season,episode,&anidb,anidb_ep){
+                examples.clear();break;
+            }
+            examples.push(json!({
+                "title":title,"imdb_id":imdb,"absolute_episode":absolute,
+                "season":season,"episode":episode,
+                "anidb_id":anidb,"anidb_episode":anidb_ep
+            }));
+        }
+        if examples.len()<8{continue;}
+        out.push(json!({
+            "kind":"verified_regex_proposal",
+            "fingerprint":hash(&format!("community-regex:{marker}")),
+            "marker":marker,"regex":pattern,
+            "source_build":build(),
+            "source_metadata":revision,
+            "evidence_count":n,
+            "distinct_imdb":series,
+            "distinct_episodes":episodes,
+            "verification":"local_exact_imdb_title_and_anidb_tvdb_crosswalk",
+            "examples":examples
+        }));
+    }
+    Ok(out)
+}
 /// Called only by global storage maintenance AFTER the configured
 /// learning database quota has been exceeded. Never delete an active rule.
 pub fn evict_obsolete(db:&Connection,max_rows:i64)->Result<i64,String>{
