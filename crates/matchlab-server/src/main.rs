@@ -14,6 +14,7 @@ mod dashboard_history;
 mod debug_feed;
 mod field_audit;
 mod field_learning;
+mod tv_learning;
 mod community_learning;
 mod local_learning;
 mod online_model;
@@ -104,6 +105,7 @@ fn cache_generation_current(saved:u64,at:Instant,current:u64)->bool{
 }
 fn parse_rules_revision()->u64{
     learned_regex::revision().rotate_left(1) ^ field_learning::revision().rotate_left(17)
+        ^ tv_learning::revision().rotate_left(33)
 }
 fn parse_cached(title:&str)->Result<Value,String>{
     if title.trim().is_empty()||title.len()>4096 {
@@ -121,6 +123,7 @@ fn parse_cached(title:&str)->Result<Value,String>{
     });
     if let Some(mut enriched)=cached{
         field_learning::apply(title,&mut enriched);
+        tv_learning::apply(title,&mut enriched);
         learned_regex::apply(title,&mut enriched);
         if parse_rules_revision()==generation{
             return Ok(enriched);
@@ -161,6 +164,7 @@ fn parse_cached(title:&str)->Result<Value,String>{
     }
     let mut enriched=value;
     field_learning::apply(title,&mut enriched);
+    tv_learning::apply(title,&mut enriched);
     learned_regex::apply(title,&mut enriched);
     Ok(enriched)
 }
