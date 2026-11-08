@@ -93,55 +93,68 @@ struct Diagnostic {
     reason: String,
 }
 
-// Shared, bounded 30-second parser cache for /parse and /match.
+// Shared, bounded 30-second parser cache for /parse and /match. Each entry
+// belongs to an exact active regex generation; obsolete entries are NEVER
+// returned. When rules change, a request performs a fresh base parse.
 const PARSE_TTL:Duration=Duration::from_secs(30);
-static PARSE_CACHE:OnceLock<Mutex<HashMap<String,(Instant,Value)>>>=OnceLock::new();
+static PARSE_CACHE:OnceLock<Mutex<HashMap<String,(Instant,u64,Value)>>>=OnceLock::new();
+fn cache_generation_current(saved:u64,at:Instant,current:u64)->bool{
+    saved==current && at.elapsed()<PARSE_TTL
+}
 fn parse_cached(title:&str)->Result<Value,String>{
     if title.trim().is_empty()||title.len()>4096 {
         return Err("title must be 1–4096 bytes".into());
     }
+    let generation=learned_regex::revision();
     let cache=PARSE_CACHE.get_or_init(||Mutex::new(HashMap::new()));
     if let Ok(guard)=cache.lock(){
-        if let Some((at,value))=guard.get(title){
-            if at.elapsed()<PARSE_TTL{
+        if let Some((at,saved_generation,value))=guard.get(title){
+            if cache_generation_current(*saved_generation,*at,generation){
                 let mut enriched=value.clone();
                 learned_regex::apply(title,&mut enriched);
-                return Ok(enriched);
+                if learned_regex::revision()==generation {
+                    return Ok(enriched);
+                }
+                // Rules changed during the cache read; reparse below.
             }
         }
     }
-    // Store the *base* parser result. Any learned overlay is applied after
-    // both memory and disk cache hits, so retired rules never leak into
-    // matching even if their historical cache entry is retained.
-    let value=if let Some(cached)=learning_cache::get_parser(title){
+    // Persisted hits are likewise strict current-namespace only. On a
+    // parser/image/regex change, an old result can remain as historical
+    // learning evidence but cannot become a live parse result.
+    let mut value=if let Some(cached)=learning_cache::get_parser(title){
         cached
     }else{
-        let parsed=Value::Object(matchlab_parser::parse_title(title,false)
-            .map_err(|e|e.to_string())?);
-        learning_cache::put_parser(title,&parsed);
-        parsed
+        Value::Object(matchlab_parser::parse_title(title,false)
+            .map_err(|e|e.to_string())?)
     };
+    if learned_regex::revision()!=generation {
+        // A new local rule was installed while loading. Do not cache or
+        // return a base parse computed in an older rule generation.
+        value=Value::Object(matchlab_parser::parse_title(title,false)
+            .map_err(|e|e.to_string())?);
+    }
+    // The base parser output is stored, not an ML-decorated response. This
+    // ensures retired learned patterns never survive as cached coordinates.
+    learning_cache::put_parser(title,&value);
     if let Ok(mut guard)=cache.lock(){
-        // Avoid O(cache size) cleanup on every previously unseen title.
-        // Under pressure, remove expired entries before evicting only the
-        // oldest live entry instead of wiping the entire warm cache.
         const CAPACITY:usize=1024;
         if guard.len()>=CAPACITY {
-            guard.retain(|_,(at,_)|at.elapsed()<PARSE_TTL);
+            let latest=learned_regex::revision();
+            guard.retain(|_,(at,old,_)|cache_generation_current(*old,*at,latest));
             if guard.len()>=CAPACITY {
                 if let Some(oldest)=guard.iter()
-                    .min_by_key(|(_, (at,_))|*at).map(|(key,_)|key.clone()){
+                    .min_by_key(|(_, (at,_,_))|*at).map(|(key,_)|key.clone()){
                     guard.remove(&oldest);
                 }
             }
         }
-        guard.insert(title.to_string(),(Instant::now(),value.clone()));
+        guard.insert(title.to_string(),(Instant::now(),learned_regex::revision(),value.clone()));
     }
     let mut enriched=value;
     learned_regex::apply(title,&mut enriched);
     Ok(enriched)
 }
-
 fn numbers(v: Option<&Value>) -> Vec<i64> {
     match v {
         Some(Value::Number(n)) => n.as_i64().into_iter().collect(),
@@ -3001,6 +3014,13 @@ mod tests {
             serde_json::to_value(&sample).unwrap()).unwrap();
         assert_eq!(restored.selected,sample.selected);
         assert_eq!(restored.imdb_candidates[0].source,"imdb");
+    }
+    #[test]
+    fn changed_regex_generation_invalidates_30_second_parser_memory_cache(){
+        let at=Instant::now();
+        assert!(cache_generation_current(4,at,4));
+        assert!(!cache_generation_current(4,at,5),
+            "a cached parse from an obsolete regex generation must be recomputed");
     }
     #[test]
     fn parse_cache_returns_full_parser_fields() {
