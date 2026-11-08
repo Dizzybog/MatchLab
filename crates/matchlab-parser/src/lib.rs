@@ -2552,7 +2552,11 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
             // "3 - 08" in this release form is not an absolute batch.
             result.insert("anime_season_episode_candidate".into(),candidate);
         } else if let Some(candidate)=unmarked_anime_episode_candidate(raw,translate_languages)? {
+            // The generic parser may have consumed the final endpoint as a
+            // standalone episode. Do not expose a contradictory episode 400
+            // while the unverified candidate actually describes 320..400.
             result.insert("anime_episode_range_candidate".into(), candidate);
+            result.insert("episodes".into(),json!([]));
         }
     }
     // "#05" is an explicit fansub episode marker, not a CRC tag or a
@@ -2569,10 +2573,12 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
         }
     }
     patch_half_episode(raw, translate_languages, &mut result)?;
-    if let Some(candidate)=unmarked_single_anime_episode_candidate(
-        raw,&result,translate_languages
-    )? {
-        result.insert("anime_episode_candidate".into(),candidate);
+    if !result.contains_key("anime_episode_range_candidate") {
+        if let Some(candidate)=unmarked_single_anime_episode_candidate(
+            raw,&result,translate_languages
+        )? {
+            result.insert("anime_episode_candidate".into(),candidate);
+        }
     }
     if let Some(episode_title) = extract_release_episode_title(raw, &result)? {
         result.insert("episode_title".into(), json!(episode_title));
@@ -2958,6 +2964,20 @@ static ADULT_KEYWORDS: Lazy<AhoCorasick> = Lazy::new(|| {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unmarked_anime_batch_does_not_claim_only_its_last_episode(){
+        let parsed=parse_title("bleach_320 - 400",false).unwrap();
+        let candidate=&parsed["anime_episode_range_candidate"];
+        assert_eq!(candidate["title"],"bleach");
+        assert_eq!(candidate["start"],320);
+        assert_eq!(candidate["end"],400);
+        assert_eq!(candidate["verified"],false);
+        // /parse is metadata-free; only /match can verify a batch. Until
+        // then, neither the final endpoint nor a single-episode hint wins.
+        assert_eq!(parsed["episodes"],json!([]));
+        assert!(!parsed.contains_key("anime_episode_candidate"));
+    }
 
     const EQUIVALENCE_TITLES: &[&str] = &[
         "Deadpool 2016 1080p BluRay x264 DTS-JYK",
