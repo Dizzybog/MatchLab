@@ -1680,6 +1680,42 @@ fn unmarked_anime_episode_candidate(
     Ok(None)
 }
 
+// Bracketed fansub releases sometimes write "<series> <season> - <episode>":
+// "[Erai-raws] Jihanki 3 - 08 [1080p]". The shape alone is ambiguous.
+// Only publish a candidate; the server must verify an exact anime identity
+// and a real episode in the advertised season before promotion.
+// Ordinary "01-07" and "26 - 50" anime batches remain unchanged.
+static FANSUB_SEASON_DASH_EPISODE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?i)^\[[^]\r\n]{2,64}\][ ._]+(.+?)[ ._]+([1-9]|1[0-2])[ ]+-[ ]+(0[1-9]|[1-9][0-9])(?=$|[ ._\[(])"
+    ).expect("valid fansub season-dash-episode regex")
+});
+fn fansub_season_dash_episode_candidate(
+    raw: &str, translate_languages: bool,
+) -> Result<Option<Value>, ParseError> {
+    let Some(caps) = FANSUB_SEASON_DASH_EPISODE_RE.captures(raw)
+        .map_err(|e| ParseError::Regex(e.to_string()))? else { return Ok(None) };
+    let (Some(name), Some(season), Some(episode)) =
+        (caps.get(1), caps.get(2), caps.get(3)) else { return Ok(None) };
+    let (Ok(season), Ok(episode)) =
+        (season.as_str().parse::<i64>(), episode.as_str().parse::<i64>())
+    else { return Ok(None) };
+    if !(1..=12).contains(&season) || !(1..=99).contains(&episode) {
+        return Ok(None);
+    }
+    let name = name.as_str().trim();
+    if name.chars().filter(|ch| ch.is_alphabetic()).count() < 4 {
+        return Ok(None);
+    }
+    let title = ENGINE.parse(name, translate_languages)?
+        .get("title").and_then(Value::as_str).unwrap_or(name).trim().to_owned();
+    if title.chars().filter(|ch| ch.is_alphabetic()).count() < 4 {
+        return Ok(None);
+    }
+    Ok(Some(json!({"title": title,"season": season,"episode": episode,
+        "verified": false})))
+}
+
 // Some common release conventions are more specific than the generic upstream
 // handlers. Apply these corrections to the leaf *after* normal parsing so we
 // never change the handler table or the fast regex prefilter.
@@ -2512,6 +2548,9 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
             result.insert("episode_range_numbering".into(),
                 json!(if has_season { "season" } else { "absolute" }));
             set_title_from_release_prefix(raw, marker_start, translate_languages, &mut result)?;
+        } else if let Some(candidate)=fansub_season_dash_episode_candidate(raw,translate_languages)? {
+            // "3 - 08" in this release form is not an absolute batch.
+            result.insert("anime_season_episode_candidate".into(),candidate);
         } else if let Some(candidate)=unmarked_anime_episode_candidate(raw,translate_languages)? {
             result.insert("anime_episode_range_candidate".into(), candidate);
         }
@@ -2559,6 +2598,7 @@ fn merge_path_metadata(merged:&mut Map<String,Value>, layer:&Map<String,Value>){
     let new_episodes=path_has_coordinates(layer,"episodes")
         ||path_has_coordinates(layer,"episode_start")
         ||path_has_coordinates(layer,"anime_episode_range_candidate")
+        ||path_has_coordinates(layer,"anime_season_episode_candidate")
         ||path_has_coordinates(layer,"anime_episode_candidate")
         ||path_has_coordinates(layer,"absolute_episode_candidate");
     let new_season=path_has_coordinates(layer,"seasons");
@@ -2573,7 +2613,7 @@ fn merge_path_metadata(merged:&mut Map<String,Value>, layer:&Map<String,Value>){
                     .is_some_and(|eps| eps.len() == 1
                         && eps[0].as_i64() == Some(candidate)));
         for key in ["episode_start","episode_end","episode_count",
-            "episode_range_numbering","anime_episode_range_candidate","anime_episode_candidate","episode_title","half_episode"] {
+            "episode_range_numbering","anime_episode_range_candidate","anime_season_episode_candidate","anime_episode_candidate","episode_title","half_episode"] {
             merged.remove(key);
         }
         if !keep_parent_absolute {
