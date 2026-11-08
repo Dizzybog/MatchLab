@@ -335,15 +335,29 @@ pub fn reconcile(db:&mut Connection,metadata:&Connection)->Result<(),String>{
     tx.commit().map_err(|e|e.to_string())?;
     reload(db,&current,&revision)
 }
-/// Delete only obsolete candidates, never active rules. Cascading deletes
-/// remove their evidence atomically. Called exclusively once the local
-/// learning DB's configured budget has been exceeded.
-pub fn evict_obsolete(db:&Connection,max_rows:i64)->Result<i64,String>{
-    init(db)?;
-    db.execute("DELETE FROM learned_regex_candidates WHERE marker IN(
-        SELECT marker FROM learned_regex_candidates WHERE obsolete=1
-        ORDER BY obsolete_at ASC,created_at ASC LIMIT ?1
-    )",[max_rows]).map(|v|v as i64).map_err(|e|e.to_string())
+/// Only when an upcoming insertion would exceed a hard limit may the
+/// oldest obsolete, non-active candidate be deleted. Evidence follows via
+/// ON DELETE CASCADE, atomically. Useful cached data is never evicted.
+fn reserve_space(db:&Connection,marker:&str,new_candidate:bool,
+    candidate_limit:i64,evidence_limit:i64)->Result<bool,String>{
+    for _ in 0..=MAX_CANDIDATES{
+        let candidates:i64=db.query_row("SELECT count(*) FROM learned_regex_candidates",
+            [],|r|r.get(0)).map_err(|e|e.to_string())?;
+        let evidence:i64=db.query_row("SELECT count(*) FROM learned_regex_evidence",
+            [],|r|r.get(0)).map_err(|e|e.to_string())?;
+        if candidates+i64::from(new_candidate)<=candidate_limit
+            && evidence+1<=evidence_limit{return Ok(true);}
+        let victim:Option<String>=db.query_row(
+            "SELECT c.marker FROM learned_regex_candidates c
+             LEFT JOIN learned_regex_active a ON a.marker=c.marker
+             WHERE c.marker<>?1 AND c.obsolete=1 AND a.marker IS NULL
+             ORDER BY c.obsolete_at,c.created_at,c.marker LIMIT 1",
+            [marker],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+        let Some(victim)=victim else{return Ok(false);};
+        db.execute("DELETE FROM learned_regex_candidates WHERE marker=?1",
+            [&victim]).map_err(|e|e.to_string())?;
+    }
+    Ok(false)
 }
 fn reload(db:&Connection,build:&str,revision:&str)->Result<(),String>{
     let mut stmt=db.prepare("SELECT marker FROM learned_regex_active
@@ -399,34 +413,33 @@ pub fn observe(db:&Connection,metadata:&Connection,title:&str,details:&Value)->R
         if let Some(episode)=selected["episode"].as_i64()
             && episode!=mapped.episode{continue;}
         if !negative_probes(&marker,&re){continue;}
-        let total:i64=db.query_row(
-            "SELECT COUNT(*) FROM learned_regex_evidence",[],|r|r.get(0))
+        let fingerprint=hash(&format!("{imdb}:{absolute}:{}",name.to_lowercase()));
+        let known:i64=db.query_row("SELECT EXISTS(SELECT 1 FROM
+            learned_regex_candidates WHERE marker=?1)",[&marker],
+            |r|r.get(0)).map_err(|e|e.to_string())?;
+        let previously_seen:i64=db.query_row("SELECT EXISTS(SELECT 1 FROM
+            learned_regex_evidence WHERE marker=?1 AND example_hash=?2 AND epoch=?3)",
+            params![marker,fingerprint,EPOCH],|r|r.get(0))
             .map_err(|e|e.to_string())?;
-        if total>=MAX_EVIDENCE{return Ok(());}
-        let existing:i64=db.query_row(
-            "SELECT COUNT(*) FROM learned_regex_candidates",[],|r|r.get(0))
-            .map_err(|e|e.to_string())?;
-        if existing>=MAX_CANDIDATES{
-            let known:i64=db.query_row("SELECT EXISTS(SELECT 1 FROM
-                learned_regex_candidates WHERE marker=?1)",[&marker],
-                |r|r.get(0)).map_err(|e|e.to_string())?;
-            if known==0{continue;}
+        if previously_seen>0{continue;}
+        if !reserve_space(db,&marker,known==0,MAX_CANDIDATES,MAX_EVIDENCE)?{
+            return Ok(()); // full of useful examples; do not delete them
         }
         db.execute("INSERT OR IGNORE INTO learned_regex_candidates(marker,created_at)
             VALUES(?1,strftime('%s','now'))",[&marker])
             .map_err(|e|e.to_string())?;
-        let fingerprint=hash(&format!("{imdb}:{absolute}:{}",name.to_lowercase()));
-        // Retired observations remain cached but cannot silently retrain a
-        // rule retired by a newer parser/metadata version.
-        let retired:i64=db.query_row("SELECT obsolete FROM learned_regex_candidates
-            WHERE marker=?1",[&marker],|r|r.get(0))
-            .map_err(|e|e.to_string())?;
-        if retired!=0 {continue;}
-        db.execute("INSERT OR IGNORE INTO learned_regex_evidence(
+        // Re-confirming an old cached key in the new epoch refreshes its
+        // provenance; merely retaining cached data never revalidates it.
+        db.execute("INSERT INTO learned_regex_evidence(
              marker,example_hash,imdb_id,absolute_episode,season,episode,
-             anidb_id,anidb_episode) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+             anidb_id,anidb_episode,epoch) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+             ON CONFLICT(marker,example_hash) DO UPDATE SET
+               imdb_id=excluded.imdb_id,absolute_episode=excluded.absolute_episode,
+               season=excluded.season,episode=excluded.episode,
+               anidb_id=excluded.anidb_id,anidb_episode=excluded.anidb_episode,
+               epoch=excluded.epoch",
              params![marker,fingerprint,imdb,absolute,mapped.season,
-                mapped.episode,mapped.anidb_id,mapped.anidb_episode])
+                mapped.episode,mapped.anidb_id,mapped.anidb_episode,EPOCH])
             .map_err(|e|e.to_string())?;
         seen+=1;
         if seen>=1 {break;}
