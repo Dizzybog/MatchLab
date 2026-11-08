@@ -129,6 +129,7 @@ def collect(all_comments,sha,seen,now=None,ancestor=git_ancestor):
     cutoff=now-timedelta(days=2)
     output=[]
     seen=set(seen)
+    pending=set()
     for sub in all_comments:
         comments=sub if isinstance(sub,list) else [sub]
         for comment in comments:
@@ -141,10 +142,13 @@ def collect(all_comments,sha,seen,now=None,ancestor=git_ancestor):
             rules=parse_batch(comment,sha,ancestor)
             if rules is None:continue
             for rule in rules:
-                if rule["fingerprint"] in seen:continue
-                seen.add(rule["fingerprint"])
+                if rule["fingerprint"] in seen or rule["fingerprint"] in pending:continue
+                pending.add(rule["fingerprint"])
                 output.append(rule)
                 if len(output)>=24:return output,seen
+    # Do NOT poison the permanent ledger with only self-reported evidence.
+    # A fingerprint becomes permanent only after trusted screening, regression
+    # tests and successful creation of the human-review PR.
     return output,seen
 
 def main():
