@@ -1536,6 +1536,12 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         println!("native Rust FTRL model self-test passed");
         return Ok(());
     }
+    if args.get(1).is_some_and(|arg|arg=="benchmark-native-ml") {
+        let stats=local_learning::benchmark_native_model()
+            .map_err(std::io::Error::other)?;
+        println!("{stats}");
+        return Ok(());
+    }
     if args.get(1).is_some_and(|arg|arg=="import-imdb") {
         if args.len()!=6 {
             return Err("usage: matchlab-server import-imdb <database.sqlite3> <title.basics.tsv.gz> <title.akas.tsv.gz> <title.episode.tsv.gz>".into());
