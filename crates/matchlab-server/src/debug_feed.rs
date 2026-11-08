@@ -132,6 +132,46 @@ fn explicit_sxe(title: &str) -> Option<(i64, i64)> {
     None
 }
 
+// A compact Spanish caption marker: Cap.103 -> S01E03, Cap.1004 -> S10E04.
+// Interpret only complete 3- or 4-digit chapter codes, not arbitrary numbers.
+fn explicit_spanish_cap(title: &str) -> Option<(i64, i64)> {
+    let bytes = title.as_bytes();
+    for i in 0..bytes.len().saturating_sub(2) {
+        if (i > 0 && bytes[i - 1].is_ascii_alphanumeric())
+            || bytes[i].to_ascii_lowercase() != b'c'
+            || bytes[i + 1].to_ascii_lowercase() != b'a'
+            || bytes[i + 2].to_ascii_lowercase() != b'p'
+        {
+            continue;
+        }
+        let mut cursor = i + 3;
+        while cursor < bytes.len()
+            && matches!(bytes[cursor], b'.' | b':' | b'_' | b'-' | b' ')
+            && cursor < i + 7
+        {
+            cursor += 1;
+        }
+        let start = cursor;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_digit()
+            && cursor - start < 5
+        {
+            cursor += 1;
+        }
+        if !(3..=4).contains(&(cursor - start))
+            || bytes.get(cursor).is_some_and(u8::is_ascii_alphanumeric)
+        {
+            continue;
+        }
+        if let Ok(number) = title[start..cursor].parse::<i64>() {
+            let (season, episode) = (number / 100, number % 100);
+            if (1..=99).contains(&season) && (1..=99).contains(&episode) {
+                return Some((season, episode));
+            }
+        }
+    }
+    None
+}
+
 fn alerts(title: &str, status: &str, details: &Value) -> Vec<Value> {
     let mut findings = Vec::new();
     if status == "error" {
@@ -157,11 +197,13 @@ fn alerts(title: &str, status: &str, details: &Value) -> Vec<Value> {
             "message":"Selected season exceeds 60; check for an absolute anime episode"
         }));
     }
-    if let Some((explicit_season, explicit_episode)) = explicit_sxe(title) {
+    if let Some((explicit_season, explicit_episode)) =
+        explicit_sxe(title).or_else(|| explicit_spanish_cap(title))
+    {
         if status == "unmatched" {
             findings.push(json!({
                 "code":"unmatched_explicit_episode","severity":"review",
-                "message":"An explicit SxxEyy release did not match",
+                "message":"An explicitly numbered release did not match",
                 "raw_season":explicit_season,"raw_episode":explicit_episode
             }));
         }
@@ -175,7 +217,7 @@ fn alerts(title: &str, status: &str, details: &Value) -> Vec<Value> {
         {
             findings.push(json!({
                 "code":"explicit_episode_mismatch","severity":"review",
-                "message":"Selected season/episode disagrees with the release's SxxEyy marker",
+                "message":"Selected season/episode disagrees with an explicit release episode marker",
                 "raw_season":explicit_season,"raw_episode":explicit_episode,
                 "selected_season":season,"selected_episode":episode
             }));
@@ -189,10 +231,22 @@ fn alerts(title: &str, status: &str, details: &Value) -> Vec<Value> {
         if parser_missing && !verified_remap && status != "error" {
             findings.push(json!({
                 "code":"parser_marker_disagreement","severity":"review",
-                "message":"The parser's season/episode arrays disagree with an explicit SxxEyy marker",
+                "message":"The parser's season/episode arrays disagree with an explicit release episode marker",
                 "raw_season":explicit_season,"raw_episode":explicit_episode
             }));
         }
+    }
+    // Unverified absolute-episode hints (e.g. "Stone Ocean 27") are useful
+    // review candidates when a series was matched without episode coordinates.
+    if is_series && episode.is_none()
+        && parsed["anime_episode_candidate"]["episode"].as_i64().is_some()
+        && selected.get("anime").is_none_or(Value::is_null)
+    {
+        findings.push(json!({
+            "code":"unresolved_absolute_anime_episode","severity":"review",
+            "message":"An absolute anime episode hint was not resolved to a selected episode",
+            "candidate_episode":parsed["anime_episode_candidate"]["episode"]
+        }));
     }
     if is_series {
         let end_season = selected["season_end"].as_i64();
@@ -453,6 +507,27 @@ mod tests {
         assert_eq!(single(&path,2).unwrap().unwrap()["details"]["reason"],"fixture");
         assert!(single(&path,9999).unwrap().is_none());
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn spanish_cap_markers_are_audited() {
+        assert_eq!(explicit_spanish_cap("Show [Cap.103]"),Some((1,3)));
+        assert_eq!(explicit_spanish_cap("The Walking Dead Cap.1004"),Some((10,4)));
+        assert_eq!(explicit_spanish_cap("Captain America 1004"),None);
+        let wrong=json!({"parsed":{"seasons":[10],"episodes":[3]},
+            "selected":{"category":"series","season":10,"episode":3}});
+        let flags=alerts("Show.Temporada.10.Cap.1004","matched",&wrong);
+        assert!(flags.iter().any(|a|a["code"]=="explicit_episode_mismatch"));
+    }
+
+    #[test]
+    fn unresolved_absolute_anime_episode_hint_is_reported() {
+        let details=json!({
+            "parsed":{"anime_episode_candidate":{"title":"Stone Ocean","episode":27}},
+            "selected":{"category":"series","season":1}
+        });
+        assert!(alerts("Stone Ocean 27","matched",&details).iter()
+            .any(|a|a["code"]=="unresolved_absolute_anime_episode"));
     }
 
     #[test]
