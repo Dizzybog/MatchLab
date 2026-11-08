@@ -3,7 +3,7 @@
 //! provides episode evidence; an IMDb crosswalk is optional and later.
 use std::collections::BTreeSet;
 use rusqlite::Connection;
-use crate::{identifiers,tantivy_search::{self,AliasLookupKind},title_normalization};
+use crate::{identifiers,tantivy_search,title_normalization};
 
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub struct VerifiedEpisode {
@@ -62,12 +62,9 @@ fn mappings(db:&Connection,anidb_id:&str)->Result<Vec<Mapping>,String>{
 fn exact_anidb_ids(db:&Connection,title:&str)->Result<BTreeSet<String>,String>{
     let key=title_normalization::clean_title(title);
     if key.len()<4{return Ok(BTreeSet::new());}
-    let entries=tantivy_search::lookup_aliases(db,AliasLookupKind::ExactTitle,&key)?;
-    Ok(entries.into_iter()
-        .filter(|row|row.source=="anidb" && row.normalized==key)
-        .filter_map(|row|row.anidb_id)
-        .filter(|id|identifiers::canonical_asid(id,1).is_some())
-        .collect())
+    let ids=tantivy_search::anidb_ids_exact(db,&key)?;
+    Ok(ids.into_iter()
+        .filter(|id|identifiers::canonical_asid(id,1).is_some()).collect())
 }
 
 /// A finite Anime-Lists episode range or exact episode pair is evidence.
