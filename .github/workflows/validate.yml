@@ -20,6 +20,8 @@ jobs:
         run: docker build -t matchlab:test .
       - name: Verify native online training and prediction
         run: docker run --rm --entrypoint /usr/local/bin/matchlab-server matchlab:test verify-native-ml
+      - name: Smoke benchmark native model and canonical parser on AMD64
+        run: docker run --rm --entrypoint /usr/local/bin/matchlab-server matchlab:test benchmark-native-ml
 
   arm64-native-ml:
     # Native ARM64 build and train/predict self-test for Oracle A1 hosts.
@@ -31,3 +33,5 @@ jobs:
         run: docker build --platform linux/arm64 -t matchlab:arm64-test .
       - name: Verify ARM64 online learner and prediction
         run: docker run --rm --entrypoint /usr/local/bin/matchlab-server matchlab:arm64-test verify-native-ml
+      - name: Smoke benchmark native model and parser on ARM64
+        run: docker run --rm --entrypoint /usr/local/bin/matchlab-server matchlab:arm64-test benchmark-native-ml
