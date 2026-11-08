@@ -24,7 +24,6 @@ const MIN_TITLES: i64 = 4;
 const MIN_OVERRIDE_EXAMPLES: i64 = 16;
 const MIN_OVERRIDE_TITLES: i64 = 6;
 const MAX_RULES: usize = 96;
-const MAX_EVIDENCE: i64 = 12_000;
 const MAX_TITLE_BYTES: usize = 240;
 static ACTIVE:OnceLock<RwLock<ActiveRules>>=OnceLock::new();
 static REVISION: AtomicU64 = AtomicU64::new(0);
@@ -332,6 +331,37 @@ pub fn count_evidence(db:&Connection)->Result<i64,String>{
               +(SELECT COUNT(*) FROM learned_field_gap_evidence WHERE source_build=?1)",
         [build()],|row|row.get(0)).map_err(|e|e.to_string())
 }
+/// Keep the training corpus rolling when it is full. Preserve evidence
+/// for active rules; prune only the oldest current-build examples from
+/// unpromoted candidates. This runs on the learning worker, never the API.
+fn reclaim_unpromoted(db:&Connection,limit:i64)->Result<i64,String>{
+    let batch=(limit/20).clamp(1,256);
+    let current=build();
+    let mut removed=0i64;
+    for table in ["learned_field_gap_evidence","learned_field_evidence"]{
+        let sql=match table{
+            "learned_field_gap_evidence"=>
+                "DELETE FROM learned_field_gap_evidence WHERE rowid IN (
+                    SELECT e.rowid FROM learned_field_gap_evidence e
+                    LEFT JOIN learned_field_rules r ON r.field=e.field
+                        AND r.signal=e.signal AND r.verified_build=?1
+                    WHERE e.source_build=?1 AND r.field IS NULL
+                    ORDER BY e.first_seen,e.rowid LIMIT ?2)",
+            _=>
+                "DELETE FROM learned_field_evidence WHERE rowid IN (
+                    SELECT e.rowid FROM learned_field_evidence e
+                    LEFT JOIN learned_field_rules r ON r.field=e.field
+                        AND r.signal=e.signal AND r.verified_build=?1
+                    WHERE e.source_build=?1 AND r.field IS NULL
+                    ORDER BY e.first_seen,e.rowid LIMIT ?2)"
+        };
+        let left=batch.saturating_sub(removed);
+        if left==0{break;}
+        removed+=db.execute(sql,params![current,left])
+            .map_err(|e|e.to_string())? as i64;
+    }
+    Ok(removed)
+}
 pub fn observe_with_budget(db:&Connection,title:&str,details:&Value,
     parsed:&Value,count:&mut i64)->Result<Vec<(String,String)>,String>{
     let mut labels=Vec::new();
@@ -348,7 +378,8 @@ pub fn observe_with_budget(db:&Connection,title:&str,details:&Value,
             else {continue;};
         let canonical=serde_json::to_string(&value).map_err(|e|e.to_string())?;
         let key=digest(&format!("{}:{field}:{signal}",title.to_ascii_lowercase()));
-        if *count>=MAX_EVIDENCE{
+        let capacity=crate::learning_cache::training_max_examples();
+        if *count>=capacity{
             let lookup=if from_gap{
                 "SELECT count(*) FROM learned_field_gap_evidence
                  WHERE field=?1 AND signal=?2 AND example_hash=?3
@@ -360,7 +391,11 @@ pub fn observe_with_budget(db:&Connection,title:&str,details:&Value,
             };
             let known:i64=db.query_row(lookup,params![field,signal,key,source_build],
                 |row|row.get(0)).map_err(|e|e.to_string())?;
-            if known==0{continue;}
+            if known==0{
+                let removed=reclaim_unpromoted(db,capacity)?;
+                *count=(*count).saturating_sub(removed);
+                if *count>=capacity{continue;}
+            }
         }
         // Statically selected statements; nothing derived from filenames
         // enters SQL identifiers or statements, only bound parameters.
@@ -835,6 +870,25 @@ mod tests {
             params!["resolution","2160p","conflict","disagree",
                 r#""1080p""#,build()]).unwrap();
         assert!(select_rules(&db).unwrap().is_empty());
+    }
+    #[test]
+    fn corpus_capacity_reclaims_unpromoted_evidence_not_active_rules(){
+        let db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        for n in 0..10{
+            db.execute("INSERT INTO learned_field_gap_evidence(
+                field,signal,example_hash,identity_hash,canonical,source_build,first_seen)
+                VALUES(?1,?2,?3,?4,?5,?6,1)",
+                params!["resolution","1440p",format!("old{n}"),
+                    format!("identity{n}"),r#""1440p""#,build()]).unwrap();
+        }
+        db.execute("INSERT INTO learned_field_rules(
+            field,signal,canonical,verified_build,example_count,identity_count)
+            VALUES('resolution','1440p',?1,?2,10,10)",
+            params![r#""1440p""#,build()]).unwrap();
+        assert_eq!(reclaim_unpromoted(&db,100).unwrap(),0);
+        db.execute("DELETE FROM learned_field_rules",[]).unwrap();
+        assert_eq!(reclaim_unpromoted(&db,100).unwrap(),5);
     }
     #[test]
     fn requires_diverse_label_agreement_before_activation() {
