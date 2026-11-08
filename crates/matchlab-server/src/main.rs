@@ -1607,7 +1607,7 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         });
     }
     if history_ready {
-        community_learning::start(PathBuf::from(&history_db));
+        community_learning::start(PathBuf::from(&history_db),PathBuf::from(&db));
     }
     // A pre-existing volume may need a fresh Tantivy schema generation.
     // Start this in the blocking pool only after all service configuration is
