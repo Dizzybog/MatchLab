@@ -207,9 +207,13 @@ pub fn init(db: &Connection) -> Result<(), String> {
 }
 pub fn observe(db: &Connection, title: &str, details: &Value) -> Result<(), String> {
     if !safe_title(title) { return Ok(()); }
-    let parsed = &details["parsed"];
+    // Crucial anti-feedback guard: never accept a previously learned overlay
+    // as training truth. Re-parse from the canonical Rust parser.
+    let canonical = matchlab_parser::parse_title(title,false)
+        .map_err(|e| e.to_string())?;
+    let parsed = Value::Object(canonical);
     let selected = &details["selected"];
-    let Some(identity) = observed_identity(parsed, selected) else { return Ok(()); };
+    let Some(identity) = observed_identity(&parsed, selected) else { return Ok(()); };
     let Some(object) = parsed.as_object() else { return Ok(()); };
     let source_build = build();
     for (field, signal) in signals(title) {
@@ -219,8 +223,8 @@ pub fn observe(db: &Connection, title: &str, details: &Value) -> Result<(), Stri
         let canonical = serde_json::to_string(value).map_err(|e| e.to_string())?;
         let key = digest(&format!("{}:{field}:{signal}", title.to_ascii_lowercase()));
         let existing: i64 = db.query_row(
-            "SELECT count(*) FROM learned_field_evidence", [],
-            |row| row.get(0)).map_err(|e| e.to_string())?;
+            "SELECT count(*) FROM learned_field_evidence WHERE source_build=?1",
+            [&source_build], |row| row.get(0)).map_err(|e| e.to_string())?;
         if existing >= MAX_EVIDENCE { return Ok(()); }
         db.execute(
             "INSERT OR IGNORE INTO learned_field_evidence(
@@ -230,6 +234,17 @@ pub fn observe(db: &Connection, title: &str, details: &Value) -> Result<(), Stri
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+/// Old evidence is reusable for forensic review but cannot authorize rules
+/// for a different parser build. Reclaim it only when the global quota is
+/// exceeded; never discard active-build evidence to make room for guesses.
+pub fn evict_obsolete(db: &Connection, limit: i64) -> Result<i64, String> {
+    if limit <= 0 { return Ok(0); }
+    db.execute(
+        "DELETE FROM learned_field_evidence WHERE rowid IN (
+            SELECT rowid FROM learned_field_evidence WHERE source_build<>?1
+            ORDER BY first_seen, rowid LIMIT ?2)",params![build(),limit])
+        .map(|n| n as i64).map_err(|e| e.to_string())
 }
 fn select_rules(db: &Connection) -> Result<Vec<FieldRule>, String> {
     let source_build = build();
@@ -405,6 +420,20 @@ mod tests {
             rule("languages","german",json!(["de"]),32,10)
         ]);
         assert_eq!(parsed["languages"],json!(["fr"]));
+    }
+    #[test]
+    fn cached_overlay_cannot_become_a_training_label() {
+        let db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        let details=json!({"parsed":{"title":"Example","codec":"x265",
+            "learned_field_overrides":[{"field":"codec","value":"x265"}]}});
+        observe(&db,"Example.x265.WEB-DL",&details).unwrap();
+        let n:i64=db.query_row("SELECT count(*) FROM learned_field_evidence",[],
+            |row|row.get(0)).unwrap();
+        // An observation is only accepted if the *base* parser recognized
+        // and independently supplied the exact same value.
+        let original=matchlab_parser::parse_title("Example.x265.WEB-DL",false).unwrap();
+        assert_eq!(n>0,original["codec"].as_str()==Some("x265"));
     }
     #[test]
     fn requires_diverse_label_agreement_before_activation() {
