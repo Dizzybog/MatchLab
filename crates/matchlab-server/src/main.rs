@@ -537,25 +537,35 @@ fn diagnose_with_policy(
         ))
     {
         let hint_title=hint_title.to_owned();
-        let key=matchlab_matcher::clean_title(&hint_title);
-        let verified=if req.series==Some(false) || !(1..=12).contains(&season)
-            || !(1..=99).contains(&episode) {false}
-        else if let Some(imdb)=exact_anime_identity(&db,&key)? {
-            season_episode_end(&db,&imdb,season)?
-                .is_some_and(|end|episode<=end)
-                || anime_resolver::resolve_season(&db,&imdb,season,episode)
-                    .map_err(|error|error.to_string())?.is_some()
-        } else {false};
+        // Anime-Lists may index "Jihanki 3" as a season-specific synonym
+        // without ever indexing bare "Jihanki". Prefer the more specific
+        // exact part alias when it proves an IMDb season-episode coordinate.
+        // No substring search and no guessing a short alias.
+        let mut verified_title=None;
+        if req.series!=Some(false) && (1..=12).contains(&season)
+            && (1..=99).contains(&episode) {
+            for candidate_title in [format!("{hint_title} {season}"),hint_title.clone()] {
+                let key=matchlab_matcher::clean_title(&candidate_title);
+                if let Some(imdb)=exact_anime_identity(&db,&key)? {
+                    let valid=season_episode_end(&db,&imdb,season)?
+                        .is_some_and(|end|episode<=end)
+                        || anime_resolver::resolve_season(&db,&imdb,season,episode)
+                            .map_err(|error|error.to_string())?.is_some();
+                    if valid {verified_title=Some(candidate_title);break;}
+                }
+            }
+        }
         if let Some(parsed)=parsed_value.as_object_mut(){
             // Generic regex handlers may mistake "3 - 08" for a batch.
             // Preserve the candidate for diagnostics but do not expose
             // unverified coordinates to downstream matching consumers.
             parsed.insert("episodes".into(),json!([]));
             parsed.insert("seasons".into(),json!([]));
-            if verified {
-                parsed.insert("title".into(),json!(hint_title));
+            if let Some(verified_title)=verified_title {
+                parsed.insert("title".into(),json!(verified_title));
                 parsed.insert("seasons".into(),json!([season]));
                 parsed.insert("episodes".into(),json!([episode]));
+                parsed.insert("anime_season_episode_base_title".into(),json!(hint_title));
                 parsed.insert("anime_title_verified".into(),json!(true));
             }
         }
@@ -716,7 +726,12 @@ fn diagnose_with_policy(
     let anime_subfolder_title=if series {
         verified_anime_subfolder_title(&db,parsed,&imdb)?
     }else {None};
-    let anime_resolve_title=anime_subfolder_title.as_deref().unwrap_or(title);
+    // A verified numeric season marker already supplies series-relative
+    // coordinates. Resolve against the base title rather than treating
+    // an exact "Jihanki 3" part alias as a local "season 3 of part 3".
+    let anime_resolve_title=parsed.get("anime_season_episode_base_title")
+        .and_then(Value::as_str)
+        .or(anime_subfolder_title.as_deref()).unwrap_or(title);
     let anime_resolve_key=matchlab_matcher::clean_title(anime_resolve_title);
     let anime = if verified_chinese_override.is_some() {
         // The validated IMDb candidate owns this crosswalk; do not select
