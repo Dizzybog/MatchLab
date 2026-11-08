@@ -51,11 +51,11 @@ class CommunityRuleTests(unittest.TestCase):
         self.assertIsNotNone(rules.valid_rule(proposal(),SHA))
         batch=comment()
         self.assertEqual(len(rules.parse_batch(batch,SHA,lambda *_:True)),1)
-        out,seen=rules.collect([batch],SHA,set(),NOW)
+        out,seen=rules.collect([batch],SHA,set(),NOW,lambda *_:True)
         self.assertEqual(len(out),1)
         self.assertEqual(len(seen),1)
         # The same daily batch never creates a second proposal.
-        out2,seen2=rules.collect([batch],SHA,seen,NOW)
+        out2,seen2=rules.collect([batch],SHA,seen,NOW,lambda *_:True)
         self.assertEqual(out2,[])
         self.assertEqual(seen2,seen)
         # Rule-only batches remain valid for the legacy anomaly reviewer.
