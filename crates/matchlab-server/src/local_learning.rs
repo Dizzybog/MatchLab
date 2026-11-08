@@ -62,11 +62,9 @@ fn count(db:&Connection,table:&str)->Result<i64,String>{
     };
     db.query_row(sql,[],|r|r.get(0)).map_err(|e|e.to_string())
 }
-fn pattern(flag:&Value,details:&Value)->Option<(String,String)>{
+fn pattern(flag:&Value,parsed:&Value,selected:&Value)->Option<(String,String)>{
     let code=flag["code"].as_str()?;
     if !code.starts_with("field_"){return None;}
-    let parsed=&details["parsed"];
-    let selected=&details["selected"];
     let feature=if code=="field_mismatch_year"{
         let (p,s)=(parsed["year"].as_i64()?,selected["year"].as_i64()?);
         if !(1880..=2100).contains(&p)||!(1880..=2100).contains(&s){return None;}
@@ -154,9 +152,9 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
         crate::candidate_discovery::observe(&tx,&title,&base,
             &model,&mut discovery)?;
         let flags=crate::field_audit::audit(
-            &title,&details["parsed"],&details["selected"]);
+            &title,&base,&details["selected"]);
         for flag in flags{
-            let Some((code,group))=pattern(&flag,&details)else{continue};
+            let Some((code,group))=pattern(&flag,&base,&details["selected"])else{continue};
             if samples>=max_examples(){continue;}
             let sample=digest(&format!("{group}:{}",normalized(&title)));
             // The PRIMARY KEY is the dedup check. No preliminary SELECT
@@ -262,7 +260,7 @@ mod tests{
     fn year_offset_patterns_are_hashed_not_saved_as_films(){
         let d=json!({"parsed":{"year":2024},"selected":{"year":2020}});
         let a=json!({"code":"field_mismatch_year"});
-        let (code,key)=pattern(&a,&d).unwrap();
+        let (code,key)=pattern(&a,&d["parsed"],&d["selected"]).unwrap();
         assert_eq!(code,"field_mismatch_year");
         assert_eq!(key.len(),64);
     }
@@ -271,7 +269,8 @@ mod tests{
         let a=json!({"code":"field_unresolved_episode"});
         let d=json!({"selected":{"imdb_id":"tt1234567"}});
         let e=json!({"selected":{"imdb_id":"tt7654321"}});
-        assert_ne!(pattern(&a,&d).unwrap().1,pattern(&a,&e).unwrap().1);
+        assert_ne!(pattern(&a,&d["parsed"],&d["selected"]).unwrap().1,
+            pattern(&a,&e["parsed"],&e["selected"]).unwrap().1);
     }
     #[test]
     fn native_inference_is_finite_and_requires_training(){
