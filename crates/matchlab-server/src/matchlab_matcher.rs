@@ -166,6 +166,19 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
                 if yes{rows.push(row);}
             }
         }
+        if rows.is_empty(){
+            // Keep the original exact indexed anime-ID discovery path as
+            // a conservative fallback, for legacy datasets and alias
+            // shapes that the prefix lookup cannot represent.
+            let ids=crate::tantivy_search::anime_candidates(db,&key)
+                .map_err(index_error)?;
+            if !ids.is_empty(){
+                let aliases=crate::tantivy_search::titles_by_ids(db,&ids)
+                    .map_err(index_error)?;
+                rows=filter(db,aliases.into_iter().map(Aka::from).collect(),
+                    &release,series,year,required_season)?;
+            }
+        }
         if !rows.is_empty(){stage="anime_alias";}
     }
     if rows.is_empty(){return Ok(vec![]);}
