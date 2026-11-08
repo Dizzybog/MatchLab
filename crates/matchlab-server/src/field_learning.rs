@@ -604,6 +604,7 @@ pub fn status() -> Value {
             "training_source":"canonical_rust_parser_and_allowlisted_raw_markers",
             "model":"rust_ftrl_proximal",
             "online_learner":crate::online_model::OnlineModel::status(),
+            "candidate_discovery":crate::candidate_discovery::status(),
             "identity_and_coordinate_override":"separate_metadata_verification"});
     }
     json!({"enabled":crate::local_learning::active(),
