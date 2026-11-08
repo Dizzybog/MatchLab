@@ -2252,7 +2252,7 @@ mod tests {
             INSERT INTO episode_map VALUES('1253','81797',1,21,892,1085,-891,'');
             INSERT INTO episode_map VALUES('1253','81797',1,22,1086,1155,-1085,'');").unwrap();
         tantivy_search::warmup(&db).unwrap();
-        assert!(verified_unmarked_anime_range_imdb(&db,"onepiece",892,1089)
+        assert!(anidb_matcher::match_absolute_range(&db,"One Piece",892,1089)
             .unwrap().is_none());
         drop(db);
         let ambiguous=diagnose(&ambiguous_path,&MatchRequest{
