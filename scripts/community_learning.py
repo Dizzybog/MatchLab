@@ -25,7 +25,7 @@ CODES = {
     "matching_error", "invalid_selected_coordinate", "unusual_season_number",
     "unmatched_explicit_episode", "explicit_episode_mismatch",
     "parser_marker_disagreement", "unresolved_absolute_anime_episode",
-    "reversed_selected_range",
+    "incomplete_anime_episode_range", "reversed_selected_range",
 }
 FEATURES = sorted({"status:matched", "status:unmatched", "status:error",
                    "has_episode", "has_season", "selected_episode", "selected_season"}
