@@ -8,7 +8,8 @@ use std::{env,path::{Path,PathBuf},time::Duration};
 
 const POLL_SECONDS:u64=15;
 const MAX_PATTERNS:i64=2_000;
-const MAX_EXAMPLES:i64=20_000;
+// Scale hashed observation capacity with the user's learning-storage budget.
+fn max_examples()->i64{(crate::learning_cache::storage_gb() as i64*20_000).min(2_000_000)}
 const MIN_EXAMPLES:i64=5;
 const FEATURES:usize=8;
 
@@ -126,7 +127,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,model:&mut OptionalMo
         let flags=crate::field_audit::audit(&title,&details["parsed"],&details["selected"]);
         for flag in flags {
             let Some((code,group))=pattern(&flag,&details)else{continue};
-            if samples>=MAX_EXAMPLES{continue;}
+            if samples>=max_examples(){continue;}
             let sample=digest(&format!("{group}:{}",normalized(&title)));
             let exists:i64=local.query_row(
                 "SELECT EXISTS(SELECT 1 FROM samples WHERE key=?1)",
@@ -222,8 +223,13 @@ pub fn start(history:PathBuf,metadata:PathBuf){
         .name("matchlab-local-learning".into()).spawn(move||{
             let mut model=OptionalModel::new();
             loop{
-                if let Err(error)=connect(&state).and_then(|mut db|
-                    scan(&history,&metadata,&mut db,&mut model)){
+                if let Err(error)=connect(&state).and_then(|mut db|{
+                    // Maintenance is wholly off the parser/matcher hot path.
+                    // A retired rule/evidence set is retained unless the
+                    // configured on-disk budget has actually been reached.
+                    crate::learning_cache::maintain(&db,&metadata)?;
+                    scan(&history,&metadata,&mut db,&mut model)
+                }){
                     tracing::warn!(%error,"local learning cycle skipped");
                 }
                 std::thread::sleep(Duration::from_secs(POLL_SECONDS));
