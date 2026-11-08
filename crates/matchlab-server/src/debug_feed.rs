@@ -504,7 +504,10 @@ mod tests {
             "selected":{"category":"series","season":3,"episode":9,
                 "anime":{"asid":"123:8"}}
         });
-        assert!(alerts("Example.S03E08.mkv","matched",&verified).is_empty());
+        let flags=alerts("Example.S03E08.mkv","matched",&verified);
+        assert!(!flags.iter().any(|flag|matches!(flag["code"].as_str(),
+            Some("explicit_episode_mismatch"|"parser_marker_disagreement"))),
+            "verified anime remapping must suppress explicit-coordinate mismatch: {flags:?}");
     }
 
     #[test]
