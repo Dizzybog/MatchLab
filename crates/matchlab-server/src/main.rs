@@ -459,6 +459,70 @@ fn verified_anime_subfolder_title(
 /// Film and OVA titles can share the long-running TV series' alias. Preserve
 /// partial-range diagnostics for an unambiguous single IMDb association; for
 /// collisions, require exactly one IMDb identity with an entirely mapped span.
+fn verified_unmarked_anime_range_imdb(
+    db:&Connection,key:&str,start:i64,end:i64,
+)->Result<Option<String>,String>{
+    let ids=tantivy_search::anime_aliases(db,key,6)?
+        .into_iter().filter(|alias|alias.clean_title==key)
+        .map(|alias|alias.imdb_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    if ids.len()==1{return Ok(ids.into_iter().next());}
+    // Bound the cost of checking generic aliases shared by many works.
+    if ids.len()>32 || start<=0 || end<start || end-start>=1_000 {
+        return Ok(None);
+    }
+    let mut verified=None;
+    for imdb in ids {
+        // Two endpoints are cheap to validate using one preloaded crosswalk.
+        // Most colliding movie/OVA identities cannot map both endpoints.
+        let (first,last)=episode_crosswalk::resolve_absolute_endpoints(
+            db,&imdb,start,end).map_err(|error|error.to_string())?;
+        if first.is_none() || last.is_none(){continue;}
+        let range=mapped_absolute_range(db,&imdb,start,end)?;
+        if range["complete"]!=true || range["segments"]
+            .as_array().is_none_or(Vec::is_empty){continue;}
+        if verified.replace(imdb).is_some(){
+            // Distinct works fully cover the range: never choose one by rank.
+            return Ok(None);
+        }
+    }
+    Ok(verified)
+}
+
+/// An unmarked final number is untrusted until the exact AniDB alias and
+/// an episode-specific crosswalk identify one and only one IMDb work.
+/// Do not require optional anime_ids decoration or a production year when
+/// the actual episode relationship has already been proved.
+/// Verify the *ranked IMDb winner*, not every Anime-Lists ID associated
+/// with the same AniDB title. One AniDB work may have many related IMDb
+/// identities (films, specials, season entries); they must not veto the
+/// already-chosen canonical series. Preserve the normal IMDb ranking.
+fn verified_unmarked_single_anime_imdb(
+    db:&Connection,candidate_title:&str,raw_title:&str,
+    year:Option<i32>,episode:i64,
+)->Result<Option<String>,String>{
+    let key=imdb_matcher::clean_title(candidate_title);
+    if key.len()<4 || !(1..=99_999).contains(&episode){return Ok(None);}
+    let exact_ids=tantivy_search::anime_aliases(db,&key,4)?
+        .into_iter().filter(|alias|alias.clean_title==key)
+        .map(|alias|alias.imdb_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    if exact_ids.is_empty(){return Ok(None);}
+    // Use the same deterministic matcher that /match uses. Resolve only
+    // its highest-ranked IMDb title. Never count other IMDb IDs linked to
+    // this AniDB work as competing proofs of an episode's identity.
+    let ranked=imdb_matcher::search(db,candidate_title,year,true,0,raw_title,true,20)
+        .map_err(|e|e.to_string())?;
+    let Some(winner)=ranked.first()else{return Ok(None)};
+    if !exact_ids.contains(&winner.imdb_id){return Ok(None);}
+    let Some(mapped)=episode_crosswalk::resolve_absolute(db,&winner.imdb_id,episode)
+        .map_err(|e|e.to_string())? else{return Ok(None)};
+    if !candidate_has_episode(db,&winner.imdb_id,mapped.season,mapped.episode)?{
+        return Ok(None);
+    }
+    Ok(Some(winner.imdb_id.clone()))
+}
+
 /// Public requests apply the release identity gate; dashboard diagnostics
 /// deliberately allow a bare title so its candidates can be inspected.
 #[derive(Clone,Copy)]
