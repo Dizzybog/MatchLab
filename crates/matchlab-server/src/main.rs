@@ -554,12 +554,15 @@ fn diagnose_with_policy(
              v.get("start").and_then(Value::as_i64),
              v.get("end").and_then(Value::as_i64))) {
             let candidate_title=candidate_title.to_owned();
-            verified_anidb_range=anidb_matcher::match_absolute_range(
-                &db,&candidate_title,start,end)?;
-            if verified_anidb_range.is_none(){
-                let key=imdb_matcher::clean_title(&candidate_title);
-                verified_anime_range_imdb=verified_unmarked_anime_range_imdb(
-                    &db,&key,start,end)?;
+            // Existing IMDb crosswalk validation wins when it can prove
+            // this range. Only fall back to the independent AniDB lookup
+            // if the legacy path cannot establish a candidate.
+            let key=imdb_matcher::clean_title(&candidate_title);
+            verified_anime_range_imdb=verified_unmarked_anime_range_imdb(
+                &db,&key,start,end)?;
+            if verified_anime_range_imdb.is_none(){
+                verified_anidb_range=anidb_matcher::match_absolute_range(
+                    &db,&candidate_title,start,end)?;
             }
             if verified_anidb_range.is_some() || verified_anime_range_imdb.is_some(){
                 if let Some(parsed)=parsed_value.as_object_mut(){
@@ -654,8 +657,12 @@ fn diagnose_with_policy(
             &db,&candidate_title,&req.title,
             req.year.or_else(||parsed_value.get("year")
                 .and_then(Value::as_i64).map(|n|n as i32)),episode)?;
-        verified_anidb_absolute=anidb_matcher::match_absolute(
-            &db,&candidate_title,episode)?;
+        // An already verified IMDb winner should not incur another AniDB
+        // lookup or be invalidated by a competing anime title alias.
+        if verified_absolute_episode_imdb.is_none(){
+            verified_anidb_absolute=anidb_matcher::match_absolute(
+                &db,&candidate_title,episode)?;
+        }
         if verified_absolute_episode_imdb.is_some()
             || verified_anidb_absolute.is_some() {
             if let Some(parsed)=parsed_value.as_object_mut(){
@@ -732,8 +739,6 @@ fn diagnose_with_policy(
         imdb.into_iter().filter(|candidate|
             year_signal_eligible(year,candidate.year,series&&!seasons.is_empty(),
                 !candidate.anime_ids.is_empty()
-                    || verified_anidb_range.is_some()
-                    || verified_anidb_absolute.is_some()
                     || verified_anime_range_imdb.as_deref()==Some(candidate.imdb_id.as_str())
                     || verified_absolute_episode_imdb.as_deref()==Some(candidate.imdb_id.as_str()),
                 parsed_quality)
