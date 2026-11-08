@@ -11,6 +11,7 @@ mod anime_resolver;
 mod anime_title;
 mod country_aliases;
 mod dashboard_history;
+mod debug_feed;
 mod query_cache;
 use axum::{extract::{Query, State}, http::{StatusCode,header}, routing::{get,post}, Json, Router};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -1604,6 +1605,9 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
     let app = Router::new().route("/",get(dashboard))
         .route("/api/dashboard/history",get(dashboard_history_request))
         .route("/api/dashboard/stats",get(dashboard_stats_request))
+        .route("/api/debug/parsing",get(debug_feed::list))
+        .route("/api/debug/parsing/status",get(debug_feed::status))
+        .route("/api/debug/parsing/{id}",get(debug_feed::detail))
         .route("/health",get(readiness))
         .route("/health/ready",get(readiness))
         .route("/health/live",get(liveness))
