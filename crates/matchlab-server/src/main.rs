@@ -2859,14 +2859,20 @@ mod tests {
         db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
             year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
             CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
-            CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT);
+            CREATE TABLE anime_series_map(
+                anidb_id TEXT,imdb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(
+                anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,
+                tvdb_season INTEGER,start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
             INSERT INTO anidb_titles VALUES('123','multiple specials');
-            INSERT INTO anime_series_map VALUES('123','tt1663145');
-            INSERT INTO anime_series_map VALUES('123','tt1679583');
-            INSERT INTO anime_series_map VALUES('123','tt1726641');
-            INSERT INTO anime_series_map VALUES('123','tt1753855');
-            INSERT INTO anime_series_map VALUES('123','tt1809274');
-            INSERT INTO anime_series_map VALUES('123','tt1865375');").unwrap();
+            INSERT INTO episode_map VALUES('123','shared',1,1,1,12,0,'');
+            INSERT INTO anime_series_map VALUES('123','tt1663145','shared',0);
+            INSERT INTO anime_series_map VALUES('123','tt1679583','shared',0);
+            INSERT INTO anime_series_map VALUES('123','tt1726641','shared',0);
+            INSERT INTO anime_series_map VALUES('123','tt1753855','shared',0);
+            INSERT INTO anime_series_map VALUES('123','tt1809274','shared',0);
+            INSERT INTO anime_series_map VALUES('123','tt1865375','shared',0);").unwrap();
         assert!(anime_identity(&db,"multiple specials").unwrap().is_none(),
             "ambiguous AniDB alias must not select the first IMDb movie");
         assert!(anime_candidate(&db,"multiple specials",Some(1),1).unwrap().is_none(),
