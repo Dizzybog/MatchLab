@@ -6,6 +6,33 @@ replays and reviews them, and a GitHub Release stores the deduplication ledger.
 No public report may modify production matches, train unsupervised corrections
 or trigger an automatic merge.
 
+## Three independent deployment modes
+
+The core Rust parser and matcher **always work** without ML and without GitHub.
+Both opt-in flags default to disabled, and no ML worker/model or GitHub
+uploader runs in the default mode.
+
+- **Default:** no flags; normal match/parse behavior, no local learning,
+  no GitHub calls related to Community Learning. The standard Docker image
+  is built without the `ml-ort` Cargo feature and has no ONNX Runtime dependency.
+- **Offline local learning:** `MATCHLAB_ML_ENABLED=true` only; a bounded
+  background Rust worker tracks hashed field-pattern frequencies. No token
+  or GitHub connection is required. If the optional `ml-ort` feature and
+  a small compatible ONNX model/runtime are installed, it also performs
+  single-threaded ONNX inference; otherwise it tracks patterns without ML
+  model inference. No changes to live SID/ASID are authorized.
+- **Community sharing:** both `MATCHLAB_ML_ENABLED=true` and
+  `MATCHLAB_COMMUNITY_LEARNING_ENABLED=true` plus the user's GitHub token.
+  This explicitly opts into uploading selected, bounded 24-hour batches.
+  The sharing flag **alone** cannot activate uploads.
+
+Note that the current GitHub Actions intake creates one shared daily Issue,
+checks/replays evidence and produces review artifacts, **not yet automatic
+regex patch pull requests**. Auto-generated code PRs must only be introduced
+with independent verified labels, negative tests, regression/performance gates
+and a clearly scoped rule-creation mechanism. GitHub PR creation and merging
+must never be assumed from an Issue comment.
+
 ## How to contribute
 
 1. Install an official published MatchLab Docker image.
@@ -29,6 +56,7 @@ or trigger an automatic merge.
 
    ~~~yaml
    environment:
+     MATCHLAB_ML_ENABLED: "true"
      MATCHLAB_COMMUNITY_LEARNING_ENABLED: "true"
      MATCHLAB_COMMUNITY_GITHUB_TOKEN: ${MATCHLAB_COMMUNITY_GITHUB_TOKEN}
    ~~~
