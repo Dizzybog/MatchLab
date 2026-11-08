@@ -17,7 +17,7 @@ fn current_build()->String{
 const DIM:usize=1<<14;
 const MAX_BYTES:usize=DIM*8;
 const MAX_EXAMPLES:i64=10_000_000;
-const MAX_SEEN:i64=80_000;
+
 static POSITIVE:AtomicI64=AtomicI64::new(0);
 static NEGATIVE:AtomicI64=AtomicI64::new(0);
 static HOLDOUT:AtomicI64=AtomicI64::new(0);
@@ -279,10 +279,12 @@ impl OnlineModel{
         if self.positives>0&&self.positives%10_000==0{
             let seen:i64=db.query_row("SELECT count(*) FROM online_model_seen",[],
                 |row|row.get(0)).map_err(|e|e.to_string())?;
-            if seen>MAX_SEEN{
+            if seen>crate::learning_cache::training_max_examples(){
+                let prune=(crate::learning_cache::training_max_examples()/10)
+                    .clamp(1,10_000);
                 db.execute("DELETE FROM online_model_seen WHERE sample_hash IN (
                     SELECT sample_hash FROM online_model_seen
-                    ORDER BY seen_at,sample_hash LIMIT 10_000)",[])
+                    ORDER BY seen_at,sample_hash LIMIT ?1)",[prune])
                     .map_err(|e|e.to_string())?;
             }
         }
