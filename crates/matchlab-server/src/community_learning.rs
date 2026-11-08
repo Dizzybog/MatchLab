@@ -224,20 +224,24 @@ fn known_main_ancestor(client:&reqwest::blocking::Client)->Result<bool,String>{
 }
 // GitHub Actions creates ONE daily issue for all installations. Clients never
 // create Issues, only one batch comment in the current daily issue.
+// Only use the issue opened by the repository's GitHub Actions bot.
+// A public contributor could otherwise spoof the daily Issue title.
 fn daily_thread(client:&reqwest::blocking::Client,time:u64)->Result<Option<u64>,String>{
     let day=chrono::DateTime::from_timestamp(time as i64,0)
         .ok_or("invalid clock")?.format("%Y-%m-%d").to_string();
     let expected=format!("[community-learning] {day}");
-    let query=format!("repo:{REPO} in:title \"{expected}\" is:issue");
-    let data=request_json(client.get("https://api.github.com/search/issues")
-        .query(&[("q",&query),("per_page",&"10".to_owned())])
+    let data=request_json(client.get(format!("https://api.github.com/repos/{REPO}/issues"))
+        .query(&[("state","open"),("sort","created"),("direction","desc"),
+            ("per_page","100")])
         .header("Accept","application/vnd.github+json")
         .send().map_err(|e|e.to_string())?)?;
-    let items=data["items"].as_array().ok_or("invalid GitHub search response")?;
+    let items=data.as_array().ok_or("invalid GitHub issues response")?;
     Ok(items.iter().find(|v|v["title"].as_str()==Some(expected.as_str())
-        && v["state"]=="open")
+        && v["state"]=="open" && v["user"]["login"]=="github-actions[bot]"
+        && v.get("pull_request").is_none())
         .and_then(|v|v["number"].as_u64()))
 }
+
 fn build_batch(db:&Connection,time:u64)->Result<Option<(String,Value,Vec<String>)>,String>{
     let mut stmt=db.prepare(
         "SELECT fingerprint,payload FROM pending ORDER BY fingerprint LIMIT ?1"
