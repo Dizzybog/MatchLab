@@ -1700,7 +1700,6 @@ mod tests {
                 ('tt0000303','300','chaostv',0),
                 ('tt0000404','400','jihankitv',0);
             INSERT INTO anime_ids VALUES
-                ('tt0000101','anidb','100'),
                 ('tt0000202','anidb','200'),
                 ('tt0000303','anidb','300'),
                 ('tt0000404','anidb','400');
@@ -1728,6 +1727,8 @@ mod tests {
                 ('400','jihankitv',1,3,1,12,0,'');").unwrap();
         tantivy_search::warmup(&db).unwrap();
         drop(db);
+        // Deliberately omit Bleach from anime_ids while retaining its real
+        // AniDB series/mapping bridge: season lookup must not depend on it.
         // IMDb already knows the complete first season. Equal Bleach
         // aliases for an unrelated film and a separate AniDB part must not
         // suppress the one fully verified season mapping.
@@ -1740,21 +1741,6 @@ mod tests {
             "sid_start":"tt0000101:1:1","sid_end":"tt0000101:1:20",
             "asid_start":"100:1","asid_end":"100:20"
         }));
-        // A complete AniDB episode crosswalk remains usable even when the
-        // optional anime_ids identity decoration is missing/stale.
-        let rw=Connection::open(&path).unwrap();
-        rw.execute("DELETE FROM anime_ids WHERE group_id='tt0000101'",[]).unwrap();
-        drop(rw);
-        let d=diagnose(&path,&MatchRequest{
-            title:"Bleach S01".into(),year:None,series:None}).unwrap();
-        let selected=d.selected.expect("Bleach S01 without anime_ids");
-        assert_eq!(public_match_response(Some(selected)),json!({
-            "sid_start":"tt0000101:1:1","sid_end":"tt0000101:1:20",
-            "asid_start":"100:1","asid_end":"100:20"
-        }));
-        let rw=Connection::open(&path).unwrap();
-        rw.execute("INSERT INTO anime_ids VALUES('tt0000101','anidb','100')",[]).unwrap();
-        drop(rw);
         // An absolute episode matches only when one IMDb identity has
         // a verified crosswalk for it, despite shared AniDB title aliases.
         let d=diagnose(&path,&MatchRequest{
