@@ -191,6 +191,11 @@ IMDb basics, alternative titles, episodes, ratings, animeApi, Anime-Lists, and A
 | `MATCHLAB_DEBUG_API_TOKEN` | Unset (disabled) | Enable authenticated, read-only parsing diagnostics with a random token of at least 32 bytes |
 | `MATCHLAB_COMMUNITY_LEARNING_ENABLED` | `false` | Explicit opt-in to upload selected suspected anomalies as public GitHub Issues |
 | `MATCHLAB_COMMUNITY_GITHUB_TOKEN` | Unset | Contributor-owned GitHub token with permission to comment on public upstream Issues; members may use fine-grained PAT, outsiders need classic `public_repo` |
+| `MATCHLAB_ML_ENABLED` | `false` | Opt in to the Rust-only local learning worker (never enables sharing by itself) |
+| `MATCHLAB_ML_MAX_STORAGE_GB` | `1` | Learning/cached-data budget in GiB (1–128), e.g. `10` for a 10 GiB local corpus |
+| `MATCHLAB_ML_CACHE_ENABLED` | `true` when local learning is on | Reuse versioned parser and matcher results; disabled when local learning is off |
+| `MATCHLAB_ML_STATE_FILE` | `/data/local-learning.sqlite3` | Shared local SQLite file for learned rules, evidence, pattern statistics and result cache |
+| `MATCHLAB_ML_MODEL_PATH` | Unset | Optional ONNX model (only when compiled with `ml-ort`) |
 | `MATCHLAB_COMMUNITY_STATE_FILE` | `/data/community-learning.sqlite3` | Bounded pending batch queue, persistent fingerprints and 24h submission state |
 | `MATCHLAB_METADATA_URLS` | Built-in HTTPS feeds | Optional seven-source override; legacy six-source lists are supported |
 | `RUST_LOG` | `matchlab_server=info` | Logging verbosity |
@@ -200,6 +205,43 @@ IMDb basics, alternative titles, episodes, ratings, animeApi, Anime-Lists, and A
 For importer options and the exact source URLs, see [Metadata lifecycle](docs/LOCAL_METADATA.md). For index internals and crash-safety considerations, see [Tantivy architecture](docs/TANTIVY_RUNTIME.md).
 
 **Security:** The optional parsing debug feed requires its own bearer token and is unavailable when `MATCHLAB_DEBUG_API_TOKEN` is absent or shorter than 32 bytes. The remaining API and dashboard have no built-in authentication. This example binds the port to **localhost**; put the service behind an authenticated HTTPS reverse proxy before exposing it over a network. Debug history may contain private torrent filenames. Use HTTPS, protect the other endpoints at the proxy, and never put the token in a URL. The debug feed is a polling surface, not an autonomous reviewer or a scheduled PR author. [Feed usage and cursor semantics](docs/API.md#read-only-parsing-diagnostics-feed).
+
+### Local learning storage and cache
+
+MatchLab can keep up to **10 GiB** of local learning data and reusable
+parser/matcher results, without sharing any of it with GitHub:
+
+~~~yaml
+environment:
+  MATCHLAB_ML_ENABLED: "true"
+  MATCHLAB_ML_MAX_STORAGE_GB: "10"
+  MATCHLAB_ML_CACHE_ENABLED: "true"
+~~~
+
+The same SQLite database under `/data/local-learning.sqlite3` stores
+anomaly fingerprints, independently checked regex evidence, and cached
+parser/matcher JSON. Cache lookups use exact hash keys, not SQLite
+full-text searches. Normal memory caching continues unchanged, even
+with local learning off.
+
+After upgrading the image, changed parser rules and metadata invalidate
+the **live use** of older results immediately, but the entries are
+marked *obsolete*, **not deleted**. Older evidence remains available
+for audit and future analysis. Once the configured storage budget is
+exceeded, maintenance first evicts obsolete learned-rule evidence,
+then stale result-cache entries, then the oldest current cache entries
+and least important observations. Current verified rules are protected.
+
+**Privacy:** This persistent local cache may contain original torrent
+titles and match diagnostics. Keep the Docker volume private and
+avoid copying it into public diagnostics or issue reports. It never
+uploads cache contents merely because local learning is enabled.
+
+The storage cap is enforced by a background, best-effort SQLite
+maintenance worker rather than expensive checks on every parser
+operation. SQLite can reuse freed pages; the file's physical size
+may remain high until compaction, even when logical usage is below
+the configured budget.
 
 ## Contribute to Community Learning
 
