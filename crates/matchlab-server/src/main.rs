@@ -15,6 +15,7 @@ mod debug_feed;
 mod field_audit;
 mod community_learning;
 mod local_learning;
+mod learned_regex;
 mod query_cache;
 use axum::{extract::{Query, State}, http::{StatusCode,header}, routing::{get,post}, Json, Router};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -99,7 +100,11 @@ fn parse_cached(title:&str)->Result<Value,String>{
     let cache=PARSE_CACHE.get_or_init(||Mutex::new(HashMap::new()));
     if let Ok(guard)=cache.lock(){
         if let Some((at,value))=guard.get(title){
-            if at.elapsed()<PARSE_TTL{return Ok(value.clone());}
+            if at.elapsed()<PARSE_TTL{
+                let mut enriched=value.clone();
+                learned_regex::apply(title,&mut enriched);
+                return Ok(enriched);
+            }
         }
     }
     let value=Value::Object(matchlab_parser::parse_title(title,false).map_err(|e|e.to_string())?);
@@ -119,7 +124,9 @@ fn parse_cached(title:&str)->Result<Value,String>{
         }
         guard.insert(title.to_string(),(Instant::now(),value.clone()));
     }
-    Ok(value)
+    let mut enriched=value;
+    learned_regex::apply(title,&mut enriched);
+    Ok(enriched)
 }
 
 fn numbers(v: Option<&Value>) -> Vec<i64> {
@@ -1609,7 +1616,7 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
     }
     if history_ready {
         community_learning::start(PathBuf::from(&history_db),PathBuf::from(&db));
-        local_learning::start(PathBuf::from(&history_db));
+        local_learning::start(PathBuf::from(&history_db),PathBuf::from(&db));
     }
     // A pre-existing volume may need a fresh Tantivy schema generation.
     // Start this in the blocking pool only after all service configuration is
