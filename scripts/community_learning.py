@@ -26,6 +26,22 @@ CODES = {
     "unmatched_explicit_episode", "explicit_episode_mismatch",
     "parser_marker_disagreement", "unresolved_absolute_anime_episode",
     "incomplete_anime_episode_range", "reversed_selected_range",
+    "field_missing_title",
+    "field_missing_resolution",
+    "field_missing_codec",
+    "field_missing_quality",
+    "field_missing_audio",
+    "field_missing_bit_depth",
+    "field_missing_hdr",
+    "field_missing_channels",
+    "field_missing_languages",
+    "field_missing_subbed",
+    "field_missing_dubbed",
+    "field_missing_seasons",
+    "field_missing_episodes",
+    "field_missing_extension",
+    "field_missing_year",
+    "field_missing_anime_episode",
 }
 FEATURES = sorted({"status:matched", "status:unmatched", "status:error",
                    "has_episode", "has_season", "selected_episode", "selected_season"}
@@ -192,11 +208,30 @@ def explicit_coordinates(title):
     return None
 
 
+def current_field_present(current, field):
+    """Compatibility check only: never infer a missing value from a label."""
+    val = current.get(field) if isinstance(current, dict) else None
+    return val is not None and val != "" and val != [] and val != {} and val is not False
+
+
 def current_status(row, current):
     """Only classify *provably* corrected parser-marker disagreements.
     IMDb identity/ASID complaints need current metadata; do not guess."""
     if current is None:
         return "replay_unavailable"
+    field_alerts = [a for a in row["alerts"] if a.startswith("field_missing_")]
+    if field_alerts:
+        # Analyzer alerts are hypotheses. A field actually present in the
+        # new parser is enough to retire this field-specific hypothesis;
+        # identity/ASID cases always require metadata-based validation.
+        fields = [a.removeprefix("field_missing_") for a in field_alerts]
+        parser_fields = [f for f in fields if f != "anime_episode"]
+        if parser_fields and all(current_field_present(current,f) for f in parser_fields):
+            if len(parser_fields) == len(row["alerts"]):
+                return "resolved_in_current_parser"
+            return "other_alerts_need_metadata_review"
+        if parser_fields and any(not current_field_present(current,f) for f in parser_fields):
+            return "possible_missing_field_in_current_parser"
     if "parser_marker_disagreement" in row["alerts"]:
         marker = explicit_coordinates(row["title"])
         if marker is not None:
