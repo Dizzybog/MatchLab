@@ -174,31 +174,39 @@ fn anime_candidate(db: &Connection, key: &str, season: Option<i64>, episode: i64
     if matches.is_empty() { return Ok(None); }
     let exact = matches[0].1 == key;
     let best_len = matches[0].1.len();
-    let best: Vec<_> = matches.iter().filter(|(_, alias, _)| (alias == key) == exact && alias.len() == best_len).collect();
-    if best.iter().any(|(_,_,imdb)| imdb != &best[0].2) { return Ok(None); }
-    let imdb = &best[0].2;
-    // Resolve only through verified anime crosswalk tables, including explicit
-    // mappings, split seasons and absolute numbering.
-    let mapped = match season {
-        Some(season) if season > 0 => {
-            let titled=anime_title::resolve(db,imdb,key,season,episode)?;
-            if titled.is_some() { titled }
-            else if anime_title::has_specific_alias(db,imdb,key)? { None }
-            else { anime_resolver::resolve_season(db,imdb,season,episode)? }
-        },
-        None => {
-            // A named anime sequel/part (e.g. "Amanchu! Advance - 01")
-            // restarts local episode numbering. Prefer the exact, uniquely
-            // verified AniDB part title, then use absolute numbering only
-            // when no such mapping can be established.
-            let named=anime_title::resolve_episode_from_exact_part_title(
-                db,imdb,key,episode)?;
-            if named.is_some(){named}
-            else{anime_resolver::resolve_absolute(db,imdb,episode)?}
-        },
-        _ => None,
-    };
-    Ok(mapped.map(|m|json!({"imdb_id":m.imdb_id,"season":m.season,
+    let best: std::collections::BTreeSet<String> = matches.iter()
+        .filter(|(_, alias, _)| (alias == key) == exact && alias.len() == best_len)
+        .map(|(_,_,imdb)|imdb.clone()).collect();
+    // Shared aliases are frequent (TV, movies, OVAs). The alias alone cannot
+    // select an IMDb identity, but a unique verified episode crosswalk can.
+    // Reject only when more than one *mapped* identity survives. Do not let
+    // a colliding film with no episode 338 block Bleach's TV episode 338.
+    let mut verified:Option<anime_resolver::Episode>=None;
+    for imdb in best {
+        let mapped = match season {
+            Some(season) if season > 0 => {
+                let titled=anime_title::resolve(db,&imdb,key,season,episode)?;
+                if titled.is_some() { titled }
+                else if anime_title::has_specific_alias(db,&imdb,key)? { None }
+                else { anime_resolver::resolve_season(db,&imdb,season,episode)? }
+            },
+            None => {
+                // Named anime sequel parts restart local episode numbering.
+                let named=anime_title::resolve_episode_from_exact_part_title(
+                    db,&imdb,key,episode)?;
+                if named.is_some(){named}
+                else{anime_resolver::resolve_absolute(db,&imdb,episode)?}
+            },
+            _ => None,
+        };
+        if let Some(mapped)=mapped {
+            if verified.replace(mapped).is_some(){
+                // Two independently mapped identities: never guess a winner.
+                return Ok(None);
+            }
+        }
+    }
+    Ok(verified.map(|m|json!({"imdb_id":m.imdb_id,"season":m.season,
         "episode":m.episode,"anidb_id":m.anidb_id,"anidb_episode":m.anidb_episode})))
 }
 
@@ -277,13 +285,19 @@ fn mapped_absolute_range(db:&Connection,imdb:&str,start:i64,end:i64)->Result<Val
 /// AniDB/TVDB crosswalk. A partial mapping never produces guessed endpoints.
 fn mapped_season_episode_range(
     db:&Connection,imdb:&str,title:&str,season:i64,start:i64,end:i64,
+    canonical_title:bool,
 )->Result<Value,String>{
     let mut segments:Vec<Value>=Vec::new();
     let mut first:Option<anime_resolver::Episode>=None;
     let mut last:Option<anime_resolver::Episode>=None;
     let mut missing=0i64;
-    let specific=anime_title::has_specific_alias(db,imdb,title)
-        .map_err(|e|e.to_string())?;
+    // The canonical IMDb series title identifies a fixed IMDb season.
+    // Never reinterpret it as a named AniDB part just because an OVA/movie
+    // shares its alias (e.g. the base series Bleach).
+    let specific=if canonical_title {false} else {
+        anime_title::has_specific_alias(db,imdb,title)
+            .map_err(|e|e.to_string())?
+    };
     let resolved=if specific {
         (start..=end).map(|episode|anime_title::resolve(db,imdb,title,season,episode)
             .map_err(|e|e.to_string())).collect::<Result<Vec<_>,_>>()?
@@ -1035,8 +1049,15 @@ fn diagnose_with_policy(
                     winner["sid"]=json!(format!("{imdb_id}:{season}:1"));
                     let has_anime=linked_anime || exact_anime;
                     if has_anime {
+                        let canonical_title=imdb.iter().any(|candidate|
+                            candidate.imdb_id==imdb_id
+                            && matchlab_matcher::clean_title(&candidate.title)==anime_resolve_key)
+                            && anime_subfolder_title.is_none();
                         let mapped=mapped_season_episode_range(
-                            &db,&imdb_id,anime_resolve_title,season,1,end)?;
+                            &db,&imdb_id,anime_resolve_title,season,1,end,canonical_title)?;
+                        // Keep the exact missing/ambiguous-map diagnostics
+                        // without weakening the verified public ASID contract.
+                        winner["anime_range_diagnostics"]=mapped.clone();
                         // AniDB endpoints are published only when every
                         // requested IMDb episode has an unambiguous mapping.
                         // Incomplete maps keep the verified IMDb range.
@@ -1069,7 +1090,7 @@ fn diagnose_with_policy(
                         || anime_title::has_specific_alias(&db,&imdb_id,anime_resolve_title)
                             .map_err(|e|e.to_string())?;
                     let range=if linked {
-                        mapped_season_episode_range(&db,&imdb_id,anime_resolve_title,season,start,end)?
+                        mapped_season_episode_range(&db,&imdb_id,anime_resolve_title,season,start,end,false)?
                     }else {
                         let known_end=season_episode_end(&db,&imdb_id,season)?;
                         let valid=known_end.is_some_and(|last|last>=end);
