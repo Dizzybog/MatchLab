@@ -225,7 +225,16 @@ pub fn observe(db: &Connection, title: &str, details: &Value) -> Result<(), Stri
         let existing: i64 = db.query_row(
             "SELECT count(*) FROM learned_field_evidence WHERE source_build=?1",
             [&source_build], |row| row.get(0)).map_err(|e| e.to_string())?;
-        if existing >= MAX_EVIDENCE { return Ok(()); }
+        // A verified, previously recorded release is allowed to revalidate
+        // even at quota. New evidence must respect the bounded budget.
+        if existing >= MAX_EVIDENCE {
+            let known: i64 = db.query_row(
+                "SELECT count(*) FROM learned_field_evidence
+                 WHERE field=?1 AND signal=?2 AND example_hash=?3",
+                params![field,signal,key],|row|row.get(0))
+                .map_err(|e|e.to_string())?;
+            if known==0 { continue; }
+        }
         db.execute(
             "INSERT INTO learned_field_evidence(
                 field,signal,example_hash,identity_hash,canonical,source_build,first_seen)
@@ -297,9 +306,11 @@ fn select_rules(db: &Connection) -> Result<Vec<FieldRule>, String> {
 }
 fn install(mut incoming: Vec<FieldRule>) {
     incoming.sort_by(|a,b| (&a.field,&a.signal).cmp(&(&b.field,&b.signal)));
+    // Only executable semantics belong in the cache namespace; new
+    // examples that do not change a rule must not invalidate a hot cache.
     let fingerprint = incoming.iter().map(|rule|
-        format!("{}:{}:{}:{}:{}", rule.field,rule.signal,rule.value,
-            rule.examples,rule.titles)).collect::<Vec<_>>().join("\n");
+        format!("{}:{}:{}", rule.field,rule.signal,rule.value))
+        .collect::<Vec<_>>().join("\n");
     let bytes = Sha256::digest(fingerprint.as_bytes());
     let mut id = [0u8;8];
     id.copy_from_slice(&bytes[..8]);
@@ -312,6 +323,20 @@ pub fn reconcile(db: &Connection) -> Result<(), String> {
     init(db)?;
     let current = build();
     let active = select_rules(db)?;
+    // Publishing the same semantic rules every 15 seconds would cause
+    // unnecessary SQLite WAL churn, cache generation changes and CPU work.
+    let mut by_rule = active.iter().map(|rule|
+        (rule.field.clone(),rule.signal.clone(),rule.value.clone()))
+        .collect::<Vec<_>>();
+    by_rule.sort_by(|a,b| (&a.0,&a.1).cmp(&(&b.0,&b.1)));
+    let already_installed = registry().read().ok().is_some_and(|guard|{
+        let mut old = guard.iter().map(|rule|
+            (rule.field.clone(),rule.signal.clone(),rule.value.clone()))
+            .collect::<Vec<_>>();
+        old.sort_by(|a,b| (&a.0,&a.1).cmp(&(&b.0,&b.1)));
+        old == by_rule
+    });
+    if already_installed && revision()!=0 { return Ok(()); }
     let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
     tx.execute("DELETE FROM learned_field_rules",[])
         .map_err(|e| e.to_string())?;
