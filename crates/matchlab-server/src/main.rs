@@ -3,7 +3,9 @@
 mod airdate;
 mod alias;
 mod episode_conversion;
-mod matchlab_matcher;
+mod imdb_matcher;
+mod anidb_matcher;
+mod title_normalization;
 mod tantivy_search;
 mod metadata_import;
 mod metadata_download;
@@ -82,6 +84,7 @@ struct Diagnostic {
     normalized_title: String,
     imdb_candidates: Vec<Candidate>,
     anime_candidate: Option<Value>,
+    anidb_candidate: Option<Value>,
     selected: Option<Value>,
     reason: String,
 }
@@ -437,7 +440,7 @@ fn verified_anime_subfolder_title(
         else{return Ok(None)};
     if imdb.is_empty(){return Ok(None);}
     for name in parents.iter().rev().filter_map(Value::as_str){
-        let key=matchlab_matcher::clean_title(name);
+        let key=imdb_matcher::clean_title(name);
         if key.len()<4 {continue;}
         let aliases=tantivy_search::anime_aliases(db,&key,4)?;
         let exact_ids:std::collections::BTreeSet<String>=aliases.into_iter()
@@ -455,70 +458,6 @@ fn verified_anime_subfolder_title(
 /// Film and OVA titles can share the long-running TV series' alias. Preserve
 /// partial-range diagnostics for an unambiguous single IMDb association; for
 /// collisions, require exactly one IMDb identity with an entirely mapped span.
-fn verified_unmarked_anime_range_imdb(
-    db:&Connection,key:&str,start:i64,end:i64,
-)->Result<Option<String>,String>{
-    let ids=tantivy_search::anime_aliases(db,key,6)?
-        .into_iter().filter(|alias|alias.clean_title==key)
-        .map(|alias|alias.imdb_id)
-        .collect::<std::collections::BTreeSet<_>>();
-    if ids.len()==1{return Ok(ids.into_iter().next());}
-    // Bound the cost of checking generic aliases shared by many works.
-    if ids.len()>32 || start<=0 || end<start || end-start>=1_000 {
-        return Ok(None);
-    }
-    let mut verified=None;
-    for imdb in ids {
-        // Two endpoints are cheap to validate using one preloaded crosswalk.
-        // Most colliding movie/OVA identities cannot map both endpoints.
-        let (first,last)=anime_resolver::resolve_absolute_endpoints(
-            db,&imdb,start,end).map_err(|error|error.to_string())?;
-        if first.is_none() || last.is_none(){continue;}
-        let range=mapped_absolute_range(db,&imdb,start,end)?;
-        if range["complete"]!=true || range["segments"]
-            .as_array().is_none_or(Vec::is_empty){continue;}
-        if verified.replace(imdb).is_some(){
-            // Distinct works fully cover the range: never choose one by rank.
-            return Ok(None);
-        }
-    }
-    Ok(verified)
-}
-
-/// An unmarked final number is untrusted until the exact AniDB alias and
-/// an episode-specific crosswalk identify one and only one IMDb work.
-/// Do not require optional anime_ids decoration or a production year when
-/// the actual episode relationship has already been proved.
-/// Verify the *ranked IMDb winner*, not every Anime-Lists ID associated
-/// with the same AniDB title. One AniDB work may have many related IMDb
-/// identities (films, specials, season entries); they must not veto the
-/// already-chosen canonical series. Preserve the normal V4 ranking.
-fn verified_unmarked_single_anime_imdb(
-    db:&Connection,candidate_title:&str,raw_title:&str,
-    year:Option<i32>,episode:i64,
-)->Result<Option<String>,String>{
-    let key=matchlab_matcher::clean_title(candidate_title);
-    if key.len()<4 || !(1..=99_999).contains(&episode){return Ok(None);}
-    let exact_ids=tantivy_search::anime_aliases(db,&key,4)?
-        .into_iter().filter(|alias|alias.clean_title==key)
-        .map(|alias|alias.imdb_id)
-        .collect::<std::collections::BTreeSet<_>>();
-    if exact_ids.is_empty(){return Ok(None);}
-    // Use the same deterministic matcher that /match uses. Resolve only
-    // its highest-ranked IMDb title. Never count other IMDb IDs linked to
-    // this AniDB work as competing proofs of an episode's identity.
-    let ranked=matchlab_matcher::search(db,candidate_title,year,true,0,raw_title,true,20)
-        .map_err(|e|e.to_string())?;
-    let Some(winner)=ranked.first()else{return Ok(None)};
-    if !exact_ids.contains(&winner.imdb_id){return Ok(None);}
-    let Some(mapped)=anime_resolver::resolve_absolute(db,&winner.imdb_id,episode)
-        .map_err(|e|e.to_string())? else{return Ok(None)};
-    if !candidate_has_episode(db,&winner.imdb_id,mapped.season,mapped.episode)?{
-        return Ok(None);
-    }
-    Ok(Some(winner.imdb_id.clone()))
-}
-
 /// Public requests apply the release identity gate; dashboard diagnostics
 /// deliberately allow a bare title so its candidates can be inspected.
 #[derive(Clone,Copy)]
@@ -538,7 +477,7 @@ fn diagnose_with_policy(
     // The parser exposes a tentative title and endpoints, without changing
     // regular release parsing. Use it only when Tantivy finds an exact,
     // unambiguous AniDB-linked title. No SQLite title discovery is performed.
-    let mut verified_anime_range_imdb:Option<String>=None;
+    let mut verified_anidb_range:Option<anidb_matcher::VerifiedRange>=None;
     if req.series!=Some(false) {
         let hint=parsed_value.get("anime_episode_range_candidate");
         if let Some((Some(candidate_title),Some(start),Some(end)))=hint.map(|v|
@@ -546,10 +485,11 @@ fn diagnose_with_policy(
              v.get("start").and_then(Value::as_i64),
              v.get("end").and_then(Value::as_i64))) {
             let candidate_title=candidate_title.to_owned();
-            let key=matchlab_matcher::clean_title(&candidate_title);
-            if let Some(imdb)=verified_unmarked_anime_range_imdb(
-                &db,&key,start,end)? {
-                verified_anime_range_imdb=Some(imdb);
+            // Anime validation depends only on exact indexed AniDB aliases
+            // and finite episode-map evidence, never on IMDb identities.
+            if let Some(verified)=anidb_matcher::match_absolute_range(
+                &db,&candidate_title,start,end)? {
+                verified_anidb_range=Some(verified);
                 if let Some(parsed)=parsed_value.as_object_mut(){
                     parsed.insert("title".into(),json!(candidate_title));
                     parsed.insert("episodes".into(),json!([]));
@@ -567,7 +507,7 @@ fn diagnose_with_policy(
     // episode even if no anime identity was verified. For an untrusted batch
     // candidate, suppress that inference rather than publishing guessed
     // coordinates for unrelated movies or ordinary TV titles.
-    if verified_anime_range_imdb.is_none()
+    if verified_anidb_range.is_none()
         && parsed_value.get("anime_episode_range_candidate").is_some()
         && let Some(parsed)=parsed_value.as_object_mut(){
         parsed.insert("episodes".into(),json!([]));
@@ -594,7 +534,7 @@ fn diagnose_with_policy(
         if req.series!=Some(false) && (1..=12).contains(&season)
             && (1..=99).contains(&episode) {
             for candidate_title in [format!("{hint_title} {season}"),hint_title.clone()] {
-                let key=matchlab_matcher::clean_title(&candidate_title);
+                let key=imdb_matcher::clean_title(&candidate_title);
                 if let Some(imdb)=exact_anime_identity(&db,&key)? {
                     let valid=season_episode_end(&db,&imdb,season)?
                         .is_some_and(|end|episode<=end)
@@ -623,25 +563,20 @@ fn diagnose_with_policy(
     // require an exact and unambiguous anime alias in Tantivy before
     // changing the parsed show title or promoting the episode coordinate.
     // This shares the same crosswalk verification as "Stone Ocean - 27".
-    let mut verified_absolute_episode_imdb:Option<String>=None;
+    let mut verified_anidb_absolute:Option<anidb_matcher::VerifiedEpisode>=None;
     if req.series != Some(false)
-        // An already recognized "Jihanki 3 - 08" cannot be demoted to a
-        // bare absolute episode 8 by the generic dash/episode hint.
         && parsed_value.get("anime_season_episode_candidate").is_none()
+        && parsed_value.get("anime_episode_range_candidate").is_none()
         && let Some(candidate) = parsed_value.get("anime_episode_candidate")
         && let (Some(title),Some(episode)) = (
             candidate.get("title").and_then(Value::as_str),
             candidate.get("episode").and_then(Value::as_i64),
         )
     {
-        let candidate_title = title.to_owned();
-        if (1..=99_999).contains(&episode)
-            && let Some(verified)=verified_unmarked_single_anime_imdb(
-                &db,&candidate_title,&req.title,
-                req.year.or_else(||parsed_value.get("year")
-                    .and_then(Value::as_i64).map(|n|n as i32)),episode)?
-        {
-            verified_absolute_episode_imdb=Some(verified);
+        let candidate_title=title.to_owned();
+        if let Some(verified)=anidb_matcher::match_absolute(
+            &db,&candidate_title,episode)?{
+            verified_anidb_absolute=Some(verified);
             if let Some(parsed)=parsed_value.as_object_mut(){
                 parsed.insert("title".into(),json!(candidate_title));
                 parsed.insert("episodes".into(),json!([episode]));
@@ -668,7 +603,7 @@ fn diagnose_with_policy(
         && numbers(parsed.get("episodes")).is_empty();
     let title=if airdate_only{dated.as_ref().map(|(name,_)|name.as_str()).unwrap_or(&title_owned)}
         else{title_owned.as_str()};
-    let key = matchlab_matcher::clean_title(title);
+    let key = imdb_matcher::clean_title(title);
     let season_range=explicit_season_range(&req.title);
     let seasons = season_range.map(|(start,end)|vec![start,end])
         .unwrap_or_else(||numbers(parsed.get("seasons")));
@@ -691,7 +626,7 @@ fn diagnose_with_policy(
             .map_err(|e|e.to_string())?.is_some()
             || exact_anime_identity(&db,&key)?.is_some(),
     };
-    let imdb = matchlab_matcher::search(&db,title,year,series,seasons.iter().copied().max().unwrap_or(0),&req.title,
+    let imdb = imdb_matcher::search(&db,title,year,series,seasons.iter().copied().max().unwrap_or(0),&req.title,
         !episodes.is_empty()||parsed.contains_key("episode_start"),20)
         .map_err(|e|e.to_string())?;
     // Enforce strict production-year/quality identity only for GET/POST /match.
@@ -704,8 +639,8 @@ fn diagnose_with_policy(
         imdb.into_iter().filter(|candidate|
             year_signal_eligible(year,candidate.year,series&&!seasons.is_empty(),
                 !candidate.anime_ids.is_empty()
-                    || verified_anime_range_imdb.as_deref()==Some(candidate.imdb_id.as_str())
-                    || verified_absolute_episode_imdb.as_deref()==Some(candidate.imdb_id.as_str()),
+                    || verified_anidb_range.is_some()
+                    || verified_anidb_absolute.is_some(),
                 parsed_quality)
         ).collect::<Vec<_>>()
     }else{imdb};
@@ -799,9 +734,9 @@ fn diagnose_with_policy(
     let anime_resolve_title=parsed.get("anime_season_episode_base_title")
         .and_then(Value::as_str)
         .or(anime_subfolder_title.as_deref()).unwrap_or(title);
-    let anime_resolve_key=matchlab_matcher::clean_title(anime_resolve_title);
+    let anime_resolve_key=imdb_matcher::clean_title(anime_resolve_title);
     let anime = if verified_chinese_override.is_some()
-        || verified_absolute_episode_imdb.is_some() {
+        || verified_anidb_absolute.is_some() {
         // The ranked IMDb winner already owns a verified absolute crosswalk.
         // Do not run the global anime-priority resolver across the remaining
         // Anime-Lists IMDb IDs: they are not alternative release winners.
@@ -837,7 +772,7 @@ fn diagnose_with_policy(
         let anime_id=a["imdb_id"].as_str().unwrap_or_default();
         !imdb.iter().any(|c| {
             (c.media_type=="tvSeries" || c.media_type=="tvMiniSeries")
-                && matchlab_matcher::clean_title(&c.matched_title)==key && c.imdb_id!=anime_id
+                && imdb_matcher::clean_title(&c.matched_title)==key && c.imdb_id!=anime_id
         })
     });
     let mut selected = if let Some(a) = &anime {
@@ -866,9 +801,9 @@ fn diagnose_with_policy(
         // Always select a candidate. A verified anime crosswalk takes priority;
         // otherwise MatchLab ranking (including stable IMDb ID tie-break) wins.
         let mut chosen_index=0usize;
-        // For a verified unmarked absolute episode, the normal V4 ranking
+        // For a verified unmarked absolute episode, the normal IMDb ranking
         // selected index 0. Do not re-rank based on other AniDB crosswalks.
-        if series && verified_absolute_episode_imdb.is_none() {
+        if series && verified_anidb_absolute.is_none() {
             if let Some(ep)=episodes.first().copied() {
                 for (index,candidate) in imdb.iter().enumerate() {
                     let mapped=match seasons.first().copied() {
@@ -971,7 +906,7 @@ fn diagnose_with_policy(
                         selected_season=inferred;
                     }else if selected_season.is_some() && series &&
                         seasons.len()==1 && episodes.len()==1 &&
-                        matchlab_matcher::clean_title(&c.title)==key &&
+                        imdb_matcher::clean_title(&c.title)==key &&
                         season_episode_end(&db,&c.imdb_id,
                             selected_season.unwrap_or(0))?
                             .is_some_and(|last|ep<=last){
@@ -1105,7 +1040,7 @@ fn diagnose_with_policy(
                     if has_anime {
                         let canonical_title=imdb.iter().any(|candidate|
                             candidate.imdb_id==imdb_id
-                            && matchlab_matcher::clean_title(&candidate.title)==anime_resolve_key)
+                            && imdb_matcher::clean_title(&candidate.title)==anime_resolve_key)
                             && anime_subfolder_title.is_none();
                         let mapped=mapped_season_episode_range(
                             &db,&imdb_id,anime_resolve_title,season,1,end,canonical_title)?;
@@ -1167,8 +1102,7 @@ fn diagnose_with_policy(
                     }else{json!(imdb_id)};
                     winner["anime"]=Value::Null;
                 }
-            }else if verified_anime_range_imdb.as_ref()
-                .is_none_or(|verified|verified==&imdb_id){
+            }else{
                 let range=mapped_absolute_range(&db,&imdb_id,start,end)?;
                 // Preserve the requested absolute endpoints even when some
                 // crosswalk entries are missing, but never invent IMDb or
@@ -3102,7 +3036,7 @@ mod tests {
                 (&sid,&series,"series","tvSeries"),
                 (&aid,&anime,"series","tvSeries")] {
                 db.execute("INSERT INTO titles VALUES(?1,?2,?3,2020,?4,'US',1,0,?5)",
-                    params![id,name,matchlab_matcher::clean_title(name),category,kind]).unwrap();
+                    params![id,name,imdb_matcher::clean_title(name),category,kind]).unwrap();
             }
             for id in [&sid,&aid] {
                 db.execute("INSERT INTO seasons VALUES(?1,10)",[id]).unwrap();
@@ -3110,7 +3044,7 @@ mod tests {
             db.execute("INSERT INTO anime_series_map VALUES(?1,?2,?3,0)",
                 params![aid,ani_id,format!("tvdb{i}")]).unwrap();
             db.execute("INSERT INTO anidb_titles VALUES(?1,?2,?3,'main','en')",
-                params![ani_id,anime,matchlab_matcher::clean_title(&anime)]).unwrap();
+                params![ani_id,anime,imdb_matcher::clean_title(&anime)]).unwrap();
             db.execute("INSERT INTO episode_map VALUES(?1,?2,1,1,1,24,0,'')",
                 params![ani_id,format!("tvdb{i}")]).unwrap();
         }
@@ -3157,9 +3091,9 @@ mod tests {
     }
     #[test]
     fn normalization_handles_accents_and_and_word() {
-        assert_eq!(matchlab_matcher::clean_title("Bjørn & Ægir"),"bjorn aegir".replace(' ',""));
-        assert_eq!(matchlab_matcher::clean_title("Rock and Roll"),"rockroll");
-        assert_eq!(matchlab_matcher::clean_title("Pokémon"),"pokemon");
+        assert_eq!(imdb_matcher::clean_title("Bjørn & Ægir"),"bjorn aegir".replace(' ',""));
+        assert_eq!(imdb_matcher::clean_title("Rock and Roll"),"rockroll");
+        assert_eq!(imdb_matcher::clean_title("Pokémon"),"pokemon");
     }
     #[test]
     fn absolute_episode_notation(){
@@ -3180,8 +3114,8 @@ mod tests {
             CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);
             INSERT INTO titles VALUES('tt1','Example','example',2020,'movie','US',1,1,'movie');
             INSERT INTO titles VALUES('tt2','Example','example',2021,'series','US',1,1,'tvSeries');").unwrap();
-        let movies=matchlab_matcher::search(&db,"Example",Some(2020),false,0,"Example",false,20).unwrap();
-        let shows=matchlab_matcher::search(&db,"Example",Some(2021),true,0,"Example",false,20).unwrap();
+        let movies=imdb_matcher::search(&db,"Example",Some(2020),false,0,"Example",false,20).unwrap();
+        let shows=imdb_matcher::search(&db,"Example",Some(2021),true,0,"Example",false,20).unwrap();
         assert_eq!(movies.len(),1);
         assert_eq!(movies[0].imdb_id,"tt1");
         assert_eq!(shows.len(),1);
