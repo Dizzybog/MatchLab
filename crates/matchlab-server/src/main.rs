@@ -1401,9 +1401,9 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result
         Ok(d)=>{
             let status=if d.selected.is_some(){"matched"}else{"unmatched"};
             let details=serde_json::to_value(d).unwrap_or(Value::Null);
-            dashboard_history::record(&state.history,&req.title,status,d.selected.as_ref(),&details,elapsed);
+            dashboard_history::record_async(&state.history,&req.title,status,d.selected.as_ref(),&details,elapsed);
         }
-        Err(error)=>dashboard_history::record(&state.history,&req.title,"error",None,&json!({"error":error}),elapsed),
+        Err(error)=>dashboard_history::record_async(&state.history,&req.title,"error",None,&json!({"error":error}),elapsed),
     }
     result
 }
