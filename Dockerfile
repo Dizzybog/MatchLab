@@ -2,6 +2,8 @@
 FROM rust:1-bookworm AS builder
 WORKDIR /build
 ARG RUSTFLAGS="-D warnings"
+ARG MATCHLAB_BUILD_SHA=""
+ENV MATCHLAB_BUILD_SHA=$MATCHLAB_BUILD_SHA
 ENV RUSTFLAGS=$RUSTFLAGS
 COPY . .
 RUN cargo build --release -p matchlab-server
