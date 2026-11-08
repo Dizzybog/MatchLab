@@ -1393,13 +1393,9 @@ fn enrich_selected_anime_episode(
     Ok(())
 }
 
-fn diagnose_logged(state:&AppState,req:&MatchRequest,debug:bool)->Result<Diagnostic,String>{
+fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result<Diagnostic,String>{
     let start=Instant::now();
-    let result=if debug{
-        diagnose_with_policy(&state.db,req,MatchPolicy::DashboardDiagnostic)
-    }else{
-        diagnose(&state.db,req)
-    };
+    let result=diagnose_with_policy(&state.db,req,policy);
     let elapsed=start.elapsed().as_millis() as u64;
     match &result {
         Ok(d)=>{
@@ -1607,20 +1603,28 @@ async fn parse_response(req:MatchRequest)->(StatusCode,Json<Value>){
 /// Bound CPU-heavy matching before it enters Tokio's blocking thread pool.
 /// This preserves full candidate ranking while protecting the process against
 /// request bursts during metadata imports and index-generation changes.
-async fn run_match(state: AppState, req: MatchRequest, debug:bool)
+async fn run_match(state: AppState, req: MatchRequest, policy:MatchPolicy)
     -> Result<Result<Diagnostic,String>,String> {
     let permit=state.match_slots.clone().acquire_owned().await
         .map_err(|e|e.to_string())?;
     tokio::task::spawn_blocking(move ||{
         let _permit=permit;
-        diagnose_logged(&state,&req,debug)
+        diagnose_logged(&state,&req,policy)
     }).await.map_err(|e|e.to_string())
 }
 
-async fn match_response(state:AppState,req:MatchRequest,debug:bool)
+// The dashboard intentionally permits loose title-only diagnostics, but a
+// background service must be able to inspect the *same* production decision
+// as /match. A separate strict endpoint avoids changing dashboard behavior.
+fn request_policy(debug:bool,strict:bool)->MatchPolicy{
+    if debug && !strict{MatchPolicy::DashboardDiagnostic}
+    else{MatchPolicy::PublicApi}
+}
+
+async fn match_response(state:AppState,req:MatchRequest,debug:bool,strict:bool)
     -> (StatusCode,Json<Value>){
     if !matching_available(&state){return indexing_response();}
-    match run_match(state,req,debug).await{
+    match run_match(state,req,request_policy(debug,strict)).await{
         Ok(Ok(d))=>{
             let value=if debug{
                 serde_json::to_value(d).unwrap_or(Value::Null)
@@ -1636,7 +1640,7 @@ async fn match_response(state:AppState,req:MatchRequest,debug:bool)
 
 async fn match_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
     -> (StatusCode,Json<Value>){
-    match_response(state,req,false).await
+    match_response(state,req,false,false).await
 }
 
 /// GET /match?title=...&year=...
@@ -1647,7 +1651,15 @@ async fn get_match_request(State(state):State<AppState>,Query(req):Query<MatchRe
 
 async fn debug_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
     -> (StatusCode,Json<Value>){
-    match_response(state,req,true).await
+    match_response(state,req,true,false).await
+}
+
+/// The integration-safe debug endpoint uses exactly the same selection
+/// policy as /match, but returns the selected range segments as diagnostics.
+/// Do not use the permissive dashboard policy for cross-request verification.
+async fn strict_debug_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
+    -> (StatusCode,Json<Value>){
+    match_response(state,req,true,true).await
 }
 
 #[tokio::main]
@@ -1885,6 +1897,7 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         .route("/episode/resolve",get(episode_conversion::get_resolve).post(episode_conversion::post_resolve))
         .route("/parse",get(get_parse_request).post(parse_request))
         .route("/debug/match",post(debug_request))
+        .route("/debug/match/strict",post(strict_debug_request))
         .with_state(AppState{db:Arc::new(PathBuf::from(db)),history:Arc::new(PathBuf::from(history_db)),
             match_slots:Arc::new(Semaphore::new(max_matches)),
             index_phase:index_state});
@@ -3397,6 +3410,13 @@ mod tests {
         assert_eq!(ordinary["sid_start"],"tt1234567:1:1");
         assert_eq!(ordinary["sid_end"],"tt1234567:1:12");
     }
+    #[test]
+    fn stremthru_strict_debug_matches_production_policy(){
+        assert!(matches!(request_policy(false,false),MatchPolicy::PublicApi));
+        assert!(matches!(request_policy(true,true),MatchPolicy::PublicApi));
+        assert!(matches!(request_policy(true,false),MatchPolicy::DashboardDiagnostic));
+    }
+
     #[test]
     fn match_response_has_only_four_fields() {
         let movie=public_match_response(Some(json!({"imdb_id":"tt1234567",
