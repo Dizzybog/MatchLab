@@ -485,6 +485,36 @@ fn verified_unmarked_anime_range_imdb(
     Ok(verified)
 }
 
+/// An unmarked final number is untrusted until the exact AniDB alias and
+/// an episode-specific crosswalk identify one and only one IMDb work.
+/// Do not require optional anime_ids decoration or a production year when
+/// the actual episode relationship has already been proved.
+fn verified_unmarked_single_anime_imdb(
+    db:&Connection,key:&str,episode:i64,
+)->Result<Option<String>,String>{
+    if key.len()<4 || !(1..=99_999).contains(&episode){return Ok(None);}
+    let ids=tantivy_search::anime_aliases(db,key,4)?
+        .into_iter().filter(|alias|alias.clean_title==key)
+        .map(|alias|alias.imdb_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    if ids.is_empty()||ids.len()>32{return Ok(None);}
+    let mut unique=None;
+    for imdb in ids {
+        let Some(mapped)=anime_resolver::resolve_absolute(db,&imdb,episode)
+            .map_err(|e|e.to_string())? else {continue};
+        // The requested coordinate must also be possible for this IMDb
+        // season when reliable season bounds exist.
+        if !candidate_has_episode(db,&imdb,mapped.season,mapped.episode)?{
+            continue;
+        }
+        if unique.replace(imdb).is_some(){
+            // Colliding anime series both verify this episode: no guessing.
+            return Ok(None);
+        }
+    }
+    Ok(unique)
+}
+
 /// Public requests apply the release identity gate; dashboard diagnostics
 /// deliberately allow a bare title so its candidates can be inspected.
 #[derive(Clone,Copy)]
@@ -589,6 +619,7 @@ fn diagnose_with_policy(
     // require an exact and unambiguous anime alias in Tantivy before
     // changing the parsed show title or promoting the episode coordinate.
     // This shares the same crosswalk verification as "Stone Ocean - 27".
+    let mut verified_absolute_episode_imdb:Option<String>=None;
     if req.series != Some(false)
         // An already recognized "Jihanki 3 - 08" cannot be demoted to a
         // bare absolute episode 8 by the generic dash/episode hint.
@@ -602,15 +633,16 @@ fn diagnose_with_policy(
         let candidate_title = title.to_owned();
         let candidate_key = matchlab_matcher::clean_title(&candidate_title);
         if (1..=99_999).contains(&episode)
-            && verified_unmarked_anime_range_imdb(
-                &db,&candidate_key,episode,episode
-            )?.is_some()
-            && let Some(parsed)=parsed_value.as_object_mut()
+            && let Some(verified)=verified_unmarked_single_anime_imdb(
+                &db,&candidate_key,episode)?
         {
-            parsed.insert("title".into(),json!(candidate_title));
-            parsed.insert("episodes".into(),json!([episode]));
-            parsed.insert("seasons".into(),json!([]));
-            parsed.insert("anime_title_verified".into(),json!(true));
+            verified_absolute_episode_imdb=Some(verified);
+            if let Some(parsed)=parsed_value.as_object_mut(){
+                parsed.insert("title".into(),json!(candidate_title));
+                parsed.insert("episodes".into(),json!([episode]));
+                parsed.insert("seasons".into(),json!([]));
+                parsed.insert("anime_title_verified".into(),json!(true));
+            }
         }
     }
     let parsed=parsed_value.as_object().ok_or("parser returned no object")?;
@@ -667,7 +699,8 @@ fn diagnose_with_policy(
         imdb.into_iter().filter(|candidate|
             year_signal_eligible(year,candidate.year,series&&!seasons.is_empty(),
                 !candidate.anime_ids.is_empty()
-                    || verified_anime_range_imdb.as_deref()==Some(candidate.imdb_id.as_str()),
+                    || verified_anime_range_imdb.as_deref()==Some(candidate.imdb_id.as_str())
+                    || verified_absolute_episode_imdb.as_deref()==Some(candidate.imdb_id.as_str()),
                 parsed_quality)
         ).collect::<Vec<_>>()
     }else{imdb};
