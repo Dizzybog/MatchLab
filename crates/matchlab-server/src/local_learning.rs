@@ -77,15 +77,16 @@ fn pattern(flag:&Value,details:&Value)->Option<(String,String)>{
     };
     Some((code.to_owned(),digest(&format!("{code}:{feature}"))))
 }
+fn bit(value:bool)->f32{if value{1.0}else{0.0}}
 fn vector(code:&str,count:i64)->[f32;FEATURES]{
     [
-        f32::from(code=="field_mismatch_year"),
-        f32::from(code=="field_unresolved_episode"),
-        f32::from(code=="field_unresolved_season"),
-        f32::from(code=="field_mismatch_episode"),
-        f32::from(code=="field_mismatch_season"),
-        f32::from(code=="field_missing_anime_episode"),
-        f32::from(code.starts_with("field_missing_")),
+        bit(code=="field_mismatch_year"),
+        bit(code=="field_unresolved_episode"),
+        bit(code=="field_unresolved_season"),
+        bit(code=="field_mismatch_episode"),
+        bit(code=="field_mismatch_season"),
+        bit(code=="field_missing_anime_episode"),
+        bit(code.starts_with("field_missing_")),
         ((count as f32).ln_1p()/10.0).min(1.0)
     ]
 }
