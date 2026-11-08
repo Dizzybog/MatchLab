@@ -489,41 +489,34 @@ fn verified_unmarked_anime_range_imdb(
 /// an episode-specific crosswalk identify one and only one IMDb work.
 /// Do not require optional anime_ids decoration or a production year when
 /// the actual episode relationship has already been proved.
+/// Verify the *ranked IMDb winner*, not every Anime-Lists ID associated
+/// with the same AniDB title. One AniDB work may have many related IMDb
+/// identities (films, specials, season entries); they must not veto the
+/// already-chosen canonical series. Preserve the normal V4 ranking.
 fn verified_unmarked_single_anime_imdb(
-    db:&Connection,key:&str,episode:i64,
+    db:&Connection,candidate_title:&str,raw_title:&str,
+    year:Option<i32>,episode:i64,
 )->Result<Option<String>,String>{
+    let key=matchlab_matcher::clean_title(candidate_title);
     if key.len()<4 || !(1..=99_999).contains(&episode){return Ok(None);}
-    let ids=tantivy_search::anime_aliases(db,key,4)?
+    let exact_ids=tantivy_search::anime_aliases(db,&key,4)?
         .into_iter().filter(|alias|alias.clean_title==key)
         .map(|alias|alias.imdb_id)
         .collect::<std::collections::BTreeSet<_>>();
-    if ids.is_empty()||ids.len()>32{return Ok(None);}
-    let mut verified=Vec::new();
-    for imdb in ids {
-        let Some(mapped)=anime_resolver::resolve_absolute(db,&imdb,episode)
-            .map_err(|e|e.to_string())? else {continue};
-        // The requested coordinate must also be possible for this IMDb
-        // season when reliable season bounds exist.
-        if candidate_has_episode(db,&imdb,mapped.season,mapped.episode)?{
-            verified.push(imdb);
-        }
+    if exact_ids.is_empty(){return Ok(None);}
+    // Use the same deterministic matcher that /match uses. Resolve only
+    // its highest-ranked IMDb title. Never count other IMDb IDs linked to
+    // this AniDB work as competing proofs of an episode's identity.
+    let ranked=matchlab_matcher::search(db,candidate_title,year,true,0,raw_title,true,20)
+        .map_err(|e|e.to_string())?;
+    let Some(winner)=ranked.first()else{return Ok(None)};
+    if !exact_ids.contains(&winner.imdb_id){return Ok(None);}
+    let Some(mapped)=anime_resolver::resolve_absolute(db,&winner.imdb_id,episode)
+        .map_err(|e|e.to_string())? else{return Ok(None)};
+    if !candidate_has_episode(db,&winner.imdb_id,mapped.season,mapped.episode)?{
+        return Ok(None);
     }
-    if verified.len()==1{return Ok(verified.pop());}
-    if verified.is_empty(){return Ok(None);}
-    // Anime-Lists can link the same AniDB title to several movie/OVA IMDb
-    // identities, all of which mechanically resolve the same episode.
-    // Their shared crosswalk does not make those works equally plausible
-    // for an unmarked "Bleach 320" release. Require one canonical, exact
-    // *television-series title* among the independently verified IDs.
-    // Do not infer a year or guess between multiple equal TV series.
-    let exact_series=tantivy_search::titles_by_ids(db,&verified)?
-        .into_iter()
-        .filter(|title|title.clean==key
-            && matches!(title.media_type.as_str(),"tvSeries"|"tvMiniSeries"))
-        .map(|title|title.imdb_id)
-        .collect::<std::collections::BTreeSet<_>>();
-    if exact_series.len()==1{Ok(exact_series.into_iter().next())}
-    else{Ok(None)}
+    Ok(Some(winner.imdb_id.clone()))
 }
 
 /// Public requests apply the release identity gate; dashboard diagnostics
@@ -642,10 +635,11 @@ fn diagnose_with_policy(
         )
     {
         let candidate_title = title.to_owned();
-        let candidate_key = matchlab_matcher::clean_title(&candidate_title);
         if (1..=99_999).contains(&episode)
             && let Some(verified)=verified_unmarked_single_anime_imdb(
-                &db,&candidate_key,episode)?
+                &db,&candidate_title,&req.title,
+                req.year.or_else(||parsed_value.get("year")
+                    .and_then(Value::as_i64).map(|n|n as i32)),episode)?
         {
             verified_absolute_episode_imdb=Some(verified);
             if let Some(parsed)=parsed_value.as_object_mut(){
@@ -1829,7 +1823,7 @@ mod tests {
         // Anime-Lists, but only one exact canonical Bleach TV-series title
         // survives disambiguation. Refuse to select a random movie/OVA.
         let imdb=verified_unmarked_single_anime_imdb(
-            &Connection::open(&path).unwrap(),"bleach",320).unwrap();
+            &Connection::open(&path).unwrap(),"Bleach","Bleach 320",None,320).unwrap();
         assert_eq!(imdb.as_deref(),Some("tt0000101"));
         // Regression for production's 'Bleach 320': shared TVDB sibling
         // defaults must not suppress a uniquely bounded episode mapping.
