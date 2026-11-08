@@ -67,6 +67,29 @@ fn exact_anidb_ids(db:&Connection,title:&str)->Result<BTreeSet<String>,String>{
         .filter(|id|identifiers::canonical_asid(id,1).is_some()).collect())
 }
 
+/// An exact named anime part can establish its TVDB season even when the
+/// default episode_map row is open-ended. This is *season evidence only*:
+/// it does not prove a concrete episode or authorize an independent ASID.
+/// Examples include Stone Ocean (season 5) and other named anime cours.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct NamedPart {
+    pub anidb_id:String,
+    pub season:i64,
+}
+pub fn named_part_season(db:&Connection,title:&str)->Result<Option<NamedPart>,String>{
+    let mut selected=None;
+    for id in exact_anidb_ids(db,title)?{
+        let seasons=mappings(db,&id)?.into_iter()
+            .filter_map(|m|(m.season>1 && m.season<=9_999).then_some(m.season))
+            .collect::<BTreeSet<_>>();
+        if seasons.len()!=1 {continue;}
+        let season=*seasons.iter().next().unwrap();
+        if selected.is_some(){return Ok(None);}
+        selected=Some(NamedPart{anidb_id:id,season});
+    }
+    Ok(selected)
+}
+
 /// A finite Anime-Lists episode range or exact episode pair is evidence.
 /// Never treat an open-ended TVDB season default (end=0) as proof that
 /// arbitrary episode numbers exist. Absolute markers with finite limits
@@ -167,7 +190,8 @@ mod tests{
                 ('700','Independent Anime','independentanime','main','en'),
                 ('701','Ambiguous Show','ambiguousshow','main','en'),
                 ('702','Ambiguous Show','ambiguousshow','main','en'),
-                ('800','Unbounded','unbounded','main','en');
+                ('800','Unbounded','unbounded','main','en'),
+                ('16187','Jojo Stone Ocean','jojostoneocean','main','en');
             INSERT INTO episode_map VALUES
                 ('2369','74796',1,-1,1,366,0,''),
                 ('2369','74796',1,15,317,342,-316,''),
@@ -175,7 +199,10 @@ mod tests{
                 ('700','custom',1,1,1,10,0,''),
                 ('701','other',1,1,1,12,0,''),
                 ('702','other',1,1,1,12,0,''),
-                ('800','other',1,1,1,0,0,'');
+                ('800','other',1,1,1,0,0,''),
+                -- Real Anime-Lists season evidence: an open-ended default
+                -- for JoJo Stone Ocean, TVDB season 5.
+                ('16187','262954',1,5,1,0,0,'');
             INSERT INTO anime_series_map VALUES
                 ('tt0434665','2369','74796',0),
                 ('tt1105263','2369','74796',0),
@@ -205,5 +232,10 @@ mod tests{
         assert_eq!(match_absolute(&db,"Unbounded",320).unwrap(),None);
         assert_eq!(match_absolute(&db,"Independent Anime",11).unwrap(),None);
         assert_eq!(match_absolute(&db,"Independent Anime",0).unwrap(),None);
+        assert_eq!(named_part_season(&db,"Jojo Stone Ocean").unwrap(),
+            Some(NamedPart{anidb_id:"16187".into(),season:5}));
+        // Season knowledge is not sufficient proof of episode 27:
+        // no bounded AniDB episode range exists for this part.
+        assert_eq!(match_absolute(&db,"Jojo Stone Ocean",27).unwrap(),None);
     }
 }
