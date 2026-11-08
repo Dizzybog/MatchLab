@@ -39,7 +39,9 @@ fn connect(path:&Path)->Result<Connection,String>{
             key TEXT PRIMARY KEY,pattern_key TEXT NOT NULL,observed_at INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS pattern_samples_idx ON samples(pattern_key);")
         .map_err(|e|e.to_string())?;
-    crate::online_model::OnlineModel::init(&db)?;
+    let model=crate::online_model::OnlineModel::load(&db)?;
+    model.publish_status();
+    crate::candidate_discovery::publish(&db)?;
     Ok(db)
 }
 fn setting(db:&Connection,key:&str)->Result<Option<String>,String>{
