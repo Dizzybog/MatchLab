@@ -660,10 +660,15 @@ fn diagnose_with_policy(
     // Enforce strict production-year/quality identity only for GET/POST /match.
     // The dashboard's /debug/match must still rank plain titles like "Fight Club".
     // Other season/episode, anime and ranking checks remain shared.
+    // Exact, uniquely verified AniDB absolute ranges are an independent
+    // anime identity signal even if the optional anime_ids metadata is absent.
+    // Unverified bare number suffixes do not qualify for this exception.
     let imdb=if matches!(policy,MatchPolicy::PublicApi){
         imdb.into_iter().filter(|candidate|
             year_signal_eligible(year,candidate.year,series&&!seasons.is_empty(),
-                !candidate.anime_ids.is_empty(),parsed_quality)
+                !candidate.anime_ids.is_empty()
+                    || verified_anime_range_imdb.as_deref()==Some(&candidate.imdb_id),
+                parsed_quality)
         ).collect::<Vec<_>>()
     }else{imdb};
     // Require every candidate for a multi-season pack to contain the final season.
