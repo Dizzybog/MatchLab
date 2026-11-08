@@ -188,6 +188,55 @@ model supplies advisory prioritization only. Full automatic override coverage
 will require independent, field-specific validators and negative
 regression datasets before that scope can be safely extended.
 
+## Native online model and candidate discovery
+
+The previous fixed eight-feature ONNX bootstrap has been replaced with a
+native Rust **FTRL-Proximal** online classifier with 16,384 hashed weight
+slots. It extracts field/marker combinations, short character n-grams,
+release context and approximate marker position. Model parameters use
+approximately 128 KiB for the sparse optimizer state and are persisted
+atomically with the history cursor and SQLite evidence batch. No runtime
+model download, inference library, Python service or GPU is required.
+
+Positive training examples come **only** from original-parser outputs or
+strictly independently interpreted raw filename markers. Every such label
+provides a counterfactual negative for an intentionally incompatible field
+class, not an assertion about IMDb or episode identity. Previously learned
+overlays, model predictions and unverified IMDb matches never train
+themselves. Learned weights remain **shadow-only**: they rank diagnostic
+observations and unfamiliar marker candidates but **cannot approve** rules.
+
+A deterministic title-group holdout withholds a portion of examples from
+gradient updates. Only after sufficient positive/negative training does it
+count pairwise classification successes. A rolling 32-pair summary can signal
+possible concept drift for human review; it **does not** modify runtime
+rules automatically. These metrics do not measure full parser precision,
+recall, or calibrated confidence. Truly production-grade evaluation requires
+an independently labeled, split-by-title-and-time regression corpus.
+
+The `candidate_discovery` stage scans a **bounded number of technical
+suffix tokens** after known release markers, learns their recurrence across
+distinct normalized titles, and ranks them with the online model. Unknown
+tokens stay private in the opt-in local SQLite store, are never published
+through HTTP or GitHub, and **never execute as regex**. The store caps
+itself at 256 distinct candidates and 12,000 title identities, reclaiming
+only old low-evidence candidates as needed. High-evidence unknown tags
+remain candidates until their values have an independent source of truth.
+In contrast, explicit new pixel heights such as `1440p` have a restricted
+numeric validator and can safely join the technical live-rule family.
+
+### Batching and hot-path isolation
+
+The background worker processes a bounded history batch within **one
+transaction** for its model weights, training deduplication, evidence and
+cursor. It reuses its SQLite connection, avoids per-observation full-table
+counts, and performs a single original Rust parse per release shared by
+the anime, technical and discovery components. Idle rule revalidation is
+throttled. The normal API **never runs model training or inference**; active
+technical rules share a precompiled regex-set prefilter with additional
+per-field conflict checks. The parser-cache mutex is released before any
+learned-rule processing.
+
 ## Contribute to the GitHub community (optional)
 
 **Nothing leaves a local-only installation.** To contribute:
