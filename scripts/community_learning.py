@@ -1,27 +1,32 @@
 #!/usr/bin/env python3
-"""Strict GitHub-only Community Learning intake and shadow-model training.
+"""Untrusted community batch intake; current-parser replay; shadow-only ML.
 
-Issue bodies are completely untrusted. This tool never executes content and
-never turns self-reported predictions into ground-truth labels.
+Following active-learning principles, a suspected anomaly is NOT a label.
+Older builds may contribute hypotheses if their SHA is an ancestor of main.
+Evidence is independently re-evaluated with the current parser before review.
 """
 import argparse
 import hashlib
 import json
 import math
+import re
+import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
-MARKER = "<!-- matchlab-community-v1 -->"
+MARKER = "<!-- matchlab-community-batch-v2 -->"
+PROTOCOL = 2
+EPOCH = 1
+MAX_COMMENTS = 500
+MAX_CANDIDATES = 200
+MAX_LEDGER = 100_000
+MAX_BATCH = 16
 CODES = {
     "matching_error", "invalid_selected_coordinate", "unusual_season_number",
     "unmatched_explicit_episode", "explicit_episode_mismatch",
     "parser_marker_disagreement", "unresolved_absolute_anime_episode",
     "reversed_selected_range",
 }
-PROTOCOL = 1
-EPOCH = 1
-MAX_ISSUES = 100
-MAX_CANDIDATES = 100
 FEATURES = sorted({"status:matched", "status:unmatched", "status:error",
                    "has_episode", "has_season", "selected_episode", "selected_season"}
                   | {"alert:" + code for code in CODES})
@@ -38,96 +43,224 @@ def allowed_title(title):
              "private=", "api_key="))
 
 
-def validate(issue, current_sha):
-    """Only current, bounded, unverified structured reports enter review."""
-    if not isinstance(issue, dict) or issue.get("pull_request"):
-        return None
-    if issue.get("title") != "[community-learning] parser anomaly":
-        return None
-    body = issue.get("body")
-    if not isinstance(body, str) or not body.startswith(MARKER + "\n"):
-        return None
-    if len(body.encode("utf-8")) > 4096:
-        return None
+def normalized(title):
+    return " ".join("".join(c if c.isalnum() else " " for c in title.lower()).split())
+
+
+def fingerprint(title, alerts):
+    return hashlib.sha256((normalized(title) + "\n" + ",".join(sorted(set(alerts))))
+                          .encode("utf-8")).hexdigest()
+
+
+def valid_sha(sha):
+    return isinstance(sha, str) and len(sha) == 40 and all(
+        c in "0123456789abcdef" for c in sha
+    )
+
+
+def git_ancestor(source_sha, current_sha):
+    if not valid_sha(source_sha) or not valid_sha(current_sha):
+        return False
     try:
-        obj = json.loads(body[len(MARKER) + 1:])
-    except (ValueError, TypeError):
+        result = subprocess.run(["git", "merge-base", "--is-ancestor",
+                                 source_sha, current_sha], check=False,
+                                timeout=3, capture_output=True)
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def validate_report(row, sha):
+    if not isinstance(row, dict) or set(row) != {
+        "protocol", "learning_epoch", "build_sha", "source",
+        "fingerprint", "title", "status", "alerts", "parsed", "selected",
+        "verified"
+    }:
         return None
-    if not isinstance(obj, dict) or (
-        obj.get("protocol") != PROTOCOL or obj.get("learning_epoch") != EPOCH
-        or obj.get("build_sha") != current_sha or obj.get("verified") is not False
-        or obj.get("source") != "matchlab-community"
-        or not allowed_title(obj.get("title"))
-        or obj.get("status") not in ("matched", "unmatched", "error")
+    if (row["protocol"] != PROTOCOL or row["learning_epoch"] != EPOCH
+        or row["build_sha"] != sha or row["source"] != "matchlab-community"
+        or row["verified"] is not False or not allowed_title(row["title"])
+        or row["status"] not in ("matched", "unmatched", "error")):
+        return None
+    codes = row["alerts"]
+    if not isinstance(codes, list) or not (1 <= len(codes) <= 8) or any(
+        not isinstance(c, str) or c not in CODES for c in codes
     ):
         return None
-    alerts = obj.get("alerts")
-    if not isinstance(alerts, list) or not (1 <= len(alerts) <= 8) or any(
-        not isinstance(x, str) or x not in CODES for x in alerts
-    ):
+    if not isinstance(row["parsed"], dict) or set(row["parsed"]) != {
+        "title", "seasons", "episodes"
+    }:
         return None
-    parsed = obj.get("parsed")
-    selected = obj.get("selected")
-    if not isinstance(parsed, dict) or not isinstance(selected, dict):
-        return None
-    if parsed.get("title") is not None and not allowed_title(parsed["title"]):
-        return None
-    for name in ("seasons", "episodes"):
-        nums = parsed.get(name)
-        if not isinstance(nums, list) or len(nums) > 12 or any(
-            type(n) is not int or not 0 <= n <= 99999 for n in nums
-        ):
-            return None
-    imdb = selected.get("imdb_id")
-    if imdb is not None and not (
-        isinstance(imdb, str) and imdb.startswith("tt") and
-        len(imdb) in (9, 10) and imdb[2:].isascii() and imdb[2:].isdigit()
-    ):
-        return None
-    for name in ("season", "episode"):
-        n = selected.get(name)
-        if n is not None and (type(n) is not int or not 0 <= n <= 99999):
-            return None
-    # Enforce the minimal shape, not just the key values. Unknown fields
-    # might contain paths, passwords or personal data.
-    if set(obj) != {"protocol", "learning_epoch", "build_sha", "source",
-                    "title", "status", "alerts", "parsed", "selected", "verified"}:
-        return None
-    if set(parsed) != {"title", "seasons", "episodes"} or set(selected) != {
+    if not isinstance(row["selected"], dict) or set(row["selected"]) != {
         "imdb_id", "season", "episode"
     }:
         return None
-    # Only structured, validated values from our allowlist are re-emitted.
-    return obj
+    if row["parsed"]["title"] is not None and not allowed_title(
+        row["parsed"]["title"]
+    ):
+        return None
+    for key in ("seasons", "episodes"):
+        numbers = row["parsed"][key]
+        if not isinstance(numbers, list) or len(numbers) > 12 or any(
+            type(n) is not int or not 0 <= n <= 99999 for n in numbers
+        ):
+            return None
+    imdb = row["selected"]["imdb_id"]
+    if imdb is not None and not (
+        isinstance(imdb, str) and re.fullmatch(r"tt[0-9]{7,8}", imdb)
+    ):
+        return None
+    for field in ("season", "episode"):
+        number = row["selected"][field]
+        if number is not None and (type(number) is not int or
+                                   not 0 <= number <= 99999):
+            return None
+    digest = row["fingerprint"]
+    if not isinstance(digest, str) or digest != fingerprint(
+        row["title"], codes
+    ):
+        return None
+    return row
 
 
-def intake(issues, sha, now):
-    result = []
-    seen = set()
+def validate_comment(comment, current_sha, is_ancestor=git_ancestor):
+    if not isinstance(comment, dict):
+        return None
+    text = comment.get("body")
+    if not isinstance(text, str) or len(text.encode("utf-8")) > 16384 or not (
+        text.startswith(MARKER + "\n")
+    ):
+        return None
+    try:
+        batch = json.loads(text[len(MARKER) + 1:])
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(batch, dict) or set(batch) != {
+        "protocol", "learning_epoch", "build_sha", "source",
+        "batch_id", "created_unix", "verified", "reports"
+    }:
+        return None
+    sha = batch["build_sha"]
+    if (batch["protocol"] != PROTOCOL or batch["learning_epoch"] != EPOCH
+        or batch["source"] != "matchlab-community-batch"
+        or batch["verified"] is not False or not valid_sha(sha)
+        or not is_ancestor(sha, current_sha)
+        or type(batch["created_unix"]) is not int
+        or not isinstance(batch["reports"], list)
+        or not 1 <= len(batch["reports"]) <= MAX_BATCH):
+        return None
+    reports = []
+    for row in batch["reports"]:
+        clean = validate_report(row, sha)
+        if clean is None:
+            return None
+        reports.append(clean)
+    fingerprints = sorted(row["fingerprint"] for row in reports)
+    if len(fingerprints) != len(set(fingerprints)):
+        return None
+    expected = hashlib.sha256(
+        (sha + "\n" + str(EPOCH) + "\n" +
+         "\n".join(fingerprints)).encode("utf-8")
+    ).hexdigest()
+    if batch["batch_id"] != expected:
+        return None
+    return reports
+
+
+def replay_current(title, parser_bin):
+    try:
+        result = subprocess.run([parser_bin], input=json.dumps(title) + "\n",
+                                text=True, capture_output=True, timeout=5,
+                                check=False)
+        if result.returncode:
+            return None
+        obj = json.loads(result.stdout.strip())
+        return obj.get("parsed") if obj.get("ok") is True else None
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
+def explicit_coordinates(title):
+    match = re.search(r"(?<![A-Za-z0-9])S([0-9]{1,3})E([0-9]{1,4})(?![A-Za-z0-9])",
+                      title, re.I)
+    if match:
+        return int(match[1]), int(match[2])
+    match = re.search(r"(?<![A-Za-z0-9])cap[. :_-]*([0-9]{3,4})(?![A-Za-z0-9])",
+                      title, re.I)
+    if match:
+        return int(match[1]) // 100, int(match[1]) % 100
+    return None
+
+
+def current_status(row, current):
+    """Only classify *provably* corrected parser-marker disagreements.
+    IMDb identity/ASID complaints need current metadata; do not guess."""
+    if current is None:
+        return "replay_unavailable"
+    if "parser_marker_disagreement" in row["alerts"]:
+        marker = explicit_coordinates(row["title"])
+        if marker is not None:
+            seasons = current.get("seasons") or []
+            episodes = current.get("episodes") or []
+            if marker[0] in seasons and marker[1] in episodes:
+                if row["alerts"] == ["parser_marker_disagreement"]:
+                    return "resolved_in_current_parser"
+                return "other_alerts_need_metadata_review"
+            return "still_present_in_current_parser"
+    return "needs_current_metadata_review"
+
+
+def flatten_comments(payload):
+    if not isinstance(payload, list):
+        return []
+    return [item for batch in payload for item in (
+        batch if isinstance(batch, list) else [batch]
+    ) if isinstance(item, dict)][:MAX_COMMENTS]
+
+
+def intake(comments, current_sha, now, seen, parser_bin,
+           is_ancestor=git_ancestor, replay=replay_current):
+    output = []
+    added = set()
+    seen_all = set(seen)
     cutoff = now - timedelta(days=2)
-    for issue in issues[:MAX_ISSUES]:
-        created = issue.get("created_at") if isinstance(issue, dict) else None
+    for comment in flatten_comments(comments):
+        created = comment.get("created_at")
         try:
             when = datetime.fromisoformat(created.replace("Z", "+00:00"))
         except (TypeError, ValueError, AttributeError):
             continue
         if when < cutoff or when > now + timedelta(minutes=5):
             continue
-        report = validate(issue, sha)
-        if report is None:
+        batch = validate_comment(comment, current_sha, is_ancestor)
+        if batch is None:
             continue
-        signature = json.dumps([report["title"], report["status"],
-            report["alerts"], report["parsed"], report["selected"]],
-            sort_keys=True, ensure_ascii=False)
-        key = hashlib.sha256(signature.encode()).hexdigest()
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append({"issue":issue.get("number"),
-            "key":key, "report":report, "verified":False})
-        if len(result) >= MAX_CANDIDATES:
+        for row in batch:
+            key = row["fingerprint"]
+            if key in seen_all or key in added:
+                continue
+            current = replay(row["title"], parser_bin)
+            status = current_status(row, current)
+            if status == "resolved_in_current_parser":
+                # A known parser problem was already fixed. Do not learn it.
+                continue
+            if len(seen_all) + len(added) >= MAX_LEDGER:
+                raise RuntimeError("Community dedup ledger reached its hard limit")
+            added.add(key)
+            output.append({
+                "fingerprint":key,"status":status,"report":row,
+                "current_parse":{
+                    "title": current.get("title"),
+                    "seasons": current.get("seasons"),
+                    "episodes": current.get("episodes")
+                } if isinstance(current, dict) else None,
+                "verified":False
+            })
+            if len(output) >= MAX_CANDIDATES:
+                break
+        if len(output) >= MAX_CANDIDATES:
             break
-    return result
+    return output, seen_all | added
 
 
 def features(item):
@@ -244,31 +377,39 @@ def train(items, sha):
     }
 
 
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--issues", required=True)
+    p.add_argument("--comments", required=True)
     p.add_argument("--verified", required=True)
     p.add_argument("--sha", required=True)
+    p.add_argument("--parser-bin", required=True)
+    p.add_argument("--seen", required=True)
+    p.add_argument("--seen-output", required=True)
     p.add_argument("--review-output", required=True)
     p.add_argument("--model-output", required=True)
     args = p.parse_args()
-    if len(args.sha) != 40 or not all(c in "0123456789abcdef" for c in args.sha.lower()):
+    if not valid_sha(args.sha):
         raise SystemExit("sha must be a full Git commit id")
-    issues = json.loads(Path(args.issues).read_text(encoding="utf-8"))
-    if not isinstance(issues, list):
-        raise SystemExit("GitHub response must be a list")
-    items = intake(issues, args.sha, datetime.now(timezone.utc))
+    comments = json.loads(Path(args.comments).read_text(encoding="utf-8"))
+    ledger = Path(args.seen)
+    seen = set(ledger.read_text(encoding="utf-8").splitlines()) if ledger.exists() else set()
+    if len(seen) > MAX_LEDGER or any(not re.fullmatch("[0-9a-f]{64}", s) for s in seen):
+        raise SystemExit("Invalid community learning ledger; fail closed")
+    reviewed, seen_new = intake(comments, args.sha,
+        datetime.now(timezone.utc), seen, args.parser_bin)
     Path(args.review_output).parent.mkdir(parents=True, exist_ok=True)
     Path(args.review_output).write_text(
         "\n".join(json.dumps(row, sort_keys=True, ensure_ascii=False)
-                  for row in items) + ("\n" if items else ""), encoding="utf-8")
+                  for row in reviewed) + ("\n" if reviewed else ""), encoding="utf-8")
+    Path(args.seen_output).write_text(
+        "\n".join(sorted(seen_new)) + ("\n" if seen_new else ""),encoding="utf-8")
     verified = read_verified(args.verified, args.sha)
     model = train(verified, args.sha)
-    Path(args.model_output).write_text(
-        json.dumps(model or {"mode":"inactive","reason":
-           "Insufficient independently reviewed current-build examples or failed holdout"},
-           indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(f"review candidates: {len(items)}; current-build verified: {len(verified)}; shadow model: {'ready' if model else 'inactive'}")
+    Path(args.model_output).write_text(json.dumps(
+        model or {"mode":"inactive","reason":"Insufficient current-source independently verified labels or holdout validation failed"},
+        indent=2,sort_keys=True) + "\n",encoding="utf-8")
+    print(f"new unresolved candidate fingerprints: {len(reviewed)}; verified labels: {len(verified)}; shadow model: {'ready' if model else 'inactive'}")
 
 
 if __name__ == "__main__":
