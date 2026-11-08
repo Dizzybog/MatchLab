@@ -636,6 +636,7 @@ fn diagnose_with_policy(
     // changing the parsed show title or promoting the episode coordinate.
     // This shares the same crosswalk verification as "Stone Ocean - 27".
     let mut verified_anidb_absolute:Option<anidb_matcher::VerifiedEpisode>=None;
+    let mut verified_absolute_episode_imdb:Option<String>=None;
     if req.series != Some(false)
         && parsed_value.get("anime_season_episode_candidate").is_none()
         && parsed_value.get("anime_episode_range_candidate").is_none()
@@ -649,6 +650,20 @@ fn diagnose_with_policy(
         if let Some(verified)=anidb_matcher::match_absolute(
             &db,&candidate_title,episode)?{
             verified_anidb_absolute=Some(verified);
+            if let Some(parsed)=parsed_value.as_object_mut(){
+                parsed.insert("title".into(),json!(candidate_title));
+                parsed.insert("episodes".into(),json!([episode]));
+                parsed.insert("seasons".into(),json!([]));
+                parsed.insert("anime_title_verified".into(),json!(true));
+            }
+        }else if let Some(winning_imdb)=verified_unmarked_single_anime_imdb(
+            &db,&candidate_title,&req.title,
+            req.year.or_else(||parsed_value.get("year")
+                .and_then(Value::as_i64).map(|n|n as i32)),episode)? {
+            // Preserve the existing IMDb-winner-specific episode proof,
+            // including legitimate legacy split/offset cases unsupported
+            // by the stricter AniDB-only finite-range proof.
+            verified_absolute_episode_imdb=Some(winning_imdb);
             if let Some(parsed)=parsed_value.as_object_mut(){
                 parsed.insert("title".into(),json!(candidate_title));
                 parsed.insert("episodes".into(),json!([episode]));
@@ -726,7 +741,9 @@ fn diagnose_with_policy(
             year_signal_eligible(year,candidate.year,series&&!seasons.is_empty(),
                 !candidate.anime_ids.is_empty()
                     || verified_anidb_range.is_some()
-                    || verified_anidb_absolute.is_some(),
+                    || verified_anidb_absolute.is_some()
+                    || verified_anime_range_imdb.as_deref()==Some(candidate.imdb_id.as_str())
+                    || verified_absolute_episode_imdb.as_deref()==Some(candidate.imdb_id.as_str()),
                 parsed_quality)
         ).collect::<Vec<_>>()
     }else{imdb};
@@ -822,7 +839,8 @@ fn diagnose_with_policy(
         .or(anime_subfolder_title.as_deref()).unwrap_or(title);
     let anime_resolve_key=imdb_matcher::clean_title(anime_resolve_title);
     let anime = if verified_chinese_override.is_some()
-        || verified_anidb_absolute.is_some() || !imdb.is_empty() {
+        || verified_anidb_absolute.is_some()
+        || verified_absolute_episode_imdb.is_some() {
         // IMDb candidate selection belongs to imdb_matcher. The older
         // anime-priority fallback is only allowed when IMDb ranking has no
         // eligible candidate; it must never replace an IMDb winner.
@@ -888,7 +906,36 @@ fn diagnose_with_policy(
         // otherwise MatchLab ranking (including stable IMDb ID tie-break) wins.
         // Keep the deterministic IMDb winner. Crosswalk evidence may
         // enrich its coordinates, but must not reorder IMDb identities.
-        let chosen=imdb.first();
+        let mut chosen_index=0usize;
+        // The original anime-aware crosswalk remains authoritative when
+        // a season marker or unverified unmarked episode leaves several
+        // IMDb candidates. The standalone AniDB verifier is additive.
+        if series && verified_anidb_absolute.is_none()
+            && verified_absolute_episode_imdb.is_none() {
+            if let Some(ep)=episodes.first().copied(){
+                for (index,candidate) in imdb.iter().enumerate(){
+                    let mapped=match seasons.first().copied(){
+                        Some(season)=>{
+                            let titled=anime_title::resolve(
+                                &db,&candidate.imdb_id,anime_resolve_title,season,ep)
+                                .map_err(|e|e.to_string())?;
+                            if titled.is_some(){titled}
+                            else if anime_title::has_specific_alias(
+                                &db,&candidate.imdb_id,anime_resolve_title)
+                                .map_err(|e|e.to_string())?{None}
+                            else{episode_crosswalk::resolve_season(
+                                &db,&candidate.imdb_id,season,ep)
+                                .map_err(|e|e.to_string())?}
+                        },
+                        None=>episode_crosswalk::resolve_absolute(
+                            &db,&candidate.imdb_id,ep)
+                            .map_err(|e|e.to_string())?,
+                    };
+                    if mapped.is_some(){chosen_index=index;break;}
+                }
+            }
+        }
+        let chosen=imdb.get(chosen_index);
         if let Some(c)=chosen {
             let mut selected_season=seasons.first().copied();
             if series && selected_season.is_none() && episodes.is_empty() {
