@@ -13,7 +13,7 @@ mod country_aliases;
 mod dashboard_history;
 mod query_cache;
 use axum::{extract::{Query, State}, http::{StatusCode,header}, routing::{get,post}, Json, Router};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 #[cfg(test)]
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
