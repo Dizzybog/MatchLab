@@ -12,6 +12,7 @@ mod anime_title;
 mod country_aliases;
 mod dashboard_history;
 mod debug_feed;
+mod community_learning;
 mod query_cache;
 use axum::{extract::{Query, State}, http::{StatusCode,header}, routing::{get,post}, Json, Router};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -1604,6 +1605,9 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
             }
         });
     }
+    if history_ready {
+        community_learning::start(PathBuf::from(&history_db));
+    }
     // A pre-existing volume may need a fresh Tantivy schema generation.
     // Start this in the blocking pool only after all service configuration is
     // validated. /health/live and the dashboard remain reachable throughout.
@@ -1638,6 +1642,7 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
     let app = Router::new().route("/",get(dashboard))
         .route("/api/dashboard/history",get(dashboard_history_request))
         .route("/api/dashboard/stats",get(dashboard_stats_request))
+        .route("/api/community/status",get(community_learning::status))
         .route("/api/debug/parsing",get(debug_feed::list))
         .route("/api/debug/parsing/status",get(debug_feed::status))
         .route("/api/debug/parsing/{id}",get(debug_feed::detail))
