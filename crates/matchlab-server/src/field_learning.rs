@@ -217,8 +217,10 @@ fn training_label(title:&str,field:&str,signal:&str,
     }
     // A present but disagreeing field is NOT considered missing. Only
     // independently explicit markers can train a missing-field rule.
-    if !empty_field(parsed.get(field))
-        {return None;}
+    let absent=empty_field(parsed.get(field))
+        || (matches!(field,"subbed"|"dubbed")
+            && parsed.get(field)==Some(&Value::Bool(false)));
+    if !absent{return None;}
     independent_marker_value(field,signal).map(|v|(v,true))
 }
 fn signals(title: &str) -> Vec<(String, String)> {
@@ -513,6 +515,7 @@ fn propose_from(title: &str, parsed: &mut Value, active: &[FieldRule]) {
             Value::Null => true,
             Value::String(s) => s.is_empty(),
             Value::Array(a) => a.is_empty(),
+            Value::Bool(false) if matches!(field,"subbed"|"dubbed") => true,
             _ => false,
         };
         // Existing values need more independent support than missing values.
@@ -668,6 +671,10 @@ mod tests {
             Some((json!("x265"),true)));
         assert_eq!(training_label("Film.1080p.DUBBED","dubbed","dubbed",&empty),
             Some((json!(true),true)));
+        let mut default_flag=serde_json::Map::new();
+        default_flag.insert("dubbed".into(),json!(false));
+        assert_eq!(training_label("Film.1080p.DUBBED","dubbed","dubbed",&default_flag),
+            Some((json!(true),true)));
         assert!(training_label("Film.4K.WEB-DL","resolution","4k",&empty).is_none());
         assert!(training_label("Film.1080p.2160p","resolution","1080p",&empty).is_none());
         assert!(training_label("Film.1080p.2160p","resolution","2160p",&empty).is_none());
@@ -702,6 +709,14 @@ mod tests {
         assert_ne!(semantic_identity(&weak),semantic_identity(&strong));
         assert!(!may_override(&weak));
         assert!(may_override(&strong));
+    }
+    #[test]
+    fn a_default_false_dubbed_flag_is_an_absence_not_a_confirmed_negative() {
+        let mut parsed=json!({"title":"Film","dubbed":false});
+        propose_from("Film.1080p.DUBBED",&mut parsed,&[
+            rule("dubbed","dubbed",json!(true),8,4)
+        ]);
+        assert_eq!(parsed["dubbed"],true);
     }
     #[test]
     fn gap_only_rule_fills_missing_but_cannot_override_parser() {
