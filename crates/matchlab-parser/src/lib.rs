@@ -2912,6 +2912,34 @@ pub fn install_handler_patches(patches:&[HandlerPatch])->Result<(),ParseError>{
 static ENGINE: Lazy<ParserEngine> =
     Lazy::new(|| ParserEngine::from_json(HANDLERS_JSON).expect("valid generated handler table"));
 
+#[cfg(test)]
+mod live_handler_catalog_tests {
+    use super::*;
+    #[test]
+    fn full_handler_catalog_exposes_original_rules_and_all_field_families(){
+        let rules=existing_regex_rules();
+        assert!(rules.len()>400);
+        for field in ["title","year","seasons","episodes","resolution",
+            "codec","quality","languages","network","edition"]{
+            assert!(rules.iter().any(|r|r["field"]==field),
+                "source parser catalogue missing {field}");
+        }
+    }
+    #[test]
+    fn unsafe_replacement_is_rejected_before_live_publication(){
+        let old=handler_patch_revision();
+        let rules=existing_regex_rules();
+        let first=&rules[0];
+        let patch=HandlerPatch{
+            index:first["index"].as_u64().unwrap() as usize,
+            original_pattern:first["pattern"].as_str().unwrap().to_owned(),
+            replacement_pattern:"(?=cat).*".to_owned()
+        };
+        assert!(install_handler_patches(&[patch]).is_err());
+        assert_eq!(handler_patch_revision(),old);
+    }
+}
+
 static BEFORE_TITLE_MATCH_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^\[([^\[\]]+)\]").expect("valid regex"));
 static DIGITS_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\d+").expect("valid regex"));
