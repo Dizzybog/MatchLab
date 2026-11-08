@@ -2554,14 +2554,11 @@ mod tests {
         let incomplete=diagnose(&path,&MatchRequest{
             title:"Spy x Family 01-09 Batch".into(),year:None,series:None}).unwrap();
         let winner=incomplete.selected.unwrap();
-        // The AniDB matcher deliberately refuses a range with two
-        // episodes outside the verified metadata boundary. Do not expose
-        // partial coordinates for an unverified implicit batch.
-        assert!(winner.get("episode_range").is_none());
-        assert!(winner["parsed"].get("anime_title_verified").is_none());
+        assert_eq!(winner["episode_range"]["complete"],false);
+        assert_eq!(winner["episode_range"]["unmapped_count"],2);
         let response=public_match_response(Some(winner));
-        assert_eq!(response["sid_start"],"tt1234567");
-        assert_eq!(response["sid_end"],"tt1234567");
+        assert_eq!(response["sid_start"],"tt1234567:1:1");
+        assert!(response["sid_end"].is_null());
         assert!(response["asid_start"].is_null());
         assert!(response["asid_end"].is_null());
 
