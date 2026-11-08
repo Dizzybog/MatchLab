@@ -23,16 +23,31 @@ patterns by release markers, media fields and matching outcomes. Examples:
 | `Bleach S16` | Season parsing succeeds, but AniDB range remains incomplete | Investigate crosswalk, not parser regex |
 | `Series.EPIS.300` | Existing regex misses or misreads an alternative episode marker | Learn a bounded `EPIS` regex if many independent crosswalks confirm it |
 | `Film.2024` | Torrent year differs from IMDb original release year | Record a possible mismatch; NOT proof of incorrect matching |
-| Other codecs, languages, resolution, quality | A likely field marker is missing or conflicts | Record a field-level anomaly for future verified rules |
+| Other codecs, languages, resolution, quality | Technical tag absent or conflicts with the core parser | Induce a field-specific literal-marker regex from concordant core-parser examples; quarantine ambiguity |
 
-The first **live learning rule family** is tightly scoped to alternative
-absolute-anime-episode markers. It is implemented in Rust with
-`regex` (linear-time matching), and may propose an exception to a
-wrong built-in parser field only after the current metadata crosswalk
-uniquely confirms the correct identity and episode. Regexes are
-constructed from an allowlisted template; arbitrary Issue text cannot
-supply PCRE2 code. Other parser fields are observed and scored, but
-do **not** yet auto-generate arbitrary regex replacements.
+Two complementary **local live learning rule families** are implemented
+in Rust using `regex` with bounded, linear-time expressions:
+
+- **Absolute anime episodes:** an unusual marker can supersede a wrong
+  built-in episode/season interpretation, but the current AniDB/TVDB
+  crosswalk must uniquely confirm the exact IMDb identity and episode.
+- **Technical release fields:** raw filename tags can generate restricted
+  field-specific literal regex for `resolution`, `codec`, `quality`,
+  `audio`, `bit_depth`, `hdr`, `channels`, `languages`, `subbed`,
+  `dubbed`, and `extension`. At least 8 concordant examples from
+  4 distinct title identities permit filling an empty field; changing an
+  existing value requires at least 16 examples from 6 title identities,
+  with no contradictory evidence and no explicit competing tag.
+  Only the **original Rust parser**, rerun on the raw release, supplies
+  field-label evidence; already learned outputs cannot retrain themselves.
+
+Regexes are synthesized from a small literal-marker grammar, never from
+user/model-supplied regex bytes. Technical labels are marker-grounded and
+conservatively validated; they are not independently proven IMDb metadata.
+Production year, unmarked season/episode, title and IMDb/AniDB identity
+remain *review-only* unless their own independent source-of-truth checks
+can establish a correction. The GitHub PR exporter still accepts only
+crosswalk-backed absolute-anime proposals, not arbitrary technical edits.
 
 The lightweight ONNX ranker currently uses *fixed bootstrap weights*.
 This is **not a continuously retrained neural network**, and scores are
@@ -131,6 +146,31 @@ quota, inactive obsolete records are evicted first, including their
 supporting examples, with SQLite foreign-key cascades. Current
 verified active rules are protected. Incompatible learning epochs
 invalidate old labels without automatically erasing their history.
+
+### Technical field-rule lifecycle
+
+The local worker maintains a bounded SQLite evidence cache with hashed
+release/title identities, canonical field labels and parser build provenance.
+It does not upload these local technical-field observations in local-only
+mode. On refresh or startup, it rebuilds the eligible technical ruleset for
+the current parser build; obsolete observations remain historical cache
+until the shared storage budget requires eviction. A rule change updates
+both in-memory and persistent parse/match cache namespaces, so an old
+answer is not reused after an override changes.
+
+The technical-rule engine deliberately **does not** infer unverified
+`imdb_id`, `anidb_id`, `title`, `year`, or ordinary season/episode
+coordinates from repetition alone. A filename can have multiple quality,
+language or codec markers; that ambiguity must not be resolved by frequency.
+If a field is already present in the raw filename or two active rules
+compete, the engine retains the deterministic parser output. A failure to
+load or validate rules leaves normal parsing and Tantivy matching intact.
+
+This is incremental pattern induction, not a continuously fine-tuned
+neural model or an all-fields, arbitrary PCRE2 generator. The ONNX bootstrap
+ranker supplies prioritization only. Full automatic override coverage
+will require independent, field-specific validators and negative
+regression datasets before that scope can be safely extended.
 
 ## Contribute to the GitHub community (optional)
 
