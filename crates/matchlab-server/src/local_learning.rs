@@ -166,7 +166,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection)->Result<(),String>{
     // The cursor and learned model are committed in the same transaction.
     put(&tx,"after_id",&after.to_string())?;
     tx.commit().map_err(|e|e.to_string())?;
-    crate::online_model::publish_status(&model);
+    model.publish_status();
     if let Some(ref metadata)=meta{
         crate::learned_regex::reconcile(local,metadata)?;
     }
