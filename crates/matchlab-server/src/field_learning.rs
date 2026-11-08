@@ -436,12 +436,19 @@ fn select_rules(db: &Connection) -> Result<Vec<FieldRule>, String> {
     }
     Ok(active)
 }
+fn may_override(rule:&FieldRule)->bool{
+    rule.examples>=MIN_OVERRIDE_EXAMPLES && rule.titles>=MIN_OVERRIDE_TITLES
+        && rule.canonical_examples>=2
+}
+fn semantic_identity(rule:&FieldRule)->(String,String,Value,bool){
+    (rule.field.clone(),rule.signal.clone(),rule.value.clone(),may_override(rule))
+}
 fn install(mut incoming: Vec<FieldRule>) {
     incoming.sort_by(|a,b| (&a.field,&a.signal).cmp(&(&b.field,&b.signal)));
     // Only executable semantics belong in the cache namespace; new
     // examples that do not change a rule must not invalidate a hot cache.
     let fingerprint = incoming.iter().map(|rule|
-        format!("{}:{}:{}", rule.field,rule.signal,rule.value))
+        format!("{}:{}:{}:{}", rule.field,rule.signal,rule.value,may_override(rule)))
         .collect::<Vec<_>>().join("\n");
     let bytes = Sha256::digest(fingerprint.as_bytes());
     let mut id = [0u8;8];
@@ -457,13 +464,11 @@ pub fn reconcile(db: &Connection) -> Result<(), String> {
     let active = select_rules(db)?;
     // Publishing the same semantic rules every 15 seconds would cause
     // unnecessary SQLite WAL churn, cache generation changes and CPU work.
-    let mut by_rule = active.iter().map(|rule|
-        (rule.field.clone(),rule.signal.clone(),rule.value.clone()))
+    let mut by_rule=active.iter().map(semantic_identity)
         .collect::<Vec<_>>();
     by_rule.sort_by(|a,b| (&a.0,&a.1).cmp(&(&b.0,&b.1)));
     let already_installed = registry().read().ok().is_some_and(|guard|{
-        let mut old = guard.iter().map(|rule|
-            (rule.field.clone(),rule.signal.clone(),rule.value.clone()))
+        let mut old=guard.iter().map(semantic_identity)
             .collect::<Vec<_>>();
         old.sort_by(|a,b| (&a.0,&a.1).cmp(&(&b.0,&b.1)));
         old == by_rule
@@ -511,8 +516,7 @@ fn propose_from(title: &str, parsed: &mut Value, active: &[FieldRule]) {
             _ => false,
         };
         // Existing values need more independent support than missing values.
-        if !empty && (rule.examples < MIN_OVERRIDE_EXAMPLES
-            || rule.titles < MIN_OVERRIDE_TITLES || rule.canonical_examples < 2) {
+        if !empty && !may_override(rule) {
             continue;
         }
         // A release may carry multiple conflicting specifications (e.g.
@@ -687,6 +691,17 @@ mod tests {
         parsed.insert("learned_field_overrides".into(),json!([
             {"field":"codec","value":"x265"}]));
         assert!(training_label("Film.x265","codec","x265",&parsed).is_none());
+    }
+    #[test]
+    fn rule_revision_changes_when_override_authority_is_earned() {
+        let weak=rule("resolution","2160p",json!("2160p"),8,4);
+        let mut strong=weak.clone();
+        strong.examples=16;
+        strong.titles=6;
+        strong.canonical_examples=2;
+        assert_ne!(semantic_identity(&weak),semantic_identity(&strong));
+        assert!(!may_override(&weak));
+        assert!(may_override(&strong));
     }
     #[test]
     fn gap_only_rule_fills_missing_but_cannot_override_parser() {
