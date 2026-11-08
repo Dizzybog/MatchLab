@@ -231,12 +231,17 @@ pub fn start(history:PathBuf,metadata:PathBuf){
     let worker=std::thread::Builder::new()
         .name("matchlab-local-learning".into()).spawn(move||{
             let mut model=OptionalModel::new();
+            // Expensive page accounting and eviction run at most every five
+            // minutes; learning scans remain responsive every 15 seconds.
+            let mut maintained=std::time::Instant::now()
+                .checked_sub(Duration::from_secs(300))
+                .unwrap_or_else(std::time::Instant::now);
             loop{
                 if let Err(error)=connect(&state).and_then(|mut db|{
-                    // Maintenance is wholly off the parser/matcher hot path.
-                    // A retired rule/evidence set is retained unless the
-                    // configured on-disk budget has actually been reached.
-                    crate::learning_cache::maintain(&db,&metadata)?;
+                    if maintained.elapsed()>=Duration::from_secs(300){
+                        crate::learning_cache::maintain(&db,&metadata)?;
+                        maintained=std::time::Instant::now();
+                    }
                     scan(&history,&metadata,&mut db,&mut model)
                 }){
                     tracing::warn!(%error,"local learning cycle skipped");
