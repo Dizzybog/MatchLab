@@ -135,7 +135,26 @@ fn curated_rules()->&'static Vec<ActiveRule>{
 /// and absolute episode in the current AniDB/TVDB crosswalk before it can
 /// change any parsed value. /parse never silently rewrites coordinates.
 fn propose_from(title:&str,parsed:&mut Value,active:&[ActiveRule]){
+    if active.is_empty(){return;} // no ML/curated rules: no regex work on default
     let Some(map)=parsed.as_object_mut()else{return;};
+    // Regex scans consume the trailing separator. Continue from that same
+    // separator to detect multiple potentially contradictory episode markers.
+    let mut rest=title;
+    let mut markers=0usize;
+    for _ in 0..3{
+        let Some(caps)=marker_re().captures(rest)else{break;};
+        let Some(full)=caps.get(0)else{break;};
+        if caps.get(1).is_some_and(|m|safe_marker(&m.as_str().to_ascii_lowercase())){
+            markers+=1;
+            if markers>1{return;}
+        }
+        let mut advance=full.end();
+        if full.as_str().ends_with([' ','.','_','-']){
+            advance=advance.saturating_sub(1);
+        }
+        if advance==0||advance>=rest.len(){break;}
+        rest=&rest[advance..];
+    }
     // Explicit SxxExx coordinates always take precedence over a learned
     // marker; also do not reinterpret existing verified anime candidates.
     static EXPLICIT:OnceLock<Regex>=OnceLock::new();
