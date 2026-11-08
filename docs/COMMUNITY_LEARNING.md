@@ -1,88 +1,154 @@
-# Community Learning: GitHub-only, opt-in, and version-aware
+# MatchLab Machine Learning and Community Learning
 
-No central Learning Hub service or shared SQLite instance is required.
-GitHub Issues hold opt-in **untrusted anomaly reports**, GitHub Actions
-replays and reviews them, and a GitHub Release stores the deduplication ledger.
-No public report may modify production matches, train unsupervised corrections
-or trigger an automatic merge.
+**Help MatchLab learn how torrents are named, without surrendering the
+speed, privacy or deterministic checks of the Rust matcher.** This design
+has two separately controlled capabilities: offline local learning and
+optional GitHub community contributions. Both default to **off**.
 
-## Three independent deployment modes
+No remote AI service, external training API, model download, account or
+GitHub connection is needed for the local learning engine. The official
+AMD64 and ARM64 Docker image contains the Rust application, a tiny ONNX
+bootstrap model and a pinned CPU-only ONNX Runtime library. The image
+also supports normal parsing/matching with no ML worker initialized.
 
-The core Rust parser and matcher **always work** without ML and without GitHub.
-Both opt-in flags default to disabled, and no ML worker/model or GitHub
-uploader runs in the default mode.
+## Goals, scope and what the ML model really does
 
-- **Default:** no flags; normal match/parse behavior, no local learning,
-  no GitHub calls related to Community Learning. The official Docker image already includes the ONNX Runtime CPU library and its tiny model, but **neither loads** unless ML is explicitly enabled.
-- **Offline local learning:** `MATCHLAB_ML_ENABLED=true` only; a bounded
-  background Rust worker tracks hashed field-pattern frequencies. No token
-  or GitHub connection is required. In the official image, a tiny ONNX model and CPU runtime are already present for AMD64 and ARM64. Activating ML starts single-threaded inference without a network download, extra mount or a second image. Ordinary Rust builds may still omit the feature. No changes to live SID/ASID are authorized.
-- **Community sharing:** both `MATCHLAB_ML_ENABLED=true` and
-  `MATCHLAB_COMMUNITY_LEARNING_ENABLED=true` plus the user's GitHub token.
-  This explicitly opts into uploading selected, bounded 24-hour batches.
-  The sharing flag **alone** cannot activate uploads.
+MatchLab compares release filename parsing with IMDb/AniDB/TVDB matches.
+The local worker observes field-level disagreements and groups recurring
+patterns by release markers, media fields and matching outcomes. Examples:
 
-Note that the current GitHub Actions intake creates one shared daily Issue,
-checks/replays evidence and produces review artifacts, **not yet automatic
-regex patch pull requests**. Auto-generated code PRs must only be introduced
-with independent verified labels, negative tests, regression/performance gates
-and a clearly scoped rule-creation mechanism. GitHub PR creation and merging
-must never be assumed from an Issue comment.
+| Release | Parser/matcher difference | Learning action |
+| --- | --- | --- |
+| `Bleach_300` | An absolute episode is recognized, but its IMDb/AniDB coordinates are missing | Look up exact mapping; do not invent IDs |
+| `Bleach S16` | Season parsing succeeds, but AniDB range remains incomplete | Investigate crosswalk, not parser regex |
+| `Series.EPIS.300` | Existing regex misses or misreads an alternative episode marker | Learn a bounded `EPIS` regex if many independent crosswalks confirm it |
+| `Film.2024` | Torrent year differs from IMDb original release year | Record a possible mismatch; NOT proof of incorrect matching |
+| Other codecs, languages, resolution, quality | A likely field marker is missing or conflicts | Record a field-level anomaly for future verified rules |
 
-## Bundled inference and supply-chain integrity
+The first **live learning rule family** is tightly scoped to alternative
+absolute-anime-episode markers. It is implemented in Rust with
+`regex` (linear-time matching), and may propose an exception to a
+wrong built-in parser field only after the current metadata crosswalk
+uniquely confirms the correct identity and episode. Regexes are
+constructed from an allowlisted template; arbitrary Issue text cannot
+supply PCRE2 code. Other parser fields are observed and scored, but
+do **not** yet auto-generate arbitrary regex replacements.
 
-The official MatchLab Dockerfile compiles the `ml-ort` Rust feature, generates a deterministic bootstrap ONNX ranker using Rust in the builder stage, and copies both that model and Microsoft ONNX Runtime CPU-only libraries into `/opt/matchlab/ml/`. Both `linux/amd64` and `linux/arm64` archives are pinned to **ONNX Runtime 1.30.0** with architecture-specific SHA-256 checks. The wrapper uses the corresponding minimum API feature (`api-30`). ONNX Runtime is only dynamically loaded by the opt-in learning worker after `MATCHLAB_ML_ENABLED=true`; no inference worker or native library initialization is executed on default startups. Model weights are initial heuristics; scores are only for prioritization, not proof of correctness. The CI production-image smoke test executes the included model to detect library/model mismatches.
+The lightweight ONNX ranker currently uses *fixed bootstrap weights*.
+This is **not a continuously retrained neural network**, and scores are
+not calibrated probabilities. We do not describe a score as 99% certain
+or treat it as ground truth. Rule activation and GitHub proposals use
+independent evidence counts, diversity, current metadata, negative
+tests, and regression checks. The ONNX score only helps prioritize
+anomaly patterns. Future supervised training can update the model
+after independently verified positive and negative labels exist.
 
-## Local storage budget and reuse
+## Opt-in modes
 
-Opt-in local learning uses a private SQLite corpus that also caches
-parser and matcher results to reduce repeat computation.
-Set `MATCHLAB_ML_MAX_STORAGE_GB=10` to allocate a **10 GiB**
-logical target (supported range: 1–128 GiB); the default is 1 GiB.
-`MATCHLAB_ML_CACHE_ENABLED=false` disables persistent cached responses
-without disabling local pattern learning. The base system always
-uses its existing short in-memory parser cache.
+| Mode | Environment | Data sharing | ONNX and local worker |
+| --- | --- | --- | --- |
+| Standard (default) | No ML variables | None | Dormant |
+| Local learning | `MATCHLAB_ML_ENABLED=true` | None; works offline | One CPU worker, local cache and live regex overlays |
+| Community Learning | Local learning + `MATCHLAB_COMMUNITY_LEARNING_ENABLED=true` + private GitHub token | One bounded batch per 24h to GitHub | Same independent local worker |
 
-A cached answer is valid only when its exact input, build, learned
-regex generation, metadata revision, expiry and **non-obsolete** state
-all match the current request. A cache hit is checked again for concurrent
-version changes before returning. Obsolete rows stay as local historical
-evidence, but **must never supply final parsed fields, an IMDb ID or
-an AniDB episode**. On the next request MatchLab runs the current parser
-and matcher again, then stores the fresh result in a different cache
-namespace. There is no eager replay of the entire old cache after an
-update, avoiding CPU spikes on weaker hosts. The learning worker
-marks obsolete records after every upgrade or metadata revision and
-evicts them **only under storage pressure**. Obsolete learned rules
-are immediately deactivated, while their supporting evidence remains
-stored until the configured quota is exceeded; eviction uses
-SQLite foreign-key cascades so rule/evidence removal is atomic.
+For local-only learning:
 
-No external network access or GitHub account is required for either
-local learning or its cache. Their persisted contents may contain
-sensitive release titles and match outputs, so protect the Docker
-volume and do not upload the database.
+~~~yaml
+services:
+  matchlab:
+    image: ghcr.io/dizzybog/matchlab:latest
+    environment:
+      MATCHLAB_ML_ENABLED: "true"
+      MATCHLAB_ML_MAX_STORAGE_GB: "1"
+      MATCHLAB_ML_CACHE_ENABLED: "true"
+    volumes:
+      - metadata:/data
+~~~
 
-## How to contribute
+Only `MATCHLAB_ML_ENABLED` is required. An ML-disabled container
+never creates the learning worker, initializes the ONNX CPU runtime, or
+opens the community uploader. A GitHub token by itself is insufficient
+to activate anything. The Rust matcher still works without a token.
 
-1. Install an official published MatchLab Docker image.
-2. Enable repository **Issues** and **Actions** (the maintainer does this).
-   The workflow creates one daily Issue named
-   `[community-learning] YYYY-MM-DD`, in UTC. It may not appear until the
-   daily workflow has run.
-3. Create a GitHub personal access token for *your own account*:
-   - **Repository owners / members:** Use a
-     [fine-grained PAT](https://github.com/settings/personal-access-tokens/new)
-     restricted to `Dizzybog/MatchLab`, with **Issues: Read and write**.
-   - **External contributors:** GitHub currently does **not** support
-     fine-grained PAT write access to a public repository you do not belong
-     to. A [classic PAT](https://github.com/settings/tokens) with
-     `public_repo` may be used instead, but this permission covers other
-     public repositories accessible by your account and is broader.
-     **Understand the risk; use a dedicated low-privilege account if
-     appropriate, or submit a manual Issue instead.**
-   Tokens belong only on your own host. Never put them in issues or chat.
-4. In your **uncommitted** local `.env` file add the token. In Compose:
+### Technical resources
+
+- The official Docker image bundles the CPU ONNX Runtime binary for each
+  platform and an ONNX graph generated entirely in Rust at build time.
+  Both assets are dormant until opt-in. CI performs real inference on
+  **linux/amd64** and **linux/arm64**.
+- Local observations are collected in bounded background batches; ONNX
+  inference uses **one CPU thread**, not GPUs. No Python backend or Ollama.
+- The local SQLite file is `/data/local-learning.sqlite3` by default,
+  and the logical storage target `MATCHLAB_ML_MAX_STORAGE_GB`
+  defaults to **1 GiB**, supporting 1–128 GiB. The budget is a
+  best-effort on-disk quota, not an exact hard filesystem partition.
+- Persistent caching can be disabled independently with
+  `MATCHLAB_ML_CACHE_ENABLED=false`; rule learning can remain active.
+- Ordinary parser/matcher hot paths do not execute ONNX. Compiled
+  lightweight community-approved regex patterns can run even when
+  local ML is off, but still require current metadata validation
+  before changing final episode coordinates.
+
+## Local evidence and rules
+
+The Rust worker scans retained diagnostic history in bounded chunks.
+A candidate is relevant only if its release marker maps to an
+independently verified IMDb and AniDB/TVDB episode crosswalk, its title
+matches the selected canonical IMDb title exactly after normalization,
+and the current base parser is demonstrably missing or misreading that
+absolute episode. The evidence includes a private release title, exact
+coordinate tuple and a stable dedup fingerprint. No guess is treated as
+a training label merely because it recurs.
+
+For a **local live regex**, the minimum is **8** checked observations,
+at least **2** IMDb identities and **3** distinct episode numbers.
+The rule must satisfy a safe marker grammar, pass negative probes,
+be within the maximum rule count, and remain reproducible against
+current metadata and parser code. Live activation is a hot-reload
+of a small set of compiled rules; a proposed episode override
+does not become a final SID/ASID until the matcher proves the
+crosswalk for that particular request.
+
+A rule with insufficient or stale evidence is *quarantined* or
+marked *obsolete*, not returned as an active rule. Old evidence is
+retained for later revalidation as a cache rather than deleted
+immediately. Historical cache records are never final answers.
+
+### Docker/image and metadata upgrades
+
+Each completed parse/match cache entry is bound to an exact
+source/build, active regex revision, metadata revision and expiration.
+Changed or obsolete cache entries **never serve requests**, even
+when still stored. They are reparsed and rematched on demand using
+current Rust code and metadata, then cached in the new namespace.
+There is no CPU-heavy full-cache replay on startup.
+
+On an image or metadata update, the local worker rechecks learned
+regex evidence against current code and crosswalks before activating
+it. Obsolete candidates and their observations remain available for
+future reconsideration; if the global learning database exceeds its
+quota, inactive obsolete records are evicted first, including their
+supporting examples, with SQLite foreign-key cascades. Current
+verified active rules are protected. Incompatible learning epochs
+invalidate old labels without automatically erasing their history.
+
+## Contribute to the GitHub community (optional)
+
+**Nothing leaves a local-only installation.** To contribute:
+
+1. Use a current official MatchLab image. Historical releases built
+   from upstream `main` can still report compatible, unresolved errors;
+   the main-branch reviewer discards problems already fixed.
+2. Create a personal GitHub token:
+   - If you are a repository member, use a [fine-grained PAT](https://github.com/settings/personal-access-tokens/new)
+     with **Dizzybog/MatchLab → Issues: read/write** only.
+   - If you are an external public contributor, a
+     [classic PAT](https://github.com/settings/tokens) with
+     `public_repo` may be necessary; that scope is broader.
+     Use a dedicated, restricted account if appropriate.
+   Do not post your token in an Issue or chat.
+3. Store the actual token in an **uncommitted local `.env`** or a
+   secret injector and enable both flags:
 
    ~~~yaml
    environment:
@@ -91,121 +157,136 @@ volume and do not upload the database.
      MATCHLAB_COMMUNITY_GITHUB_TOKEN: ${MATCHLAB_COMMUNITY_GITHUB_TOKEN}
    ~~~
 
-   Opt-in is **disabled by default**. Providing a token alone does not
-   enable uploads. Restart MatchLab.
-5. Check `curl http://127.0.0.1:8765/api/community/status`. It should
-   report `enabled: true` and `ready: true`. You can opt out at any time:
-   disable the flag, redeploy, and revoke your token.
-6. MatchLab scans the last 1,000 local history entries incrementally every
-   five minutes, adds **up to 16 distinct suspicious examples** to a
-   persistent pending SQLite table, and waits until **24 hours have elapsed**.
-   It then posts at most **one batch comment** to today's shared daily
-   GitHub Issue, **only if that Issue was created by `github-actions[bot]`**.
-   This prevents malicious users from impersonating a daily thread by title.
-   It does not create its own Issues. Failed checks are retried
-   later; after an attempted POST a batch is marked as sent *before* the
-   network call, so an uncertain timeout cannot cause repeated comments.
-   This trades possible lost submissions for safety against GitHub spam.
-7. A SHA-256 fingerprint calculated from the normalized release filename
-   plus anomaly codes is stored persistently after a submission attempt.
-   Repeated observations in future 24-hour windows **and after Docker
-   upgrades** do not produce another report on that installation. GitHub
-   Actions also deduplicates across contributors and days using a small
-   fingerprint ledger kept in a GitHub Release asset.
-8. Shared Issue comments can expose torrent **basenames**. Although obvious
-   paths, URLs, email addresses and credentials are filtered, this does not
-   guarantee that basenames are private. Do not enable sharing for private
-   or identifying releases. Raw debug traces, full paths, trackers and
-   authorization tokens are never included.
+4. Redeploy and check `GET /api/community/status`: the response
+   should show `local_learning_enabled: true`, `enabled: true`,
+   and `ready: true`. Disable the sharing flag and redeploy to
+   opt out; revoke the token if no longer needed.
 
-## Accept older releases, but never learn outdated errors
+**Privacy warning:** Local evidence and complete cache results can
+contain private release names; keep `/data` private. Public
+GitHub Issues and PRs may still reveal release *basenames*, even
+after rejecting paths, URL strings and obvious secrets. Contribute
+only filenames you are willing to make public. The client never
+uploads complete metadata SQLite files, torrent contents, tracker
+credentials, or the GitHub token.
 
-**A report from an older MatchLab version is welcome if the bug still
-exists in current code.** An older client need not have the newest image
-to contribute, provided its embedded source SHA is on the upstream `main`
-history and its **report protocol and learning epoch** are compatible.
+### The 24-hour contribution protocol
 
-The safety boundary is the GitHub Action, not the reported version:
-- Verify the submitted source SHA is an ancestor of current `main` with a
-  complete Git history. Unrelated, malformed or non-mainline source commits
-  are excluded.
-- Parse each candidate title again using the **current Rust parser** compiled
-  by the workflow from main. If an explicitly marked season/episode
-  disagreement is **demonstrably fixed**, discard that candidate.
-- Example: `Bleach S16` may parse season 16 and find a complete IMDb
-  episode range, while its AniDB mapping remains incomplete. This now
-  produces a separate `incomplete_anime_episode_range` review alert.
-  Correct parsing of `S16` is **not** evidence that ASID start/end work.
-- For matching or AniDB/IMDb crosswalk problems, simple parsing alone is
-  **not enough** to establish that the bug is still present or fixed.
-  Mark these cases `needs_current_metadata_review` for independent
-  reproduction on current metadata. Do not claim an unverified match
-  was corrected.
-- Only independently verified, still relevant examples enter the versioned
-  `learning/verified.jsonl` dataset (with current SHA validation). Human
-  reviewers must confirm and update the evidence and labels as necessary.
-- Older unverified pending data is discarded after any protocol, learning
-  epoch or executable change; the local reporting cursor moves to newest
-  history. **The already-reported fingerprint registry survives upgrades**
-  to avoid resubmission. Verified historical regression cases are retained,
-  but must be revalidated for incompatible epochs before training.
+- GitHub Actions creates/reuses **one shared Issue per UTC day**.
+  Clients only submit comments to the dated Issue created by the
+  `github-actions[bot]`; they never create their own Issues.
+- Each explicitly opted-in client collects up to **16** unique items
+  over a **24-hour window**, then attempts at most one batch comment.
+  A batch may contain strict anomaly observations and rule proposals.
+  Clients mark attempted batches and fingerprints before submitting
+  to avoid reposting after an ambiguous network timeout. This means
+  an individual batch may be lost rather than duplicated.
+- The local ledger survives upgrades and prevents resending the same
+  fingerprint. A GitHub Release asset maintains global cross-install
+  deduplication. GitHub may still impose API/abuse limits.
+- Compatible **v2 anomaly** reports continue to be reviewed. **v3
+  batches** can also carry verified local regex proposals. GitHub
+  validates both independently, never trusting a claimed SHA as
+  cryptographic proof of a running binary.
+- The source commit must be an ancestor of current upstream main.
+  Reported parser anomalies are replayed by the **latest Rust parser**;
+  identity/crosswalk claims need independent verification, because
+  no client's reported ID is a trustworthy label by itself.
 
-**Build hashes are not an attestation:** anyone with permission to comment
-can forge GitHub fields. Version checking stops accidental stale/unsupported
-reports, not malicious impersonation. Reports are hypotheses, not truth.
+### How a high-evidence regex becomes a PR
 
-## GitHub maintainer setup
+A local regex must be **active and independently revalidated** on the
+current source and metadata before it can be exported. Upstream PR
+screening has additional requirements: at least **12** independently
+verified observations, **4** distinct IMDb identities, **5** episode
+numbers, and multiple non-private example filenames. The uploader
+sends a generated, restricted regex plus bounded evidence — not raw
+user-authored PCRE2 expressions.
 
-1. Review and merge the implementation PR after successful Rust, Python,
-   Docker and security CI. Confirm **Issues**, **Actions** and releases
-   are enabled. Do not enable community uploading before the PR is merged.
-2. GitHub's **Publish Docker image** workflow embeds
-   `MATCHLAB_BUILD_SHA` in the executable at compile time. Source SHA
-   cannot be changed via a runtime environment variable.
-3. The trusted `Community learning review` workflow runs daily at about
-   00:23 UTC or by manual dispatch. It creates/reuses **at most one
-   dated GitHub Issue** for all installations, and reads the previous
-   day's batch comments. No Issue text is ever executed as a command.
-4. The workflow downloads the persistent SHA-256 fingerprint ledger from
-   release `community-learning-ledger`, validates all reports, runs the
-   current Rust parser, excludes resolved parser errors and previously
-   seen fingerprints, and updates that ledger. A ledger overflow or
-   malformed ledger stops processing rather than dropping dedup history.
-   Review artifacts are stored for 7 days.
-5. Review pending identity-related reports with **current IMDb/AniDB
-   mappings**. Reproduce the failure; create or update a regression test
-   and commit independently confirmed examples to
-   `learning/verified.jsonl`.
-6. The shadow-mode Bernoulli Naive Bayes model is trained only with
-   enough verified **positive and negative** examples validated on the
-   current source SHA. It uses a fixed holdout split and explicit quality
-   thresholds. The model artifact does **not** change runtime matching.
-7. When model accuracy and dataset diversity are established, add a
-   separately reviewed signed-release and rollback workflow for
-   production rule/model updates. This PR does not enable automatic
-   changes of SID/ASID, self-training from unverified guesses or
-   unattended merging.
+The daily trusted GitHub Actions workflow:
 
-## Resource boundaries
+1. Loads the previous day's Issue comments as **untrusted JSON data**;
+   rejects malformed schemas, incompatible epochs, non-mainline SHAs
+   and already seen fingerprints.
+2. Regenerates the canonical regex from its allowlisted release
+   marker. Checks sufficient evidence diversity and sanitized names.
+3. Uses a Rust **current-parser** screening program to reject
+   redundant or unsafe rules, and negative probes to catch obvious
+   collisions. It adds at most **one** rule to a proposed versioned
+   `learning/community_rules.json` per daily run.
+4. Runs the Rust test and all-target check on the candidate before
+   opening a GitHub pull request. The bot account must have
+   permission to create PRs. **All PRs require human review** of the
+   claimed IMDb/AniDB evidence and are **never auto-merged**.
+5. Once the maintainer merges a verified rule, it is compiled into
+   the next official image. These community-curated patterns work
+   even without local ML; final IMDb/AniDB episode values still pass
+   the current crosswalk and normal production gates.
 
-- Clients: up to 16 unique reports per 24 hours; one comment every 24 hours
-  at most; a bounded pending queue and a local database of at most 50,000
-  reported fingerprints. The uploader will stop if the local registry
-  reaches that limit, rather than losing dedup history. Reports are never
-  sent unless the user explicitly enables them.
-- GitHub: at most one shared Issue each UTC day; bounded ingestion of up to
-  500 comments and 200 unique candidates per daily run; a maximum of
-  100,000 global fingerprint entries; 7-day review artifact retention.
-- GitHub Actions uses read/write Issues to create the shared thread,
-  read/write Contents to maintain the GitHub Release dedup asset,
-  and *no third-party automation rights to merge PRs*. Only trusted
-  default-branch workflows perform these operations.
-- One-comment-per-installation does not eliminate GitHub's abuse/rate
-  limits. For very large adoption an alternative transport will eventually
-  be necessary; the system fails closed rather than flooding GitHub.
+**Important limitation:** GitHub currently replays parser output
+against the current code but does not independently download a
+full IMDb/AniDB metadata database in the bot review job. Thus a
+valid-looking mapping supplied by a client is still a **claim**,
+not authoritative proof. The bot may open a review PR but cannot
+approve or merge a proposed rule autonomously. Also, the current
+local ONNX model is a deterministic bootstrap ranker; claims of
+calibrated 99% certainty would be misleading.
 
-This design follows the useful distinction made by active-learning and
-label-quality projects: **unverified signals are acquisition candidates,
-not training labels**. Learning quality comes from independently
-confirmed labels and evaluation on current data, not merely from having
-many contributors.
+## Maintainer setup
+
+After merging the implementation PR and verifying the Docker image:
+
+1. Enable **Issues**, **GitHub Actions** and **GitHub Releases** for
+   the repository.
+2. In **Settings → Actions → General**, allow GitHub Actions to
+   **create pull requests**. The daily workflow requests
+   `contents: write`, `issues: write` and `pull-requests: write`;
+   no permission to merge or approve is used. Branch protection
+   must still require review and CI as desired.
+3. Verify the Docker publishing workflow supplies
+   `MATCHLAB_BUILD_SHA` at compile time for the official image.
+   Compatible older builds can submit hypotheses but are rechecked
+   against current main.
+4. From **Actions → Community learning review**, choose **Run
+   workflow** to seed today's shared Issue, or leave the UTC 00:23
+   schedule enabled. Scheduled jobs can be delayed or disabled on
+   inactive repositories; monitor failed runs.
+5. Check the daily review artifact (7-day retention), rule PRs and
+   `community-learning-ledger` GitHub Release asset. If GitHub
+   rejects PR creation due to repository settings, fix the setting
+   and re-run the workflow; never embed a maintainer PAT in Docker.
+6. Independently verify proposed rule examples, negative tests,
+   and actual IMDb/AniDB crosswalks before approving and merging
+   any bot PR. Review the scope of every new regex.
+
+**No external Learning Hub server is required.** Python in the hosted
+GitHub Actions review job is not part of the MatchLab image or its
+weak-host runtime; core parser/matcher, local learning, ONNX
+inference and local regex application all run in Rust.
+
+## Troubleshooting and security boundaries
+
+- `MATCHLAB_ML_ENABLED=false`: no local worker, ONNX session or
+  learning-specific GitHub traffic. The usual matching API works.
+- Local ML on, sharing off: no GitHub traffic related to learning.
+- Sharing on without local ML/token/official SHA: uploader refuses
+  to start. See `/api/community/status` and container logs.
+- ONNX asset missing or incompatible: learning observation counts
+  continue without ONNX scoring; the core matcher is unaffected.
+- An ambiguous episode, an unverifiable IMDb identity, stale
+  metadata, or insufficient independent evidence cannot
+  activate a local override or authorize a GitHub PR.
+- An unsupported parser/label epoch quarantines old learned
+  evidence; it is not silently promoted to new training labels.
+- A GitHub token is not remote attestation. Contributors can forge
+  reports; all inputs remain untrusted until independent review.
+- The runtime regex language is restricted to safe, bounded,
+  linear-time templates. No remote Issue can execute shell,
+  SQL, Rust or arbitrary regex bytecode.
+- The local learning quota uses SQLite page measurements and
+  background maintenance; it is a logical best-effort storage
+  budget, not a hard OS disk quota.
+
+For the matching API, metadata behavior and debugging see
+[API documentation](API.md), [metadata lifecycle](LOCAL_METADATA.md)
+and [release parser audit](RELEASE_PARSER_AUDIT.md).
