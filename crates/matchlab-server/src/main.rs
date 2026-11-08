@@ -543,6 +543,10 @@ fn diagnose_with_policy(
     // regular release parsing. Use it only when Tantivy finds an exact,
     // unambiguous AniDB-linked title. No SQLite title discovery is performed.
     let mut verified_anidb_range:Option<anidb_matcher::VerifiedRange>=None;
+    // Compatibility lane: long-standing crosswalk rules support full ranges
+    // spanning multiple AniDB works, and partially mapped IMDb ranges. The
+    // independent AniDB matcher must not silently remove that behavior.
+    let mut verified_anime_range_imdb:Option<String>=None;
     if req.series!=Some(false) {
         let hint=parsed_value.get("anime_episode_range_candidate");
         if let Some((Some(candidate_title),Some(start),Some(end)))=hint.map(|v|
@@ -550,11 +554,14 @@ fn diagnose_with_policy(
              v.get("start").and_then(Value::as_i64),
              v.get("end").and_then(Value::as_i64))) {
             let candidate_title=candidate_title.to_owned();
-            // Anime validation depends only on exact indexed AniDB aliases
-            // and finite episode-map evidence, never on IMDb identities.
-            if let Some(verified)=anidb_matcher::match_absolute_range(
-                &db,&candidate_title,start,end)? {
-                verified_anidb_range=Some(verified);
+            verified_anidb_range=anidb_matcher::match_absolute_range(
+                &db,&candidate_title,start,end)?;
+            if verified_anidb_range.is_none(){
+                let key=imdb_matcher::clean_title(&candidate_title);
+                verified_anime_range_imdb=verified_unmarked_anime_range_imdb(
+                    &db,&key,start,end)?;
+            }
+            if verified_anidb_range.is_some() || verified_anime_range_imdb.is_some(){
                 if let Some(parsed)=parsed_value.as_object_mut(){
                     parsed.insert("title".into(),json!(candidate_title));
                     parsed.insert("episodes".into(),json!([]));
@@ -572,7 +579,7 @@ fn diagnose_with_policy(
     // episode even if no anime identity was verified. For an untrusted batch
     // candidate, suppress that inference rather than publishing guessed
     // coordinates for unrelated movies or ordinary TV titles.
-    if verified_anidb_range.is_none()
+    if verified_anidb_range.is_none() && verified_anime_range_imdb.is_none()
         && parsed_value.get("anime_episode_range_candidate").is_some()
         && let Some(parsed)=parsed_value.as_object_mut(){
         parsed.insert("episodes".into(),json!([]));
