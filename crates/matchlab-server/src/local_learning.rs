@@ -212,6 +212,50 @@ pub fn verify_native_model()->Result<(),String>{
         _=>Err("native FTRL self-test failed".into())
     }
 }
+/// Explicit, offline synthetic throughput probe. Never run automatically
+/// during serving; actual production decisions require representative real
+/// releases and matching-accuracy regression measurements separately.
+pub fn benchmark_native_model()->Result<Value,String>{
+    let db=Connection::open_in_memory().map_err(|e|e.to_string())?;
+    let mut model=crate::online_model::OnlineModel::load(&db)?;
+    const N:usize=10_000;
+    let start=std::time::Instant::now();
+    for n in 0..N{
+        let (field,signal)=if n%2==0{("resolution","2160p")}
+            else{("codec","x265")};
+        let title=format!("Benchmark.Work.{n}.2160p.x265.WEB-DL");
+        model.observe(&db,&title,field,signal)?;
+    }
+    let training_ms=start.elapsed().as_secs_f64()*1000.0;
+    let start=std::time::Instant::now();
+    for n in 0..N{
+        let title=format!("Probe.Work.{n}.2160p.x265.WEB-DL");
+        let _=model.score("resolution","2160p",&title);
+    }
+    let inference_ms=start.elapsed().as_secs_f64()*1000.0;
+    let names=[
+        "Film.Name.2024.2160p.HEVC.WEB-DL",
+        "TV.Series.S02E07.1080p.x264.WEBRip",
+        "Anime.Name.EPIS300.720p.AAC",
+        "Series.Name.Season.3.Episode.9.1080p",
+    ];
+    let start=std::time::Instant::now();
+    for n in 0..N{
+        matchlab_parser::parse_title(names[n%names.len()],false)
+            .map_err(|e|e.to_string())?;
+    }
+    let parse_ms=start.elapsed().as_secs_f64()*1000.0;
+    Ok(serde_json::json!({
+        "benchmark":"synthetic_offline_single_thread",
+        "warning":"not a representative dataset or a parser-accuracy claim",
+        "samples_per_stage":N,
+        "ftrl_train_ms":training_ms,
+        "ftrl_inference_ms":inference_ms,
+        "canonical_parse_ms":parse_ms,
+        "ftrl_parameter_bytes":128*1024,
+        "requires_real_arm64_corpus_validation":true
+    }))
+}
 pub fn start(history:PathBuf,metadata:PathBuf){
     if !active(){return;}
     let state=PathBuf::from(env::var("MATCHLAB_ML_STATE_FILE")
