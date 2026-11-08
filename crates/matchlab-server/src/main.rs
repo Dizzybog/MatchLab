@@ -584,6 +584,20 @@ fn diagnose_with_policy(
                 parsed.insert("seasons".into(),json!([]));
                 parsed.insert("anime_title_verified".into(),json!(true));
             }
+        }else if let Some(part)=anidb_matcher::named_part_season(
+            &db,&candidate_title)?{
+            // "Stone Ocean 27" is a local episode of a named anime
+            // part. Recognizing the exact title and its mapped TVDB season
+            // allows IMDb matching against the canonical parent series;
+            // an open-ended default does NOT independently verify ASID 27.
+            // The selected IMDb title must later prove the crosswalk.
+            if let Some(parsed)=parsed_value.as_object_mut(){
+                parsed.insert("title".into(),json!(candidate_title));
+                parsed.insert("episodes".into(),json!([episode]));
+                parsed.insert("seasons".into(),json!([]));
+                parsed.insert("anime_named_part_season_hint".into(),json!(part.season));
+                parsed.insert("anime_named_part_anidb_id".into(),json!(part.anidb_id));
+            }
         }
     }
     let parsed=parsed_value.as_object().ok_or("parser returned no object")?;
