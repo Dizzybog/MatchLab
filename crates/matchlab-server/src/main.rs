@@ -1395,7 +1395,11 @@ fn enrich_selected_anime_episode(
 
 fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result<Diagnostic,String>{
     let start=Instant::now();
-    let result=diagnose_with_policy(&state.db,req,policy);
+    let result=if matches!(policy,MatchPolicy::PublicApi){
+        diagnose(&state.db,req)
+    }else{
+        diagnose_with_policy(&state.db,req,policy)
+    };
     let elapsed=start.elapsed().as_millis() as u64;
     match &result {
         Ok(d)=>{
