@@ -16,21 +16,18 @@ jobs:
         run: RUSTFLAGS="-D warnings" cargo test --workspace
       - name: Check all Rust targets, including parser benchmarks
         run: RUSTFLAGS="-D warnings" cargo check --workspace --all-targets
-      - name: Check optional ONNX Rust integration (no runtime required)
-        run: RUSTFLAGS="-D warnings" cargo check -p matchlab-server --features ml-ort
-      - name: Build production Docker image with bundled ONNX model and runtime
+      - name: Build lightweight production Docker image with native Rust ML
         run: docker build -t matchlab:test .
-      - name: Verify bundled ONNX CPU inference without ML enabled
-        run: docker run --rm -e MATCHLAB_ML_ENABLED=true --entrypoint /usr/local/bin/matchlab-server matchlab:test verify-ml-image
+      - name: Verify native online training and prediction
+        run: docker run --rm --entrypoint /usr/local/bin/matchlab-server matchlab:test verify-native-ml
 
-  arm64-onnx-image:
-    # Native ARM64 build and actual ONNX inference; this is the same CPU
-    # architecture as Oracle A1 ARM hosts. No QEMU emulation.
+  arm64-native-ml:
+    # Native ARM64 build and train/predict self-test for Oracle A1 hosts.
     runs-on: ubuntu-26.04-arm
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
-      - name: Build official ARM64 image with embedded model and runtime
+      - name: Build official ARM64 image with native Rust learner
         run: docker build --platform linux/arm64 -t matchlab:arm64-test .
-      - name: Verify embedded ARM64 ONNX model under explicit opt-in
-        run: docker run --rm -e MATCHLAB_ML_ENABLED=true --entrypoint /usr/local/bin/matchlab-server matchlab:arm64-test verify-ml-image
+      - name: Verify ARM64 online learner and prediction
+        run: docker run --rm --entrypoint /usr/local/bin/matchlab-server matchlab:arm64-test verify-native-ml
