@@ -36,13 +36,13 @@ jobs:
           TODAY="$(date -u +%F)"
           YESTERDAY="$(date -u -d 'yesterday' +%F)"
           gh api "/repos/${GH_REPO}/issues?state=all&sort=created&direction=desc&per_page=100" > "$RUNNER_TEMP/recent-issues.json"
-          today_number="$(jq -r --arg title "[community-learning] $TODAY" '.[] | select(.title==$title) | .number' "$RUNNER_TEMP/recent-issues.json" | head -n1)"
+          today_number="$(jq -r --arg title "[community-learning] $TODAY" '.[] | select(.title==$title and .user.login=="github-actions[bot]") | .number' "$RUNNER_TEMP/recent-issues.json" | head -n1)"
           if [ -z "$today_number" ]; then
             gh issue create --repo "$GH_REPO" \
               --title "[community-learning] $TODAY" \
               --body "One shared daily thread for opt-in MatchLab reports. Candidate batches are not ground truth."
           fi
-          yesterday_number="$(jq -r --arg title "[community-learning] $YESTERDAY" '.[] | select(.title==$title) | .number' "$RUNNER_TEMP/recent-issues.json" | head -n1)"
+          yesterday_number="$(jq -r --arg title "[community-learning] $YESTERDAY" '.[] | select(.title==$title and .user.login=="github-actions[bot]") | .number' "$RUNNER_TEMP/recent-issues.json" | head -n1)"
           if [ -z "$yesterday_number" ]; then
             echo '[]' > "$RUNNER_TEMP/community-comments.json"
           else
