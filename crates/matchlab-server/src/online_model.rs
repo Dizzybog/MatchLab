@@ -10,7 +10,10 @@ use serde_json::{json,Value};
 use std::sync::atomic::{AtomicI64,Ordering};
 use std::collections::BTreeSet;
 
-const EPOCH:i64=1;
+const EPOCH:i64=2;
+fn current_build()->String{
+    format!("{}:{}",option_env!("MATCHLAB_BUILD_SHA").unwrap_or("dev"),EPOCH)
+}
 const DIM:usize=1<<14;
 const MAX_BYTES:usize=DIM*8;
 const MAX_EXAMPLES:i64=10_000_000;
@@ -51,9 +54,18 @@ fn identity_group(title:&str)->String{
     for word in title.split(|c:char|!c.is_ascii_alphanumeric())
         .filter(|s|!s.is_empty()).take(12){
         let lower=word.to_ascii_lowercase();
+        let season_episode=lower.starts_with('s')&&lower[1..].bytes()
+            .next().is_some_and(|c|c.is_ascii_digit());
+        let standalone_episode=lower.starts_with('e')&&lower[1..].bytes()
+            .next().is_some_and(|c|c.is_ascii_digit());
+        let release_year=lower.len()==4 && lower.parse::<i32>()
+            .is_ok_and(|y|(1900..=2100).contains(&y));
         if ["2160p","1080p","720p","4320p","4k","8k","x264","x265",
             "hevc","av1","webrip","webdl","bluray","hdtv","aac","ddp",
-            "ac3","mkv","mp4"].contains(&lower.as_str()){break;}
+            "ac3","mkv","mp4"].contains(&lower.as_str())
+            ||(!group.is_empty() && (season_episode||standalone_episode||release_year)){
+            break;
+        }
         group.push(lower);
     }
     group.into_iter().take(8).collect::<Vec<_>>().join(" ")
@@ -162,11 +174,33 @@ impl OnlineModel{
             CREATE TABLE IF NOT EXISTS online_model_holdout(
                 epoch INTEGER PRIMARY KEY,holdout INTEGER NOT NULL,
                 correct INTEGER NOT NULL,recent_window INTEGER NOT NULL,
-                recent_count INTEGER NOT NULL);")
+                recent_count INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS online_model_build(
+                epoch INTEGER PRIMARY KEY,source_build TEXT NOT NULL);")
             .map_err(|e|e.to_string())
     }
     pub fn load(db:&Connection)->Result<Self,String>{
         Self::init(db)?;
+        let current=current_build();
+        let prior:Option<String>=db.query_row(
+            "SELECT source_build FROM online_model_build WHERE epoch=?1",
+            [EPOCH],|row|row.get(0)
+        ).optional().map_err(|e|e.to_string())?;
+        if prior.as_deref()!=Some(current.as_str()){
+            // A new parser/image build invalidates trained weights and
+            // deduplication provenance; historical raw evidence remains in
+            // its separate evidence tables for independent revalidation.
+            db.execute("DELETE FROM online_model_seen",[])
+                .map_err(|e|e.to_string())?;
+            db.execute("DELETE FROM online_model",[])
+                .map_err(|e|e.to_string())?;
+            db.execute("DELETE FROM online_model_holdout",[])
+                .map_err(|e|e.to_string())?;
+            db.execute("INSERT INTO online_model_build(epoch,source_build)
+                VALUES(?1,?2) ON CONFLICT(epoch) DO UPDATE SET
+                source_build=excluded.source_build",
+                params![EPOCH,current]).map_err(|e|e.to_string())?;
+        }
         let saved:Option<(Vec<u8>,i64,i64)>=db.query_row(
             "SELECT parameters,positives,negatives FROM online_model WHERE epoch=?1",
             [EPOCH],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))
@@ -336,6 +370,23 @@ mod tests{
         model.save(&db).unwrap();
         let restored=OnlineModel::load(&db).unwrap();
         assert_eq!(restored.holdout,model.holdout);
+    }
+    #[test]
+    fn stale_parser_build_invalidates_model_and_training_dedup(){
+        let db=Connection::open_in_memory().unwrap();
+        let mut model=OnlineModel::load(&db).unwrap();
+        for k in 0..40 {
+            model.observe(&db,&format!("Film{k}.2160p.WEB-DL"),
+                "resolution","2160p").unwrap();
+        }
+        model.save(&db).unwrap();
+        db.execute("UPDATE online_model_build SET source_build='older-build'
+            WHERE epoch=?1",[EPOCH]).unwrap();
+        let restored=OnlineModel::load(&db).unwrap();
+        assert_eq!(restored.trained(),(0,0));
+        let rows:i64=db.query_row("SELECT count(*) FROM online_model_seen",
+            [],|row|row.get(0)).unwrap();
+        assert_eq!(rows,0);
     }
     #[test]
     fn corrupt_weights_fail_closed(){
