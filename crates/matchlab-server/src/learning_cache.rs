@@ -4,7 +4,8 @@
 //!
 //! Cached results are never ground-truth training labels. A build change,
 //! a new verified local regex overlay or a metadata snapshot change gives
-//! a different namespace. The local learning worker prunes stale entries.
+//! a different namespace. Stale entries are RETAINED as low-priority cache
+//! evidence and evicted first only when the configured quota is exceeded.
 use rusqlite::{params,Connection,OpenFlags,OptionalExtension};
 use serde_json::Value;
 use sha2::{Digest,Sha256};
@@ -15,7 +16,7 @@ const DEFAULT_GB:u64=1;
 const MAX_GB:u64=128;
 const MAX_ENTRY_BYTES:usize=512*1024;
 const CACHE_FRACTION:u64=70; // 30% reserved for examples, rules and SQLite overhead
-const CACHE_TTL_SECS:i64=24*3600;
+const CACHE_TTL_SECS:i64=30*24*3600;
 const BUSY_MS:u64=12;
 
 pub fn storage_gb()->u64 {
@@ -24,7 +25,7 @@ pub fn storage_gb()->u64 {
         .filter(|value|(1..=MAX_GB).contains(value))
         .unwrap_or(DEFAULT_GB)
 }
-fn enabled()->bool{
+pub fn enabled()->bool{
     crate::local_learning::active() && env::var("MATCHLAB_ML_CACHE_ENABLED")
         .ok().is_none_or(|flag|flag.eq_ignore_ascii_case("true"))
 }
@@ -88,13 +89,19 @@ fn write(kind:&str,title:&str,year:Option<i32>,series:Option<bool>,
         let db=Connection::open(state_file())?;
         db.busy_timeout(Duration::from_millis(BUSY_MS))?;
         initialize(&db)?;
+        // Fail closed when the entire local learning DB is at its quota.
+        // The low-priority worker will reclaim obsolete rows first.
+        if used_bytes(&db).unwrap_or(u64::MAX)>=storage_gb()*GIB {
+            return Ok(());
+        }
         db.execute(
             "INSERT INTO learning_cache
               (cache_key,namespace,kind,payload,bytes,created_at,expires_at)
              VALUES(?1,?2,?3,?4,?5,?6,?7)
              ON CONFLICT(cache_key) DO UPDATE SET
                payload=excluded.payload,bytes=excluded.bytes,
-               created_at=excluded.created_at,expires_at=excluded.expires_at",
+               created_at=excluded.created_at,expires_at=excluded.expires_at,
+               obsolete=0",
             params![key(&ns,title,year,series),ns,kind,raw,
                 raw.len() as i64,now(),now()+CACHE_TTL_SECS]
         )?;
@@ -125,48 +132,102 @@ fn initialize(db:&Connection)->rusqlite::Result<()>{
             cache_key TEXT PRIMARY KEY,namespace TEXT NOT NULL,
             kind TEXT NOT NULL CHECK(kind IN ('parse','match')),
             payload BLOB NOT NULL,bytes INTEGER NOT NULL,
-            created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL);
+            created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,
+            obsolete INTEGER NOT NULL DEFAULT 0);
          CREATE INDEX IF NOT EXISTS learning_cache_expiry
            ON learning_cache(expires_at);
          CREATE INDEX IF NOT EXISTS learning_cache_oldest
-           ON learning_cache(created_at);"
+           ON learning_cache(created_at);
+         CREATE INDEX IF NOT EXISTS learning_cache_priority
+           ON learning_cache(obsolete,created_at);"
     )
 }
-/// Called only by the opt-in local learning worker every minute. The count
-/// of cached bytes is measured in SQLite, and oldest entries are evicted in
-/// bounded batches. No full-table search happens in a match request.
+/// Approximate actual occupied SQLite pages, not only stored payload bytes.
+/// The freelist is reusable immediately without a blocking full VACUUM.
+fn used_bytes(db:&Connection)->Result<u64,String>{
+    let pages:u64=db.pragma_query_value(None,"page_count",|r|r.get(0))
+        .map_err(|e|e.to_string())?;
+    let reusable:u64=db.pragma_query_value(None,"freelist_count",|r|r.get(0))
+        .map_err(|e|e.to_string())?;
+    let size:u64=db.pragma_query_value(None,"page_size",|r|r.get(0))
+        .map_err(|e|e.to_string())?;
+    Ok(pages.saturating_sub(reusable)*size)
+}
+/// Called off the hot path. Version/expiry changes mark old cache rows as
+/// obsolete, never delete them immediately. Under the configured quota,
+/// they remain available for historical analysis (but not live cache hits).
 pub fn maintain(db:&Connection,metadata:&Path)->Result<(),String>{
     if !enabled(){return Ok(());}
+    maintain_with_budget(db,metadata,storage_gb()*GIB)
+}
+fn maintain_with_budget(db:&Connection,metadata:&Path,budget:u64)->Result<(),String>{
     initialize(db).map_err(|e|e.to_string())?;
-    let current_parse=namespace("parse",None).ok_or("parser cache namespace")?;
+    let current_parse=namespace("parse",None).ok_or("parser namespace unavailable")?;
     let current_match=namespace("match",Some(metadata));
-    // If metadata is not available, no match entry may be served.
     db.execute(
-        "DELETE FROM learning_cache WHERE expires_at<=?1
-           OR (kind='parse' AND namespace<>?2)
-           OR (kind='match' AND namespace<>COALESCE(?3,''))",
+        "UPDATE learning_cache SET obsolete=1 WHERE obsolete=0
+           AND (expires_at<=?1
+            OR (kind='parse' AND namespace<>?2)
+            OR (kind='match' AND namespace<>COALESCE(?3,'')))",
         params![now(),current_parse,current_match]
     ).map_err(|e|e.to_string())?;
-    let max_cache_bytes=(storage_gb()*GIB*CACHE_FRACTION/100) as i64;
+    let cache_budget=(budget*CACHE_FRACTION/100) as i64;
     let mut bytes:i64=db.query_row(
         "SELECT COALESCE(SUM(bytes),0) FROM learning_cache",[],
         |r|r.get(0)).map_err(|e|e.to_string())?;
-    let mut batches=0usize;
-    while bytes>max_cache_bytes && batches<256 {
-        let removed=db.execute(
+    let mut occupied=used_bytes(db)?;
+    // Only when the WHOLE learning DB exceeds its cap may obsolete learned
+    // regex patterns and their old evidence be reclaimed. Foreign keys
+    // enforce atomic deletion of the rule's supporting evidence.
+    if occupied>budget{
+        for _ in 0..64 {
+            if occupied<=budget{break;}
+            let deleted=crate::learned_regex::evict_obsolete(db,32)?;
+            if deleted==0{break;}
+            occupied=used_bytes(db)?;
+        }
+    }
+    // Prefer obsolete cache data. Only after all obsolete entries are
+    // exhausted may we evict the oldest still-valid cache responses.
+    for _ in 0..1024 {
+        if bytes<=cache_budget && occupied<=budget{break;}
+        let mut removed=db.execute(
             "DELETE FROM learning_cache WHERE cache_key IN(
-               SELECT cache_key FROM learning_cache ORDER BY created_at ASC LIMIT 512)",
-            []
+               SELECT cache_key FROM learning_cache WHERE obsolete=1
+               ORDER BY created_at ASC LIMIT 512)",[]
         ).map_err(|e|e.to_string())?;
+        if removed==0{
+            removed=db.execute(
+                "DELETE FROM learning_cache WHERE cache_key IN(
+                   SELECT cache_key FROM learning_cache
+                   ORDER BY created_at ASC LIMIT 512)",[]
+            ).map_err(|e|e.to_string())?;
+        }
         if removed==0{break;}
         bytes=db.query_row("SELECT COALESCE(SUM(bytes),0) FROM learning_cache",
             [],|r|r.get(0)).map_err(|e|e.to_string())?;
-        batches+=1;
+        occupied=used_bytes(db)?;
     }
-    // Reclaim unused WAL frames in a low-priority maintenance cycle; SQLite
-    // can reuse freed DB pages without an expensive full VACUUM.
-    db.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")
-        .map_err(|e|e.to_string())?;
+    if occupied>budget {
+        // Samples hold hashes only and are less important than current
+        // validated regex evidence. Delete old unreferenced observations
+        // last, never remove active learned rules to satisfy cache quotas.
+        for _ in 0..256 {
+            if occupied<=budget{break;}
+            let removed=db.execute("DELETE FROM samples WHERE key IN (
+                SELECT key FROM samples ORDER BY observed_at ASC LIMIT 256)",[])
+                .unwrap_or(0);
+            if removed==0{break;}
+            occupied=used_bytes(db)?;
+        }
+    }
+    // Reuse freed pages and checkpoint opportunistically, without a full
+    // VACUUM that could cause CPU/IO spikes on weak hardware.
+    let _=db.execute_batch("PRAGMA wal_checkpoint(PASSIVE);");
+    if occupied>budget {
+        tracing::warn!(occupied_bytes=occupied,budget_bytes=budget,
+            "learning storage remains over budget; future cache writes blocked");
+    }
     Ok(())
 }
 #[cfg(test)]
@@ -180,18 +241,20 @@ mod tests{
             key("match","Show S01E02",Some(2005),Some(true)));
     }
     #[test]
-    fn eviction_prunes_expired_entries_and_respects_small_budget(){
+    fn obsolete_cache_survives_until_pressure_then_is_evicted_first(){
         let db=Connection::open_in_memory().unwrap();
         initialize(&db).unwrap();
-        db.execute("INSERT INTO learning_cache VALUES(
-            'expired','other','parse',X'7B7D',2,1,1)",[]).unwrap();
-        // A missing metadata file is okay: it invalidates match caches.
-        // The in-memory connection is also used by the maintenance worker.
-        if crate::local_learning::active(){
-            maintain(&db,Path::new("/nonexistent.sqlite3")).unwrap();
-            let n:i64=db.query_row("SELECT COUNT(*) FROM learning_cache",
-                [],|r|r.get(0)).unwrap();
-            assert_eq!(n,0);
-        }
+        db.execute("INSERT INTO learning_cache(
+          cache_key,namespace,kind,payload,bytes,created_at,expires_at)
+          VALUES('old','old-parser','parse',X'7B7D',2,1,1)",[]).unwrap();
+        // Don't purge stale historical cache while there is spare space.
+        maintain_with_budget(&db,Path::new("/nonexistent.sqlite3"),1024*1024).unwrap();
+        let inactive:i64=db.query_row("SELECT obsolete FROM learning_cache
+            WHERE cache_key='old'",[],|r|r.get(0)).unwrap();
+        assert_eq!(inactive,1);
+        maintain_with_budget(&db,Path::new("/nonexistent.sqlite3"),0).unwrap();
+        let remaining:i64=db.query_row("SELECT count(*) FROM learning_cache",
+            [],|r|r.get(0)).unwrap();
+        assert_eq!(remaining,0);
     }
 }
