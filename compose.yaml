@@ -21,6 +21,8 @@ services:
       # For ONNX scoring build the image with --build-arg MATCHLAB_FEATURES=ml-ort
       # and mount a compatible ONNX Runtime shared library (ORT_DYLIB_PATH).
       # MATCHLAB_ML_STATE_FILE: /data/local-learning.sqlite3
+      # MATCHLAB_ML_MAX_STORAGE_GB: "10"
+      # MATCHLAB_ML_CACHE_ENABLED: "true"
       # Community Learning requires MATCHLAB_ML_ENABLED=true, separate
       # explicit sharing opt-in, and a personal GitHub Issues token.
       # MATCHLAB_COMMUNITY_LEARNING_ENABLED: "true"
