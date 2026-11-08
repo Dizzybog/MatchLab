@@ -83,7 +83,7 @@ fn report(title:&str,status:&str,details:&Value)->Option<Value>{
             "matching_error"|"invalid_selected_coordinate"|"unusual_season_number"|
             "unmatched_explicit_episode"|"explicit_episode_mismatch"|
             "parser_marker_disagreement"|"unresolved_absolute_anime_episode"|
-            "reversed_selected_range")).map(str::to_owned)).collect();
+            "incomplete_anime_episode_range"|"reversed_selected_range")).map(str::to_owned)).collect();
     codes.sort();codes.dedup();
     if codes.is_empty(){return None;}
     let parsed=&details["parsed"];
