@@ -224,10 +224,16 @@ parser/matcher JSON. Cache lookups use exact hash keys, not SQLite
 full-text searches. Normal memory caching continues unchanged, even
 with local learning off.
 
-After upgrading the image, changed parser rules and metadata invalidate
-the **live use** of older results immediately, but the entries are
-marked *obsolete*, **not deleted**. Older evidence remains available
-for audit and future analysis. Once the configured storage budget is
+After upgrading the image, changed parser rules and metadata immediately
+invalidate **completed parser and matcher results**. An obsolete cache row is
+never returned, even when it is still physically stored in SQLite. On the
+next request for that title, MatchLab **parses and matches again** using the
+current parser, active learned rules and IMDb/AniDB metadata; only the newly
+computed result enters the current cache namespace. This is lazy
+recomputation, not an expensive mass reprocessing of the cache.
+Historical observations, old outcomes and independently checked regex
+evidence remain available for learning and audit, **not as trusted match
+answers or current training labels**. Once the configured storage budget is
 exceeded, maintenance first evicts obsolete learned-rule evidence,
 then stale result-cache entries, then the oldest current cache entries
 and least important observations. Current verified rules are protected.
