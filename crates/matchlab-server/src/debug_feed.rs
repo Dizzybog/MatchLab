@@ -500,7 +500,7 @@ mod tests {
         assert!(findings.iter().any(|a|a["code"]=="explicit_episode_mismatch"));
         assert!(findings.iter().any(|a|a["code"]=="parser_marker_disagreement"));
         let verified=json!({
-            "parsed":{"seasons":[3],"episodes":[9]},
+            "parsed":{"title":"Example","seasons":[3],"episodes":[9]},
             "selected":{"category":"series","season":3,"episode":9,
                 "anime":{"asid":"123:8"}}
         });
