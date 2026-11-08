@@ -6,7 +6,7 @@ use serde_json::Value;
 use sha2::{Digest,Sha256};
 use std::{env,path::{Path,PathBuf},time::Duration};
 
-const POLL_SECONDS:u64=60;
+const POLL_SECONDS:u64=15;
 const MAX_PATTERNS:i64=2_000;
 const MAX_EXAMPLES:i64=20_000;
 const MIN_EXAMPLES:i64=5;
@@ -90,7 +90,7 @@ fn vector(code:&str,count:i64)->[f32;FEATURES]{
         ((count as f32).ln_1p()/10.0).min(1.0)
     ]
 }
-fn scan(history:&Path,local:&mut Connection,model:&mut OptionalModel)->Result<(),String>{
+fn scan(history:&Path,metadata:&Path,local:&mut Connection,model:&mut OptionalModel)->Result<(),String>{
     let history_db=Connection::open_with_flags(history,OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e|e.to_string())?;
     history_db.busy_timeout(Duration::from_secs(2)).map_err(|e|e.to_string())?;
@@ -110,12 +110,19 @@ fn scan(history:&Path,local:&mut Connection,model:&mut OptionalModel)->Result<()
         .map_err(|e|e.to_string())?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e|e.to_string())?;
+    let meta=Connection::open_with_flags(metadata,OpenFlags::SQLITE_OPEN_READ_ONLY).ok();
+    if let Some(ref metadata)=meta {
+        crate::learned_regex::reconcile(local,metadata)?;
+    }
     let now=chrono::Utc::now().timestamp();
     let mut samples=count(local,"samples")?;
     let mut patterns=count(local,"patterns")?;
     for (id,title,raw) in rows {
         after=id;
         let Ok(details)=serde_json::from_str::<Value>(&raw)else{continue};
+        if let Some(ref metadata)=meta {
+            crate::learned_regex::observe(local,metadata,&title,&details)?;
+        }
         let flags=crate::field_audit::audit(&title,&details["parsed"],&details["selected"]);
         for flag in flags {
             let Some((code,group))=pattern(&flag,&details)else{continue};
@@ -148,6 +155,9 @@ fn scan(history:&Path,local:&mut Connection,model:&mut OptionalModel)->Result<()
                     params![score,group]).map_err(|e|e.to_string())?;
             }
         }
+    }
+    if let Some(ref metadata)=meta {
+        crate::learned_regex::reconcile(local,metadata)?;
     }
     put(local,"after_id",&after.to_string())
 }
@@ -204,7 +214,7 @@ impl OptionalModel {
         }
     }
 }
-pub fn start(history:PathBuf){
+pub fn start(history:PathBuf,metadata:PathBuf){
     if !active(){return;}
     let state=PathBuf::from(env::var("MATCHLAB_ML_STATE_FILE")
         .unwrap_or_else(|_|"/data/local-learning.sqlite3".into()));
@@ -213,7 +223,7 @@ pub fn start(history:PathBuf){
             let mut model=OptionalModel::new();
             loop{
                 if let Err(error)=connect(&state).and_then(|mut db|
-                    scan(&history,&mut db,&mut model)){
+                    scan(&history,&metadata,&mut db,&mut model)){
                     tracing::warn!(%error,"local learning cycle skipped");
                 }
                 std::thread::sleep(Duration::from_secs(POLL_SECONDS));
