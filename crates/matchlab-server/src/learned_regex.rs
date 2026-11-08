@@ -3,10 +3,10 @@
 //! absolute-episode HINTS, never guessed IMDb IDs/SIDs/ASIDs. The normal
 //! matcher must verify the hint with its current AniDB/TVDB crosswalk.
 //!
-//! Evidence and rules live in SQLite with ON DELETE CASCADE. A new image or
-//! metadata revision quarantines all old compiled overlays, replays their
-//! evidence, removes obsolete/unsafe rules AND the underlying evidence in
-//! one transaction, then hot-swaps only verified rules into memory.
+//! Learned rules are deactivated on a code/metadata change until evidence
+//! passes revalidation; obsolete rules and their evidence remain a reusable
+//! local cache. Only capacity pressure may prune inactive, unnecessary
+//! candidates and their evidence together, transactionally.
 use regex::{Regex,RegexBuilder};
 use rusqlite::{params,Connection,OptionalExtension};
 use serde_json::{json,Value};
@@ -95,7 +95,7 @@ fn match_release<'a>(re:&Regex,title:&'a str)->Option<(&'a str,i64)>{
     if re.captures_iter(title).take(2).count()!=1 {return None;}
     if !technical_suffix(&title[full.end()..]) {return None;}
     let original=&title[..full.start()];
-    let name=original.trim_end_matches(|c:char|matches!(c,' '|'.'_'|'.'|'-'));
+    let name=original.trim_end_matches(|c:char|matches!(c,' '|'_'|'.'|'-'));
     if name.len()<2||name.len()>140 || !name.chars().any(char::is_alphabetic){
         return None;
     }
@@ -148,7 +148,12 @@ pub fn init(db:&Connection)->Result<(),String>{
     db.execute_batch(
         "PRAGMA foreign_keys=ON;
          CREATE TABLE IF NOT EXISTS learned_regex_candidates(
-            marker TEXT PRIMARY KEY,created_at INTEGER NOT NULL);
+            marker TEXT PRIMARY KEY,created_at INTEGER NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending',
+            state_reason TEXT NOT NULL DEFAULT '',
+            evaluated_build TEXT NOT NULL DEFAULT '',
+            evaluated_metadata TEXT NOT NULL DEFAULT '',
+            last_evaluated INTEGER NOT NULL DEFAULT 0);
          CREATE TABLE IF NOT EXISTS learned_regex_evidence(
             marker TEXT NOT NULL REFERENCES learned_regex_candidates(marker)
               ON DELETE CASCADE,
@@ -156,13 +161,35 @@ pub fn init(db:&Connection)->Result<(),String>{
             absolute_episode INTEGER NOT NULL,season INTEGER NOT NULL,
             episode INTEGER NOT NULL,anidb_id TEXT NOT NULL,
             anidb_episode INTEGER NOT NULL,
+            epoch INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY(marker,example_hash));
          CREATE TABLE IF NOT EXISTS learned_regex_active(
             marker TEXT PRIMARY KEY REFERENCES learned_regex_candidates(marker)
               ON DELETE CASCADE,
             pattern TEXT NOT NULL,verified_build TEXT NOT NULL,
             verified_metadata TEXT NOT NULL,activated_at INTEGER NOT NULL);"
-    ).map_err(|e|e.to_string())
+    ).map_err(|e|e.to_string())?;
+    // Upgrade existing databases without destroying their learned cache.
+    for (table,column,definition) in [
+        ("learned_regex_candidates","state","state TEXT NOT NULL DEFAULT 'pending'"),
+        ("learned_regex_candidates","state_reason","state_reason TEXT NOT NULL DEFAULT ''"),
+        ("learned_regex_candidates","evaluated_build","evaluated_build TEXT NOT NULL DEFAULT ''"),
+        ("learned_regex_candidates","evaluated_metadata","evaluated_metadata TEXT NOT NULL DEFAULT ''"),
+        ("learned_regex_candidates","last_evaluated","last_evaluated INTEGER NOT NULL DEFAULT 0"),
+        ("learned_regex_evidence","epoch","epoch INTEGER NOT NULL DEFAULT 1"),
+    ]{
+        let sql=format!("PRAGMA table_info({table})");
+        let mut stmt=db.prepare(&sql).map_err(|e|e.to_string())?;
+        let columns=stmt.query_map([],|r|r.get::<_,String>(1))
+            .map_err(|e|e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;
+        drop(stmt);
+        if !columns.iter().any(|name|name==column){
+            db.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {definition};"))
+                .map_err(|e|e.to_string())?;
+        }
+    }
+    Ok(())
 }
 fn metadata_revision(metadata:&Connection)->Result<String,String>{
     let stamp:Option<String>=metadata.query_row(
@@ -179,11 +206,11 @@ fn check_verified(metadata:&Connection,imdb:&str,absolute:i64,
 }
 fn validate_examples(db:&Connection,metadata:&Connection,marker:&str)->Result<bool,String>{
     let mut stmt=db.prepare("SELECT imdb_id,absolute_episode,season,episode,
-        anidb_id,anidb_episode FROM learned_regex_evidence WHERE marker=?1")
+        anidb_id,anidb_episode FROM learned_regex_evidence WHERE marker=?1 AND epoch=?2")
         .map_err(|e|e.to_string())?;
     let mut good=true;
     let mut count=0i64;
-    let rows=stmt.query_map([marker],|r|Ok((
+    let rows=stmt.query_map(params![marker,EPOCH],|r|Ok((
         r.get::<_,String>(0)?,r.get::<_,i64>(1)?,
         r.get::<_,i64>(2)?,r.get::<_,i64>(3)?,
         r.get::<_,String>(4)?,r.get::<_,i64>(5)?)))
@@ -200,7 +227,7 @@ fn validate_examples(db:&Connection,metadata:&Connection,marker:&str)->Result<bo
 fn qualifies(db:&Connection,marker:&str)->Result<bool,String>{
     let (samples,series,eps):(i64,i64,i64)=db.query_row(
         "SELECT COUNT(*),COUNT(DISTINCT imdb_id),COUNT(DISTINCT absolute_episode)
-         FROM learned_regex_evidence WHERE marker=?1",[marker],
+         FROM learned_regex_evidence WHERE marker=?1 AND epoch=?2",params![marker,EPOCH],
         |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))
         .map_err(|e|e.to_string())?;
     Ok(samples>=MIN_EXAMPLES&&series>=MIN_SERIES&&eps>=MIN_EPISODES)
