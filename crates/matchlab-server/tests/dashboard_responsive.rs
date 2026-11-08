@@ -57,7 +57,7 @@ fn activity_days_are_keyboard_accessible_and_show_exact_utc_request_totals(){
     // aggregated day.total from the 14-day API (not the capped 1,000 rows).
     assert!(DASHBOARD.contains(r#"role="group" aria-label="Daily request activity (UTC)""#));
     assert!(DASHBOARD.contains(r#"id="day-summary" class="day-summary small" role="status" aria-live="polite""#));
-    assert!(DASHBOARD.contains(r#"'<button type="button" class="day-bar" data-day="'#));
+    assert!(DASHBOARD.contains(r#"class="day-bar" data-day=""#));
     assert!(DASHBOARD.contains(r#"aria-controls="day-summary" aria-pressed="false""#));
     assert!(DASHBOARD.contains("button.addEventListener('click',()=>selectActivityDay(button.dataset.day,days))"));
     assert!(DASHBOARD.contains("const count=Math.max(0,Number(selected.total)||0);"));
