@@ -172,6 +172,10 @@ fn explicit_spanish_cap(title: &str) -> Option<(i64, i64)> {
     None
 }
 
+pub(crate) fn community_alerts(title:&str,status:&str,details:&Value)->Vec<Value>{
+    alerts(title,status,details)
+}
+
 fn alerts(title: &str, status: &str, details: &Value) -> Vec<Value> {
     let mut findings = Vec::new();
     if status == "error" {
