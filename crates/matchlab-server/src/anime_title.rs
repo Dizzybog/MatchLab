@@ -27,6 +27,19 @@ pub fn resolve(db:&Connection,imdb:&str,title:&str,season:i64,episode:i64)
     if aliases.iter().any(|(id,alias)|id!=&best.0&&
         (alias==&key)==(best.1==key)&&alias.len()==best.1.len()){return Ok(None);}
     let selected=&best.0;
+    // Explicit S01E27 under a *named* anime part is frequently the
+    // part-local first season, not season 1 of the canonical IMDb show.
+    // The exact AniDB part may map to TVDB/IMDb season 5 (Stone Ocean).
+    // Remap only when this specific alias has one verified season and
+    // the selected IMDb title's crosswalk confirms the same AniDB ID.
+    if season==1 && best.1==key
+        && let Some(mapped_season)=season_from_title(db,imdb,title)?
+        && mapped_season>1
+        && let Some(mapped)=episode_crosswalk::resolve_season(
+            db,imdb,mapped_season,episode)?
+        && mapped.anidb_id==*selected {
+        return Ok(Some(mapped));
+    }
     let family:Option<String>=db.query_row(
         "SELECT tvdb_id FROM episode_map WHERE anidb_id=?1 AND anidb_season>0
          AND tvdb_season>0 ORDER BY tvdb_season,offset,start LIMIT 1",
