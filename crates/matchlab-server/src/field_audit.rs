@@ -65,6 +65,12 @@ fn explicit_episode(tokens:&[String])->bool{
         !ep.is_empty()&&ep.len()<=4&&ep.bytes().all(|c|c.is_ascii_digit())
     })
 }
+pub(crate) fn supported_pixel_height(token:&str)->bool{
+    let Some(prefix)=token.strip_suffix('p')else{return false;};
+    let Ok(n)=prefix.parse::<u16>()else{return false;};
+    matches!(n,240|360|480|540|576|600|640|720|800|864|900|960
+        |1024|1080|1200|1440|1600|1800|2160|2880|3200|4320)
+}
 fn audio_channels(raw:&str)->Option<&'static str>{
     let bytes=leaf(raw).as_bytes();
     for (n,signal) in [("5.1","5.1"),("7.1","7.1"),("2.0","2.0")] {
@@ -164,8 +170,10 @@ pub fn audit(raw:&str,parsed:&Value,selected:&Value)->Vec<Value>{
         && t.iter().any(|s|s.len()>=4&&s.bytes().any(|b|b.is_ascii_alphabetic())){
         missing(&mut out,parsed,"title","nonempty_release_name","review");
     }
-    if let Some(v)=has(&t,&["4320p","2160p","1080p","720p","576p","480p","4k","8k"]){
-        missing(&mut out,parsed,"resolution",&v,"high");
+    let resolution=has(&t,&["4320p","2160p","1080p","720p","576p","480p","4k","8k"])
+        .or_else(||t.iter().find(|token|supported_pixel_height(token)).cloned());
+    if let Some(ref v)=resolution{
+        missing(&mut out,parsed,"resolution",v,"high");
     }
     if let Some(v)=has(&t,&["x264","h264","avc","x265","h265","hevc","av1","vp9"]){
         missing(&mut out,parsed,"codec",&v,"high");
@@ -246,6 +254,18 @@ mod tests{
     fn codes(name:&str,parsed:Value,selected:Value)->Vec<String>{
         audit(name,&parsed,&selected).into_iter()
             .filter_map(|a|a["code"].as_str().map(str::to_owned)).collect()
+    }
+    #[test]
+    fn safely_detects_new_pixel_height_tags_but_not_arbitrary_numbers(){
+        for p in ["1440p","900p","360p","2880p"]{
+            let name=format!("Film.Name.{p}.WEB-DL");
+            let parsed=json!({"title":"Film Name"});
+            assert!(codes(&name,parsed,Value::Null)
+                .contains(&"field_missing_resolution".to_owned()),"{p}");
+        }
+        for p in ["9999p","1999p","1234p","23p","p1440"]{
+            assert!(!supported_pixel_height(p),"{p}");
+        }
     }
     #[test]
     fn reports_independent_field_evidence_only_when_missing(){
