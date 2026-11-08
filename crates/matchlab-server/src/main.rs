@@ -9,7 +9,8 @@ mod title_normalization;
 mod tantivy_search;
 mod metadata_import;
 mod metadata_download;
-mod anime_resolver;
+mod episode_crosswalk;
+mod identifiers;
 mod anime_title;
 mod country_aliases;
 mod dashboard_history;
@@ -184,21 +185,21 @@ fn anime_candidate(db: &Connection, key: &str, season: Option<i64>, episode: i64
     // select an IMDb identity, but a unique verified episode crosswalk can.
     // Reject only when more than one *mapped* identity survives. Do not let
     // a colliding film with no episode 338 block Bleach's TV episode 338.
-    let mut verified:Option<anime_resolver::Episode>=None;
+    let mut verified:Option<episode_crosswalk::Episode>=None;
     for imdb in best {
         let mapped = match season {
             Some(season) if season > 0 => {
                 let titled=anime_title::resolve(db,&imdb,key,season,episode)?;
                 if titled.is_some() { titled }
                 else if anime_title::has_specific_alias(db,&imdb,key)? { None }
-                else { anime_resolver::resolve_season(db,&imdb,season,episode)? }
+                else { episode_crosswalk::resolve_season(db,&imdb,season,episode)? }
             },
             None => {
                 // Named anime sequel parts restart local episode numbering.
                 let named=anime_title::resolve_episode_from_exact_part_title(
                     db,&imdb,key,episode)?;
                 if named.is_some(){named}
-                else{anime_resolver::resolve_absolute(db,&imdb,episode)?}
+                else{episode_crosswalk::resolve_absolute(db,&imdb,episode)?}
             },
             _ => None,
         };
@@ -247,9 +248,9 @@ fn exact_anime_identity(db:&Connection,key:&str)->Result<Option<String>,String>{
 fn mapped_absolute_range(db:&Connection,imdb:&str,start:i64,end:i64)->Result<Value,String>{
     let mut segments:Vec<Value>=Vec::new();
     let mut missing=0i64;
-    let mut first:Option<anime_resolver::Episode>=None;
-    let mut last:Option<anime_resolver::Episode>=None;
-    let mapped_episodes=anime_resolver::resolve_absolute_range(db,imdb,start,end)
+    let mut first:Option<episode_crosswalk::Episode>=None;
+    let mut last:Option<episode_crosswalk::Episode>=None;
+    let mapped_episodes=episode_crosswalk::resolve_absolute_range(db,imdb,start,end)
         .map_err(|e|e.to_string())?;
     for (absolute,mapped) in (start..=end).zip(mapped_episodes) {
         if let Some(ep)=mapped {
@@ -291,8 +292,8 @@ fn mapped_season_episode_range(
     canonical_title:bool,
 )->Result<Value,String>{
     let mut segments:Vec<Value>=Vec::new();
-    let mut first:Option<anime_resolver::Episode>=None;
-    let mut last:Option<anime_resolver::Episode>=None;
+    let mut first:Option<episode_crosswalk::Episode>=None;
+    let mut last:Option<episode_crosswalk::Episode>=None;
     let mut missing=0i64;
     // The canonical IMDb series title identifies a fixed IMDb season.
     // Never reinterpret it as a named AniDB part just because an OVA/movie
@@ -305,7 +306,7 @@ fn mapped_season_episode_range(
         (start..=end).map(|episode|anime_title::resolve(db,imdb,title,season,episode)
             .map_err(|e|e.to_string())).collect::<Result<Vec<_>,_>>()?
     }else{
-        anime_resolver::resolve_season_range(db,imdb,season,start,end)
+        episode_crosswalk::resolve_season_range(db,imdb,season,start,end)
             .map_err(|e|e.to_string())?
     };
     for (episode,mapped) in (start..=end).zip(resolved) {
@@ -411,14 +412,14 @@ fn season_episode_end(db:&Connection,imdb:&str,season:i64)->Result<Option<i64>,S
 // that the absolute episode belongs to the SAME advertised season.
 fn verified_chinese_absolute_fallback(
     db:&Connection,imdb:&str,season:i64,episode:i64,absolute_hint:Option<i64>,
-)->Result<Option<anime_resolver::Episode>,String>{
+)->Result<Option<episode_crosswalk::Episode>,String>{
     if absolute_hint!=Some(episode)||season<=0||episode<=0{
         return Ok(None);
     }
     if candidate_has_episode(db,imdb,season,episode)?{
         return Ok(None);
     }
-    let Some(mapped)=anime_resolver::resolve_absolute(db,imdb,episode)
+    let Some(mapped)=episode_crosswalk::resolve_absolute(db,imdb,episode)
         .map_err(|error|error.to_string())? else {return Ok(None)};
     if mapped.season!=season||mapped.episode==episode
         ||!candidate_has_episode(db,imdb,mapped.season,mapped.episode)?{
@@ -538,7 +539,7 @@ fn diagnose_with_policy(
                 if let Some(imdb)=exact_anime_identity(&db,&key)? {
                     let valid=season_episode_end(&db,&imdb,season)?
                         .is_some_and(|end|episode<=end)
-                        || anime_resolver::resolve_season(&db,&imdb,season,episode)
+                        || episode_crosswalk::resolve_season(&db,&imdb,season,episode)
                             .map_err(|error|error.to_string())?.is_some();
                     if valid {verified_title=Some(candidate_title);break;}
                 }
@@ -653,7 +654,7 @@ fn diagnose_with_policy(
         }).collect::<Vec<_>>()
     }else{imdb};
     let chinese_absolute_hint=parsed.get("absolute_episode_candidate").and_then(Value::as_i64);
-    let mut chinese_absolute_by_imdb=HashMap::<String,anime_resolver::Episode>::new();
+    let mut chinese_absolute_by_imdb=HashMap::<String,episode_crosswalk::Episode>::new();
     // Episode maxima in user-contributed IMDb data can lag behind actual
     // broadcasts (e.g. Cops.S36.E41). Apply episode-count pruning only
     // when the season/title filters leave more than two plausible identities.
@@ -813,10 +814,10 @@ fn diagnose_with_policy(
                             if titled.is_some(){titled}
                             else if anime_title::has_specific_alias(&db,&candidate.imdb_id,anime_resolve_title)
                                 .map_err(|e|e.to_string())? {None}
-                            else {anime_resolver::resolve_season(&db,&candidate.imdb_id,season,ep)
+                            else {episode_crosswalk::resolve_season(&db,&candidate.imdb_id,season,ep)
                                 .map_err(|e|e.to_string())?}
                         }
-                        None => anime_resolver::resolve_absolute(&db,&candidate.imdb_id,ep)
+                        None => episode_crosswalk::resolve_absolute(&db,&candidate.imdb_id,ep)
                             .map_err(|e|e.to_string())?,
                     };
                     if mapped.is_some() {
@@ -845,7 +846,7 @@ fn diagnose_with_policy(
                     if titled.is_some(){titled}
                     else if anime_title::has_specific_alias(&db,&c.imdb_id,anime_resolve_title)
                         .map_err(|e|e.to_string())? {None}
-                    else {anime_resolver::resolve_season(&db,&c.imdb_id,season,ep)
+                    else {episode_crosswalk::resolve_season(&db,&c.imdb_id,season,ep)
                         .map_err(|e|e.to_string())?}
                 }else{
                     // Without an Sxx marker, a verified exact anime part
@@ -856,7 +857,7 @@ fn diagnose_with_policy(
                         .map_err(|e|e.to_string())?;
                     if named.is_some(){named}
                     else {
-                        let absolute=anime_resolver::resolve_absolute(
+                        let absolute=episode_crosswalk::resolve_absolute(
                             &db,&c.imdb_id,ep).map_err(|e|e.to_string())?;
                         if absolute.is_some(){absolute}
                         else {
@@ -869,7 +870,7 @@ fn diagnose_with_policy(
                                 .map_err(|e|e.to_string())?.is_some_and(|s|s>1);
                             if anime_local_episode_season_one(
                                 &db,&c.imdb_id,ep,!c.anime_ids.is_empty(),later_part)?{
-                                anime_resolver::resolve_season(
+                                episode_crosswalk::resolve_season(
                                     &db,&c.imdb_id,1,ep).map_err(|e|e.to_string())?
                             }else{None}
                         }
@@ -1222,7 +1223,7 @@ fn enrich_selected_anime_episode(
     if !metadata_import::valid_imdb_id(&imdb)
         || !valid_sid_coordinate(season,episode)
         || season<=0||episode<=0{return Ok(());}
-    let Some(mapped)=anime_resolver::resolve_season(
+    let Some(mapped)=episode_crosswalk::resolve_season(
         db,&imdb,season,episode).map_err(|e|e.to_string())?
         else{return Ok(())};
     if mapped.imdb_id!=imdb||mapped.season!=season||mapped.episode!=episode{
@@ -1348,11 +1349,11 @@ fn public_match_response(selected: Option<Value>) -> Value {
             let start=r["start"].as_i64()?;
             let end=r["end"].as_i64()?;
             if end<start{return None;}
-            Some((anime_resolver::canonical_asid(id,start)?,
-                anime_resolver::canonical_asid(id,end)?))
+            Some((episode_crosswalk::canonical_asid(id,start)?,
+                episode_crosswalk::canonical_asid(id,end)?))
         });
         let single=winner.pointer("/anime/asid").and_then(Value::as_str)
-            .filter(|asid|anime_resolver::valid_asid(asid)).map(str::to_owned);
+            .filter(|asid|episode_crosswalk::valid_asid(asid)).map(str::to_owned);
         let (asid_start,asid_end)=if let Some((start,end))=independent {
             (json!(start),json!(end))
         }else{(json!(single),json!(single))};
@@ -1395,7 +1396,7 @@ fn public_match_response(selected: Option<Value>) -> Value {
     // must never publish out-of-range ASIDs that make consumers retry a
     // whole batch. A valid IMDb SID survives without the invalid ASID.
     let direct_asid=winner.pointer("/anime/asid").and_then(Value::as_str)
-        .filter(|value|anime_resolver::valid_asid(value))
+        .filter(|value|episode_crosswalk::valid_asid(value))
         .map(str::to_owned);
     let segments=winner.pointer("/episode_range/segments").and_then(Value::as_array);
     let complete=winner.pointer("/episode_range/complete")
@@ -1405,8 +1406,8 @@ fn public_match_response(selected: Option<Value>) -> Value {
         let mapped=entries.iter().map(|segment|{
             let id=segment["anidb_id"].as_str()?;
             Some((
-                anime_resolver::canonical_asid(id,segment["start_anime_episode"].as_i64()?)?,
-                anime_resolver::canonical_asid(id,segment["end_anime_episode"].as_i64()?)?,
+                episode_crosswalk::canonical_asid(id,segment["start_anime_episode"].as_i64()?)?,
+                episode_crosswalk::canonical_asid(id,segment["end_anime_episode"].as_i64()?)?,
             ))
         }).collect::<Option<Vec<_>>>()?;
         Some((mapped.first()?.0.clone(),mapped.last()?.1.clone()))
@@ -1423,8 +1424,8 @@ fn public_match_response(selected: Option<Value>) -> Value {
                 segment["anidb_id"].as_str().is_some_and(|other|other!=id))){
                 return None;
             }
-            Some((anime_resolver::canonical_asid(id,start)?,
-                anime_resolver::canonical_asid(id,end)?))
+            Some((episode_crosswalk::canonical_asid(id,start)?,
+                episode_crosswalk::canonical_asid(id,end)?))
         })
     }else{None};
     let (asid_start,asid_end)=if let Some((start,end))=independent_range {
@@ -1980,7 +1981,7 @@ mod tests {
         // already-ranked original TV-series winner.
         for id in ["tt0434665","tt1105263","tt1148261",
             "tt1339302","tt1785394"] {
-            let mapped=anime_resolver::resolve_absolute(&db,id,320).unwrap()
+            let mapped=episode_crosswalk::resolve_absolute(&db,id,320).unwrap()
                 .expect("crosswalk must map episode 320");
             assert_eq!((mapped.season,mapped.episode),(15,4));
         }
