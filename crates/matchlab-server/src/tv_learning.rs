@@ -52,6 +52,13 @@ fn capture(name:&str,re:&Regex)->Option<Coordinates>{
     let caps=found.next()?;
     if found.next().is_some(){return None;}
     let whole=caps.get(0)?;
+    // The boundary regex consumes its trailing separator. A second
+    // SxxExx marker can start at that separator, so captures_iter alone
+    // would miss it. Re-scan the shared boundary to reject ranges/packs.
+    if whole.end()<name.len() {
+        let start=whole.end().saturating_sub(1);
+        if re.is_match(&name[start..]){return None;}
+    }
     let prefix=name[..whole.start()].trim_end_matches(['.','_','-',' ']);
     if prefix.len()<4 || !prefix.chars().any(char::is_alphabetic){
         return None;
