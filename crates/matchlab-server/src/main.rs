@@ -1755,6 +1755,7 @@ mod tests {
                 ('101','otherbleachtv',1,99,1,12,0,''),
                 ('500','sidebleachtv',1,1,1,2,0,''),
                 ('100','bleachtv',1,2,22,42,-21,''),
+                ('100','bleachtv',1,14,300,319,-299,''),
                 ('100','bleachtv',1,15,320,340,-319,''),
                 ('100','bleachtv',1,16,341,366,-340,''),
                 ('200','duketv',1,-1,13,24,0,''),
@@ -1781,6 +1782,21 @@ mod tests {
         }));
         // An absolute episode matches only when one IMDb identity has
         // a verified crosswalk for it, despite shared AniDB title aliases.
+        // Fixture season 14 maps absolute episode 300 -> IMDb S14E01.
+        // These are synthetic boundaries, NOT a claim about live IMDb.
+        // All three release shapes must survive the strict public filter
+        // even without optional anime_ids, year or release-quality hints.
+        for title in ["Bleach_300","Bleach.300","Bleach - 300"] {
+            let d=diagnose(&path,&MatchRequest{
+                title:title.into(),year:None,series:None}).unwrap();
+            let selected=d.selected.expect("verified Bleach absolute episode");
+            assert_eq!(selected["imdb_id"],"tt0000101","{title}: {selected}");
+            assert_eq!(public_match_response(Some(selected)),json!({
+                "sid_start":"tt0000101:14:1",
+                "sid_end":"tt0000101:14:1",
+                "asid_start":"100:300","asid_end":"100:300"
+            }),"{title}");
+        }
         let d=diagnose(&path,&MatchRequest{
             title:"Bleach_338".into(),year:None,series:None}).unwrap();
         let selected=d.selected.expect("Bleach absolute episode 338 match");
