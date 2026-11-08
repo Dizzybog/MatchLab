@@ -203,6 +203,30 @@ For importer options and the exact source URLs, see [Metadata lifecycle](docs/LO
 
 ## Contribute to Community Learning
 
+### Opt-in modes (independent of normal matching)
+
+| Configuration | Local learning | Uploads | Matching |
+| --- | --- | --- | --- |
+| Default: neither flag | Disabled (no ML worker/model) | None | Normal Rust matcher |
+| `MATCHLAB_ML_ENABLED=true` | Enabled, fully local | None, no GitHub token needed | Normal Rust matcher |
+| Both flags + GitHub token | Enabled, fully local | Opt-in daily GitHub batch | Normal Rust matcher |
+| Sharing flag only | Disabled | **None**: local opt-in is required | Normal Rust matcher |
+
+The base Docker build does **not** contain ONNX Runtime. Local learning
+starts with bounded, hashed Rust pattern statistics even without ONNX;
+the optional `ml-ort\` Cargo feature enables CPU-only ONNX scoring when a
+compatible ONNX model and runtime library are configured. No local learning
+runs in the request hot path. Local learning never needs a GitHub API token
+or makes GitHub requests by itself.
+
+**Current GitHub integration status:** confirmed anomalies are transported
+as daily, deduplicated Issue comments and reviewed by a GitHub Action.
+This PR does **not yet create automatic parser-regex patch PRs**, nor does
+it automatically approve/merge code. The intended next step is to create
+a code PR **only after** a learned pattern has independently verified
+labels and passes current-source, negative, performance and regression tests.
+
+
 **Off by default. No extra learning server required.** Community Learning
 uses GitHub Issues and Actions. Opt-in users contribute suspected errors to
 **one shared GitHub Issue per UTC day**, as a **single comment containing
@@ -229,6 +253,7 @@ To contribute:
 
    ~~~yaml
    environment:
+     MATCHLAB_ML_ENABLED: "true"
      MATCHLAB_COMMUNITY_LEARNING_ENABLED: "true"
      MATCHLAB_COMMUNITY_GITHUB_TOKEN: ${MATCHLAB_COMMUNITY_GITHUB_TOKEN}
    ~~~
