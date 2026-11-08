@@ -507,6 +507,69 @@ fn select_rules(db: &Connection) -> Result<Vec<FieldRule>, String> {
     }
     Ok(active)
 }
+/// Public, opt-in community suggestions. Only reconstructed regex grammar,
+/// hashed evidence totals and bundled-handler patterns are exported:
+/// no private torrent names, IMDb identifiers or raw observations.
+pub fn community_proposals(db:&Connection)->Result<Vec<Value>,String>{
+    let rules=select_rules(db)?;
+    let mut out=Vec::new();
+    for rule in &rules {
+        if rule.examples<12 ||rule.titles<4{continue;}
+        let canonical=serde_json::to_string(&rule.value).map_err(|e|e.to_string())?;
+        let key=format!("community-field:{}:{}:{canonical}",rule.field,rule.signal);
+        out.push(json!({
+            "kind":"learned_field_regex",
+            "fingerprint":digest(&key),
+            "field":rule.field,"signal":rule.signal,
+            "regex":rule.regex.as_str(),
+            "canonical":rule.value,
+            "evidence_count":rule.examples,
+            "distinct_titles":rule.titles,
+            "canonical_confirmations":rule.canonical_examples,
+            "source_build":build(),
+            "verification":"local_canonical_and_explicit_release_marker",
+        }));
+    }
+    // Read the original source-handler catalog in the background only.
+    // Share BOTH the old and proposed new regex for human review.
+    for patch in source_handler_patches(&rules){
+        let source=matchlab_parser::existing_regex_rules();
+        let Some(original)=source.get(patch.index)else{continue;};
+        let field=original["field"].as_str().unwrap_or_default();
+        let transform=original["transform"].as_str().unwrap_or_default();
+        let candidate=rules.iter().find(|rule|{
+            rule.field==field
+                &&format!("value('{}')",rule.value.as_str().unwrap_or(""))
+                    ==transform
+                &&patch.replacement_pattern.ends_with(rule.regex.as_str().trim_end_matches("$"))
+        });
+        // Same rule may be available as an extension on more than one
+        // source pattern; do not manufacture evidence if unavailable.
+        let Some(rule)=candidate.or_else(||rules.iter().find(|r|
+            r.field==field && may_override(r)
+                &&patch.replacement_pattern.contains(r.regex.as_str())
+        ))else{continue;};
+        let key=format!("community-patch:{}:{}:{}",
+            patch.index,patch.original_pattern,patch.replacement_pattern);
+        out.push(json!({
+            "kind":"learned_source_regex_patch",
+            "fingerprint":digest(&key),
+            "handler_index":patch.index,
+            "field":rule.field,"signal":rule.signal,
+            "original_regex":patch.original_pattern,
+            "proposed_regex":patch.replacement_pattern,
+            "transform":transform,
+            "evidence_count":rule.examples,
+            "distinct_titles":rule.titles,
+            "canonical_confirmations":rule.canonical_examples,
+            "source_build":build(),
+            "verification":"source_catalog_and_canonical_release_markers",
+        }));
+    }
+    out.truncate(32);
+    Ok(out)
+}
+
 fn may_override(rule:&FieldRule)->bool{
     rule.examples>=MIN_OVERRIDE_EXAMPLES && rule.titles>=MIN_OVERRIDE_TITLES
         && rule.canonical_examples>=2
