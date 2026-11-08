@@ -2264,6 +2264,15 @@ mod tests {
         assert_eq!(public_match_response(Some(winner)),json!({
             "sid_start":"tt2359704:5:3","sid_end":"tt2359704:5:3",
             "asid_start":"16187:3","asid_end":"16187:3"}));
+        // An explicit Part 3 title uses its own AniDB-local episode three,
+        // corresponding to the parent show's IMDb/TVDB S05E27.
+        let third=diagnose(&path,&MatchRequest{
+            title:"JoJo's Bizarre Adventure Stone Ocean Part 3 S01E03".into(),
+            year:None,series:None}).unwrap();
+        let winner=third.selected.expect("Stone Ocean third cour");
+        assert_eq!(public_match_response(Some(winner)),json!({
+            "sid_start":"tt2359704:5:27","sid_end":"tt2359704:5:27",
+            "asid_start":"17664:3","asid_end":"17664:3"}));
         let title_only=diagnose(&path,&MatchRequest{
             title:"JoJo's Bizarre Adventure Stone Ocean".into(),
             year:None,series:None}).unwrap();
