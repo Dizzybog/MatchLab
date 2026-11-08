@@ -621,6 +621,86 @@ mod tests {
         assert!(context_valid("Film.AAC.5.1.WEB-DL","channels","5.1"));
     }
     #[test]
+    fn missing_field_clues_are_independent_but_strict() {
+        let empty=serde_json::Map::new();
+        assert_eq!(training_label("Film.2160p.WEB-DL","resolution","2160p",&empty),
+            Some((json!("2160p"),true)));
+        assert_eq!(training_label("Film.x265.WEB-DL","codec","x265",&empty),
+            Some((json!("x265"),true)));
+        assert_eq!(training_label("Film.1080p.DUBBED","dubbed","dubbed",&empty),
+            Some((json!(true),true)));
+        assert!(training_label("Film.4K.WEB-DL","resolution","4k",&empty).is_none());
+        assert!(training_label("Film.1080p.2160p","resolution","1080p",&empty).is_none());
+        assert!(training_label("Film.1080p.2160p","resolution","2160p",&empty).is_none());
+        assert!(training_label("Film.AAC.DTS.WEB-DL","audio","aac",&empty).is_none());
+        assert!(training_label("The Danish Girl.1080p","languages","danish",&empty).is_none());
+        assert!(training_label("Film.1080p.mkv.WEB-DL","extension","mkv",&empty).is_none());
+        let mut populated=serde_json::Map::new();
+        populated.insert("resolution".into(),json!("720p"));
+        assert!(training_label("Film.2160p","resolution","2160p",&populated).is_none());
+        populated.insert("resolution".into(),json!("2160p"));
+        assert_eq!(training_label("Film.2160p","resolution","2160p",&populated),
+            Some((json!("2160p"),false)));
+    }
+    #[test]
+    fn gap_labels_cannot_train_from_the_previous_learned_result() {
+        let mut parsed=serde_json::Map::new();
+        parsed.insert("codec".into(),json!("x264"));
+        parsed.insert("learned_field_overrides".into(),json!([
+            {"field":"codec","value":"x265"}]));
+        assert!(training_label("Film.x265","codec","x265",&parsed).is_none());
+    }
+    #[test]
+    fn gap_only_rule_fills_missing_but_cannot_override_parser() {
+        let db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        for n in 0..16 {
+            db.execute("INSERT INTO learned_field_gap_evidence(
+                field,signal,example_hash,identity_hash,canonical,source_build,first_seen)
+                VALUES(?1,?2,?3,?4,?5,?6,1)",
+                params!["resolution","2160p",format!("gap{n}"),
+                    format!("title{n}"),r#""2160p""#,build()]).unwrap();
+        }
+        let rules=select_rules(&db).unwrap();
+        assert_eq!(rules.len(),1);
+        assert_eq!(rules[0].canonical_examples,0);
+        let mut missing=json!({"title":"Film"});
+        propose_from("Film.2160p",&mut missing,&rules);
+        assert_eq!(missing["resolution"],"2160p");
+        let mut populated=json!({"title":"Film","resolution":"720p"});
+        propose_from("Film.2160p",&mut populated,&rules);
+        assert_eq!(populated["resolution"],"720p");
+        for n in 0..2 {
+            db.execute("INSERT INTO learned_field_evidence(
+                field,signal,example_hash,identity_hash,canonical,source_build,first_seen)
+                VALUES(?1,?2,?3,?4,?5,?6,1)",
+                params!["resolution","2160p",format!("canonical{n}"),
+                    format!("trusted{n}"),r#""2160p""#,build()]).unwrap();
+        }
+        let rules=select_rules(&db).unwrap();
+        assert_eq!(rules[0].canonical_examples,2);
+        propose_from("Film.2160p",&mut populated,&rules);
+        assert_eq!(populated["resolution"],"2160p");
+    }
+    #[test]
+    fn conflicting_gap_and_canonical_evidence_quarantines_rule() {
+        let db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        for n in 0..12 {
+            db.execute("INSERT INTO learned_field_gap_evidence(
+                field,signal,example_hash,identity_hash,canonical,source_build,first_seen)
+                VALUES(?1,?2,?3,?4,?5,?6,1)",
+                params!["resolution","2160p",format!("gap{n}"),
+                    format!("title{n}"),r#""2160p""#,build()]).unwrap();
+        }
+        db.execute("INSERT INTO learned_field_evidence(
+            field,signal,example_hash,identity_hash,canonical,source_build,first_seen)
+            VALUES(?1,?2,?3,?4,?5,?6,1)",
+            params!["resolution","2160p","conflict","disagree",
+                r#""1080p""#,build()]).unwrap();
+        assert!(select_rules(&db).unwrap().is_empty());
+    }
+    #[test]
     fn requires_diverse_label_agreement_before_activation() {
         let db=Connection::open_in_memory().unwrap();
         init(&db).unwrap();
