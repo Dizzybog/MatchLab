@@ -1225,7 +1225,20 @@ fn diagnose_with_policy(
     // AniDB verification is a separate identity lane. An IMDb match is
     // useful for season coordinates but never a precondition for a proven
     // AniDB identity/episode; equally, ASID is not inferred from IMDb alone.
-    let independent_season=if req.series!=Some(false)
+    // Keep the extra Tantivy lookup off the ordinary TV fast path.
+    // An independently matched AniDB episode is needed only when the
+    // original crosswalk has not already supplied an ASID and the release
+    // either has an anime signal or no valid IMDb identity at all.
+    let independent_season_needed=selected.as_ref().is_none_or(|winner|{
+        winner["category"]=="series"
+            && winner.pointer("/anime/asid").and_then(Value::as_str).is_none()
+            && (winner["anime_ids"].as_object()
+                    .is_some_and(|ids|!ids.is_empty())
+                || parsed.get("anime_title_verified")==Some(&json!(true))
+                || parsed.get("anime_season_episode_candidate").is_some())
+    });
+    let independent_season=if independent_season_needed
+        && req.series!=Some(false)
         && verified_anidb_absolute.is_none()
         && verified_anidb_range.is_none()
         && seasons.len()==1 && episodes.len()==1
