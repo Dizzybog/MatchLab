@@ -16,8 +16,8 @@ services:
       # MATCHLAB_METADATA_URLS: https://...,...
       # MATCHLAB_METADATA_REFRESH_HOURS: "168"
       # Optional local learning only (no GitHub uploads).
-      # The tiny ONNX model AND CPU runtime already ship in this image:
-      # no build args, downloads, runtime libraries or model mounts needed.
+      # Native FTRL learner runs offline in the same Rust process.
+      # No external AI service, Python, ONNX Runtime or GPU needed.
       # MATCHLAB_ML_ENABLED: "true"
       # MATCHLAB_ML_STATE_FILE: /data/local-learning.sqlite3
       # MATCHLAB_ML_MAX_STORAGE_GB: "10"
