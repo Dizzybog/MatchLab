@@ -2211,16 +2211,26 @@ mod tests {
             INSERT INTO seasons VALUES ('tt2359704',5);
             INSERT INTO season_episodes VALUES ('tt2359704',1,26,26),
                 ('tt2359704',5,38,38);
-            INSERT INTO anime_series_map VALUES('tt2359704','16187','262954',0);
+            INSERT INTO anime_series_map VALUES
+                ('tt2359704','16187','262954',0),
+                ('tt2359704','17286','262954',0),
+                ('tt2359704','17664','262954',0);
             INSERT INTO anime_ids VALUES('tt2359704','anidb','16187');
-            INSERT INTO anidb_titles VALUES(
-                '16187','JoJo''s Bizarre Adventure Stone Ocean',
-                'jojosbizarreadventurestoneocean','main','en');
-            -- Real Anime-Lists shape: season five is an open-ended default,
-            -- so the AniDB-only lane recognizes a named part but must not
-            -- claim that this alone verifies any particular episode.
-            INSERT INTO episode_map VALUES(
-                '16187','262954',1,5,1,0,0,'');").unwrap();
+            INSERT INTO anidb_titles VALUES
+                ('16187','JoJo''s Bizarre Adventure Stone Ocean',
+                 'jojosbizarreadventurestoneocean','main','en'),
+                ('17286','JoJo''s Bizarre Adventure Stone Ocean Part 2',
+                 'jojosbizarreadventurestoneoceanpart2','main','en'),
+                ('17664','JoJo''s Bizarre Adventure Stone Ocean Part 3',
+                 'jojosbizarreadventurestoneoceanpart3','main','en');
+            -- Anime-Lists maps Stone Ocean's three AniDB cours into the
+            -- same TVDB/IMDb season five, offset by 0, 12, and 24.
+            -- Unbounded defaults are season evidence, not independent
+            -- proof that AniDB work 16187 owns episode 27.
+            INSERT INTO episode_map VALUES
+                ('16187','262954',1,5,1,0,0,''),
+                ('17286','262954',1,5,1,0,12,''),
+                ('17664','262954',1,5,1,0,24,'');").unwrap();
         tantivy_search::warmup(&db).unwrap();
         assert_eq!(anidb_matcher::named_part_season(
             &db,"JoJo's Bizarre Adventure Stone Ocean").unwrap(),
@@ -2242,9 +2252,18 @@ mod tests {
             assert_eq!(winner["episode"],27,"{raw}: {winner}");
             assert_eq!(public_match_response(Some(winner)),json!({
                 "sid_start":"tt2359704:5:27","sid_end":"tt2359704:5:27",
-                "asid_start":"16187:27","asid_end":"16187:27"
+                "asid_start":"17664:3","asid_end":"17664:3"
             }),"{raw}");
         }
+        // Earlier episodes remain in the first AniDB work; part-specific
+        // releases use local episode numbering while preserving S05.
+        let early=diagnose(&path,&MatchRequest{
+            title:"JoJo's Bizarre Adventure Stone Ocean - 03".into(),
+            year:None,series:None}).unwrap();
+        let winner=early.selected.expect("first Stone Ocean part");
+        assert_eq!(public_match_response(Some(winner)),json!({
+            "sid_start":"tt2359704:5:3","sid_end":"tt2359704:5:3",
+            "asid_start":"16187:3","asid_end":"16187:3"}));
         let title_only=diagnose(&path,&MatchRequest{
             title:"JoJo's Bizarre Adventure Stone Ocean".into(),
             year:None,series:None}).unwrap();
