@@ -23,7 +23,7 @@ patterns by release markers, media fields and matching outcomes. Examples:
 | `Bleach S16` | Season parsing succeeds, but AniDB range remains incomplete | Investigate crosswalk, not parser regex |
 | `Series.EPIS.300` | Existing regex misses or misreads an alternative episode marker | Learn a bounded `EPIS` regex if many independent crosswalks confirm it |
 | `Film.2024` | Torrent year differs from IMDb original release year | Record a possible mismatch; NOT proof of incorrect matching |
-| Other codecs, languages, resolution, quality | Technical tag absent or conflicts with the core parser | Induce a field-specific literal-marker regex from concordant core-parser examples; quarantine ambiguity |
+| Other codecs, languages, resolution, quality | Technical tag absent or conflicts with the core parser | Induce a field-specific literal-marker regex from concordant parser results **or separately checked missing-field markers**; quarantine ambiguity |
 
 Two complementary **local live learning rule families** are implemented
 in Rust using `regex` with bounded, linear-time expressions:
@@ -37,9 +37,14 @@ in Rust using `regex` with bounded, linear-time expressions:
   `dubbed`, and `extension`. At least 8 concordant examples from
   4 distinct title identities permit filling an empty field; changing an
   existing value requires at least 16 examples from 6 title identities,
+  **including at least two canonical-parser confirmations**,
   with no contradictory evidence and no explicit competing tag.
-  Only the **original Rust parser**, rerun on the raw release, supplies
-  field-label evidence; already learned outputs cannot retrain themselves.
+  Labels have two distinct provenances: (1) **original canonical Rust
+  parser** results, and (2) a restricted mapping from explicitly recognizable
+  raw technical tags **only when that parser misses the field**. The second
+  stream learns to fill omissions; it cannot independently authorize
+  overwriting existing values. Already learned outputs never train
+  themselves.
 
 Regexes are synthesized from a small literal-marker grammar, never from
 user/model-supplied regex bytes. Technical labels are marker-grounded and
@@ -150,7 +155,9 @@ invalidate old labels without automatically erasing their history.
 ### Technical field-rule lifecycle
 
 The local worker maintains a bounded SQLite evidence cache with hashed
-release/title identities, canonical field labels and parser build provenance.
+release/title identities, canonical field labels, independent raw-marker
+gap evidence, and parser build provenance. Missing-field evidence is kept
+in a distinct table rather than masquerading as original parser output.
 It does not upload these local technical-field observations in local-only
 mode. On refresh or startup, it rebuilds the eligible technical ruleset for
 the current parser build; obsolete observations remain historical cache
@@ -167,7 +174,12 @@ compete, the engine retains the deterministic parser output. A failure to
 load or validate rules leaves normal parsing and Tantivy matching intact.
 
 This is incremental pattern induction, not a continuously fine-tuned
-neural model or an all-fields, arbitrary PCRE2 generator. The ONNX bootstrap
+neural model or an all-fields, arbitrary PCRE2 generator. New **unknown**
+release markers that lack an independently defensible label remain
+observations to investigate; the learner does not manufacture ground truth
+from repetition. For example, an explicit `2160p` can train a missing
+resolution, while an unknown string resembling a resolution cannot be
+assigned a value merely because it appears frequently. The ONNX bootstrap
 ranker supplies prioritization only. Full automatic override coverage
 will require independent, field-specific validators and negative
 regression datasets before that scope can be safely extended.
