@@ -45,7 +45,7 @@ pub async fn status()->Json<Value>{
         "build_sha":valid_sha(build_sha()).then_some(build_sha()),
         "upload":"one_daily_github_issue_with_opt_in_batch_comments",
         "batch_interval_hours":24,"max_reports_per_batch":MAX_BATCH,
-        "uploads":"verified_regex_proposals_and_strict_anomalies",
+        "uploads":"verified_new_and_source_regex_proposals_and_strict_anomalies",
         "older_build_reports":"accepted_as_unverified_until_current_replay",
         "note":"Reports are untrusted signals, never verified training labels"}))
 }
@@ -276,10 +276,22 @@ fn collect_rule_proposals(db:&Connection,metadata:&Path,time:u64)->Result<(),Str
     let Ok(meta)=Connection::open_with_flags(
         metadata,OpenFlags::SQLITE_OPEN_READ_ONLY
     )else{return Ok(());};
-    let Ok(rules)=crate::learned_regex::proposals(&local,&meta)else{return Ok(());};
+    let mut rules=crate::learned_regex::proposals(&local,&meta)
+        .unwrap_or_default();
+    rules.extend(crate::field_learning::community_proposals(&local)
+        .unwrap_or_default());
+    rules.extend(crate::tv_learning::community_proposals(&local)
+        .unwrap_or_default());
+    // Distinct fingerprints avoid repeats between source patch proposals
+    // and newly added technical/TV regex families.
+    rules.sort_by(|a,b|a["fingerprint"].as_str().cmp(&b["fingerprint"].as_str()));
+    rules.dedup_by(|a,b|a["fingerprint"]==b["fingerprint"]);
     let mut count:i64=db.query_row("SELECT COUNT(*) FROM pending",[],|r|r.get(0))
         .map_err(|e|e.to_string())?;
-    for proposal in rules.into_iter().take(2){
+    for proposal in rules {
+        // A single comment can carry at most two independently reviewed
+        // regex suggestions. Other candidates remain eligible next cycle.
+        if count>=2{break;}
         if count>=MAX_BATCH as i64{break;}
         let Some(key)=proposal["fingerprint"].as_str()else{continue;};
         let seen:i64=db.query_row(
@@ -357,7 +369,7 @@ fn build_batch(db:&Connection,time:u64)->Result<Option<(String,Value,Vec<String>
     let mut reports=Vec::new();
     let mut rules=Vec::new();
     for item in items{
-        if item["kind"]=="verified_regex_proposal"{
+        if matches!(item["kind"].as_str(),Some("verified_regex_proposal" | "learned_field_regex" | "learned_tv_regex" | "learned_source_regex_patch")){
             rules.push(item);
         }else{
             reports.push(item);
