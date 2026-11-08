@@ -182,11 +182,12 @@ pub fn resolve_episode_from_exact_part_title(
     // Other split-cour layouts require interpreting season=1 as the first
     // season *within* the named AniDB part. Keep the existing verified
     // split-part mapping rather than assuming every part has one season.
-    let mapped=resolve(db,imdb,title,1,episode)?;
-    Ok(mapped.filter(|m|m.season==inferred_season
-        && m.anidb_id==*named_id)
-        .filter(|m|within_known_season_bounds(
-            db,imdb,m.season,m.episode).unwrap_or(false)))
+    let Some(mapped)=resolve(db,imdb,title,1,episode)?else{return Ok(None)};
+    if mapped.season!=inferred_season || mapped.anidb_id!=*named_id
+        || !within_known_season_bounds(db,imdb,mapped.season,mapped.episode)? {
+        return Ok(None);
+    }
+    Ok(Some(mapped))
 }
 
 /// Infer an IMDb/TVDB season from a title-specific AniDB alias without an episode.
