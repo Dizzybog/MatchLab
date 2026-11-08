@@ -1335,7 +1335,29 @@ fn public_match_response(selected: Option<Value>) -> Value {
     // still contains a comma-separated Anime-Lists IMDb field. Callers must
     // receive an unambiguous single title ID or an explicit no-match.
     if !metadata_import::valid_imdb_id(imdb){
-        return json!({"sid_start":null,"sid_end":null,"asid_start":null,"asid_end":null});
+        // An ASID verified by Tantivy's exact AniDB alias and bounded
+        // episode evidence can stand without a valid IMDb identity.
+        // Never grant this exception to malformed IMDb metadata alone.
+        if winner["anidb_independent_verified"]!=true
+            || winner.pointer("/parsed/half_episode").and_then(Value::as_bool)==Some(true) {
+            return json!({"sid_start":null,"sid_end":null,
+                "asid_start":null,"asid_end":null});
+        }
+        let independent=winner.get("anidb_range").and_then(|r|{
+            let id=r["anidb_id"].as_str()?;
+            let start=r["start"].as_i64()?;
+            let end=r["end"].as_i64()?;
+            if end<start{return None;}
+            Some((anime_resolver::canonical_asid(id,start)?,
+                anime_resolver::canonical_asid(id,end)?))
+        });
+        let single=winner.pointer("/anime/asid").and_then(Value::as_str)
+            .filter(|asid|anime_resolver::valid_asid(asid)).map(str::to_owned);
+        let (asid_start,asid_end)=if let Some((start,end))=independent {
+            (json!(start),json!(end))
+        }else{(json!(single),json!(single))};
+        return json!({"sid_start":null,"sid_end":null,
+            "asid_start":asid_start,"asid_end":asid_end});
     }
     // A release labelled E12.5 is not necessarily IMDb episode E12.
     // Preserve the verified show identity, but never publish a guessed
@@ -1389,8 +1411,26 @@ fn public_match_response(selected: Option<Value>) -> Value {
         }).collect::<Option<Vec<_>>>()?;
         Some((mapped.first()?.0.clone(),mapped.last()?.1.clone()))
     });
-    let (asid_start,asid_end)=if segments.is_some() {
-        // Ranges require every mapped segment to be valid and complete.
+    let independent_range=if winner["anidb_independent_verified"]==true {
+        winner.get("anidb_range").and_then(|r|{
+            let id=r["anidb_id"].as_str()?;
+            let start=r["start"].as_i64()?;
+            let end=r["end"].as_i64()?;
+            if end<start{return None;}
+            // A conflicting IMDb-based crosswalk must not silently turn
+            // one valid anime into another unrelated AniDB work.
+            if segments.is_some_and(|entries|entries.iter().any(|segment|
+                segment["anidb_id"].as_str().is_some_and(|other|other!=id))){
+                return None;
+            }
+            Some((anime_resolver::canonical_asid(id,start)?,
+                anime_resolver::canonical_asid(id,end)?))
+        })
+    }else{None};
+    let (asid_start,asid_end)=if let Some((start,end))=independent_range {
+        (json!(start),json!(end))
+    }else if segments.is_some() {
+        // IMDb-derived ranges require every segment to be valid and complete.
         range_asids.map_or((Value::Null,Value::Null),|(start,end)|
             (json!(start),json!(end)))
     }else{
