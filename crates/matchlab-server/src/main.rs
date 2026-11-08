@@ -158,7 +158,7 @@ fn parse_cached(title:&str)->Result<Value,String>{
     }
     let mut enriched=value;
     field_learning::apply(title,&mut enriched);
-                learned_regex::apply(title,&mut enriched);
+    learned_regex::apply(title,&mut enriched);
     Ok(enriched)
 }
 fn numbers(v: Option<&Value>) -> Vec<i64> {
@@ -1320,6 +1320,10 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,debug:bool)->Result<Diagnos
     result
 }
 
+async fn ml_status()->Json<Value>{
+    Json(field_learning::status())
+}
+
 async fn dashboard()->([(header::HeaderName,&'static str);1],&'static str){
     ([(header::CONTENT_TYPE,"text/html; charset=utf-8")],include_str!("dashboard.html"))
 }
@@ -1760,6 +1764,7 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         .route("/api/dashboard/history",get(dashboard_history_request))
         .route("/api/dashboard/stats",get(dashboard_stats_request))
         .route("/api/community/status",get(community_learning::status))
+        .route("/api/ml/status",get(ml_status))
         .route("/api/debug/parsing",get(debug_feed::list))
         .route("/api/debug/parsing/status",get(debug_feed::status))
         .route("/api/debug/parsing/{id}",get(debug_feed::detail))
