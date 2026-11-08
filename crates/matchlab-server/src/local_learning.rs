@@ -187,7 +187,13 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
             }
         }
     }
-    if newly_trained{model.save(&tx)?;}
+    // Holdout-only batches update evaluation counters without changing
+    // weights. Persist those counters atomically with the history cursor,
+    // otherwise the next batch silently loses evaluation observations.
+    if newly_trained{model.save(&tx)?;}else{
+        // save() is bounded (128 KiB) and keeps holdout provenance durable.
+        model.save(&tx)?;
+    }
     // The cursor and learned model are committed in the same transaction.
     put(&tx,"after_id",&after.to_string())?;
     tx.commit().map_err(|e|e.to_string())?;
