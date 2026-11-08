@@ -93,7 +93,7 @@ def validate_report(row, sha):
         "verified"
     }:
         return None
-    if (row["protocol"] != PROTOCOL or row["learning_epoch"] != EPOCH
+    if (row["protocol"] not in (PROTOCOL, 3) or row["learning_epoch"] != EPOCH
         or row["build_sha"] != sha or row["source"] != "matchlab-community"
         or row["verified"] is not False or not allowed_title(row["title"])
         or row["status"] not in ("matched", "unmatched", "error")):
@@ -142,46 +142,61 @@ def validate_report(row, sha):
 def validate_comment(comment, current_sha, is_ancestor=git_ancestor):
     if not isinstance(comment, dict):
         return None
-    text = comment.get("body")
-    if not isinstance(text, str) or len(text.encode("utf-8")) > 16384 or not (
-        text.startswith(MARKER + "\n")
-    ):
+    body = comment.get("body")
+    if not isinstance(body, str) or len(body.encode("utf-8")) > 16384:
         return None
+    marker = next((m for m in (MARKER, "<!-- matchlab-community-batch-v3 -->")
+                   if body.startswith(m + "\n")), None)
+    if marker is None:
+        return None
+    protocol = 3 if "v3" in marker else 2
     try:
-        batch = json.loads(text[len(MARKER) + 1:])
+        batch = json.loads(body[len(marker) + 1:])
     except (ValueError, TypeError):
         return None
-    if not isinstance(batch, dict) or set(batch) != {
-        "protocol", "learning_epoch", "build_sha", "source",
-        "batch_id", "created_unix", "verified", "reports"
-    }:
+    fields = {"protocol","learning_epoch","build_sha","source","batch_id",
+              "created_unix","verified","reports"}
+    if protocol == 3:
+        fields.add("rules")
+    if not isinstance(batch, dict) or set(batch) != fields:
         return None
     sha = batch["build_sha"]
-    if (batch["protocol"] != PROTOCOL or batch["learning_epoch"] != EPOCH
+    rules = batch.get("rules", [])
+    if (batch["protocol"] != protocol or batch["learning_epoch"] != EPOCH
         or batch["source"] != "matchlab-community-batch"
         or batch["verified"] is not False or not valid_sha(sha)
         or not is_ancestor(sha, current_sha)
         or type(batch["created_unix"]) is not int
         or not isinstance(batch["reports"], list)
-        or not 1 <= len(batch["reports"]) <= MAX_BATCH):
+        or not isinstance(rules, list)
+        or not 1 <= len(batch["reports"]) + len(rules) <= MAX_BATCH):
         return None
     reports = []
     for row in batch["reports"]:
         clean = validate_report(row, sha)
-        if clean is None:
+        if clean is None or clean["protocol"] != protocol:
             return None
         reports.append(clean)
-    fingerprints = sorted(row["fingerprint"] for row in reports)
+    # The standalone v3 rule intake separately validates the full safe
+    # schema and cross-references. Here, validate fingerprints and overall
+    # batch integrity to continue accepting older issue observations.
+    rule_fp=[]
+    for entry in rules:
+        if not isinstance(entry,dict):
+            return None
+        fp=entry.get("fingerprint")
+        if not isinstance(fp,str) or re.fullmatch("[0-9a-f]{64}",fp) is None:
+            return None
+        rule_fp.append(fp)
+    fingerprints=sorted([row["fingerprint"] for row in reports] + rule_fp)
     if len(fingerprints) != len(set(fingerprints)):
         return None
-    expected = hashlib.sha256(
-        (sha + "\n" + str(EPOCH) + "\n" +
-         "\n".join(fingerprints)).encode("utf-8")
+    expected=hashlib.sha256(
+        (sha+"\n"+str(EPOCH)+"\n"+"\n".join(fingerprints)).encode()
     ).hexdigest()
     if batch["batch_id"] != expected:
         return None
     return reports
-
 
 def replay_current(title, parser_bin):
     try:
@@ -323,7 +338,7 @@ def read_verified(path, sha):
         # Verified labels are scoped to a fixed validated executable SHA.
         # Previously verified examples remain for regression review but are
         # not silently carried across unvalidated parser revisions.
-        if item.get("protocol") != PROTOCOL or item.get("learning_epoch") != EPOCH:
+        if item.get("protocol") not in (PROTOCOL,3) or item.get("learning_epoch") != EPOCH:
             continue
         if item.get("validated_on_sha") != sha:
             continue
