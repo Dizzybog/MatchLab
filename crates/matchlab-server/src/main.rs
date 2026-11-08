@@ -106,6 +106,7 @@ fn cache_generation_current(saved:u64,at:Instant,current:u64)->bool{
 fn parse_rules_revision()->u64{
     learned_regex::revision().rotate_left(1) ^ field_learning::revision().rotate_left(17)
         ^ tv_learning::revision().rotate_left(33)
+        ^ matchlab_parser::handler_patch_revision().rotate_left(49)
 }
 fn parse_cached(title:&str)->Result<Value,String>{
     if title.trim().is_empty()||title.len()>4096 {
