@@ -15,6 +15,9 @@ services:
       # Optional overrides; public sources and seven-day refresh are built in.
       # MATCHLAB_METADATA_URLS: https://...,...
       # MATCHLAB_METADATA_REFRESH_HOURS: "168"
+      # Community Learning needs explicit opt-in and a personal GitHub Issues token.
+      # MATCHLAB_COMMUNITY_LEARNING_ENABLED: "true"
+      # MATCHLAB_COMMUNITY_GITHUB_TOKEN: ${MATCHLAB_COMMUNITY_GITHUB_TOKEN}
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
