@@ -1047,7 +1047,14 @@ fn diagnose_with_policy(
                         "end_season":season,"end_episode":end,
                         "source":"imdb_season_episodes"});
                     winner["sid"]=json!(format!("{imdb_id}:{season}:1"));
-                    let has_anime=linked_anime || exact_anime;
+                    // The relational AniDB bridge can be present even if
+                    // the optional anime_ids enrichment is absent or stale.
+                    // Query by selected IMDb ID, never by ambiguous title;
+                    // the actual range still needs fully verified mappings.
+                    let has_anime=linked_anime || exact_anime || db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM anime_series_map WHERE imdb_id=?1)",
+                        [&imdb_id],|row|row.get::<_,i64>(0))
+                        .map_err(|e|e.to_string())? != 0;
                     if has_anime {
                         let canonical_title=imdb.iter().any(|candidate|
                             candidate.imdb_id==imdb_id
@@ -1733,6 +1740,21 @@ mod tests {
             "sid_start":"tt0000101:1:1","sid_end":"tt0000101:1:20",
             "asid_start":"100:1","asid_end":"100:20"
         }));
+        // A complete AniDB episode crosswalk remains usable even when the
+        // optional anime_ids identity decoration is missing/stale.
+        let rw=Connection::open(&path).unwrap();
+        rw.execute("DELETE FROM anime_ids WHERE group_id='tt0000101'",[]).unwrap();
+        drop(rw);
+        let d=diagnose(&path,&MatchRequest{
+            title:"Bleach S01".into(),year:None,series:None}).unwrap();
+        let selected=d.selected.expect("Bleach S01 without anime_ids");
+        assert_eq!(public_match_response(Some(selected)),json!({
+            "sid_start":"tt0000101:1:1","sid_end":"tt0000101:1:20",
+            "asid_start":"100:1","asid_end":"100:20"
+        }));
+        let rw=Connection::open(&path).unwrap();
+        rw.execute("INSERT INTO anime_ids VALUES('tt0000101','anidb','100')",[]).unwrap();
+        drop(rw);
         // An absolute episode matches only when one IMDb identity has
         // a verified crosswalk for it, despite shared AniDB title aliases.
         let d=diagnose(&path,&MatchRequest{
