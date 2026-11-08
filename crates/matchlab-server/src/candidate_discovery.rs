@@ -2,7 +2,7 @@
 //! from regex activation and matching. Scores are *uncalibrated review ranks*.
 //! Only opt-in local SQLite contains literal unknown tags; the HTTP status
 //! reports aggregate counts, never filenames, markers, hashes, or identities.
-use rusqlite::{params,Connection};
+use rusqlite::{params,Connection,OptionalExtension};
 use serde_json::{json,Value};
 use sha2::{Digest,Sha256};
 use std::collections::BTreeMap;
@@ -14,7 +14,7 @@ const MAX_RAW_BYTES:usize=240;
 const MAX_TOKENS:usize=12;
 const MIN_RANK:f32=0.50;
 static STATUS:OnceLock<RwLock<Value>>=OnceLock::new();
-pub struct Budget{candidates:i64,examples:i64}
+pub struct Budget{candidates:i64,examples:i64,evictions:u8}
 fn hash(raw:&str)->String{format!("{:x}",Sha256::digest(raw.as_bytes()))}
 fn valid_name(raw:&str)->bool{
     raw.len()<=MAX_RAW_BYTES && !raw.contains(['/', '\\', '@', '\n','\r','\0'])
@@ -75,7 +75,26 @@ pub fn budget(db:&Connection)->Result<Budget,String>{
         |r|r.get(0)).map_err(|e|e.to_string())?;
     let examples=db.query_row("SELECT COUNT(*) FROM ml_unknown_examples",[],
         |r|r.get(0)).map_err(|e|e.to_string())?;
-    Ok(Budget{candidates,examples})
+    Ok(Budget{candidates,examples,evictions:0})
+}
+fn reclaim_unqualified(db:&Connection,budget:&mut Budget)->Result<bool,String>{
+    if budget.evictions>=8{return Ok(false);}
+    let victim:Option<(String,String,i64)>=db.query_row(
+        "SELECT marker,predicted_field,distinct_works FROM ml_unknown_candidates
+         WHERE distinct_works<4 ORDER BY last_seen,distinct_works,marker LIMIT 1",[],
+        |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))
+    ).optional().map_err(|e|e.to_string())?;
+    let Some((marker,field,_works))=victim else{return Ok(false);};
+    let removed=db.execute("DELETE FROM ml_unknown_examples
+        WHERE marker=?1 AND predicted_field=?2",params![marker,field])
+        .map_err(|e|e.to_string())? as i64;
+    db.execute("DELETE FROM ml_unknown_candidates
+        WHERE marker=?1 AND predicted_field=?2",params![marker,field])
+        .map_err(|e|e.to_string())?;
+    budget.examples=budget.examples.saturating_sub(removed);
+    budget.candidates=budget.candidates.saturating_sub(1);
+    budget.evictions+=1;
+    Ok(true)
 }
 pub fn observe(db:&Connection,title:&str,parsed:&Value,
     model:&crate::online_model::OnlineModel,remaining:&mut Budget)->Result<(),String>{
@@ -83,7 +102,8 @@ pub fn observe(db:&Connection,title:&str,parsed:&Value,
     if !(4..=120).contains(&name.len()) {return Ok(());}
     let identity=hash(&name);
     for marker in unknown_tokens(title){
-        if remaining.examples>=MAX_EXAMPLES{break;}
+        if remaining.examples>=MAX_EXAMPLES
+            && !reclaim_unqualified(db,remaining)?{break;}
         // Learning predictions are only for review prioritization. The
         // actual value and regex are never used in a parser or matcher.
         let mut ranked:Option<(&str,f32)>=None;
@@ -99,7 +119,8 @@ pub fn observe(db:&Connection,title:&str,parsed:&Value,
             "SELECT EXISTS(SELECT 1 FROM ml_unknown_candidates
              WHERE marker=?1 AND predicted_field=?2)",
             params![marker,field],|r|r.get(0)).map_err(|e|e.to_string())?;
-        if known==0&&remaining.candidates>=MAX_CANDIDATES{continue;}
+        if known==0&&remaining.candidates>=MAX_CANDIDATES
+            && !reclaim_unqualified(db,remaining)?{continue;}
         let inserted=db.execute(
             "INSERT OR IGNORE INTO ml_unknown_examples(marker,predicted_field,identity_hash)
              VALUES(?1,?2,?3)",params![marker,field,identity])
@@ -154,6 +175,22 @@ mod tests{
         assert!(unknown_tokens("Movie.Custom.Marker").is_empty());
         assert!(unknown_tokens("The.Danish.Girl.1080p").is_empty());
         assert!(unknown_tokens("Film.1080p.x265.WEB-DL").is_empty());
+    }
+    #[test]
+    fn bounded_review_store_reclaims_noise_but_protects_diverse_examples(){
+        let db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        db.execute("INSERT INTO ml_unknown_candidates VALUES(
+            'noise','codec',0.6,1,1)",[]).unwrap();
+        db.execute("INSERT INTO ml_unknown_examples VALUES(
+            'noise','codec','work1')",[]).unwrap();
+        let mut usage=budget(&db).unwrap();
+        assert!(reclaim_unqualified(&db,&mut usage).unwrap());
+        assert_eq!(usage.candidates,0);
+        assert_eq!(usage.examples,0);
+        db.execute("INSERT INTO ml_unknown_candidates VALUES(
+            'diverse','codec',0.8,8,1)",[]).unwrap();
+        assert!(!reclaim_unqualified(&db,&mut usage).unwrap());
     }
     #[test]
     fn never_promotes_raw_unverified_strings_into_active_regex(){
