@@ -1125,11 +1125,81 @@ fn diagnose_with_policy(
     if let Some(winner)=selected.as_mut(){
         enrich_selected_anime_episode(&db,winner)?;
     }
-    let reason = if anime.is_some() {"Verified anime crosswalk"} else if selected.is_some() {
+    // AniDB verification is a separate identity lane. An IMDb match is
+    // useful for season coordinates but never a precondition for a proven
+    // AniDB identity/episode; equally, ASID is not inferred from IMDb alone.
+    let independent_season=if req.series!=Some(false)
+        && verified_anidb_absolute.is_none()
+        && verified_anidb_range.is_none()
+        && seasons.len()==1 && episodes.len()==1
+        && parsed.get("anime_episode_range_candidate").is_none()
+    {
+        anidb_matcher::match_season(&db,anime_resolve_title,seasons[0],episodes[0])?
+    }else{None};
+    let independently_verified=verified_anidb_absolute.as_ref()
+        .or(independent_season.as_ref());
+    let anidb_candidate=if let Some(item)=independently_verified {
+        Some(json!({"anidb_id":item.anidb_id,"episode":item.episode,
+            "asid":item.asid(),"verified":true,"source":"anidb_tantivy"}))
+    }else{
+        verified_anidb_range.as_ref().map(|item|json!({
+            "anidb_id":item.anidb_id,"start":item.start,"end":item.end,
+            "verified":true,"source":"anidb_tantivy_range"
+        }))
+    };
+    if let Some(item)=independently_verified {
+        let independent_asid=item.asid();
+        if selected.is_none(){
+            selected=Some(json!({"imdb_id":null,"title":title,
+                "category":"series","season":null,"episode":null,
+                "anime":{"anidb_id":item.anidb_id,"episode":item.episode,
+                    "asid":independent_asid},
+                "anidb_independent_verified":true,
+                "match_source":"anidb_only","parsed":parsed_value.clone()}));
+        }else if let Some(winner)=selected.as_mut(){
+            if winner.get("episode_range").is_none()
+                && winner["category"]=="series" {
+                match winner.pointer("/anime/asid").and_then(Value::as_str) {
+                    Some(existing) if existing!=independent_asid => {
+                        // Disagreeing, independently verified paths are a
+                        // conflict, not permission to publish either ASID.
+                        winner["anidb_conflict"]=json!({
+                            "independent":independent_asid,"imdb_crosswalk":existing});
+                        winner["anime"]=Value::Null;
+                    },
+                    _ => {
+                        winner["anime"]=json!({"anidb_id":item.anidb_id,
+                            "episode":item.episode,"asid":independent_asid});
+                        winner["anidb_independent_verified"]=json!(true);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(item)=verified_anidb_range.as_ref(){
+        if selected.is_none(){
+            selected=Some(json!({"imdb_id":null,"title":title,"category":"series",
+                "anime":null,"match_source":"anidb_only",
+                "parsed":parsed_value.clone()}));
+        }
+        if let Some(winner)=selected.as_mut(){
+            winner["anidb_independent_verified"]=json!(true);
+            winner["anidb_range"]=json!({"anidb_id":item.anidb_id,
+                "start":item.start,"end":item.end});
+        }
+    }
+    let reason = if anidb_candidate.is_some() && selected.as_ref()
+        .is_some_and(|winner|winner["imdb_id"].is_null()) {
+        "Independently verified AniDB episode without IMDb identity"
+    }else if anidb_candidate.is_some() {
+        "Independent AniDB and IMDb match results"
+    }else if anime.is_some() {
+        "Verified anime crosswalk"
+    }else if selected.is_some() {
         "IMDb title candidate (experimental matching rules)"
-    } else {"No eligible candidate"};
-    Ok(Diagnostic{parsed: parsed_value,normalized_title:key,imdb_candidates:imdb,anime_candidate:anime,
-        selected,reason:reason.into()})
+    }else{"No eligible candidate"};
+    Ok(Diagnostic{parsed:parsed_value,normalized_title:key,imdb_candidates:imdb,
+        anime_candidate:anime,anidb_candidate,selected,reason:reason.into()})
 }
 
 /// A canonical single-episode SID and a verified AniDB crosswalk should
