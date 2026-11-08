@@ -1758,6 +1758,9 @@ mod tests {
                 ('100','bleachtv',1,14,300,319,-299,''),
                 ('100','bleachtv',1,15,320,340,-319,''),
                 ('100','bleachtv',1,16,341,366,-340,''),
+                -- A newer Bleach cour belongs to the same TVDB family but
+                -- must not compete with the explicitly mapped series.
+                ('901','bleachtv',1,17,0,0,0,''),
                 ('200','duketv',1,-1,13,24,0,''),
                 ('200','duketv',1,2,13,24,-12,''),
                 ('300','chaostv',1,-1,1,12,0,''),
@@ -1795,6 +1798,19 @@ mod tests {
                 "sid_start":"tt0000101:14:1",
                 "sid_end":"tt0000101:14:1",
                 "asid_start":"100:300","asid_end":"100:300"
+            }),"{title}");
+        }
+        // Regression for production's 'Bleach 320': shared TVDB sibling
+        // defaults must not suppress a uniquely bounded episode mapping.
+        // Fixture coordinates are synthetic: absolute 320 -> S15E01.
+        for title in ["Bleach 320","Bleach_320","Bleach.320"] {
+            let d=diagnose(&path,&MatchRequest{
+                title:title.into(),year:None,series:None}).unwrap();
+            let selected=d.selected.expect("bounded Bleach 320 match");
+            assert_eq!(public_match_response(Some(selected)),json!({
+                "sid_start":"tt0000101:15:1",
+                "sid_end":"tt0000101:15:1",
+                "asid_start":"100:320","asid_end":"100:320"
             }),"{title}");
         }
         let d=diagnose(&path,&MatchRequest{
