@@ -110,18 +110,21 @@ fn parse_cached(title:&str)->Result<Value,String>{
     }
     let generation=parse_rules_revision();
     let cache=PARSE_CACHE.get_or_init(||Mutex::new(HashMap::new()));
-    if let Ok(guard)=cache.lock(){
-        if let Some((at,saved_generation,value))=guard.get(title){
-            if cache_generation_current(*saved_generation,*at,generation){
-                let mut enriched=value.clone();
-                field_learning::apply(title,&mut enriched);
-                learned_regex::apply(title,&mut enriched);
-                if parse_rules_revision()==generation {
-                    return Ok(enriched);
-                }
-                // Rules changed during the cache read; reparse below.
-            }
+    // Clone only the base cached value under the lock, then release it
+    // before running learned regex checks. Concurrent API requests must
+    // never serialize behind the potentially expensive rule validation.
+    let cached=cache.lock().ok().and_then(|guard|{
+        guard.get(title).and_then(|(at,saved_generation,value)|
+            cache_generation_current(*saved_generation,*at,generation)
+                .then(||value.clone()))
+    });
+    if let Some(mut enriched)=cached{
+        field_learning::apply(title,&mut enriched);
+        learned_regex::apply(title,&mut enriched);
+        if parse_rules_revision()==generation{
+            return Ok(enriched);
         }
+        // Rules changed during evaluation; fall through to fresh parsing.
     }
     // Persisted hits are likewise strict current-namespace only. On a
     // parser/image/regex change, an old result can remain as historical
