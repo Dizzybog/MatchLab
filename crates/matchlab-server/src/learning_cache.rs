@@ -15,7 +15,6 @@ const GIB:u64=1024*1024*1024;
 const DEFAULT_GB:u64=1;
 const MAX_GB:u64=128;
 const MAX_ENTRY_BYTES:usize=512*1024;
-const CACHE_FRACTION:u64=70; // 30% reserved for examples, rules and SQLite overhead
 const CACHE_TTL_SECS:i64=30*24*3600;
 const BUSY_MS:u64=12;
 
@@ -171,10 +170,9 @@ fn maintain_with_budget(db:&Connection,metadata:&Path,budget:u64)->Result<(),Str
             OR (kind='match' AND namespace<>COALESCE(?3,'')))",
         params![now(),current_parse,current_match]
     ).map_err(|e|e.to_string())?;
-    let cache_budget=(budget*CACHE_FRACTION/100) as i64;
-    let mut bytes:i64=db.query_row(
-        "SELECT COALESCE(SUM(bytes),0) FROM learning_cache",[],
-        |r|r.get(0)).map_err(|e|e.to_string())?;
+    // One shared quota for both learning evidence and cached responses.
+    // Never evict merely because one class of data reached an arbitrary
+    // sub-budget: eviction starts only when actual DB usage is over the cap.
     let mut occupied=used_bytes(db)?;
     // Only when the WHOLE learning DB exceeds its cap may obsolete learned
     // regex patterns and their old evidence be reclaimed. Foreign keys
@@ -190,7 +188,7 @@ fn maintain_with_budget(db:&Connection,metadata:&Path,budget:u64)->Result<(),Str
     // Prefer obsolete cache data. Only after all obsolete entries are
     // exhausted may we evict the oldest still-valid cache responses.
     for _ in 0..1024 {
-        if bytes<=cache_budget && occupied<=budget{break;}
+        if occupied<=budget{break;}
         let mut removed=db.execute(
             "DELETE FROM learning_cache WHERE cache_key IN(
                SELECT cache_key FROM learning_cache WHERE obsolete=1
@@ -204,8 +202,6 @@ fn maintain_with_budget(db:&Connection,metadata:&Path,budget:u64)->Result<(),Str
             ).map_err(|e|e.to_string())?;
         }
         if removed==0{break;}
-        bytes=db.query_row("SELECT COALESCE(SUM(bytes),0) FROM learning_cache",
-            [],|r|r.get(0)).map_err(|e|e.to_string())?;
         occupied=used_bytes(db)?;
     }
     if occupied>budget {
