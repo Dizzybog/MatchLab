@@ -1,6 +1,6 @@
 //! MatchLab's anime part-title matcher and local-season resolver.
 use rusqlite::{params,Connection,OptionalExtension};
-use crate::{anime_resolver,imdb_matcher};
+use crate::{episode_crosswalk,imdb_matcher};
 use std::collections::BTreeSet;
 
 #[derive(Debug,Clone)]
@@ -15,7 +15,7 @@ fn aliases(db:&Connection,imdb:&str,key:&str)->rusqlite::Result<Vec<(String,Stri
 }
 
 pub fn resolve(db:&Connection,imdb:&str,title:&str,season:i64,episode:i64)
-    -> rusqlite::Result<Option<anime_resolver::Episode>> {
+    -> rusqlite::Result<Option<episode_crosswalk::Episode>> {
     if season<=0||episode<=0{return Ok(None);}
     let key=imdb_matcher::clean_title(title);
     if key.len()<4{return Ok(None);}
@@ -39,7 +39,7 @@ pub fn resolve(db:&Connection,imdb:&str,title:&str,season:i64,episode:i64)
          ELSE 2147483647 END LIMIT 1",
         [&family],|r|r.get(0)).optional()?;
     if base.as_deref()==Some(selected){
-        return anime_resolver::resolve_season(db,imdb,season,episode);
+        return episode_crosswalk::resolve_season(db,imdb,season,episode);
     }
     let mut stmt=db.prepare(
         "SELECT m.anidb_id,MIN(m.tvdb_season),MIN(m.offset),MIN(m.start)
@@ -70,10 +70,10 @@ pub fn resolve(db:&Connection,imdb:&str,title:&str,season:i64,episode:i64)
     let (tv,ep)=*coordinates.iter().next().unwrap();
     // A named anime part can use an open-ended or offset crosswalk too.
     // Refuse out-of-range AniDB episodes before creating an ASID.
-    if anime_resolver::canonical_asid(&target.id,local).is_none()
+    if episode_crosswalk::canonical_asid(&target.id,local).is_none()
         || !(1..=9_999).contains(&tv)
         || !(1..=99_999).contains(&ep){return Ok(None);}
-    Ok(Some(anime_resolver::Episode{imdb_id:imdb.into(),season:tv,
+    Ok(Some(episode_crosswalk::Episode{imdb_id:imdb.into(),season:tv,
         episode:ep,anidb_id:target.id.clone(),anidb_episode:local}))
 }
 
@@ -103,7 +103,7 @@ pub fn has_specific_alias(db:&Connection,imdb:&str,title:&str)->rusqlite::Result
 /// tied to this IMDb series and one mapped positive TVDB season.
 pub fn resolve_episode_from_exact_part_title(
     db:&Connection,imdb:&str,title:&str,episode:i64,
-)->rusqlite::Result<Option<anime_resolver::Episode>>{
+)->rusqlite::Result<Option<episode_crosswalk::Episode>>{
     if episode<=0{return Ok(None);}
     let Some(inferred_season)=season_from_title(db,imdb,title)? else{return Ok(None)};
     // anime_title::resolve interprets season=1 as the FIRST season of
