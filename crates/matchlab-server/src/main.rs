@@ -1685,7 +1685,15 @@ async fn get_match_request(State(state):State<AppState>,Query(req):Query<MatchRe
     match_response(state,req,false,false).await
 }
 
+// Integration diagnostics and public /match MUST share the same identity
+// selection policy. The dashboard's intentionally permissive search has a
+// separate endpoint so it cannot corrupt StremThru crosswalk validation.
 async fn debug_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
+    -> (StatusCode,Json<Value>){
+    match_response(state,req,true,true).await
+}
+
+async fn dashboard_diagnose_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
     -> (StatusCode,Json<Value>){
     match_response(state,req,true,false).await
 }
@@ -1934,6 +1942,7 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         .route("/parse",get(get_parse_request).post(parse_request))
         .route("/debug/match",post(debug_request))
         .route("/debug/match/strict",post(strict_debug_request))
+        .route("/api/dashboard/diagnose",post(dashboard_diagnose_request))
         .with_state(AppState{db:Arc::new(PathBuf::from(db)),history:Arc::new(PathBuf::from(history_db)),
             match_slots:Arc::new(Semaphore::new(max_matches)),
             index_phase:index_state});
@@ -3476,6 +3485,8 @@ mod tests {
         assert!(matches!(request_policy(false,false),MatchPolicy::PublicApi));
         assert!(matches!(request_policy(true,true),MatchPolicy::PublicApi));
         assert!(matches!(request_policy(true,false),MatchPolicy::DashboardDiagnostic));
+        // /debug/match calls with (debug=true,strict=true), while the
+        // dashboard's independent interactive route uses (true,false).
     }
 
     #[test]
