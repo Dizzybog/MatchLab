@@ -11,7 +11,8 @@ const POLL_SECONDS:u64=15;
 const MAX_PATTERNS:i64=2_000;
 const MIN_EXAMPLES:i64=5;
 fn max_examples()->i64{
-    (crate::learning_cache::storage_gb() as i64*20_000).min(2_000_000)
+    (crate::learning_cache::storage_gb() as i64*20_000)
+        .min(crate::learning_cache::training_max_examples())
 }
 pub(crate) fn active()->bool{
     env::var("MATCHLAB_ML_ENABLED").ok()
