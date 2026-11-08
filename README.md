@@ -27,12 +27,25 @@ MatchLab runs two independent identity lanes after parsing a release:
    IMDb links to the *same* AniDB work count as one anime identity, while
    multiple distinct AniDB works with equally verified episodes remain
    ambiguous.
-3. **Crosswalk enrichment** converts the *already selected* IMDb title to
-   season and episode coordinates when a unique mapping exists; it does
-   not rerank the IMDb title because another linked work also has an
-   episode mapping. Independently confirmed AniDB IDs are preserved even
-   if IMDb has no match. Conflicting crosswalk identities are not silently
-   combined.
+3. **Existing anime compatibility and crosswalk rules** remain active.
+   The original anime-priority rules, named sequel/part handling, absolute
+   episode offsets, split seasons, and partial/complete range validation
+   still determine which verified IMDb candidate is eligible. The new
+   AniDB-only lane does **not** replace these protections or arbitrarily
+   change their ranking. Independently confirmed AniDB IDs are preserved
+   even if IMDb has no match. Conflicting crosswalk identities are not
+   silently combined.
+
+
+**Compatibility guarantee:** The Rust release parser and its existing regex
+rules are unchanged by this refactor. `episode_crosswalk` retains the prior
+IMDb↔AniDB algorithms, including sparse explicit maps, special episode
+numbering, split cours and verified partial ranges. For unmarked filenames,
+the independent AniDB check runs alongside the legacy verified IMDb
+crosswalk; failure of the stricter AniDB-only check must not erase a
+previously valid IMDb episode or season-pack result. Season names such as
+`JoJo's Bizarre Adventure Stone Ocean` continue to be resolved through
+their exact AniDB part alias and TVDB season mapping.
 
 A single verified anime episode can therefore produce an **ASID without
 an IMDb SID**: `sid_start` and `sid_end` are `null`, while
