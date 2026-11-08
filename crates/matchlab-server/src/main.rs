@@ -1234,7 +1234,7 @@ fn diagnose_with_policy(
             && winner.pointer("/anime/asid").and_then(Value::as_str).is_none()
             && (winner["anime_ids"].as_object()
                     .is_some_and(|ids|!ids.is_empty())
-                || parsed.get("anime_title_verified")==Some(&json!(true))
+                || parsed.get("anime_title_verified").and_then(Value::as_bool)==Some(true)
                 || parsed.get("anime_season_episode_candidate").is_some())
     });
     let independent_season=if independent_season_needed
