@@ -1682,7 +1682,7 @@ async fn match_request(State(state):State<AppState>,Json(req):Json<MatchRequest>
 /// GET /match?title=...&year=...
 async fn get_match_request(State(state):State<AppState>,Query(req):Query<MatchRequest>)
     -> (StatusCode,Json<Value>){
-    match_response(state,req,false).await
+    match_response(state,req,false,false).await
 }
 
 async fn debug_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
@@ -2805,18 +2805,18 @@ mod tests {
             let request=||MatchRequest{
                 title:title.into(),year:None,series:None};
             let (status,Json(debug))=match_response(
-                state.clone(),request(),true).await;
+                state.clone(),request(),true,false).await;
             assert_eq!(status,StatusCode::OK,"{title}");
             assert_eq!(debug["selected"]["imdb_id"],"tt0137523","{title}");
             let (status,Json(api))=match_response(
-                state.clone(),request(),false).await;
+                state.clone(),request(),false,false).await;
             assert_eq!(status,StatusCode::OK,"{title}");
             assert!(api["sid_start"].is_null(),
                 "public API must enforce production-year signal for {title}");
         }
         let (status,Json(api))=match_response(state,
             MatchRequest{title:"Fight.Club.1999.mkv".into(),
-                year:None,series:None},false).await;
+                year:None,series:None},false,false).await;
         assert_eq!(status,StatusCode::OK);
         assert_eq!(api["sid_start"],"tt0137523");
         std::fs::remove_file(&path).unwrap();
@@ -2850,7 +2850,7 @@ mod tests {
         assert_eq!(ready["status"],"indexing");
         let (status,Json(matched))=match_response(state,MatchRequest{
             title:"One Piece S21E03".into(),year:None,series:None
-        },false).await;
+        },false,false).await;
         assert_eq!(status,StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(matched["status"],"indexing");
         assert!(matched["error"].as_str().unwrap().contains("indexing"));
