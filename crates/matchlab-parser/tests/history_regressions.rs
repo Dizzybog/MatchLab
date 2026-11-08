@@ -72,3 +72,39 @@ fn resolution_dimensions_are_not_season_episode() {
     assert_eq!(p["seasons"], json!([]));
     assert_eq!(p["episodes"], json!([]));
 }
+
+#[test]
+fn spanish_cap_three_digit_season_episode_shorthand() {
+    // CAP.NNN is a release convention: 1 season digit + 2 episode digits.
+    // Unlike the unmarked anime numbers, these are explicit TV coordinates.
+    for (raw, season, episode) in [
+        ("La Promesa Cap.103 HDTV XviD Castellano", 1, 3),
+        ("La Promesa.CAP_203.720p.HDTV", 2, 3),
+        ("La Promesa Cap 312 WEB-DL", 3, 12),
+        ("La Promesa cap-405 WEBRip", 4, 5),
+        ("La Promesa.CAP.999.1080p", 9, 99),
+    ] {
+        let parsed = parsed(raw);
+        assert_eq!(parsed["title"], "La Promesa", "{raw}: {parsed:?}");
+        assert_eq!(parsed["seasons"], json!([season]), "{raw}: {parsed:?}");
+        assert_eq!(parsed["episodes"], json!([episode]), "{raw}: {parsed:?}");
+    }
+    let nested = parsed("La Promesa/Temporada 1/La Promesa Cap.103.mkv");
+    assert_eq!(nested["seasons"], json!([1]));
+    assert_eq!(nested["episodes"], json!([3]));
+}
+
+#[test]
+fn spanish_cap_notation_does_not_override_stronger_episode_coordinates() {
+    let explicit = parsed("La Promesa S02E05 Cap.103 720p HDTV");
+    assert_eq!(explicit["seasons"], json!([2]));
+    assert_eq!(explicit["episodes"], json!([5]));
+
+    for raw in ["La Promesa Capitulo 103", "La Promesa Cap.1034",
+                "La Promesa Cap.100", "La Promesa cap.103p"] {
+        let parsed = parsed(raw);
+        assert_ne!((parsed["seasons"].clone(), parsed["episodes"].clone()),
+            (json!([1]), json!([3])),
+            "must not fabricate S01E03 from {raw}: {parsed:?}");
+    }
+}
