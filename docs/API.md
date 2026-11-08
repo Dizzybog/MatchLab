@@ -609,6 +609,13 @@ flag. These are **shadow evaluation statistics**, not calibrated scores or
 actual IMDb parsing/matching accuracy. The model is never run on an HTTP
 request and can never authorize a regex or identifier change.
 
+`training_and_cache` reports the configured corpus evidence limit
+(`training_max_examples`), shared disk budget, persistent cache row limit,
+positive and no-match TTLs, and in-process cache hits/misses. The cache
+reuses repeated exact parse/match requests only within the current
+source/rules/metadata namespace; obsolete results are always re-parsed and
+re-matched on demand. It is never a substitute for new verification.
+
 `candidate_discovery` exposes only grouped counts of unknown release
 markers eligible for human review. The underlying marker strings, titles,
 hashes and model candidate predictions do not leave the local opt-in
