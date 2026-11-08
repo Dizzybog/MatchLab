@@ -21,3 +21,5 @@ flate2 = "1.1"
 quick-xml = "0.38"
 
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+
+sha2 = "0.10"
