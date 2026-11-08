@@ -83,6 +83,94 @@ def valid_rule(row,build_sha):
         return None
     return row
 
+
+# All non-anime regex changes enter the GitHub PR queue as review-only
+# data. No user-supplied regex is run in Python or loaded by the server.
+TECH_FIELDS={"resolution","codec","quality","audio","bit_depth","hdr",
+    "channels","languages","subbed","dubbed","extension"}
+TV_GRAMMARS={
+    "sxe":r"(?i)(?:^|[._ -])s(?P<s>[0-9]{1,3})[._ -]*e(?P<e>[0-9]{1,5})(?:$|[._ -])",
+    "x":r"(?i)(?:^|[._ -])(?P<s>[0-9]{1,3})x(?P<e>[0-9]{1,5})(?:$|[._ -])",
+    "words":r"(?i)(?:^|[._ -])season[._ -]+(?P<s>[0-9]{1,3})[._ -]+episode[._ -]+(?P<e>[0-9]{1,5})(?:$|[._ -])",
+}
+CATALOG=Path(__file__).resolve().parents[1] / "crates/matchlab-parser/src/generated/handlers.json"
+def digest(s):return hashlib.sha256(s.encode()).hexdigest()
+def bounded_int(v,small=0,big=2_000_000):
+    return type(v) is int and small<=v<=big
+def technical_pattern(field,signal):
+    if field not in TECH_FIELDS or not isinstance(signal,str):return None
+    if not 2<=len(signal)<=24 or not re.fullmatch("[a-z0-9_.]+",signal):
+        return None
+    parts=[re.escape(p) for p in re.split("[_.]",signal) if p]
+    if not 1<=len(parts)<=4:return None
+    pattern=r"(?i)(?:^|[ ._-])(?:"+r"[ ._-]*".join(parts)+r")(?:$|[ ._-])"
+    return pattern if len(pattern)<=140 else None
+def valid_extended_rule(r,sha):
+    if not isinstance(r,dict):return None
+    kind=r.get("kind")
+    common={"kind","fingerprint","evidence_count","distinct_titles",
+        "canonical_confirmations","source_build","verification"}
+    if not all(bounded_int(r.get(k),v) for k,v in
+        (("evidence_count",12),("distinct_titles",4),
+         ("canonical_confirmations",0))):return None
+    if r["canonical_confirmations"]>r["evidence_count"]:return None
+    if not isinstance(r.get("fingerprint"),str):return None
+    if kind=="learned_field_regex":
+        expected=common|{"field","signal","regex","canonical"}
+        if set(r)!=expected or r["source_build"]!=sha+":3":return None
+        field,signal=r["field"],r["signal"]
+        pattern=technical_pattern(field,signal)
+        if pattern is None or r["regex"]!=pattern:return None
+        if r["verification"]!="local_canonical_and_explicit_release_marker":return None
+        value=r["canonical"]
+        if type(value) not in (str,int,bool,list):return None
+        if isinstance(value,str) and not (1<=len(value)<=48 and
+            re.fullmatch("[a-zA-Z0-9_. +\\-]+",value)):return None
+        if type(value) is int and not 0<=value<=9999:return None
+        if isinstance(value,list) and not (field=="languages" and
+            1<=len(value)<=8 and all(isinstance(x,str) and
+            re.fullmatch("[a-zA-Z]{1,5}",x) for x in value)):return None
+        canon=json.dumps(value,ensure_ascii=False,separators=(",",":"))
+        expected_fp=digest(f"community-field:{field}:{signal}:{canon}")
+    elif kind=="learned_tv_regex":
+        expected=common|{"family","fields","regex"}
+        if set(r)!=expected or r["source_build"]!=sha+":1":return None
+        family=r["family"]
+        if not isinstance(family,str) or family not in TV_GRAMMARS:return None
+        if r["regex"]!=TV_GRAMMARS[family] or r["fields"]!=["seasons","episodes"]:
+            return None
+        if r["verification"]!="explicit_tv_marker_and_canonical_confirmations":
+            return None
+        if r["canonical_confirmations"]<2:return None
+        expected_fp=digest("community-tv:"+family)
+    elif kind=="learned_source_regex_patch":
+        expected=common|{"handler_index","field","signal",
+            "original_regex","proposed_regex","transform"}
+        if set(r)!=expected or r["source_build"]!=sha+":3":return None
+        if not bounded_int(r["handler_index"],0,4096):return None
+        if r["field"] not in {"resolution","codec","bit_depth"}:return None
+        extra=technical_pattern(r["field"],r["signal"])
+        if extra is None:return None
+        try:
+            handlers=json.loads(CATALOG.read_text())["handlers"]
+            source=handlers[r["handler_index"]]
+        except (OSError,IndexError,KeyError,ValueError,TypeError):
+            return None
+        if source.get("kind")!="regex" or source.get("name")!=r["field"]:
+            return None
+        old=source.get("pattern")
+        if not isinstance(old,str) or r["original_regex"]!=old:return None
+        if r["transform"]!=source.get("transform"):return None
+        new="(?:"+old+")|(?:"+extra+")"
+        if len(new)>512 or r["proposed_regex"]!=new:return None
+        if r["verification"]!="source_catalog_and_canonical_release_markers":
+            return None
+        if (r["evidence_count"]<16 or r["distinct_titles"]<6 or
+            r["canonical_confirmations"]<2):return None
+        expected_fp=digest(f"community-patch:{r['handler_index']}:{old}:{new}")
+    else:return None
+    return r if r["fingerprint"]==expected_fp else None
+
 def parse_batch(comment,current_sha,ancestor=git_ancestor):
     if not isinstance(comment,dict):return None
     body=comment.get("body")
@@ -108,7 +196,9 @@ def parse_batch(comment,current_sha,ancestor=git_ancestor):
         return None
     rules=[]
     for candidate in batch["rules"]:
-        valid=valid_rule(candidate,sha)
+        valid=(valid_rule(candidate,sha) if isinstance(candidate,dict)
+               and candidate.get('kind')=='verified_regex_proposal'
+               else valid_extended_rule(candidate,sha))
         if valid is None:return None
         rules.append(valid)
     fingerprints=[r["fingerprint"] for r in rules]
