@@ -545,7 +545,8 @@ fn reload(db:&Connection,build:&str,revision:&str)->Result<(),String>{
 }
 /// A single independently verified anime mapping is *one observation*, not
 /// permission to patch the parser. At least 8 diverse examples are required.
-pub fn observe(db:&Connection,metadata:&Connection,title:&str,details:&Value)->Result<(),String>{
+pub fn observe(db:&Connection,metadata:&Connection,title:&str,
+    details:&Value,base:&Value)->Result<(),String>{
     if title.len()>240||title.contains(['/', '\\','@','\n','\r','\0']){return Ok(());}
     let parsed=&details["parsed"];
     let selected=&details["selected"];
@@ -556,9 +557,6 @@ pub fn observe(db:&Connection,metadata:&Connection,title:&str,details:&Value)->R
     if selected_imdb.is_some_and(|imdb|
         !imdb.starts_with("tt")||!(9..=10).contains(&imdb.len())||
         !imdb[2..].bytes().all(|b|b.is_ascii_digit())){return Ok(());}
-    let plain=matchlab_parser::parse_title(title,false)
-        .map_err(|e|e.to_string())?;
-    let base=Value::Object(plain);
     if base.get("anime_episode_range_candidate").is_some()
         ||base.get("anime_season_episode_candidate").is_some()
         ||base["anime_title_verified"]==true{return Ok(());}
