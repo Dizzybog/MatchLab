@@ -23,6 +23,7 @@ const MAX_EVIDENCE:i64=2048;
 const MAX_REGEX_BYTES:usize=160;
 static ACTIVE:OnceLock<RwLock<Vec<ActiveRule>>>=OnceLock::new();
 static CANDIDATE:OnceLock<Regex>=OnceLock::new();
+static CURATED:OnceLock<Vec<ActiveRule>>=OnceLock::new();
 static RULESET_REVISION:AtomicU64=AtomicU64::new(0);
 
 /// Stable fingerprint of currently active overlays, included in cache keys.
@@ -107,6 +108,27 @@ fn install(rows:Vec<ActiveRule>){
         RULESET_REVISION.store(u64::from_le_bytes(bits),Ordering::Release);
     }
 }
+/// Reviewed rules committed through GitHub are part of the release image,
+/// not downloaded at runtime. They are tiny, deterministic and do not need
+/// ONNX or local opt-in to work. Identity/coordinates still need current
+/// crosswalk verification in the matcher.
+fn curated_rules()->&'static Vec<ActiveRule>{
+    CURATED.get_or_init(||{
+        const SOURCE:&str=include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),"/../../learning/community_rules.json"
+        ));
+        let items:Vec<Value>=serde_json::from_str(SOURCE).unwrap_or_default();
+        items.into_iter().take(32).filter_map(|entry|{
+            let marker=entry["marker"].as_str()?;
+            let expected=pattern_for(marker)?;
+            if entry["regex"].as_str()!=Some(expected.as_str()){return None;}
+            let pattern=regex_for(marker)?;
+            negative_probes(marker,&pattern).then_some(ActiveRule{
+                marker:marker.to_owned(),pattern
+            })
+        }).collect()
+    })
+}
 /// Learned overrides are *proposals* only. Even if the built-in parser
 /// extracted another value, this may propose a more specific candidate.
 /// The public matcher must independently verify its exact anime identity
@@ -145,9 +167,25 @@ fn propose_from(title:&str,parsed:&mut Value,active:&[ActiveRule]){
 /// Runs only when local opt-in is enabled. This never overwrites parser
 /// coordinates by itself, and the default matcher has no ML dependency.
 pub fn apply(title:&str,parsed:&mut Value){
-    if !crate::local_learning::active(){return;}
-    if let Ok(active)=rules().read(){
-        propose_from(title,parsed,&active);
+    // Public reviewed rules are available in every image without any ML
+    // worker, shared GitHub token, model initialization or network access.
+    let reviewed=curated_rules();
+    if !crate::local_learning::active(){
+        propose_from(title,parsed,reviewed);
+        return;
+    }
+    if let Ok(local)=rules().read(){
+        // Prefer a known curated rule if both lists have the same marker.
+        let mut list=Vec::with_capacity(reviewed.len()+local.len());
+        for rule in reviewed.iter().chain(local.iter()){
+            if list.iter().any(|item:&ActiveRule|item.marker==rule.marker){continue;}
+            if let Some(pattern)=regex_for(&rule.marker){
+                list.push(ActiveRule{marker:rule.marker.clone(),pattern});
+            }
+        }
+        propose_from(title,parsed,&list);
+    }else{
+        propose_from(title,parsed,reviewed);
     }
 }
 
