@@ -335,6 +335,24 @@ directly replaces an IMDb/AniDB result, changes episode coordinates or
 authorizes a regex. Rule promotion still requires separate verifiers.
 GitHub reporting additionally requires its own explicit opt-in and token.
 
+### Manual native ML benchmark
+
+For an **offline synthetic CPU smoke benchmark** of the native FTRL learner,
+its inference path, and the canonical parser, build the PR's source and run:
+
+```bash
+docker build -t matchlab:pr69 .
+docker run --rm --entrypoint /usr/local/bin/matchlab-server matchlab:pr69 benchmark-native-ml
+```
+
+The CLI prints JSON times in milliseconds for 10,000 synthetic samples per
+stage. These are **not** representative real-torrent measurements, an
+end-to-end API latency test, or evidence of improved parsing precision. For
+production signoff, additionally use held-out real torrent titles with field
+labels, verify false-positive regressions and compare ARM64 CPU, RSS and
+response latency against `main`. This opt-in benchmark is never run by the
+normal API or worker.
+
 ### Online model evaluation and unknown-pattern review
 
 The native Rust FTRL-Proximal model uses hashed character n-grams, field/marker
