@@ -308,7 +308,11 @@ IMDb basics, alternative titles, episodes, ratings, animeApi, Anime-Lists, and A
 | `MATCHLAB_COMMUNITY_LEARNING_ENABLED` | `false` | Separate opt-in for deduplicated GitHub anomaly and high-evidence regex proposals |
 | `MATCHLAB_COMMUNITY_GITHUB_TOKEN` | Unset | Contributor-owned GitHub token with permission to comment on public upstream Issues; members may use fine-grained PAT, outsiders need classic `public_repo` |
 | `MATCHLAB_ML_ENABLED` | `false` | Opt in to the Rust-only local learning worker (never enables sharing by itself) |
-| `MATCHLAB_ML_MAX_STORAGE_GB` | `1` | Learning/cached-data budget in GiB (1–128), e.g. `10` for a 10 GiB local corpus |
+| `MATCHLAB_ML_MAX_STORAGE_GB` | `1` | Shared best-effort learning DB disk budget in GiB (1–128); separate from training example count | 
+| `MATCHLAB_ML_TRAINING_MAX_EXAMPLES` | `12000` | Retain up to 100–2,000,000 current-build verified technical field observations; unpromoted old evidence rotates when full |
+| `MATCHLAB_ML_CACHE_MAX_ENTRIES` | `100000` | Maximum persistent parse/match cache rows (100–2,000,000), enforced by background cleanup |
+| `MATCHLAB_ML_CACHE_TTL_HOURS` | `720` | Repeated successful parse/match response lifetime (1–720 h); build/rule/metadata changes invalidate earlier |
+| `MATCHLAB_ML_UNMATCHED_CACHE_TTL_MINUTES` | `30` | Short no-match result lifetime (1–1440 min); changes invalidate earlier |
 | `MATCHLAB_ML_CACHE_ENABLED` | `true` when local learning is on | Reuse versioned parser and matcher results; disabled when local learning is off |
 | `MATCHLAB_ML_STATE_FILE` | `/data/local-learning.sqlite3` | Shared local SQLite file for learned rules, evidence, pattern statistics and result cache |
 | `MATCHLAB_COMMUNITY_STATE_FILE` | `/data/community-learning.sqlite3` | Bounded pending batch queue, persistent fingerprints and 24h submission state |
@@ -390,14 +394,31 @@ parser/matcher results, without sharing any of it with GitHub:
 environment:
   MATCHLAB_ML_ENABLED: "true"
   MATCHLAB_ML_MAX_STORAGE_GB: "10"
+  MATCHLAB_ML_TRAINING_MAX_EXAMPLES: "500000"
   MATCHLAB_ML_CACHE_ENABLED: "true"
+  MATCHLAB_ML_CACHE_MAX_ENTRIES: "200000"
+  MATCHLAB_ML_CACHE_TTL_HOURS: "720"
+  MATCHLAB_ML_UNMATCHED_CACHE_TTL_MINUTES: "30"
 ~~~
 
 The same SQLite database under `/data/local-learning.sqlite3` stores
 anomaly fingerprints, independently checked regex evidence, and cached
-parser/matcher JSON. Cache lookups use exact hash keys, not SQLite
+parser/matcher JSON. The example's `500000` is a **count of retained field
+observations**, not 500,000 guaranteed distinct torrent titles; releases can
+supply more than one field. It does not reserve 10 GiB of RAM. Unpromoted
+old observations are rotated in bounded background batches on saturation,
+while evidence supporting active rules is protected. When all retained
+evidence supports active rules, the worker declines new evidence instead
+of silently sacrificing those rules. This is a safety limit, not a
+guarantee of maximum disk-file size. Cache lookups use exact hash keys, not SQLite
 full-text searches. Normal memory caching continues unchanged, even
 with local learning off.
+
+Repeated no-match requests also use the same exact-key cache but expire
+after a much shorter interval (30 minutes by default). This reduces
+duplicate expensive Tantivy matching while avoiding long-lived negative
+results. Parse/match caches are **derived artifacts**, never training labels;
+training always re-parses the raw name with the current canonical parser.
 
 After upgrading the image, changed parser rules and metadata immediately
 invalidate **completed parser and matcher results**. An obsolete cache row is
