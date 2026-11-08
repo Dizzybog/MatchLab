@@ -1,19 +1,31 @@
-# MatchLab Community Learning (GitHub only)
+# Community Learning: GitHub-only, opt-in, and version-aware
 
-No additional server is required. Users explicitly opt in to creating up to
-four public GitHub Issues per UTC day with suspected parser anomalies. GitHub
-Actions validates **current official build SHA**, learning epoch and payload
-schema and generates review data. Neither GitHub Issues nor its submitter
-can be trusted as ground truth.
+No central Learning Hub service or shared SQLite instance is required.
+GitHub Issues hold opt-in **untrusted anomaly reports**, GitHub Actions
+replays and reviews them, and a GitHub Release stores the deduplication ledger.
+No public report may modify production matches, train unsupervised corrections
+or trigger an automatic merge.
 
-## Enable contributions
+## How to contribute
 
-1. Pull the latest official `ghcr.io/dizzybog/matchlab:latest` image. It
-   embeds the full Git SHA during the official build.
-2. Create a [fine-grained GitHub personal access token](https://github.com/settings/personal-access-tokens/new):
-   repository `Dizzybog/MatchLab` only; permission **Issues: Read and write**
-   only. GitHub Issues must be enabled on the repository.
-3. In your local, **uncommitted** Compose configuration:
+1. Install an official published MatchLab Docker image.
+2. Enable repository **Issues** and **Actions** (the maintainer does this).
+   The workflow creates one daily Issue named
+   `[community-learning] YYYY-MM-DD`, in UTC. It may not appear until the
+   daily workflow has run.
+3. Create a GitHub personal access token for *your own account*:
+   - **Repository owners / members:** Use a
+     [fine-grained PAT](https://github.com/settings/personal-access-tokens/new)
+     restricted to `Dizzybog/MatchLab`, with **Issues: Read and write**.
+   - **External contributors:** GitHub currently does **not** support
+     fine-grained PAT write access to a public repository you do not belong
+     to. A [classic PAT](https://github.com/settings/tokens) with
+     `public_repo` may be used instead, but this permission covers other
+     public repositories accessible by your account and is broader.
+     **Understand the risk; use a dedicated low-privilege account if
+     appropriate, or submit a manual Issue instead.**
+   Tokens belong only on your own host. Never put them in issues or chat.
+4. In your **uncommitted** local `.env` file add the token. In Compose:
 
    ~~~yaml
    environment:
@@ -21,71 +33,115 @@ can be trusted as ground truth.
      MATCHLAB_COMMUNITY_GITHUB_TOKEN: ${MATCHLAB_COMMUNITY_GITHUB_TOKEN}
    ~~~
 
-   Put the token in your own local `.env` or secret injector. Enabling the
-   token **alone** must never trigger uploading. Restart your container.
-4. Check `curl http://127.0.0.1:8765/api/community/status`. Both `enabled`
-   and `ready` should be true. To stop, set the flag to false or revoke
-   the token and restart. Do not share the token in GitHub, screenshots or chat.
-5. The uploader reads only up to five bounded pages from the *current* local
-   history every five minutes, and submits up to four suspected anomalies
-   per UTC day. It never sends full debug traces, filesystem paths, tracker
-   URLs, passwords or token contents. It rejects URLs, `@`, paths and obvious
-   secrets; **basenames can still contain private identifying details**.
-   All GitHub Issues are public and may be permanent. Only enable this
-   if your torrent filenames are suitable for public release.
-6. To contribute without a token, manually open an Issue with a
-   **non-sensitive** example, current behavior, expected behavior and
-   independent IMDb/AniDB references.
+   Opt-in is **disabled by default**. Providing a token alone does not
+   enable uploads. Restart MatchLab.
+5. Check `curl http://127.0.0.1:8765/api/community/status`. It should
+   report `enabled: true` and `ready: true`. You can opt out at any time:
+   disable the flag, redeploy, and revoke your token.
+6. MatchLab scans the last 1,000 local history entries incrementally every
+   five minutes, adds **up to 16 distinct suspicious examples** to a
+   persistent pending SQLite table, and waits until **24 hours have elapsed**.
+   It then posts at most **one batch comment** to today's shared daily
+   GitHub Issue. It does not create its own Issues. Failed checks are retried
+   later; after an attempted POST a batch is marked as sent *before* the
+   network call, so an uncertain timeout cannot cause repeated comments.
+   This trades possible lost submissions for safety against GitHub spam.
+7. A SHA-256 fingerprint calculated from the normalized release filename
+   plus anomaly codes is stored persistently after a submission attempt.
+   Repeated observations in future 24-hour windows **and after Docker
+   upgrades** do not produce another report on that installation. GitHub
+   Actions also deduplicates across contributors and days using a small
+   fingerprint ledger kept in a GitHub Release asset.
+8. Shared Issue comments can expose torrent **basenames**. Although obvious
+   paths, URLs, email addresses and credentials are filtered, this does not
+   guarantee that basenames are private. Do not enable sharing for private
+   or identifying releases. Raw debug traces, full paths, trackers and
+   authorization tokens are never included.
 
-## Strict version eligibility, not trust
+## Accept older releases, but never learn outdated errors
 
-- Protocol `1` defines the report format, learning epoch `1` defines
-  compatibility of labels and features.
-- Official Docker images embed their Git SHA *at compilation*, rather than
-  trusting a runtime version environment variable.
-- The client requests GitHub's latest upstream `main` commit SHA; if the
-  request fails, the SHA is unavailable, or it differs from the embedded
-  hash, uploads are disabled (fail closed). A new build/protocol/epoch
-  starts the cursor at **the newest local request**. No old backlog is sent.
-- The GitHub Action independently rejects any report not matching the
-  exact **current** main SHA, protocol, and epoch and deduplicates its
-  output; stale reports are never fed to training.
-- A GitHub token **does not attest which binary is running**. Contributors
-  can forge body fields, including SHA. Thus reports are only *untrusted
-  hypotheses*. They cannot trigger automatic code execution, new
-  rules, ground-truth labels or production merges.
-- Verified regressions are retained because facts can survive parser
-  updates. On an incompatible epoch change, old labels must be
-  **revalidated** before training; unverified staging is invalidated.
-  We do not erase trustworthy data solely because a new Docker
-  version was published.
+**A report from an older MatchLab version is welcome if the bug still
+exists in current code.** An older client need not have the newest image
+to contribute, provided its embedded source SHA is on the upstream `main`
+history and its **report protocol and learning epoch** are compatible.
 
-## Repository maintainer steps
+The safety boundary is the GitHub Action, not the reported version:
+- Verify the submitted source SHA is an ancestor of current `main` with a
+  complete Git history. Unrelated, malformed or non-mainline source commits
+  are excluded.
+- Parse each candidate title again using the **current Rust parser** compiled
+  by the workflow from main. If an explicitly marked season/episode
+  disagreement is **demonstrably fixed**, discard that candidate.
+- For matching or AniDB/IMDb crosswalk problems, simple parsing alone is
+  **not enough** to establish that the bug is still present or fixed.
+  Mark these cases `needs_current_metadata_review` for independent
+  reproduction on current metadata. Do not claim an unverified match
+  was corrected.
+- Only independently verified, still relevant examples enter the versioned
+  `learning/verified.jsonl` dataset (with current SHA validation). Human
+  reviewers must confirm and update the evidence and labels as necessary.
+- Older unverified pending data is discarded after any protocol, learning
+  epoch or executable change; the local reporting cursor moves to newest
+  history. **The already-reported fingerprint registry survives upgrades**
+  to avoid resubmission. Verified historical regression cases are retained,
+  but must be revalidated for incompatible epochs before training.
 
-1. Merge this PR after CI is green; keep Actions and Issues enabled.
-2. The updated Docker publishing workflow passes `MATCHLAB_BUILD_SHA`
-   to the release build, so unofficial/older images cannot report.
-3. In GitHub's Actions tab, open **Community learning review** and
-   run it manually or allow the daily schedule.
-4. The workflow parses GitHub Issues strictly as untrusted structured
-   data, checks version and epoch, deduplicates and emits a limited
-   review artifact. It **does not execute anything from Issue content**.
-5. Reproduce a submission using the current MatchLab version, validate
-   the expected behavior against independent metadata, and commit a
-   confirmed example to `learning/verified.jsonl`. Never accept a
-   submitter's label as proven without verification.
-6. `scripts/community_learning.py` optionally trains a *shadow-mode*
-   Bernoulli Naive Bayes review-priority model once there are sufficient
-   verified positive and negative examples and a holdout test passes.
-   The generated model is an Actions artifact, **not loaded into the
-   production matcher**. This deliberately separates building a
-   trustworthy dataset from activating automatic matching decisions.
-7. If model/rule auto-updates are wanted later, add reviewed, versioned
-   releases with rollback. Do not auto-merge unverified reports.
+**Build hashes are not an attestation:** anyone with permission to comment
+can forge GitHub fields. Version checking stops accidental stale/unsupported
+reports, not malicious impersonation. Reports are hypotheses, not truth.
 
-There is no persistent shared SQLite database on your server. Public
-Issues are the submissions; bounded GitHub workflow artifacts are
-temporary; `learning/verified.jsonl` is the reviewed compact dataset.
-GitHub may rate-limit or disable scheduled workflows on inactive public
-repositories. Monitor Actions status and use manual dispatch if needed.
+## GitHub maintainer setup
 
+1. Review and merge the implementation PR after successful Rust, Python,
+   Docker and security CI. Confirm **Issues**, **Actions** and releases
+   are enabled. Do not enable community uploading before the PR is merged.
+2. GitHub's **Publish Docker image** workflow embeds
+   `MATCHLAB_BUILD_SHA` in the executable at compile time. Source SHA
+   cannot be changed via a runtime environment variable.
+3. The trusted `Community learning review` workflow runs daily at about
+   00:23 UTC or by manual dispatch. It creates/reuses **at most one
+   dated GitHub Issue** for all installations, and reads the previous
+   day's batch comments. No Issue text is ever executed as a command.
+4. The workflow downloads the persistent SHA-256 fingerprint ledger from
+   release `community-learning-ledger`, validates all reports, runs the
+   current Rust parser, excludes resolved parser errors and previously
+   seen fingerprints, and updates that ledger. A ledger overflow or
+   malformed ledger stops processing rather than dropping dedup history.
+   Review artifacts are stored for 7 days.
+5. Review pending identity-related reports with **current IMDb/AniDB
+   mappings**. Reproduce the failure; create or update a regression test
+   and commit independently confirmed examples to
+   `learning/verified.jsonl`.
+6. The shadow-mode Bernoulli Naive Bayes model is trained only with
+   enough verified **positive and negative** examples validated on the
+   current source SHA. It uses a fixed holdout split and explicit quality
+   thresholds. The model artifact does **not** change runtime matching.
+7. When model accuracy and dataset diversity are established, add a
+   separately reviewed signed-release and rollback workflow for
+   production rule/model updates. This PR does not enable automatic
+   changes of SID/ASID, self-training from unverified guesses or
+   unattended merging.
+
+## Resource boundaries
+
+- Clients: up to 16 unique reports per 24 hours; one comment every 24 hours
+  at most; a bounded pending queue and a local database of at most 50,000
+  reported fingerprints. The uploader will stop if the local registry
+  reaches that limit, rather than losing dedup history. Reports are never
+  sent unless the user explicitly enables them.
+- GitHub: at most one shared Issue each UTC day; bounded ingestion of up to
+  500 comments and 200 unique candidates per daily run; a maximum of
+  100,000 global fingerprint entries; 7-day review artifact retention.
+- GitHub Actions uses read/write Issues to create the shared thread,
+  read/write Contents to maintain the GitHub Release dedup asset,
+  and *no third-party automation rights to merge PRs*. Only trusted
+  default-branch workflows perform these operations.
+- One-comment-per-installation does not eliminate GitHub's abuse/rate
+  limits. For very large adoption an alternative transport will eventually
+  be necessary; the system fails closed rather than flooding GitHub.
+
+This design follows the useful distinction made by active-learning and
+label-quality projects: **unverified signals are acquisition candidates,
+not training labels**. Learning quality comes from independently
+confirmed labels and evaluation on current data, not merely from having
+many contributors.
