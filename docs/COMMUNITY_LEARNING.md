@@ -52,8 +52,11 @@ user/model-supplied regex bytes. Technical labels are marker-grounded and
 conservatively validated; they are not independently proven IMDb metadata.
 Production year, unmarked season/episode, title and IMDb/AniDB identity
 remain *review-only* unless their own independent source-of-truth checks
-can establish a correction. The GitHub PR exporter still accepts only
-crosswalk-backed absolute-anime proposals, not arbitrary technical edits.
+can establish a correction. With explicit GitHub sharing enabled, the
+exporter now includes every **evidence-backed regex addition or proposed
+change to an existing source handler**, as well as crosswalk-verified anime
+episode rules. Other proposals are held for human review; their presence
+in a GitHub PR never makes them executable on another installation.
 
 The lightweight **native Rust FTRL-Proximal model now genuinely learns**
 online: it updates bounded, sparse logistic weights from verified technical
@@ -353,6 +356,32 @@ credentials, or the GitHub token.
   Reported parser anomalies are replayed by the **latest Rust parser**;
   identity/crosswalk claims need independent verification, because
   no client's reported ID is a trustworthy label by itself.
+
+### What gets shared when GitHub sharing is enabled
+
+Local learning never shares data by default. When BOTH
+`MATCHLAB_ML_ENABLED=true` and
+`MATCHLAB_COMMUNITY_LEARNING_ENABLED=true` are configured with a valid
+GitHub token, the worker can submit up to two high-evidence regex proposals
+in a bounded 24-hour batch.
+
+| Proposal | GitHub payload | Status after PR |
+| --- | --- | --- |
+| New technical-field regex | Field, raw marker, synthesized regex, canonical value and distinct evidence counts | Human-review proposal |
+| New ordinary-TV coordinate regex | `SxxExx`/`NxM`/`Season N Episode M` template and evidence counts | Human-review proposal |
+| Change to existing generated regex | Original handler index, field, transform, original regex and proposed broadened regex, evidence counts | Human-review proposal |
+| Verified absolute anime marker | Restricted episode-marker regex and separately crosswalk-checked evidence | Curated reviewed rule after independent human approval |
+
+The GitHub Action reads untrusted Issue comments as **data**, validates
+exact grammars and source handler identity, runs Rust tests and opens at most
+one review PR daily. New technical/TV/source proposals enter
+`learning/community_regex_proposals.json` as **non-executable review
+records**; a maintainer must independently replay representative
+examples and integrate accepted changes into the parser. Anime markers
+continue to use `learning/community_rules.json`. The bot never
+auto-merges. Regex proposal envelopes contain no private torrent filenames;
+separate optional anomaly reports or crosswalk examples may contain
+sanitized basenames, so review privacy before opting into sharing.
 
 ### How a high-evidence regex becomes a PR
 
