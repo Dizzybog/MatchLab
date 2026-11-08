@@ -2182,6 +2182,79 @@ mod tests {
     }
 
     #[test]
+    fn stone_ocean_named_part_uses_canonical_jojo_imdb_season_five(){
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-jojo-stone-ocean-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,
+            category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            INSERT INTO titles VALUES
+                ('tt2359704','JoJo''s Bizarre Adventure',
+                 'jojosbizarreadventure',2012,'series','',1,0,'tvSeries'),
+                ('tt9990001','Stone Ocean: The Movie',
+                 'stoneoceanthemovie',2022,'movie','',1,0,'movie');
+            INSERT INTO seasons VALUES ('tt2359704',5);
+            INSERT INTO season_episodes VALUES ('tt2359704',1,26,26),
+                ('tt2359704',5,38,38);
+            INSERT INTO anime_series_map VALUES('tt2359704','16187','262954',0);
+            INSERT INTO anime_ids VALUES('tt2359704','anidb','16187');
+            INSERT INTO anidb_titles VALUES(
+                '16187','JoJo''s Bizarre Adventure Stone Ocean',
+                'jojosbizarreadventurestoneocean','main','en');
+            -- Real Anime-Lists shape: season five is an open-ended default,
+            -- so the AniDB-only lane recognizes a named part but must not
+            -- claim that this alone verifies any particular episode.
+            INSERT INTO episode_map VALUES(
+                '16187','262954',1,5,1,0,0,'');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        assert_eq!(anidb_matcher::named_part_season(
+            &db,"JoJo's Bizarre Adventure Stone Ocean").unwrap(),
+            Some(anidb_matcher::NamedPart{anidb_id:"16187".into(),season:5}));
+        assert_eq!(anidb_matcher::match_absolute(
+            &db,"JoJo's Bizarre Adventure Stone Ocean",27).unwrap(),None);
+        drop(db);
+        for raw in [
+            "JoJo's Bizarre Adventure Stone Ocean - 27",
+            "JoJo's Bizarre Adventure Stone Ocean 27",
+            "JoJo's Bizarre Adventure Stone Ocean 27.mkv",
+        ]{
+            let d=diagnose(&path,&MatchRequest{
+                title:raw.into(),year:None,series:None}).unwrap();
+            let winner=d.selected.expect("named anime part must resolve");
+            assert_eq!(winner["imdb_id"],"tt2359704","{raw}: {winner}");
+            assert_eq!(winner["season"],5,"{raw}: {winner}");
+            assert_eq!(winner["episode"],27,"{raw}: {winner}");
+            assert_eq!(public_match_response(Some(winner)),json!({
+                "sid_start":"tt2359704:5:27","sid_end":"tt2359704:5:27",
+                "asid_start":"16187:27","asid_end":"16187:27"
+            }),"{raw}");
+        }
+        let title_only=diagnose(&path,&MatchRequest{
+            title:"JoJo's Bizarre Adventure Stone Ocean".into(),
+            year:None,series:None}).unwrap();
+        let winner=title_only.selected.expect("named part title");
+        assert_eq!(winner["imdb_id"],"tt2359704","{winner}");
+        assert_eq!(winner["season"],5,"{winner}");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
     fn one_piece_batch_with_seven_anidb_aliases_uses_unique_complete_crosswalk(){
         let stamp=std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
