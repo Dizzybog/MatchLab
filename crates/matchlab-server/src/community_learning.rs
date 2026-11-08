@@ -239,7 +239,7 @@ fn scan(db:&Connection,history:&Path,metadata:&Path,time:u64)->Result<(),String>
         if rows.is_empty(){break;}
         let row_count=rows.len();
         for (id,title,status,details) in rows{
-            if pending<MAX_BATCH as i64{
+            if pending<(MAX_BATCH-2) as i64{
                 let details:Value=serde_json::from_str(&details).unwrap_or(Value::Null);
                 if let Some(candidate)=report(&title,&status,&details,metadata_db.as_ref()){
                     let key=candidate["fingerprint"].as_str().unwrap_or_default();
@@ -288,10 +288,11 @@ fn collect_rule_proposals(db:&Connection,metadata:&Path,time:u64)->Result<(),Str
     rules.dedup_by(|a,b|a["fingerprint"]==b["fingerprint"]);
     let mut count:i64=db.query_row("SELECT COUNT(*) FROM pending",[],|r|r.get(0))
         .map_err(|e|e.to_string())?;
+    let mut added=0usize;
     for proposal in rules {
-        // A single comment can carry at most two independently reviewed
-        // regex suggestions. Other candidates remain eligible next cycle.
-        if count>=2{break;}
+        // Reserve two rule slots per daily batch, regardless of whether
+        // unrelated history anomalies are already in the queue.
+        if count>=MAX_BATCH as i64 || added>=2 {break;}
         if count>=MAX_BATCH as i64{break;}
         let Some(key)=proposal["fingerprint"].as_str()else{continue;};
         let seen:i64=db.query_row(
@@ -303,6 +304,7 @@ fn collect_rule_proposals(db:&Connection,metadata:&Path,time:u64)->Result<(),Str
              VALUES(?1,?2,?3)",params![key,proposal.to_string(),time as i64])
             .map_err(|e|e.to_string())?;
         count+=rows as i64;
+        added+=rows;
     }
     Ok(())
 }
