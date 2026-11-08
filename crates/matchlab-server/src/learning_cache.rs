@@ -7,7 +7,8 @@
 //! a different namespace. Stale entries are RETAINED as low-priority cache
 //! evidence and evicted first only when the configured quota is exceeded.
 use rusqlite::{params,Connection,OpenFlags,OptionalExtension};
-use serde_json::Value;
+use serde_json::{json,Value};
+use std::sync::atomic::{AtomicU64,Ordering};
 use sha2::{Digest,Sha256};
 use std::{env,fs,path::{Path,PathBuf},time::{Duration,SystemTime,UNIX_EPOCH}};
 
@@ -16,6 +17,12 @@ const DEFAULT_GB:u64=1;
 const MAX_GB:u64=128;
 const MAX_ENTRY_BYTES:usize=512*1024;
 const CACHE_TTL_SECS:i64=30*24*3600;
+const DEFAULT_TRAINING_EXAMPLES:i64=12_000;
+const MAX_TRAINING_EXAMPLES:i64=2_000_000;
+const DEFAULT_CACHE_ENTRIES:i64=100_000;
+const MAX_CACHE_ENTRIES:i64=2_000_000;
+static CACHE_HITS:AtomicU64=AtomicU64::new(0);
+static CACHE_MISSES:AtomicU64=AtomicU64::new(0);
 const BUSY_MS:u64=12;
 
 pub fn storage_gb()->u64 {
@@ -23,6 +30,40 @@ pub fn storage_gb()->u64 {
         .ok().and_then(|value|value.parse::<u64>().ok())
         .filter(|value|(1..=MAX_GB).contains(value))
         .unwrap_or(DEFAULT_GB)
+}
+/// The number of unique, validated field observations retained for each
+/// current source build. This is deliberately separate from on-disk GiB:
+/// disk quota and sample diversity are different constraints.
+fn bounded_count(raw:Option<&str>,default:i64,min:i64,max:i64)->i64{
+    raw.and_then(|s|s.parse::<i64>().ok())
+        .filter(|value|(*value>=min)&&(*value<=max))
+        .unwrap_or(default)
+}
+pub fn training_max_examples()->i64{
+    bounded_count(env::var("MATCHLAB_ML_TRAINING_MAX_EXAMPLES").ok().as_deref(),
+        DEFAULT_TRAINING_EXAMPLES,100,MAX_TRAINING_EXAMPLES)
+}
+fn cache_max_entries()->i64{
+    bounded_count(env::var("MATCHLAB_ML_CACHE_MAX_ENTRIES").ok().as_deref(),
+        DEFAULT_CACHE_ENTRIES,100,MAX_CACHE_ENTRIES)
+}
+fn cache_ttl_secs()->i64{
+    bounded_count(env::var("MATCHLAB_ML_CACHE_TTL_HOURS").ok().as_deref(),
+        CACHE_TTL_SECS/3600,1,30*24)*3600
+}
+fn miss_ttl_secs()->i64{
+    bounded_count(env::var("MATCHLAB_ML_UNMATCHED_CACHE_TTL_MINUTES")
+        .ok().as_deref(),30,1,24*60)*60
+}
+pub fn status()->Value{
+    json!({"enabled":enabled(),"shared_storage_limit_gb":storage_gb(),
+        "training_max_examples":training_max_examples(),
+        "cache_max_entries":cache_max_entries(),
+        "matched_cache_ttl_hours":cache_ttl_secs()/3600,
+        "unmatched_cache_ttl_minutes":miss_ttl_secs()/60,
+        "hits":CACHE_HITS.load(Ordering::Relaxed),
+        "misses":CACHE_MISSES.load(Ordering::Relaxed),
+        "stale_entries_reparsed_and_rematched":true})
 }
 pub fn enabled()->bool{
     crate::local_learning::active() && env::var("MATCHLAB_ML_CACHE_ENABLED")
@@ -90,8 +131,13 @@ fn read(kind:&str,title:&str,year:Option<i32>,series:Option<bool>,
     let ns=namespace(kind,metadata)?;
     let db=Connection::open_with_flags(state_file(),OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
     db.busy_timeout(Duration::from_millis(BUSY_MS)).ok()?;
-    let value=read_current(&db,&key(&ns,title,year,series),&ns,now())?;
-    (namespace(kind,metadata).as_deref()==Some(ns.as_str())).then_some(value)
+    let value=read_current(&db,&key(&ns,title,year,series),&ns,now());
+    let valid=if namespace(kind,metadata).as_deref()==Some(ns.as_str()){
+        value
+    }else{None};
+    if valid.is_some(){CACHE_HITS.fetch_add(1,Ordering::Relaxed);}
+    else{CACHE_MISSES.fetch_add(1,Ordering::Relaxed);}
+    valid
 }
 fn write(kind:&str,title:&str,year:Option<i32>,series:Option<bool>,
     metadata:Option<&Path>,value:&Value){
@@ -119,7 +165,9 @@ fn write(kind:&str,title:&str,year:Option<i32>,series:Option<bool>,
                created_at=excluded.created_at,expires_at=excluded.expires_at,
                obsolete=0",
             params![key(&ns,title,year,series),ns,kind,raw,
-                raw.len() as i64,now(),now()+CACHE_TTL_SECS]
+                raw.len() as i64,now(),now()+if kind=="match"
+                    && value["selected"].is_null(){miss_ttl_secs()}
+                    else{cache_ttl_secs()}]
         )?;
         Ok(())
     })();
@@ -235,6 +283,19 @@ fn maintain_with_budget(db:&Connection,metadata:&Path,budget:u64)->Result<(),Str
             occupied=used_bytes(db)?;
         }
     }
+    // Bound the number of repeat-query entries separately from the corpus
+    // size. This runs off-path, pruning stale records first, never training
+    // evidence. Cache misses reparse and rematch with current source data.
+    let max_entries=cache_max_entries();
+    let cached:i64=db.query_row("SELECT COUNT(*) FROM learning_cache",[],
+        |row|row.get(0)).map_err(|e|e.to_string())?;
+    if cached>max_entries{
+        let excess=cached-max_entries;
+        db.execute("DELETE FROM learning_cache WHERE cache_key IN (
+            SELECT cache_key FROM learning_cache ORDER BY obsolete DESC,
+                created_at ASC,cache_key LIMIT ?1)",[excess])
+            .map_err(|e|e.to_string())?;
+    }
     // Reuse freed pages and checkpoint opportunistically, without a full
     // VACUUM that could cause CPU/IO spikes on weak hardware.
     let _=db.execute_batch("PRAGMA wal_checkpoint(PASSIVE);");
@@ -247,6 +308,26 @@ fn maintain_with_budget(db:&Connection,metadata:&Path,budget:u64)->Result<(),Str
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn configurable_corpus_size_and_cache_limits_reject_invalid_values(){
+        assert_eq!(bounded_count(Some("250000"),12_000,100,2_000_000),250_000);
+        for raw in ["0","-2","2000001","not-a-number","1.5"]{
+            assert_eq!(bounded_count(Some(raw),12_000,100,2_000_000),12_000);
+        }
+        assert_eq!(bounded_count(None,12_000,100,2_000_000),12_000);
+    }
+    #[test]
+    fn unmatched_entries_are_short_lived_and_stale_namespaces_never_hit(){
+        let db=Connection::open_in_memory().unwrap();
+        initialize(&db).unwrap();
+        let ns="snapshot";
+        let k=key(ns,"Film.S02E07",None,None);
+        db.execute("INSERT INTO learning_cache(cache_key,namespace,kind,payload,bytes,
+            created_at,expires_at) VALUES(?1,?2,'match',?3,2,1,?4)",
+            params![k,ns,b"{}".to_vec(),now()+30*60]).unwrap();
+        assert!(read_current(&db,&k,ns,now()+30*60+1).is_none());
+        assert!(read_current(&db,&k,"new-regex",now()).is_none());
+    }
     #[test]
     fn stable_key_separates_parse_and_match_policies(){
         assert_ne!(key("parse","Show S01E02",None,None),
