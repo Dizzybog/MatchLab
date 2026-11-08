@@ -131,14 +131,19 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
     for (id,title,raw) in rows{
         after=id;
         let Ok(details)=serde_json::from_str::<Value>(&raw)else{continue};
+        // Reparse once from raw history using the current trusted Rust
+        // parser. Never use completed, potentially obsolete ML responses
+        // as the label source; share this immutable base between learners.
+        let base=Value::Object(matchlab_parser::parse_title(&title,false)
+            .map_err(|e|e.to_string())?);
         if let Some(ref metadata)=meta{
-            crate::learned_regex::observe(&tx,metadata,&title,&details)?;
+            crate::learned_regex::observe(&tx,metadata,&title,&details,&base)?;
         }
         for (field,signal) in crate::field_learning::observe_with_budget(
-            &tx,&title,&details,&mut evidence)?{
+            &tx,&title,&details,&base,&mut evidence)?{
             newly_trained|=model.observe(&tx,&title,&field,&signal)?;
         }
-        crate::candidate_discovery::observe(&tx,&title,&details["parsed"],
+        crate::candidate_discovery::observe(&tx,&title,&base,
             &model,&mut discovery)?;
         let flags=crate::field_audit::audit(
             &title,&details["parsed"],&details["selected"]);
