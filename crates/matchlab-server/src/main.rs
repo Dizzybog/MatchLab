@@ -15,6 +15,7 @@ mod debug_feed;
 mod field_audit;
 mod community_learning;
 mod local_learning;
+mod learning_cache;
 mod learned_regex;
 #[cfg(feature="ml-ort")]
 mod tiny_onnx;
@@ -71,7 +72,7 @@ struct MatchRequest {
     series: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Candidate {
     imdb_id: String,
     title: String,
@@ -79,10 +80,10 @@ struct Candidate {
     media_type: String,
     matched_title: String,
     anime_ids: std::collections::BTreeMap<String,String>,
-    source: &'static str,
+    source: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Diagnostic {
     parsed: Value,
     normalized_title: String,
@@ -109,7 +110,17 @@ fn parse_cached(title:&str)->Result<Value,String>{
             }
         }
     }
-    let value=Value::Object(matchlab_parser::parse_title(title,false).map_err(|e|e.to_string())?);
+    // Store the *base* parser result. Any learned overlay is applied after
+    // both memory and disk cache hits, so retired rules never leak into
+    // matching even if their historical cache entry is retained.
+    let value=if let Some(cached)=learning_cache::get_parser(title){
+        cached
+    }else{
+        let parsed=Value::Object(matchlab_parser::parse_title(title,false)
+            .map_err(|e|e.to_string())?);
+        learning_cache::put_parser(title,&parsed);
+        parsed
+    };
     if let Ok(mut guard)=cache.lock(){
         // Avoid O(cache size) cleanup on every previously unseen title.
         // Under pressure, remove expired entries before evicting only the
@@ -760,7 +771,7 @@ fn diagnose_with_policy(
     }
     let imdb: Vec<Candidate> = imdb.into_iter().map(|m|Candidate{
         imdb_id:m.imdb_id,title:m.title,year:m.year,media_type:m.media_type,
-        matched_title:m.matched_title,anime_ids:m.anime_ids,source:"imdb"}).collect();
+        matched_title:m.matched_title,anime_ids:m.anime_ids,source:"imdb".into()}).collect();
     // Normal titles remain leaf-driven; an exact, verified AniDB alias from
     // the *nearest* anime subfolder may provide more specific part/season
     // context for the crosswalk resolver.
@@ -1212,10 +1223,23 @@ fn enrich_selected_anime_episode(
 fn diagnose_logged(state:&AppState,req:&MatchRequest,debug:bool)->Result<Diagnostic,String>{
     let start=Instant::now();
     let result=if debug{
+        // Diagnostics intentionally bypass the persistent match cache.
         diagnose_with_policy(&state.db,req,MatchPolicy::DashboardDiagnostic)
+    }else if let Some(snapshot)=learning_cache::get_match(
+        &req.title,req.year,req.series,&state.db){
+        match serde_json::from_value::<Diagnostic>(snapshot){
+            Ok(diagnostic)=>Ok(diagnostic),
+            Err(_)=>diagnose(&state.db,req),
+        }
     }else{
         diagnose(&state.db,req)
     };
+    if !debug && let Ok(ref diagnostic)=result
+        && diagnostic.selected.is_some()
+        && let Ok(snapshot)=serde_json::to_value(diagnostic){
+        learning_cache::put_match(
+            &req.title,req.year,req.series,&state.db,&snapshot);
+    }
     let elapsed=start.elapsed().as_millis() as u64;
     match &result {
         Ok(d)=>{
@@ -2922,6 +2946,25 @@ mod tests {
         })));
         assert_eq!(valid["sid_start"],"tt1663145:1:1");
         assert_eq!(valid["sid_end"],"tt1663145:1:1");
+    }
+    #[test]
+    fn cached_diagnostics_roundtrip_without_static_string_lifetimes(){
+        let sample=Diagnostic{
+            parsed:json!({"title":"Example","seasons":[1],"episodes":[7]}),
+            normalized_title:"example".into(),
+            imdb_candidates:vec![Candidate{
+                imdb_id:"tt1234567".into(),title:"Example".into(),year:2022,
+                media_type:"tvSeries".into(),matched_title:"Example".into(),
+                anime_ids:std::collections::BTreeMap::new(),source:"imdb".into()
+            }],
+            anime_candidate:None,selected:Some(json!({
+                "imdb_id":"tt1234567","season":1,"episode":7
+            })),reason:"Verified".into(),
+        };
+        let restored:Diagnostic=serde_json::from_value(
+            serde_json::to_value(&sample).unwrap()).unwrap();
+        assert_eq!(restored.selected,sample.selected);
+        assert_eq!(restored.imdb_candidates[0].source,"imdb");
     }
     #[test]
     fn parse_cache_returns_full_parser_fields() {
