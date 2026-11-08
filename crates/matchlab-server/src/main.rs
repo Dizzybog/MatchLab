@@ -218,6 +218,18 @@ fn anime_identity(db:&Connection,key:&str)->rusqlite::Result<Option<String>>{
     Ok(Some(best_imdb.clone()))
 }
 
+/// Return an IMDb identity only when the release title itself is an exact,
+/// unique AniDB alias. This is stricter than the prefix-based fallback used
+/// to rank title candidates and safe for season-pack inference.
+fn exact_anime_identity(db:&Connection,key:&str)->Result<Option<String>,String>{
+    if key.len()<4{return Ok(None);}
+    let ids=tantivy_search::anime_aliases(db,key,4)?.into_iter()
+        .filter(|alias|alias.clean_title==key)
+        .map(|alias|alias.imdb_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    if ids.len()==1{Ok(ids.into_iter().next())}else{Ok(None)}
+}
+
 /// Resolve every absolute episode independently: an anime range may span
 /// several IMDb seasons. Never interpolate across missing crosswalk entries.
 fn mapped_absolute_range(db:&Connection,imdb:&str,start:i64,end:i64)->Result<Value,String>{
@@ -575,7 +587,8 @@ fn diagnose_with_policy(
         // coordinates is a movie candidate, even if an anime alias exists.
         None if year.is_some() => false,
         None => anime_title::season_from_any_exact_title(&db,&key)
-            .map_err(|e|e.to_string())?.is_some(),
+            .map_err(|e|e.to_string())?.is_some()
+            || exact_anime_identity(&db,&key)?.is_some(),
     };
     let imdb = matchlab_matcher::search(&db,title,year,series,seasons.iter().copied().max().unwrap_or(0),&req.title,
         !episodes.is_empty()||parsed.contains_key("episode_start"),20)
@@ -911,11 +924,33 @@ fn diagnose_with_policy(
         winner["episode_range"]=json!({"start_season":start,"end_season":end,
             "source":"imdb_season_pack"});
     }
-    if episodes.is_empty() && seasons.len()==1 {
+    // A season-only release needs both IMDb AND AniDB endpoints. Prior
+    // code stopped at IMDb season_episodes, so /match always returned null
+    // ASIDs for "Bleach_S02". Also support an exact, title-only anime pack
+    // whose metadata verified season 1 (e.g. [Group][Chaos_Head][BDRip]).
+    // A supplied episode or batch is never expanded to the entire season.
+    if episodes.is_empty() && !parsed.contains_key("episode_start")
+        && season_range.is_none() {
         if let Some(winner)=selected.as_mut(){
             if let Some(imdb_id)=winner["imdb_id"].as_str().map(str::to_owned){
-                let season=seasons[0];
-                if let Some(end)=season_episode_end(&db,&imdb_id,season)?{
+                let selected_season=seasons.first().copied()
+                    .or_else(||winner["season"].as_i64());
+                let exact_anime=exact_anime_identity(&db,&key)?
+                    .is_some_and(|id|id==imdb_id);
+                let season=if let Some(season)=selected_season{
+                    Some(season)
+                } else if exact_anime {
+                    // Only infer a missing season if IMDb knows the series
+                    // has exactly one season. Never guess season 1 for a
+                    // long-running anime or a generic folder title.
+                    let max=db.query_row("SELECT max_season FROM seasons
+                        WHERE imdb_id=?1",[&imdb_id],|row|row.get::<_,i64>(0))
+                        .optional().map_err(|e|e.to_string())?;
+                    (max==Some(1)).then_some(1)
+                }else{None};
+                if let Some(season)=season
+                    && let Some(end)=season_episode_end(&db,&imdb_id,season)?
+                {
                     winner["season"]=json!(season);
                     winner["episode"]=json!(1);
                     winner["season_end"]=json!(season);
@@ -924,6 +959,23 @@ fn diagnose_with_policy(
                         "end_season":season,"end_episode":end,
                         "source":"imdb_season_episodes"});
                     winner["sid"]=json!(format!("{imdb_id}:{season}:1"));
+                    let has_anime=winner["anime_ids"].as_object()
+                        .is_some_and(|ids|!ids.is_empty()) || exact_anime;
+                    if has_anime {
+                        let mapped=mapped_season_episode_range(
+                            &db,&imdb_id,anime_resolve_title,season,1,end)?;
+                        // AniDB endpoints are published only when every
+                        // requested IMDb episode has an unambiguous mapping.
+                        // Incomplete maps keep the verified IMDb range.
+                        if mapped["complete"]==true
+                            && mapped["segments"].as_array().is_some_and(|s|!s.is_empty())
+                            && mapped["start_season"].as_i64()==Some(season)
+                            && mapped["start_episode"].as_i64()==Some(1)
+                            && mapped["end_episode"].as_i64()==Some(end)
+                        {
+                            winner["episode_range"]=mapped;
+                        }
+                    }
                 }
             }
         }
