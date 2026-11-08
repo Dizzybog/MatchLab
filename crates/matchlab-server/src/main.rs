@@ -935,8 +935,18 @@ fn diagnose_with_policy(
             if let Some(imdb_id)=winner["imdb_id"].as_str().map(str::to_owned){
                 let selected_season=seasons.first().copied()
                     .or_else(||winner["season"].as_i64());
-                let exact_anime=exact_anime_identity(&db,&key)?
-                    .is_some_and(|id|id==imdb_id);
+                let linked_anime=winner["anime_ids"].as_object()
+                    .is_some_and(|ids|!ids.is_empty())
+                    || imdb.iter().any(|candidate|candidate.imdb_id==imdb_id
+                        && !candidate.anime_ids.is_empty());
+                // Avoid an extra Tantivy title lookup for a season pack
+                // already linked through the selected IMDb identity.
+                let exact_anime=if linked_anime && !seasons.is_empty(){
+                    false
+                }else{
+                    exact_anime_identity(&db,&key)?
+                        .is_some_and(|id|id==imdb_id)
+                };
                 let season=if let Some(season)=selected_season{
                     Some(season)
                 } else if exact_anime {
@@ -959,8 +969,7 @@ fn diagnose_with_policy(
                         "end_season":season,"end_episode":end,
                         "source":"imdb_season_episodes"});
                     winner["sid"]=json!(format!("{imdb_id}:{season}:1"));
-                    let has_anime=winner["anime_ids"].as_object()
-                        .is_some_and(|ids|!ids.is_empty()) || exact_anime;
+                    let has_anime=linked_anime || exact_anime;
                     if has_anime {
                         let mapped=mapped_season_episode_range(
                             &db,&imdb_id,anime_resolve_title,season,1,end)?;
