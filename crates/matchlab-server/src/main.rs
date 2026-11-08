@@ -1388,23 +1388,27 @@ fn public_match_response(selected: Option<Value>) -> Value {
         }).collect::<Option<Vec<_>>>()?;
         Some((mapped.first()?.0.clone(),mapped.last()?.1.clone()))
     });
-    let independent_range=if winner["anidb_independent_verified"]==true {
+    let independent_range_conflict=winner["anidb_independent_verified"]==true
+        && winner.get("anidb_range").and_then(|r|r["anidb_id"].as_str())
+            .is_some_and(|id|segments.is_some_and(|entries|
+                entries.iter().any(|segment|
+                    segment["anidb_id"].as_str().is_some_and(|other|other!=id))));
+    let independent_range=if winner["anidb_independent_verified"]==true
+        && !independent_range_conflict {
         winner.get("anidb_range").and_then(|r|{
             let id=r["anidb_id"].as_str()?;
             let start=r["start"].as_i64()?;
             let end=r["end"].as_i64()?;
             if end<start{return None;}
-            // A conflicting IMDb-based crosswalk must not silently turn
-            // one valid anime into another unrelated AniDB work.
-            if segments.is_some_and(|entries|entries.iter().any(|segment|
-                segment["anidb_id"].as_str().is_some_and(|other|other!=id))){
-                return None;
-            }
             Some((episode_crosswalk::canonical_asid(id,start)?,
                 episode_crosswalk::canonical_asid(id,end)?))
         })
     }else{None};
-    let (asid_start,asid_end)=if let Some((start,end))=independent_range {
+    let (asid_start,asid_end)=if independent_range_conflict {
+        // Two verified identity lanes disagree. Neither ASID may be
+        // published until the metadata conflict is reconciled.
+        (Value::Null,Value::Null)
+    }else if let Some((start,end))=independent_range {
         (json!(start),json!(end))
     }else if segments.is_some() {
         // IMDb-derived ranges require every segment to be valid and complete.
@@ -2064,6 +2068,23 @@ mod tests {
             assert!(response["asid_start"].is_null());
             assert!(response["asid_end"].is_null());
         }
+    }
+
+    #[test]
+    fn independent_anidb_range_conflict_cannot_fall_back_to_wrong_imdb_asid(){
+        let winner=json!({"imdb_id":"tt1234567","category":"series",
+            "season":1,"episode":1,"season_end":1,"episode_end":2,
+            "anidb_independent_verified":true,
+            "anidb_range":{"anidb_id":"2369","start":1,"end":2},
+            "episode_range":{"complete":true,"segments":[{
+                "anidb_id":"17765","start_anime_episode":1,
+                "end_anime_episode":2
+            }]}});
+        let response=public_match_response(Some(winner));
+        assert_eq!(response["sid_start"],"tt1234567:1:1");
+        assert_eq!(response["sid_end"],"tt1234567:1:2");
+        assert!(response["asid_start"].is_null());
+        assert!(response["asid_end"].is_null());
     }
 
     #[test]
