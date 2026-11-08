@@ -12,7 +12,7 @@ const MAX_EXAMPLES:i64=20_000;
 const MIN_EXAMPLES:i64=5;
 const FEATURES:usize=8;
 
-fn active()->bool{
+pub(crate) fn active()->bool{
     env::var("MATCHLAB_ML_ENABLED").ok()
         .is_some_and(|v|v.eq_ignore_ascii_case("true"))
 }
