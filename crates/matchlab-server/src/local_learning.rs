@@ -79,10 +79,13 @@ fn pattern(flag:&Value,details:&Value)->Option<(String,String)>{
     };
     Some((code.to_owned(),digest(&format!("{code}:{feature}"))))
 }
-fn scan(history:&Path,metadata:&Path,local:&mut Connection)->Result<(),String>{
-    // Both learners reconcile only between batches: no active-registry
-    // mutation occurs inside the evidence transaction.
-    crate::field_learning::reconcile(local)?;
+fn scan(history:&Path,metadata:&Path,local:&mut Connection,
+    revalidate:bool)->Result<(),String>{
+    // Revalidation is necessary at startup and during scheduled maintenance,
+    // not every 15 seconds when nothing in history changed.
+    if revalidate||crate::field_learning::revision()==0{
+        crate::field_learning::reconcile(local)?;
+    }
     let history_db=Connection::open_with_flags(history,OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e|e.to_string())?;
     history_db.busy_timeout(Duration::from_secs(2)).map_err(|e|e.to_string())?;
@@ -95,7 +98,15 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection)->Result<(),String>{
     };
     let mut after=cursor.parse::<i64>().unwrap_or(newest);
     if newest<after{put(local,"after_id",&newest.to_string())?;return Ok(());}
-    if newest==after{return Ok(());}
+    if newest==after{
+        if revalidate {
+            if let Ok(meta)=Connection::open_with_flags(
+                metadata,OpenFlags::SQLITE_OPEN_READ_ONLY){
+                crate::learned_regex::reconcile(local,&meta)?;
+            }
+        }
+        return Ok(());
+    }
     let mut stmt=history_db.prepare("SELECT id,title,details FROM requests
         WHERE id>?1 ORDER BY id ASC LIMIT 1000").map_err(|e|e.to_string())?;
     let rows=stmt.query_map([after],|r|Ok((r.get::<_,i64>(0)?,
@@ -195,15 +206,31 @@ pub fn start(history:PathBuf,metadata:PathBuf){
             let mut maintained=std::time::Instant::now()
                 .checked_sub(Duration::from_secs(300))
                 .unwrap_or_else(std::time::Instant::now);
+            // Reuse the SQLite writer connection: repeated open/WAL setup
+            // and schema creation every polling interval waste host CPU.
+            let mut connection:Option<Connection>=None;
             loop{
-                if let Err(error)=connect(&state).and_then(|mut db|{
-                    if maintained.elapsed()>=Duration::from_secs(300){
-                        crate::learning_cache::maintain(&db,&metadata)?;
-                        maintained=std::time::Instant::now();
+                if connection.is_none(){
+                    match connect(&state){
+                        Ok(db)=>connection=Some(db),
+                        Err(error)=>tracing::warn!(%error,"local learning database unavailable")
                     }
-                    scan(&history,&metadata,&mut db)
-                }){
-                    tracing::warn!(%error,"local learning cycle skipped");
+                }
+                if let Some(ref mut db)=connection{
+                    let refresh=maintained.elapsed()>=Duration::from_secs(300);
+                    let result=(||->Result<(),String>{
+                        if refresh{
+                            crate::learning_cache::maintain(db,&metadata)?;
+                            maintained=std::time::Instant::now();
+                        }
+                        scan(&history,&metadata,db,refresh)
+                    })();
+                    if let Err(error)=result{
+                        tracing::warn!(%error,"local learning cycle skipped");
+                        // A failed transaction is rolled back and reloaded
+                        // from the last committed cursor on the next pass.
+                        connection=None;
+                    }
                 }
                 std::thread::sleep(Duration::from_secs(POLL_SECONDS));
             }
