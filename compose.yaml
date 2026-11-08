@@ -18,10 +18,21 @@ services:
       # Optional local learning only (no GitHub uploads).
       # Native FTRL learner runs offline in the same Rust process.
       # No external AI service, Python, ONNX Runtime or GPU needed.
-      # MATCHLAB_ML_ENABLED: "true"
-      # MATCHLAB_ML_STATE_FILE: /data/local-learning.sqlite3
-      # MATCHLAB_ML_MAX_STORAGE_GB: "10"
-      # MATCHLAB_ML_CACHE_ENABLED: "true"
+      # Set MATCHLAB_ML_ENABLED to "true" to enable local Rust ML.
+      # These settings allocate no ML worker while it remains false.
+      MATCHLAB_ML_ENABLED: "false"
+      MATCHLAB_ML_STATE_FILE: /data/local-learning.sqlite3
+      # Entire learning database, including evidence and cached results.
+      MATCHLAB_ML_MAX_STORAGE_GB: "10"
+      # Distinct validated field evidence examples (100–2,000,000).
+      MATCHLAB_ML_TRAINING_MAX_EXAMPLES: "500000"
+      # Cache repeated exact parses and IMDb/AniDB matches locally.
+      # Old results are always re-parsed/re-matched after model rule,
+      # metadata or image changes; no stale completed answers are served.
+      MATCHLAB_ML_CACHE_ENABLED: "true"
+      MATCHLAB_ML_CACHE_MAX_ENTRIES: "200000"
+      MATCHLAB_ML_CACHE_TTL_HOURS: "720"
+      MATCHLAB_ML_UNMATCHED_CACHE_TTL_MINUTES: "30"
       # Community Learning requires MATCHLAB_ML_ENABLED=true, separate
       # explicit sharing opt-in, and a personal GitHub Issues token.
       # MATCHLAB_COMMUNITY_LEARNING_ENABLED: "true"
