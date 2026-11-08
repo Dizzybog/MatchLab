@@ -174,31 +174,39 @@ fn anime_candidate(db: &Connection, key: &str, season: Option<i64>, episode: i64
     if matches.is_empty() { return Ok(None); }
     let exact = matches[0].1 == key;
     let best_len = matches[0].1.len();
-    let best: Vec<_> = matches.iter().filter(|(_, alias, _)| (alias == key) == exact && alias.len() == best_len).collect();
-    if best.iter().any(|(_,_,imdb)| imdb != &best[0].2) { return Ok(None); }
-    let imdb = &best[0].2;
-    // Resolve only through verified anime crosswalk tables, including explicit
-    // mappings, split seasons and absolute numbering.
-    let mapped = match season {
-        Some(season) if season > 0 => {
-            let titled=anime_title::resolve(db,imdb,key,season,episode)?;
-            if titled.is_some() { titled }
-            else if anime_title::has_specific_alias(db,imdb,key)? { None }
-            else { anime_resolver::resolve_season(db,imdb,season,episode)? }
-        },
-        None => {
-            // A named anime sequel/part (e.g. "Amanchu! Advance - 01")
-            // restarts local episode numbering. Prefer the exact, uniquely
-            // verified AniDB part title, then use absolute numbering only
-            // when no such mapping can be established.
-            let named=anime_title::resolve_episode_from_exact_part_title(
-                db,imdb,key,episode)?;
-            if named.is_some(){named}
-            else{anime_resolver::resolve_absolute(db,imdb,episode)?}
-        },
-        _ => None,
-    };
-    Ok(mapped.map(|m|json!({"imdb_id":m.imdb_id,"season":m.season,
+    let best: std::collections::BTreeSet<String> = matches.iter()
+        .filter(|(_, alias, _)| (alias == key) == exact && alias.len() == best_len)
+        .map(|(_,_,imdb)|imdb.clone()).collect();
+    // Shared aliases are frequent (TV, movies, OVAs). The alias alone cannot
+    // select an IMDb identity, but a unique verified episode crosswalk can.
+    // Reject only when more than one *mapped* identity survives. Do not let
+    // a colliding film with no episode 338 block Bleach's TV episode 338.
+    let mut verified:Option<anime_resolver::Episode>=None;
+    for imdb in best {
+        let mapped = match season {
+            Some(season) if season > 0 => {
+                let titled=anime_title::resolve(db,&imdb,key,season,episode)?;
+                if titled.is_some() { titled }
+                else if anime_title::has_specific_alias(db,&imdb,key)? { None }
+                else { anime_resolver::resolve_season(db,&imdb,season,episode)? }
+            },
+            None => {
+                // Named anime sequel parts restart local episode numbering.
+                let named=anime_title::resolve_episode_from_exact_part_title(
+                    db,&imdb,key,episode)?;
+                if named.is_some(){named}
+                else{anime_resolver::resolve_absolute(db,&imdb,episode)?}
+            },
+            _ => None,
+        };
+        if let Some(mapped)=mapped {
+            if verified.replace(mapped).is_some(){
+                // Two independently mapped identities: never guess a winner.
+                return Ok(None);
+            }
+        }
+    }
+    Ok(verified.map(|m|json!({"imdb_id":m.imdb_id,"season":m.season,
         "episode":m.episode,"anidb_id":m.anidb_id,"anidb_episode":m.anidb_episode})))
 }
 
@@ -277,13 +285,19 @@ fn mapped_absolute_range(db:&Connection,imdb:&str,start:i64,end:i64)->Result<Val
 /// AniDB/TVDB crosswalk. A partial mapping never produces guessed endpoints.
 fn mapped_season_episode_range(
     db:&Connection,imdb:&str,title:&str,season:i64,start:i64,end:i64,
+    canonical_title:bool,
 )->Result<Value,String>{
     let mut segments:Vec<Value>=Vec::new();
     let mut first:Option<anime_resolver::Episode>=None;
     let mut last:Option<anime_resolver::Episode>=None;
     let mut missing=0i64;
-    let specific=anime_title::has_specific_alias(db,imdb,title)
-        .map_err(|e|e.to_string())?;
+    // The canonical IMDb series title identifies a fixed IMDb season.
+    // Never reinterpret it as a named AniDB part just because an OVA/movie
+    // shares its alias (e.g. the base series Bleach).
+    let specific=if canonical_title {false} else {
+        anime_title::has_specific_alias(db,imdb,title)
+            .map_err(|e|e.to_string())?
+    };
     let resolved=if specific {
         (start..=end).map(|episode|anime_title::resolve(db,imdb,title,season,episode)
             .map_err(|e|e.to_string())).collect::<Result<Vec<_>,_>>()?
@@ -646,10 +660,15 @@ fn diagnose_with_policy(
     // Enforce strict production-year/quality identity only for GET/POST /match.
     // The dashboard's /debug/match must still rank plain titles like "Fight Club".
     // Other season/episode, anime and ranking checks remain shared.
+    // Exact, uniquely verified AniDB absolute ranges are an independent
+    // anime identity signal even if the optional anime_ids metadata is absent.
+    // Unverified bare number suffixes do not qualify for this exception.
     let imdb=if matches!(policy,MatchPolicy::PublicApi){
         imdb.into_iter().filter(|candidate|
             year_signal_eligible(year,candidate.year,series&&!seasons.is_empty(),
-                !candidate.anime_ids.is_empty(),parsed_quality)
+                !candidate.anime_ids.is_empty()
+                    || verified_anime_range_imdb.as_deref()==Some(candidate.imdb_id.as_str()),
+                parsed_quality)
         ).collect::<Vec<_>>()
     }else{imdb};
     // Require every candidate for a multi-season pack to contain the final season.
@@ -1033,10 +1052,24 @@ fn diagnose_with_policy(
                         "end_season":season,"end_episode":end,
                         "source":"imdb_season_episodes"});
                     winner["sid"]=json!(format!("{imdb_id}:{season}:1"));
-                    let has_anime=linked_anime || exact_anime;
+                    // The relational AniDB bridge can be present even if
+                    // the optional anime_ids enrichment is absent or stale.
+                    // Query by selected IMDb ID, never by ambiguous title;
+                    // the actual range still needs fully verified mappings.
+                    let has_anime=linked_anime || exact_anime || db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM anime_series_map WHERE imdb_id=?1)",
+                        [&imdb_id],|row|row.get::<_,i64>(0))
+                        .map_err(|e|e.to_string())? != 0;
                     if has_anime {
+                        let canonical_title=imdb.iter().any(|candidate|
+                            candidate.imdb_id==imdb_id
+                            && matchlab_matcher::clean_title(&candidate.title)==anime_resolve_key)
+                            && anime_subfolder_title.is_none();
                         let mapped=mapped_season_episode_range(
-                            &db,&imdb_id,anime_resolve_title,season,1,end)?;
+                            &db,&imdb_id,anime_resolve_title,season,1,end,canonical_title)?;
+                        // Keep the exact missing/ambiguous-map diagnostics
+                        // without weakening the verified public ASID contract.
+                        winner["anime_range_diagnostics"]=mapped.clone();
                         // AniDB endpoints are published only when every
                         // requested IMDb episode has an unambiguous mapping.
                         // Incomplete maps keep the verified IMDb range.
@@ -1069,7 +1102,7 @@ fn diagnose_with_policy(
                         || anime_title::has_specific_alias(&db,&imdb_id,anime_resolve_title)
                             .map_err(|e|e.to_string())?;
                     let range=if linked {
-                        mapped_season_episode_range(&db,&imdb_id,anime_resolve_title,season,start,end)?
+                        mapped_season_episode_range(&db,&imdb_id,anime_resolve_title,season,start,end,false)?
                     }else {
                         let known_end=season_episode_end(&db,&imdb_id,season)?;
                         let valid=known_end.is_some_and(|last|last>=end);
@@ -1655,30 +1688,39 @@ mod tests {
                   'thedukeofdeathandhismaid',2021,'series','',1,0,'tvSeries'),
                 ('tt0000303','Chaos;Head','chaoshead',2008,'series','',1,0,'tvSeries'),
                 ('tt0000404','Reborn as a Vending Machine',
-                 'rebornasavendingmachine',2023,'series','',1,0,'tvSeries');
+                 'rebornasavendingmachine',2023,'series','',1,0,'tvSeries'),
+                ('tt0000505','Bleach side story','bleachsidestory',2005,
+                 'movie','',1,0,'movie');
             INSERT INTO seasons VALUES ('tt0000101',16),('tt0000202',3),
                 ('tt0000303',1),('tt0000404',3);
             INSERT INTO season_episodes VALUES
-                ('tt0000101',2,21,21),('tt0000202',2,12,12),
+                ('tt0000101',1,20,20),('tt0000101',2,21,21),
+                ('tt0000202',2,12,12),
                 ('tt0000303',1,12,12),('tt0000404',3,12,12);
             INSERT INTO anime_series_map VALUES
                 ('tt0000101','100','bleachtv',0),
+                ('tt0000101','101','otherbleachtv',0),
+                ('tt0000505','500','sidebleachtv',0),
                 ('tt0000202','200','duketv',0),
                 ('tt0000303','300','chaostv',0),
                 ('tt0000404','400','jihankitv',0);
             INSERT INTO anime_ids VALUES
-                ('tt0000101','anidb','100'),
                 ('tt0000202','anidb','200'),
                 ('tt0000303','anidb','300'),
                 ('tt0000404','anidb','400');
             INSERT INTO anidb_titles VALUES
                 ('100','Bleach','bleach','main','en'),
+                ('101','Bleach','bleach','synonym','en'),
+                ('500','Bleach','bleach','synonym','en'),
                 ('200','Shinigami Bocchan to Kuro Maid',
                  'shinigamibocchantokuromaid','synonym','ja'),
                 ('300','Chaos Head','chaoshead','main','en'),
                 ('400','Jihanki 3','jihanki3','synonym','ja');
             INSERT INTO episode_map VALUES
                 ('100','bleachtv',1,-1,1,366,0,''),
+                ('100','bleachtv',1,1,1,20,0,''),
+                ('101','otherbleachtv',1,99,1,12,0,''),
+                ('500','sidebleachtv',1,1,1,2,0,''),
                 ('100','bleachtv',1,2,22,42,-21,''),
                 ('100','bleachtv',1,15,320,340,-319,''),
                 ('100','bleachtv',1,16,341,366,-340,''),
@@ -1690,6 +1732,31 @@ mod tests {
                 ('400','jihankitv',1,3,1,12,0,'');").unwrap();
         tantivy_search::warmup(&db).unwrap();
         drop(db);
+        // Deliberately omit Bleach from anime_ids while retaining its real
+        // AniDB series/mapping bridge: season lookup must not depend on it.
+        // IMDb already knows the complete first season. Equal Bleach
+        // aliases for an unrelated film and a separate AniDB part must not
+        // suppress the one fully verified season mapping.
+        let d=diagnose(&path,&MatchRequest{
+            title:"Bleach S01".into(),year:None,series:None}).unwrap();
+        let selected=d.selected.expect("Bleach S01 IMDb match");
+        assert_eq!(selected["episode_range"]["complete"],true,"{selected}");
+        assert_eq!(selected["anime_range_diagnostics"]["unmapped_count"],0);
+        assert_eq!(public_match_response(Some(selected)),json!({
+            "sid_start":"tt0000101:1:1","sid_end":"tt0000101:1:20",
+            "asid_start":"100:1","asid_end":"100:20"
+        }));
+        // An absolute episode matches only when one IMDb identity has
+        // a verified crosswalk for it, despite shared AniDB title aliases.
+        let d=diagnose(&path,&MatchRequest{
+            title:"Bleach_338".into(),year:None,series:None}).unwrap();
+        let selected=d.selected.expect("Bleach absolute episode 338 match");
+        assert_eq!(selected["season"],15,"{selected}");
+        assert_eq!(selected["episode"],19,"{selected}");
+        assert_eq!(public_match_response(Some(selected)),json!({
+            "sid_start":"tt0000101:15:19","sid_end":"tt0000101:15:19",
+            "asid_start":"100:338","asid_end":"100:338"
+        }));
         let d=diagnose(&path,&MatchRequest{
             title:"Bleach_S02".into(),year:None,series:None}).unwrap();
         let selected=d.selected.expect("Bleach season pack IMDb");
@@ -2805,14 +2872,20 @@ mod tests {
         db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
             year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
             CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
-            CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT);
+            CREATE TABLE anime_series_map(
+                anidb_id TEXT,imdb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(
+                anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,
+                tvdb_season INTEGER,start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
             INSERT INTO anidb_titles VALUES('123','multiple specials');
-            INSERT INTO anime_series_map VALUES('123','tt1663145');
-            INSERT INTO anime_series_map VALUES('123','tt1679583');
-            INSERT INTO anime_series_map VALUES('123','tt1726641');
-            INSERT INTO anime_series_map VALUES('123','tt1753855');
-            INSERT INTO anime_series_map VALUES('123','tt1809274');
-            INSERT INTO anime_series_map VALUES('123','tt1865375');").unwrap();
+            INSERT INTO episode_map VALUES('123','shared',1,1,1,12,0,'');
+            INSERT INTO anime_series_map VALUES('123','tt1663145','shared',0);
+            INSERT INTO anime_series_map VALUES('123','tt1679583','shared',0);
+            INSERT INTO anime_series_map VALUES('123','tt1726641','shared',0);
+            INSERT INTO anime_series_map VALUES('123','tt1753855','shared',0);
+            INSERT INTO anime_series_map VALUES('123','tt1809274','shared',0);
+            INSERT INTO anime_series_map VALUES('123','tt1865375','shared',0);").unwrap();
         assert!(anime_identity(&db,"multiple specials").unwrap().is_none(),
             "ambiguous AniDB alias must not select the first IMDb movie");
         assert!(anime_candidate(&db,"multiple specials",Some(1),1).unwrap().is_none(),
