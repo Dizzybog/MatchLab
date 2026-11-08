@@ -89,6 +89,7 @@ jobs:
             --seen-out "$RUNNER_TEMP/fingerprints-final.txt"
       - name: Screen at most one rule against latest trusted Rust parser
         run: |
+          cp learning/community_rules.json "$RUNNER_TEMP/community-rules-before.json"
           cargo run --release --locked -p matchlab-parser \
             --example screen_community_rules -- \
             "$RUNNER_TEMP/community-rule-candidates.json" \
@@ -147,6 +148,24 @@ jobs:
             --base main --head "$branch" \
             --title "feat(parser): review high-evidence community regex" \
             --body-file "$RUNNER_TEMP/community-pr-body.md"
+          echo "COMMUNITY_PR_CREATED=true" >> "$GITHUB_ENV"
+      - name: Dedup only rules actually placed into a review PR
+        if: env.COMMUNITY_PR_CREATED == 'true'
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          temp = Path(os.environ["RUNNER_TEMP"])
+          before = json.loads((temp / "community-rules-before.json").read_text())
+          after = json.loads(Path("learning/community_rules.json").read_text())
+          old_markers = {r["marker"] for r in before}
+          ledger = temp / "fingerprints-final.txt"
+          seen = set(ledger.read_text().splitlines())
+          for rule in after:
+              if rule["marker"] not in old_markers:
+                  seen.add(hashlib.sha256(("community-regex:" + rule["marker"]).encode()).hexdigest())
+          ledger.write_text("\n".join(sorted(seen)) + ("\n" if seen else ""))
+          PY
       - name: Persist global dedup ledger (no changes to main or production)
         env:
           GH_TOKEN: ${{ github.token }}
