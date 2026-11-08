@@ -2232,6 +2232,7 @@ mod tests {
             "JoJo's Bizarre Adventure Stone Ocean - 27",
             "JoJo's Bizarre Adventure Stone Ocean 27",
             "JoJo's Bizarre Adventure Stone Ocean 27.mkv",
+            "JoJo's Bizarre Adventure Stone Ocean S01E27.mkv",
         ]{
             let d=diagnose(&path,&MatchRequest{
                 title:raw.into(),year:None,series:None}).unwrap();
