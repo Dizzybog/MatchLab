@@ -49,3 +49,22 @@ fn history_t_title_is_a_separate_accessible_copy_action(){
     assert!(DASHBOARD.contains("document.execCommand('copy')"));
     assert!(DASHBOARD.contains(r#"id="copy-feedback" class="copy-feedback" role="status" aria-live="polite""#));
 }
+
+
+#[test]
+fn activity_days_are_keyboard_accessible_and_show_exact_utc_request_totals(){
+    // Bars are buttons, not hover-only divs. Selection uses the already
+    // aggregated day.total from the 14-day API (not the capped 1,000 rows).
+    assert!(DASHBOARD.contains(r#"role="group" aria-label="Daily request activity (UTC)""#));
+    assert!(DASHBOARD.contains(r#"id="day-summary" class="day-summary small" role="status" aria-live="polite""#));
+    assert!(DASHBOARD.contains(r#"class="day-bar" data-day=""#));
+    assert!(DASHBOARD.contains(r#"aria-controls="day-summary" aria-pressed="false""#));
+    assert!(DASHBOARD.contains("button.addEventListener('click',()=>selectActivityDay(button.dataset.day,days))"));
+    assert!(DASHBOARD.contains("const count=Math.max(0,Number(selected.total)||0);"));
+    assert!(DASHBOARD.contains("summary.textContent=day+' (UTC) · '+count.toLocaleString()+' requests';"));
+    assert!(DASHBOARD.contains("selectActivityDay(selectedActivityDay,days)"));
+    assert!(DASHBOARD.contains("bar.setAttribute('aria-pressed',String(bar.dataset.day===selectedActivityDay))"));
+    assert!(DASHBOARD.contains("focused?.focus({preventScroll:true})"));
+    assert!(DASHBOARD.contains(".day-bar:focus-visible"));
+    assert!(DASHBOARD.contains(".day-bar{min-width:24px}"));
+}
