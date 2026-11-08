@@ -300,7 +300,7 @@ fn validate_examples(db:&Connection,metadata:&Connection,marker:&str)->Result<bo
         if !check_verified(metadata,&imdb,abs,season,episode,&anidb,anidb_ep){
             return Ok(false);
         }
-        let Ok(parsed)=matchlab_parser::parse_title(&title,false)else{return Ok(false);};
+        let Ok(parsed)=matchlab_parser::parse_title_canonical(&title,false)else{return Ok(false);};
         let ordinary=Value::Object(parsed);
         if ordinary["anime_episode_candidate"]["episode"].as_i64()==Some(abs)
             ||ordinary["episodes"].as_array().is_some_and(|list|
