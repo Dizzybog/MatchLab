@@ -72,6 +72,9 @@ MatchLab listens on port **8765**. Both `GET` and `POST` accept `title` (or `t_t
 | `GET /episode/resolve`, `POST /episode/resolve` | Verified IMDb season/episode ↔ AniDB episode conversion |
 | `GET /parse`, `POST /parse` | Parse the full release name without metadata lookups |
 | `POST /debug/match` | Show candidate ranking and episode-mapping details |
+| `GET /api/debug/parsing/status` | Authenticated read-only history cursor and retention information |
+| `GET /api/debug/parsing` | Authenticated incremental parser diagnostics and anomaly hints |
+| `GET /api/debug/parsing/{id}` | Authenticated full diagnostics for one retained request |
 | `GET /health` | Check whether indexed metadata is ready |
 | `GET /health/live` | Lightweight liveness check |
 | `GET /` | Open the dashboard and search history |
@@ -185,6 +188,7 @@ IMDb basics, alternative titles, episodes, ratings, animeApi, Anime-Lists, and A
 | `MATCHLAB_HOST` | `0.0.0.0:8765` in Docker | HTTP listener |
 | `MATCHLAB_METADATA_REFRESH_HOURS` | `168` | Refresh every 1–720 hours |
 | `MATCHLAB_MAX_CONCURRENT_MATCHES` | `4` | Limit simultaneous match operations (1–64) |
+| `MATCHLAB_DEBUG_API_TOKEN` | Unset (disabled) | Enable authenticated, read-only parsing diagnostics with a random token of at least 32 bytes |
 | `MATCHLAB_METADATA_URLS` | Built-in HTTPS feeds | Optional seven-source override; legacy six-source lists are supported |
 | `RUST_LOG` | `matchlab_server=info` | Logging verbosity |
 
@@ -192,7 +196,7 @@ IMDb basics, alternative titles, episodes, ratings, animeApi, Anime-Lists, and A
 
 For importer options and the exact source URLs, see [Metadata lifecycle](docs/LOCAL_METADATA.md). For index internals and crash-safety considerations, see [Tantivy architecture](docs/TANTIVY_RUNTIME.md).
 
-**Security:** There is no built-in authentication. This example binds the port to **localhost**; put the service behind an authenticated HTTPS reverse proxy before exposing it over a network. Debug logs may contain the provided filenames.
+**Security:** The optional parsing debug feed requires its own bearer token and is unavailable when `MATCHLAB_DEBUG_API_TOKEN` is absent or shorter than 32 bytes. The remaining API and dashboard have no built-in authentication. This example binds the port to **localhost**; put the service behind an authenticated HTTPS reverse proxy before exposing it over a network. Debug history may contain private torrent filenames. Use HTTPS, protect the other endpoints at the proxy, and never put the token in a URL. The debug feed is a polling surface, not an autonomous reviewer or a scheduled PR author. [Feed usage and cursor semantics](docs/API.md#read-only-parsing-diagnostics-feed).
 
 ## Build and test
 
