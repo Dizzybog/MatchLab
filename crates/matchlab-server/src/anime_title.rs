@@ -14,6 +14,43 @@ fn aliases(db:&Connection,imdb:&str,key:&str)->rusqlite::Result<Vec<(String,Stri
             .map(|a|(a.anidb_id,a.clean_title)).collect())
 }
 
+/// An AniDB title with an offset-zero mapping names the beginning of
+/// an IMDb/TVDB season. Season-relative episode coordinates may continue
+/// into later AniDB parts with nonzero offsets (Stone Ocean episodes 25+).
+fn begins_tvdb_season(
+    db:&Connection,id:&str,season:i64,
+)->rusqlite::Result<bool>{
+    Ok(db.query_row("SELECT 1 FROM episode_map
+        WHERE anidb_id=?1 AND anidb_season>0 AND tvdb_season=?2
+            AND offset=0 AND start<=1 LIMIT 1",
+        params![id,season],|r|r.get::<_,i64>(0)).optional()?.is_some())
+}
+
+fn shares_tvdb_season(
+    db:&Connection,base:&str,candidate:&str,season:i64,
+)->rusqlite::Result<bool>{
+    Ok(db.query_row("SELECT 1 FROM episode_map b
+        JOIN episode_map m ON m.tvdb_id=b.tvdb_id
+        WHERE b.anidb_id=?1 AND m.anidb_id=?2
+          AND b.tvdb_season=?3 AND m.tvdb_season=?3
+          AND b.tvdb_id<>'' LIMIT 1",
+        params![base,candidate,season],|r|r.get::<_,i64>(0))
+        .optional()?.is_some())
+}
+
+/// Historical IMDb episode counts can be stale or absent. Use available
+/// upper bounds to reject impossible named-part episode numbers; missing
+/// bounds do not authorize guessing an unrelated AniDB identity.
+fn within_known_season_bounds(
+    db:&Connection,imdb:&str,season:i64,episode:i64,
+)->rusqlite::Result<bool>{
+    let max:Option<i64>=db.query_row(
+        "SELECT MAX(max_episode) FROM season_episodes
+        WHERE imdb_id=?1 AND season=?2",
+        params![imdb,season],|r|r.get(0)).optional()?.flatten();
+    Ok(episode>0 && max.is_none_or(|end|end>=episode))
+}
+
 pub fn resolve(db:&Connection,imdb:&str,title:&str,season:i64,episode:i64)
     -> rusqlite::Result<Option<episode_crosswalk::Episode>> {
     if season<=0||episode<=0{return Ok(None);}
@@ -37,7 +74,11 @@ pub fn resolve(db:&Connection,imdb:&str,title:&str,season:i64,episode:i64)
         && mapped_season>1
         && let Some(mapped)=episode_crosswalk::resolve_season(
             db,imdb,mapped_season,episode)?
-        && mapped.anidb_id==*selected {
+        && within_known_season_bounds(db,imdb,mapped.season,mapped.episode)?
+        && (mapped.anidb_id==*selected
+            || (begins_tvdb_season(db,selected,mapped_season)?
+                && shares_tvdb_season(
+                    db,selected,&mapped.anidb_id,mapped_season)?)) {
         return Ok(Some(mapped));
     }
     let family:Option<String>=db.query_row(
@@ -131,7 +172,11 @@ pub fn resolve_episode_from_exact_part_title(
     // and require the mapped AniDB ID to equal the exact named part.
     if let Some(mapped)=episode_crosswalk::resolve_season(
         db,imdb,inferred_season,episode)?
-        && mapped.anidb_id==*named_id {
+        && within_known_season_bounds(db,imdb,mapped.season,mapped.episode)?
+        && (mapped.anidb_id==*named_id
+            || (begins_tvdb_season(db,named_id,inferred_season)?
+                && shares_tvdb_season(
+                    db,named_id,&mapped.anidb_id,inferred_season)?)) {
         return Ok(Some(mapped));
     }
     // Other split-cour layouts require interpreting season=1 as the first
@@ -139,7 +184,9 @@ pub fn resolve_episode_from_exact_part_title(
     // split-part mapping rather than assuming every part has one season.
     let mapped=resolve(db,imdb,title,1,episode)?;
     Ok(mapped.filter(|m|m.season==inferred_season
-        && m.anidb_id==*named_id))
+        && m.anidb_id==*named_id)
+        .filter(|m|within_known_season_bounds(
+            db,imdb,m.season,m.episode).unwrap_or(false)))
 }
 
 /// Infer an IMDb/TVDB season from a title-specific AniDB alias without an episode.
