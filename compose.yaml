@@ -15,6 +15,12 @@ services:
       # Optional overrides; public sources and seven-day refresh are built in.
       # MATCHLAB_METADATA_URLS: https://...,...
       # MATCHLAB_METADATA_REFRESH_HOURS: "168"
+      # Optional local learning only (no uploads, no ONNX dependency in base image):
+      # MATCHLAB_ML_ENABLED: "true"
+      # MATCHLAB_ML_MODEL_PATH: /data/learning-model.onnx
+      # For ONNX scoring build the image with --build-arg MATCHLAB_FEATURES=ml-ort
+      # and mount a compatible ONNX Runtime shared library (ORT_DYLIB_PATH).
+      # MATCHLAB_ML_STATE_FILE: /data/local-learning.sqlite3
       # Community Learning needs explicit opt-in and a personal GitHub Issues token.
       # MATCHLAB_COMMUNITY_LEARNING_ENABLED: "true"
       # MATCHLAB_COMMUNITY_GITHUB_TOKEN: ${MATCHLAB_COMMUNITY_GITHUB_TOKEN}
