@@ -313,6 +313,31 @@ mod tests{
         assert_eq!(size,MAX_BYTES as i64);
     }
     #[test]
+    fn same_title_with_different_encodes_stays_in_one_holdout_group(){
+        assert_eq!(identity_group("The.Movie.1080p.x265.WEB-DL"),
+            identity_group("The.Movie.2160p.AV1.BluRay"));
+        let db=Connection::open_in_memory().unwrap();
+        let mut model=OnlineModel::load(&db).unwrap();
+        for k in 0..80{
+            model.observe(&db,&format!("Training{k}.2160p.WEB-DL"),
+                "resolution","2160p").unwrap();
+        }
+        let candidate=(0..500).find(|k|{
+            let name=format!("Unseen{k}.2160p.WEB-DL");
+            hash(&format!("holdout:{}",identity_group(&name)))%5==0
+        }).unwrap();
+        let title=format!("Unseen{candidate}.2160p.WEB-DL");
+        let before=model.positives;
+        let evaluation=model.holdout;
+        assert!(model.observe(&db,&title,"resolution","2160p").unwrap());
+        assert_eq!(model.positives,before,
+            "holdout must never update the model weights");
+        assert_eq!(model.holdout,evaluation+1);
+        model.save(&db).unwrap();
+        let restored=OnlineModel::load(&db).unwrap();
+        assert_eq!(restored.holdout,model.holdout);
+    }
+    #[test]
     fn corrupt_weights_fail_closed(){
         let db=Connection::open_in_memory().unwrap();
         OnlineModel::init(&db).unwrap();
