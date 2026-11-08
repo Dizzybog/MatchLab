@@ -841,9 +841,9 @@ fn diagnose_with_policy(
     let anime = if verified_chinese_override.is_some()
         || verified_anidb_absolute.is_some()
         || verified_absolute_episode_imdb.is_some() {
-        // IMDb candidate selection belongs to imdb_matcher. The older
-        // anime-priority fallback is only allowed when IMDb ranking has no
-        // eligible candidate; it must never replace an IMDb winner.
+        // A separately verified absolute episode owns its crosswalk.
+        // Otherwise retain the established anime-priority path, including
+        // its explicit collision and season eligibility protections.
         None
     } else if series {
         if let Some(ep)=episodes.first(){
@@ -900,12 +900,9 @@ fn diagnose_with_policy(
             "category":"series","matched_title":title,
             "anime_ids":anime_ids,"parsed":parsed_value.clone()}))
     } else {
-        // Python match_title refuses ambiguous IMDb identities rather than
-        // silently returning the first equally plausible candidate.
-        // Always select a candidate. A verified anime crosswalk takes priority;
-        // otherwise MatchLab ranking (including stable IMDb ID tie-break) wins.
-        // Keep the deterministic IMDb winner. Crosswalk evidence may
-        // enrich its coordinates, but must not reorder IMDb identities.
+        // Keep established deterministic IMDb ranking and the proven
+        // anime crosswalk priority. This is still required for anime parts
+        // whose release title differs from the main IMDb series title.
         let mut chosen_index=0usize;
         // The original anime-aware crosswalk remains authoritative when
         // a season marker or unverified unmarked episode leaves several
@@ -1211,7 +1208,8 @@ fn diagnose_with_policy(
                     }else{json!(imdb_id)};
                     winner["anime"]=Value::Null;
                 }
-            }else{
+            }else if verified_anime_range_imdb.as_ref()
+                .is_none_or(|verified|verified==&imdb_id) {
                 let range=mapped_absolute_range(&db,&imdb_id,start,end)?;
                 // Preserve the requested absolute endpoints even when some
                 // crosswalk entries are missing, but never invent IMDb or
