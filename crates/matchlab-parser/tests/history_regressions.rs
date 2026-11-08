@@ -83,6 +83,8 @@ fn spanish_cap_three_digit_season_episode_shorthand() {
         ("La Promesa Cap 312 WEB-DL", 3, 12),
         ("La Promesa cap-405 WEBRip", 4, 5),
         ("La Promesa.CAP.999.1080p", 9, 99),
+        ("La Promesa.Cap.1034.HDTV", 10, 34),
+        ("La Promesa CAP_1207 720p Castellano", 12, 7),
     ] {
         let parsed = parsed(raw);
         assert_eq!(parsed["title"], "La Promesa", "{raw}: {parsed:?}");
@@ -100,11 +102,24 @@ fn spanish_cap_notation_does_not_override_stronger_episode_coordinates() {
     assert_eq!(explicit["seasons"], json!([2]));
     assert_eq!(explicit["episodes"], json!([5]));
 
-    for raw in ["La Promesa Capitulo 103", "La Promesa Cap.1034",
-                "La Promesa Cap.100", "La Promesa cap.103p"] {
+    for raw in ["La Promesa Capitulo 103", "La Promesa Cap.100",
+                "La Promesa cap.103p", "La Promesa Cap.10345"] {
         let parsed = parsed(raw);
         assert_ne!((parsed["seasons"].clone(), parsed["episodes"].clone()),
             (json!([1]), json!([3])),
             "must not fabricate S01E03 from {raw}: {parsed:?}");
     }
+}
+
+#[test]
+fn real_spanish_temporada_ten_cap_1004_is_s10e04() {
+    let raw = "The Walking Dead - Temporada 10 [HDTV 720p][Cap.1004][AC3 5.1 Castellano][www.descargas2020.org]";
+    let p = parsed(raw);
+    assert_eq!(p["seasons"], json!([10]), "{p:?}");
+    assert_eq!(p["episodes"], json!([4]), "{p:?}");
+    assert_eq!(p["title"], "The Walking Dead", "{p:?}");
+
+    let mismatched = parsed("The Walking Dead - Temporada 9 [Cap.1004]");
+    assert_ne!(mismatched["seasons"], json!([10]),
+        "conflicting explicit season must not be overwritten: {mismatched:?}");
 }
