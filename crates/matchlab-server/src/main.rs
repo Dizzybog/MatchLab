@@ -1305,8 +1305,10 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,debug:bool)->Result<Diagnos
         // generations. Retrying the next request is safer than serving stale.
         return Err("matching metadata or learned regex changed during request; retry".into());
     }
+    // Cache both successful matches and stable no-match outcomes. A
+    // negative result uses a short TTL, and every hit still requires the
+    // current parser/regex and metadata namespace. Debug requests bypass it.
     if !debug && let Ok(ref diagnostic)=result
-        && diagnostic.selected.is_some()
         && let Ok(snapshot)=serde_json::to_value(diagnostic){
         learning_cache::put_match(
             &req.title,req.year,req.series,&state.db,&snapshot);
@@ -1324,7 +1326,13 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,debug:bool)->Result<Diagnos
 }
 
 async fn ml_status()->Json<Value>{
-    Json(field_learning::status())
+    let mut report=field_learning::status();
+    if let Some(object)=report.as_object_mut(){
+        object.insert("training_and_cache".into(),learning_cache::status());
+        object.insert("online_model".into(),online_model::OnlineModel::status());
+        object.insert("unknown_markers".into(),candidate_discovery::status());
+    }
+    Json(report)
 }
 
 async fn dashboard()->([(header::HeaderName,&'static str);1],&'static str){
