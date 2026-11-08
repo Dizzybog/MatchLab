@@ -114,6 +114,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,model:&mut OptionalMo
     let meta=Connection::open_with_flags(metadata,OpenFlags::SQLITE_OPEN_READ_ONLY).ok();
     if let Some(ref metadata)=meta {
         crate::learned_regex::reconcile(local,metadata)?;
+        crate::field_learning::reconcile(local)?;
     }
     let now=chrono::Utc::now().timestamp();
     let mut samples=count(local,"samples")?;
@@ -124,6 +125,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,model:&mut OptionalMo
         if let Some(ref metadata)=meta {
             crate::learned_regex::observe(local,metadata,&title,&details)?;
         }
+        crate::field_learning::observe(local,&title,&details)?;
         let flags=crate::field_audit::audit(&title,&details["parsed"],&details["selected"]);
         for flag in flags {
             let Some((code,group))=pattern(&flag,&details)else{continue};
@@ -159,6 +161,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,model:&mut OptionalMo
     }
     if let Some(ref metadata)=meta {
         crate::learned_regex::reconcile(local,metadata)?;
+        crate::field_learning::reconcile(local)?;
     }
     put(local,"after_id",&after.to_string())
 }
