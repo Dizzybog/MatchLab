@@ -18,7 +18,7 @@ use std::sync::{
     OnceLock, RwLock,
 };
 
-const EPOCH: i64 = 1;
+const EPOCH: i64 = 2;
 const MIN_EXAMPLES: i64 = 8;
 const MIN_TITLES: i64 = 4;
 const MIN_OVERRIDE_EXAMPLES: i64 = 16;
@@ -37,6 +37,7 @@ struct FieldRule {
     regex: Regex,
     examples: i64,
     titles: i64,
+    canonical_examples: i64,
 }
 
 fn registry() -> &'static RwLock<Vec<FieldRule>> {
@@ -140,6 +141,65 @@ fn validated_value(field: &str, signal: &str, value: &Value) -> bool {
         _ => false,
     }
 }
+// Independent raw-marker references can label an absent *technical* field
+// when the canonical parser misses it. They cannot relabel an existing
+// result, supply IMDb coordinates, or learn an unknown label by repetition.
+fn independent_marker_value(field:&str,signal:&str)->Option<Value>{
+    let value=match (field,signal){
+        ("resolution","4320p"|"2160p"|"1080p"|"720p"|"576p"|"480p")=>json!(signal),
+        ("codec","x264"|"x265"|"h264"|"h265"|"hevc"|"av1")=>json!(signal),
+        ("quality","web_dl"|"webdl")=>json!("WEB-DL"),
+        ("quality","webrip")=>json!("WEBRip"),
+        ("quality","bluray")=>json!("BluRay"),
+        ("quality","hdtv")=>json!("HDTV"),
+        ("audio","aac"|"ac3"|"eac3"|"ddp"|"dts"|"flac"|"truehd"|"opus")=>json!(signal),
+        ("bit_depth","8bit"|"10bit"|"12bit")=>json!(signal),
+        ("channels","5.1"|"7.1"|"2.0")=>json!(signal),
+        ("extension","mkv"|"mp4"|"avi"|"m4v"|"webm"|"m2ts")=>json!(signal),
+        ("subbed","subbed"|"hardsubbed")|("dubbed","dubbed")=>json!(true),
+        _=>return None,
+    };
+    validated_value(field,signal,&value).then_some(value)
+}
+fn independent_context_valid(raw:&str,field:&str,signal:&str)->bool{
+    if !context_valid(raw,field,signal){return false;}
+    let name=leaf(raw);
+    if field=="extension" && !name.to_ascii_lowercase()
+        .ends_with(&format!(".{signal}")){return false;}
+    // Reject overlapping or contradictory media markers as negative probes.
+    let alternatives:&[&str]=match field{
+        "resolution"=>&["4320p","2160p","1080p","720p","576p","480p","4k","8k"],
+        "codec"=>&["x264","x265","h264","h265","hevc","av1","vp9"],
+        "quality"=>&["web_dl","webdl","webrip","bluray","bdrip","brrip","hdtv","dvdrip"],
+        "audio"=>&["aac","ac3","eac3","ddp","dts","flac","truehd","opus"],
+        "bit_depth"=>&["8bit","10bit","12bit","10bits","12bits"],
+        "channels"=>&["5.1","7.1","2.0"],
+        _=>&[],
+    };
+    !alternatives.iter().filter(|other|**other!=signal).any(|other|
+        pattern_for(field,other).is_some_and(|re|re.is_match(name)))
+}
+fn empty_field(value:Option<&Value>)->bool{
+    match value{
+        None|Some(Value::Null)=>true,
+        Some(Value::String(s))=>s.trim().is_empty(),
+        Some(Value::Array(a))=>a.is_empty(),
+        Some(Value::Object(o))=>o.is_empty(),
+        _=>false,
+    }
+}
+fn training_label(title:&str,field:&str,signal:&str,
+    parsed:&serde_json::Map<String,Value>)->Option<(Value,bool)>{
+    if let Some(value)=parsed.get(field)
+        && validated_value(field,signal,value){
+        return Some((value.clone(),false));
+    }
+    // A present but disagreeing field is NOT considered missing. Only
+    // independently explicit markers can train a missing-field rule.
+    if !empty_field(parsed.get(field))
+        || !independent_context_valid(title,field,signal){return None;}
+    independent_marker_value(field,signal).map(|v|(v,true))
+}
 fn signals(title: &str) -> Vec<(String, String)> {
     // Audit the original raw release, not parser output: marker extraction
     // does not depend on the suspected incorrect field.
@@ -211,6 +271,13 @@ pub fn init(db: &Connection) -> Result<(), String> {
             PRIMARY KEY(field,signal,example_hash));
          CREATE INDEX IF NOT EXISTS learned_field_cohort
             ON learned_field_evidence(field,signal,source_build);
+         CREATE TABLE IF NOT EXISTS learned_field_gap_evidence(
+             field TEXT NOT NULL,signal TEXT NOT NULL,example_hash TEXT NOT NULL,
+             identity_hash TEXT NOT NULL,canonical TEXT NOT NULL,
+             source_build TEXT NOT NULL,first_seen INTEGER NOT NULL,
+             PRIMARY KEY(field,signal,example_hash));
+         CREATE INDEX IF NOT EXISTS learned_field_gap_cohort
+             ON learned_field_gap_evidence(field,signal,source_build);
          CREATE TABLE IF NOT EXISTS learned_field_rules(
             field TEXT NOT NULL,signal TEXT NOT NULL,canonical TEXT NOT NULL,
             verified_build TEXT NOT NULL,example_count INTEGER NOT NULL,
@@ -230,32 +297,45 @@ pub fn observe(db: &Connection, title: &str, details: &Value) -> Result<(), Stri
     let source_build = build();
     for (field, signal) in signals(title) {
         if !context_valid(title, &field, &signal) { continue; }
-        let Some(value) = object.get(&field) else { continue; };
-        if !validated_value(&field, &signal, value) { continue; }
-        let canonical = serde_json::to_string(value).map_err(|e| e.to_string())?;
-        let key = digest(&format!("{}:{field}:{signal}", title.to_ascii_lowercase()));
-        let existing: i64 = db.query_row(
-            "SELECT count(*) FROM learned_field_evidence WHERE source_build=?1",
-            [&source_build], |row| row.get(0)).map_err(|e| e.to_string())?;
-        // A verified, previously recorded release is allowed to revalidate
-        // even at quota. New evidence must respect the bounded budget.
-        if existing >= MAX_EVIDENCE {
-            let known: i64 = db.query_row(
+        let Some((value,from_gap))=training_label(title,&field,&signal,object)
+            else {continue;};
+        let canonical=serde_json::to_string(&value).map_err(|e|e.to_string())?;
+        let key=digest(&format!("{}:{field}:{signal}",title.to_ascii_lowercase()));
+        let existing:i64=db.query_row(
+            "SELECT (SELECT count(*) FROM learned_field_evidence WHERE source_build=?1)
+                  + (SELECT count(*) FROM learned_field_gap_evidence WHERE source_build=?1)",
+            [&source_build],|row|row.get(0)).map_err(|e|e.to_string())?;
+        if existing>=MAX_EVIDENCE{
+            let lookup=if from_gap{
+                "SELECT count(*) FROM learned_field_gap_evidence
+                 WHERE field=?1 AND signal=?2 AND example_hash=?3"
+            }else{
                 "SELECT count(*) FROM learned_field_evidence
-                 WHERE field=?1 AND signal=?2 AND example_hash=?3",
-                params![field,signal,key],|row|row.get(0))
-                .map_err(|e|e.to_string())?;
-            if known==0 { continue; }
+                 WHERE field=?1 AND signal=?2 AND example_hash=?3"
+            };
+            let known:i64=db.query_row(lookup,params![field,signal,key],
+                |row|row.get(0)).map_err(|e|e.to_string())?;
+            if known==0{continue;}
         }
-        db.execute(
+        // Statically selected statements; nothing derived from filenames
+        // enters SQL identifiers or statements, only bound parameters.
+        let sql=if from_gap{
+            "INSERT INTO learned_field_gap_evidence(
+                field,signal,example_hash,identity_hash,canonical,source_build,first_seen)
+             VALUES(?1,?2,?3,?4,?5,?6,strftime('%s','now'))
+             ON CONFLICT(field,signal,example_hash) DO UPDATE SET
+                identity_hash=excluded.identity_hash,canonical=excluded.canonical,
+                source_build=excluded.source_build,first_seen=excluded.first_seen"
+        }else{
             "INSERT INTO learned_field_evidence(
                 field,signal,example_hash,identity_hash,canonical,source_build,first_seen)
              VALUES(?1,?2,?3,?4,?5,?6,strftime('%s','now'))
              ON CONFLICT(field,signal,example_hash) DO UPDATE SET
                 identity_hash=excluded.identity_hash,canonical=excluded.canonical,
-                source_build=excluded.source_build,first_seen=excluded.first_seen",
-            params![field,signal,key,identity,canonical,source_build])
-            .map_err(|e| e.to_string())?;
+                source_build=excluded.source_build,first_seen=excluded.first_seen"
+        };
+        db.execute(sql,params![field,signal,key,identity,canonical,source_build])
+            .map_err(|e|e.to_string())?;
     }
     Ok(())
 }
@@ -265,19 +345,33 @@ pub fn observe(db: &Connection, title: &str, details: &Value) -> Result<(), Stri
 pub fn evict_obsolete(db: &Connection, limit: i64) -> Result<i64, String> {
     if limit <= 0 { return Ok(0); }
     init(db)?;
-    db.execute(
+    let obsolete=db.execute(
+        "DELETE FROM learned_field_gap_evidence WHERE rowid IN (
+            SELECT rowid FROM learned_field_gap_evidence WHERE source_build<>?1
+            ORDER BY first_seen,rowid LIMIT ?2)",params![build(),limit])
+        .map_err(|e|e.to_string())? as i64;
+    let remaining=limit.saturating_sub(obsolete);
+    if remaining==0{return Ok(obsolete);}
+    let original=db.execute(
         "DELETE FROM learned_field_evidence WHERE rowid IN (
             SELECT rowid FROM learned_field_evidence WHERE source_build<>?1
-            ORDER BY first_seen, rowid LIMIT ?2)",params![build(),limit])
-        .map(|n| n as i64).map_err(|e| e.to_string())
+            ORDER BY first_seen,rowid LIMIT ?2)",params![build(),remaining])
+        .map_err(|e|e.to_string())? as i64;
+    Ok(obsolete+original)
 }
 fn select_rules(db: &Connection) -> Result<Vec<FieldRule>, String> {
     let source_build = build();
     let mut stmt = db.prepare(
         "SELECT field,signal,canonical,count(*) AS examples,
-                count(DISTINCT identity_hash) AS titles
-         FROM learned_field_evidence WHERE source_build=?1
-         GROUP BY field,signal,canonical
+                count(DISTINCT identity_hash) AS titles,
+                sum(CASE WHEN origin=0 THEN 1 ELSE 0 END) AS canonical_examples
+         FROM (
+           SELECT field,signal,canonical,identity_hash,0 AS origin
+             FROM learned_field_evidence WHERE source_build=?1
+           UNION ALL
+           SELECT field,signal,canonical,identity_hash,1 AS origin
+             FROM learned_field_gap_evidence WHERE source_build=?1
+         ) GROUP BY field,signal,canonical
          HAVING examples>=?2 AND titles>=?3
          ORDER BY examples DESC,field,signal,canonical LIMIT 512"
     ).map_err(|e| e.to_string())?;
@@ -285,17 +379,17 @@ fn select_rules(db: &Connection) -> Result<Vec<FieldRule>, String> {
         params![source_build, MIN_EXAMPLES, MIN_TITLES],
         |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,
             row.get::<_,String>(2)?,row.get::<_,i64>(3)?,
-            row.get::<_,i64>(4)?)))
+            row.get::<_,i64>(4)?,row.get::<_,i64>(5)?)))
         .map_err(|e| e.to_string())?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| e.to_string())?;
     let mut grouped: BTreeMap<(String,String), Vec<FieldRule>> = BTreeMap::new();
-    for (field, signal, canonical, examples, titles) in matches {
+    for (field, signal, canonical, examples, titles, canonical_examples) in matches {
         let Ok(value) = serde_json::from_str::<Value>(&canonical) else { continue; };
         if !validated_value(&field, &signal, &value) { continue; }
         let Some(regex) = pattern_for(&field, &signal) else { continue; };
         grouped.entry((field.clone(), signal.clone())).or_default()
-            .push(FieldRule{field,signal,value,regex,examples,titles});
+            .push(FieldRule{field,signal,value,regex,examples,titles,canonical_examples});
     }
     let mut active = Vec::new();
     for ((field,signal), candidates) in grouped {
@@ -304,9 +398,11 @@ fn select_rules(db: &Connection) -> Result<Vec<FieldRule>, String> {
         if candidates.len() != 1 { continue; }
         let rule = candidates.into_iter().next().expect("one candidate");
         let conflicts: i64 = db.query_row(
-            "SELECT count(*) FROM learned_field_evidence
-             WHERE field=?1 AND signal=?2 AND source_build=?3
-               AND canonical<>?4",
+            "SELECT
+               (SELECT count(*) FROM learned_field_evidence
+                  WHERE field=?1 AND signal=?2 AND source_build=?3 AND canonical<>?4)
+              +(SELECT count(*) FROM learned_field_gap_evidence
+                  WHERE field=?1 AND signal=?2 AND source_build=?3 AND canonical<>?4)",
             params![field,signal,source_build,
                 serde_json::to_string(&rule.value).map_err(|e| e.to_string())?],
             |row| row.get(0)).map_err(|e| e.to_string())?;
@@ -390,7 +486,7 @@ fn propose_from(title: &str, parsed: &mut Value, active: &[FieldRule]) {
         };
         // Existing values need more independent support than missing values.
         if !empty && (rule.examples < MIN_OVERRIDE_EXAMPLES
-            || rule.titles < MIN_OVERRIDE_TITLES) {
+            || rule.titles < MIN_OVERRIDE_TITLES || rule.canonical_examples < 2) {
             continue;
         }
         // A release may carry multiple conflicting specifications (e.g.
@@ -426,7 +522,7 @@ pub fn status() -> Value {
         return json!({"enabled":crate::local_learning::active(),
             "active_rule_count":active.len(),"active_rules_by_field":fields,
             "revision":format!("{:016x}",revision()),
-            "training_source":"canonical_rust_parser",
+            "training_source":"canonical_rust_parser_and_allowlisted_raw_markers",
             "model":"fixed_bootstrap_anomaly_ranker",
             "identity_and_coordinate_override":"separate_metadata_verification"});
     }
@@ -445,7 +541,8 @@ mod tests {
     use super::*;
     fn rule(field:&str,signal:&str,value:Value,examples:i64,titles:i64)->FieldRule {
         FieldRule {field:field.into(),signal:signal.into(),value,
-            regex:pattern_for(field,signal).unwrap(),examples,titles}
+            regex:pattern_for(field,signal).unwrap(),examples,titles,
+            canonical_examples:examples}
     }
     #[test]
     fn safe_regex_is_generated_from_literal_tokens_only() {
