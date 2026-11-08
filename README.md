@@ -189,6 +189,9 @@ IMDb basics, alternative titles, episodes, ratings, animeApi, Anime-Lists, and A
 | `MATCHLAB_METADATA_REFRESH_HOURS` | `168` | Refresh every 1–720 hours |
 | `MATCHLAB_MAX_CONCURRENT_MATCHES` | `4` | Limit simultaneous match operations (1–64) |
 | `MATCHLAB_DEBUG_API_TOKEN` | Unset (disabled) | Enable authenticated, read-only parsing diagnostics with a random token of at least 32 bytes |
+| `MATCHLAB_COMMUNITY_LEARNING_ENABLED` | `false` | Explicit opt-in to upload selected suspected anomalies as public GitHub Issues |
+| `MATCHLAB_COMMUNITY_GITHUB_TOKEN` | Unset | Fine-grained GitHub PAT scoped to `Dizzybog/MatchLab` with Issues: write |
+| `MATCHLAB_COMMUNITY_STATE_FILE` | `/data/community-learning-state.json` | Persisted reporting cursor and daily upload limit; resets on new builds/epochs |
 | `MATCHLAB_METADATA_URLS` | Built-in HTTPS feeds | Optional seven-source override; legacy six-source lists are supported |
 | `RUST_LOG` | `matchlab_server=info` | Logging verbosity |
 
@@ -197,6 +200,52 @@ IMDb basics, alternative titles, episodes, ratings, animeApi, Anime-Lists, and A
 For importer options and the exact source URLs, see [Metadata lifecycle](docs/LOCAL_METADATA.md). For index internals and crash-safety considerations, see [Tantivy architecture](docs/TANTIVY_RUNTIME.md).
 
 **Security:** The optional parsing debug feed requires its own bearer token and is unavailable when `MATCHLAB_DEBUG_API_TOKEN` is absent or shorter than 32 bytes. The remaining API and dashboard have no built-in authentication. This example binds the port to **localhost**; put the service behind an authenticated HTTPS reverse proxy before exposing it over a network. Debug history may contain private torrent filenames. Use HTTPS, protect the other endpoints at the proxy, and never put the token in a URL. The debug feed is a polling surface, not an autonomous reviewer or a scheduled PR author. [Feed usage and cursor semantics](docs/API.md#read-only-parsing-diagnostics-feed).
+
+## Contribute to Community Learning
+
+**Community Learning is off by default.** Enable it only if you consent to
+publishing selected torrent *basenames* as **public GitHub Issues**. Even
+basenames can reveal private information, so do not enable it for a
+sensitive library. No original torrent files, paths, tracker URLs, API
+credentials or full debug payloads are uploaded.
+
+To join:
+
+1. Run the latest **official** MatchLab Docker image. It contains a
+   compile-time Git SHA; outdated/unofficial builds cannot upload reports.
+2. Create a [fine-grained GitHub token](https://github.com/settings/personal-access-tokens/new)
+   restricted to repository **Dizzybog/MatchLab** with **Issues: Read and write**
+   only. Never share the token.
+3. Set these variables in your local Compose file, keeping the actual
+   token in a **private**, uncommitted `.env` file:
+
+   ~~~yaml
+   environment:
+     MATCHLAB_COMMUNITY_LEARNING_ENABLED: "true"
+     MATCHLAB_COMMUNITY_GITHUB_TOKEN: ${MATCHLAB_COMMUNITY_GITHUB_TOKEN}
+   ~~~
+
+4. Redeploy; open `/api/community/status`. Both `enabled` and `ready`
+   must show `true`. To stop sharing, set the enabled flag to `false`,
+   restart, and optionally revoke the token.
+5. Selected anomaly reports are sent at most **4 per UTC day**. When
+   a new official build becomes available, older builds automatically
+   stop sending, and upgraded installs **do not replay old request
+   history**. GitHub Actions independently rejects stale versions.
+   Uploaded reports are **not automatically trusted or learned from**.
+
+The daily GitHub Actions workflow validates version and epoch, deduplicates
+candidate reports, and generates a bounded review artifact plus an optional
+**shadow-mode machine learning model** trained only on independently
+reviewed, current-build labels. **It does not change production matching,
+publish active ML rules, or auto-merge PRs.** This prevents outdated or
+unverified results from poisoning the learning dataset.
+
+For manual contributions, open a GitHub Issue containing only a
+non-sensitive example, expected result and verifiable IMDb/AniDB evidence.
+
+**Full setup, security policy and maintainer guide:**
+[Community Learning](docs/COMMUNITY_LEARNING.md).
 
 ## Build and test
 
