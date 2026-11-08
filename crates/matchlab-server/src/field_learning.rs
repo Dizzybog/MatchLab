@@ -8,7 +8,7 @@
 //!
 //! Ordinary matching never opens SQLite: the worker atomically hot-swaps an
 //! immutable in-memory ruleset. The whole module is disabled by default.
-use regex::{Regex, RegexBuilder};
+use regex::{Regex,RegexBuilder,RegexSet,RegexSetBuilder};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -26,7 +26,7 @@ const MIN_OVERRIDE_TITLES: i64 = 6;
 const MAX_RULES: usize = 96;
 const MAX_EVIDENCE: i64 = 12_000;
 const MAX_TITLE_BYTES: usize = 240;
-static ACTIVE: OnceLock<RwLock<Vec<FieldRule>>> = OnceLock::new();
+static ACTIVE:OnceLock<RwLock<ActiveRules>>=OnceLock::new();
 static REVISION: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
@@ -40,8 +40,14 @@ struct FieldRule {
     canonical_examples: i64,
 }
 
-fn registry() -> &'static RwLock<Vec<FieldRule>> {
-    ACTIVE.get_or_init(|| RwLock::new(Vec::new()))
+struct ActiveRules{
+    rules:Vec<FieldRule>,
+    matcher:Option<RegexSet>,
+}
+fn registry()->&'static RwLock<ActiveRules>{
+    ACTIVE.get_or_init(||RwLock::new(ActiveRules{
+        rules:Vec::new(),matcher:None
+    }))
 }
 pub fn revision() -> u64 {
     REVISION.load(Ordering::Acquire)
@@ -296,14 +302,14 @@ pub fn init(db: &Connection) -> Result<(), String> {
             source_build TEXT NOT NULL, first_seen INTEGER NOT NULL,
             PRIMARY KEY(field,signal,example_hash));
          CREATE INDEX IF NOT EXISTS learned_field_cohort
-            ON learned_field_evidence(field,signal,source_build);
+            ON learned_field_evidence(source_build,field,signal,canonical,identity_hash);
          CREATE TABLE IF NOT EXISTS learned_field_gap_evidence(
              field TEXT NOT NULL,signal TEXT NOT NULL,example_hash TEXT NOT NULL,
              identity_hash TEXT NOT NULL,canonical TEXT NOT NULL,
              source_build TEXT NOT NULL,first_seen INTEGER NOT NULL,
              PRIMARY KEY(field,signal,example_hash));
          CREATE INDEX IF NOT EXISTS learned_field_gap_cohort
-             ON learned_field_gap_evidence(field,signal,source_build);
+             ON learned_field_gap_evidence(source_build,field,signal,canonical,identity_hash);
          CREATE TABLE IF NOT EXISTS learned_field_rules(
             field TEXT NOT NULL,signal TEXT NOT NULL,canonical TEXT NOT NULL,
             verified_build TEXT NOT NULL,example_count INTEGER NOT NULL,
@@ -477,9 +483,14 @@ fn install(mut incoming: Vec<FieldRule>) {
     let bytes = Sha256::digest(fingerprint.as_bytes());
     let mut id = [0u8;8];
     id.copy_from_slice(&bytes[..8]);
-    if let Ok(mut guard) = registry().write() {
-        *guard = incoming;
-        REVISION.store(u64::from_le_bytes(id), Ordering::Release);
+    // One automaton prunes up to 96 rules in one pass. The original
+    // compiled regex still checks boundaries, field-specific conflicts
+    // and positive/negative probes for each candidate.
+    let matcher=RegexSetBuilder::new(incoming.iter().map(|rule|rule.regex.as_str()))
+        .size_limit(1024*1024).build().ok();
+    if let Ok(mut guard)=registry().write(){
+        *guard=ActiveRules{rules:incoming,matcher};
+        REVISION.store(u64::from_le_bytes(id),Ordering::Release);
     }
 }
 pub fn reconcile(db: &Connection) -> Result<(), String> {
@@ -492,7 +503,7 @@ pub fn reconcile(db: &Connection) -> Result<(), String> {
         .collect::<Vec<_>>();
     by_rule.sort_by(|a,b| (&a.0,&a.1).cmp(&(&b.0,&b.1)));
     let already_installed = registry().read().ok().is_some_and(|guard|{
-        let mut old=guard.iter().map(semantic_identity)
+        let mut old=guard.rules.iter().map(semantic_identity)
             .collect::<Vec<_>>();
         old.sort_by(|a,b| (&a.0,&a.1).cmp(&(&b.0,&b.1)));
         old == by_rule
@@ -514,17 +525,20 @@ pub fn reconcile(db: &Connection) -> Result<(), String> {
     install(active);
     Ok(())
 }
-fn propose_from(title: &str, parsed: &mut Value, active: &[FieldRule]) {
+fn propose_with_prefilter(title:&str,parsed:&mut Value,active:&[FieldRule],
+    matcher:Option<&RegexSet>) {
     if active.is_empty() || !safe_title(title) { return; }
     let Some(map) = parsed.as_object_mut() else { return; };
     // Never let an unverified field rule change title, production year,
     // IMDb/AniDB identity or season/episode coordinates.
     let mut candidates: BTreeMap<&str, Vec<&FieldRule>> = BTreeMap::new();
-    for rule in active {
-        if !independent_context_with_re(title,&rule.field,&rule.signal,&rule.regex) {
+    let matched=matcher.map(|set|set.matches(leaf(title)));
+    for (index,rule) in active.iter().enumerate(){
+        if matched.as_ref().is_some_and(|found|!found.matched(index)){continue;}
+        if !rule.regex.is_match(leaf(title)){continue;}
+        if !independent_context_with_re(title,&rule.field,&rule.signal,&rule.regex){
             continue;
         }
-        if !rule.regex.is_match(leaf(title)) { continue; }
         candidates.entry(&rule.field).or_default().push(rule);
     }
     let mut changes = Vec::new();
@@ -566,16 +580,20 @@ fn propose_from(title: &str, parsed: &mut Value, active: &[FieldRule]) {
         map.insert("learned_field_overrides".into(),Value::Array(changes));
     }
 }
+#[cfg(test)]
+fn propose_from(title:&str,parsed:&mut Value,active:&[FieldRule]){
+    propose_with_prefilter(title,parsed,active,None);
+}
 /// Privacy-preserving operator observability. Never return filenames,
 /// release history, hashes, canonical labels from private observations or IDs.
 pub fn status() -> Value {
     let mut fields = BTreeMap::<String, usize>::new();
     if let Ok(active) = registry().read() {
-        for rule in active.iter() {
+        for rule in active.rules.iter() {
             *fields.entry(rule.field.clone()).or_default() += 1;
         }
         return json!({"enabled":crate::local_learning::active(),
-            "active_rule_count":active.len(),"active_rules_by_field":fields,
+            "active_rule_count":active.rules.len(),"active_rules_by_field":fields,
             "revision":format!("{:016x}",revision()),
             "training_source":"canonical_rust_parser_and_allowlisted_raw_markers",
             "model":"rust_ftrl_proximal",
@@ -589,7 +607,7 @@ pub fn status() -> Value {
 pub fn apply(title: &str, parsed: &mut Value) {
     if !crate::local_learning::active() { return; }
     if let Ok(guard) = registry().read() {
-        propose_from(title,parsed,&guard);
+        propose_with_prefilter(title,parsed,&guard.rules,guard.matcher.as_ref());
     }
 }
 #[cfg(test)]
@@ -631,6 +649,24 @@ mod tests {
         ]);
         assert_eq!(parsed["quality"],"WEBRip");
         assert_eq!(parsed["codec"],"x264");
+    }
+    #[test]
+    fn prefiltered_set_preserves_the_same_rule_decisions(){
+        let active=vec![
+            rule("resolution","2160p",json!("2160p"),20,8),
+            rule("codec","x265",json!("x265"),20,8),
+            rule("audio","aac",json!("AAC"),20,8)
+        ];
+        let compiled=RegexSetBuilder::new(active.iter().map(|r|r.regex.as_str()))
+            .build().unwrap();
+        for name in ["Film.2160p.WEB-DL.x265","Film.720p.WEBRip.AAC",
+            "Film.1080p.2160p.x265","Film.WEB-DL"]{
+            let mut baseline=json!({"title":"Film"});
+            let mut optimized=baseline.clone();
+            propose_from(name,&mut baseline,&active);
+            propose_with_prefilter(name,&mut optimized,&active,Some(&compiled));
+            assert_eq!(baseline,optimized,"prefilter changed {name}");
+        }
     }
     #[test]
     fn even_a_single_active_rule_must_reject_competing_raw_markers() {
