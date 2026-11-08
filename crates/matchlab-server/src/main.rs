@@ -146,7 +146,7 @@ fn explicit_season_range(raw:&str)->Option<(i64,i64)>{
     None
 }
 
-/// Explicit absolute episode notation used by the Python matcher.
+/// Explicit absolute episode notation used by the Rust release matcher.
 fn explicit_absolute_episode(raw:&str)->Option<i64>{
     let words:Vec<_>=raw.split(|c:char|!c.is_ascii_alphanumeric())
         .filter(|x|!x.is_empty()).collect();
