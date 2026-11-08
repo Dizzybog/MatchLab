@@ -93,9 +93,18 @@ no-matches have separate TTLs; stale results are recomputed.
 For the learning status, inspect `GET /api/ml/status`. Local learning
 never posts to GitHub. If you also want to contribute publicly, enable
 `MATCHLAB_COMMUNITY_LEARNING_ENABLED=true` and provide your own private
-`MATCHLAB_COMMUNITY_GITHUB_TOKEN`. The upstream PR-review pipeline
-currently supports separately verified absolute-anime marker proposals;
-other field proposals still require community intake validation.
+`MATCHLAB_COMMUNITY_GITHUB_TOKEN`. The upstream GitHub intake now accepts **all three other
+regex proposal types**: new technical-field rules, ordinary-TV season/episode
+rules and modifications to existing generated handler regex, in addition to
+verified anime markers. Each submitted proposal contains the actual regex;
+source modifications include **both original and proposed patterns** plus
+their original handler index, field, transform and evidence counters.
+The daily GitHub Action opens at most one human-review PR. Technical/TV/source
+proposals enter `learning/community_regex_proposals.json` as **review-only
+suggestions**; they are not silently installed on other users' systems by
+merging an unverified report. Independently tested and approved changes must
+subsequently be integrated into the parser. Only approved anime marker rules
+are packaged automatically via `learning/community_rules.json`.
 
 **[Full learning architecture, limitations and contribution guide](docs/COMMUNITY_LEARNING.md)**
 
