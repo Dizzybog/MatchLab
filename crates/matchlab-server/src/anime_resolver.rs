@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 
 #[derive(Clone,Debug)]
-struct Link {anidb:String,tvdb:String,trakt:i64}
+struct Link {anidb:String,tvdb:String,trakt:i64,direct:bool}
 #[derive(Clone,Debug)]
 struct Mapping {anidb:String,tvdb:String,tv_season:i64,start:i64,end:i64,offset:i64,map:String}
 #[derive(Clone,Debug,PartialEq,Eq,Serialize)]
@@ -32,13 +32,13 @@ pub(crate) fn valid_asid(asid:&str)->bool{
 }
 fn links(db:&Connection,imdb:&str)->rusqlite::Result<Vec<Link>>{
     let mut stmt=db.prepare("SELECT anidb_id,tvdb_id,trakt_season FROM anime_series_map WHERE imdb_id=?1")?;
-    let mut out=stmt.query_map([imdb],|r|Ok(Link{anidb:r.get(0)?,tvdb:r.get(1)?,trakt:r.get(2)?}))?
+    let mut out=stmt.query_map([imdb],|r|Ok(Link{anidb:r.get(0)?,tvdb:r.get(1)?,trakt:r.get(2)?,direct:true}))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     if out.is_empty(){
         let mut stmt=db.prepare("SELECT DISTINCT value FROM anime_ids WHERE group_id=?1 AND type='anidb'")?;
         let ids=stmt.query_map([imdb],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         if ids.len()!=1{return Ok(vec![]);}
-        out.push(Link{anidb:ids[0].clone(),tvdb:String::new(),trakt:0});
+        out.push(Link{anidb:ids[0].clone(),tvdb:String::new(),trakt:0,direct:true});
     }
     let tvdbs:BTreeSet<String>=out.iter().filter(|l|!l.tvdb.is_empty()).map(|l|l.tvdb.clone()).collect();
     for tvdb in tvdbs {
@@ -46,7 +46,7 @@ fn links(db:&Connection,imdb:&str)->rusqlite::Result<Vec<Link>>{
         for id in stmt.query_map([&tvdb],|r|r.get::<_,String>(0))? {
             let id=id?;
             if !out.iter().any(|l|l.anidb==id&&l.tvdb==tvdb){
-                out.push(Link{anidb:id,tvdb:tvdb.clone(),trakt:0});
+                out.push(Link{anidb:id,tvdb:tvdb.clone(),trakt:0,direct:false});
             }
         }
     }
@@ -175,7 +175,16 @@ fn resolve_absolute_preloaded(
     imdb:&str,episode:i64,links:&[Link],maps:&[Mapping],
 )->Option<Episode>{
     if !(1..=99_999).contains(&episode){return None;}
-    let mut candidates=BTreeSet::new();
+    // A TVDB family includes sequels, movies and cours with different AniDB
+    // identities. An open-ended season default is weaker evidence than a
+    // concrete bounded episode mapping (or an explicit episode pair).
+    // Keep ties at the strongest evidence level ambiguous.
+    let mut candidates=std::collections::BTreeMap::<(String,i64,i64,i64),u8>::new();
+    let mut register=|candidate:(String,i64,i64,i64),strength:u8|{
+        candidates.entry(candidate)
+            .and_modify(|previous|*previous=(*previous).max(strength))
+            .or_insert(strength);
+    };
     for link in links{
         let associated:Vec<_>=maps.iter().filter(|m|m.anidb==link.anidb&&(link.tvdb.is_empty()||m.tvdb==link.tvdb)).collect();
         let absolutes:Vec<_>=associated.iter().filter(|m|m.tv_season==-1).collect();
@@ -184,45 +193,49 @@ fn resolve_absolute_preloaded(
         if local<=0||absolutes.first().is_some_and(|m|m.end>0&&local>m.end){continue;}
         for m in &associated{
             if m.tv_season<=0{continue;}
-            // Explicit episode pairs are authoritative even when the range
-            // describes a different numbering domain.
+            // Explicit episode pairs are authoritative even if the mapping
+            // range describes another numbering domain.
             let explicit=explicit_pairs(&m.map);
             if !explicit.is_empty(){
                 for (ani,tv) in explicit {
-                    if ani==local&&tv>0 {
-                        let season=if split(link,m,&links,&maps){link.trakt}else{m.tv_season};
-                        if season>0{candidates.insert((link.anidb.clone(),local,season,tv));}
+                    if ani==local&&tv>0{
+                        let season=if split(link,m,links,maps){link.trakt}else{m.tv_season};
+                        if season>0{
+                            register((link.anidb.clone(),local,season,tv),3);
+                        }
                     }
                 }
                 continue;
             }
             if local<m.start.max(1)||(m.end>0&&local>m.end){continue;}
-            let is_split=split(link,m,&links,&maps);
+            // Related AniDB works from the same TVDB family are not proof
+            // that this IMDb title owns every episode of an open-ended
+            // sequel. Indirect links require a finite range or exact pair.
+            if !link.direct && (m.start<=0 || m.end<=0){continue;}
+            let is_split=split(link,m,links,maps);
             let season=if is_split{link.trakt}else{m.tv_season};
-            if is_split{
-                let tv=local-m.start.max(1)+1;
-                if season>0&&tv>0{candidates.insert((link.anidb.clone(),local,season,tv));}
+            let tv=if is_split{
+                local-m.start.max(1)+1
             }else{
-                let explicit=explicit_pairs(&m.map);
-                if !explicit.is_empty(){
-                    for (ani,tv) in explicit{
-                        if ani==local&&season>0&&tv>0{candidates.insert((link.anidb.clone(),local,season,tv));}
-                    }
-                }else{
-                    let tv=local+m.offset;
-                    if season>0&&tv>0{candidates.insert((link.anidb.clone(),local,season,tv));}
-                }
+                local+m.offset
+            };
+            if season>0&&tv>0{
+                // An explicit start/end range proves this number belongs to
+                // this AniDB work. Default open-ended seasons do not.
+                let strength=if m.start>0&&m.end>0{2}else{1};
+                register((link.anidb.clone(),local,season,tv),strength);
             }
         }
     }
-    // An explicit AniDB pair or offset may yield a six-digit local episode
-    // even when the IMDb coordinates look valid. Never publish such an ASID.
-    candidates.retain(|(id,ani,season,tv)|
+    // Invalid coordinates must never compete with verified candidates.
+    candidates.retain(|(id,ani,season,tv),_|
         canonical_asid(id,*ani).is_some()
         && (1..=9_999).contains(season)
         && (1..=99_999).contains(tv));
-    if candidates.len()!=1{return None;}
-    let (anidb_id,anidb_episode,season,episode)=candidates.into_iter().next().unwrap();
+    let strongest=candidates.values().copied().max()?;
+    let mut winners=candidates.into_iter().filter(|(_,strength)|*strength==strongest);
+    let ((anidb_id,anidb_episode,season,episode),_)=winners.next()?;
+    if winners.next().is_some(){return None;}
     Some(Episode{imdb_id:imdb.into(),season,episode,anidb_id,anidb_episode})
 }
 
@@ -300,6 +313,44 @@ pub fn resolve_anidb(
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn bleach_absolute_320_prefers_bounded_episode_over_shared_tvdb_open_sequels(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(
+                anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            -- Bleach (2004) has an absolute-season marker plus explicit
+            -- TVDB season 15 mapping for absolute episodes 317..342.
+            INSERT INTO anime_series_map VALUES('tt0434665','2369','74796',0);
+            INSERT INTO episode_map VALUES
+                ('2369','74796',1,-1,1,0,0,''),
+                ('2369','74796',1,15,317,342,-316,''),
+                -- Later Bleach parts share TVDB 74796 and have open defaults.
+                ('15449','74796',1,17,0,0,0,''),
+                ('17765','74796',1,17,0,0,13,'');").unwrap();
+        let mapped=resolve_absolute(&db,"tt0434665",320).unwrap().unwrap();
+        assert_eq!((mapped.season,mapped.episode),(15,4));
+        assert_eq!((mapped.anidb_id.as_str(),mapped.anidb_episode),("2369",320));
+        let batch=resolve_absolute_range(&db,"tt0434665",319,321).unwrap();
+        assert_eq!(batch.len(),3);
+        for (number,episode) in (319..=321).zip(batch){
+            let ep=episode.expect("bounded Bleach episode");
+            assert_eq!((ep.season,ep.episode,ep.anidb_episode),(15,number-316,number));
+            assert_eq!(ep.anidb_id,"2369");
+        }
+        // No bounded mapping covers a later sequel episode. Related
+        // unbounded default rows cannot claim it for the 2004 IMDb series.
+        assert!(resolve_absolute(&db,"tt0434665",400).unwrap().is_none());
+        // Two independently bounded works remain ambiguous even when they
+        // share the same TVDB family; never pick one by name or ID ordering.
+        db.execute("INSERT INTO episode_map VALUES
+            ('8888','74796',1,15,317,342,-316,'')",[]).unwrap();
+        assert!(resolve_absolute(&db,"tt0434665",320).unwrap().is_none());
+    }
+
     #[test]fn explicit(){assert_eq!(explicit_pairs(";1-2+3;4-7;"),vec![(1,2),(1,3),(4,7)]);}
     #[test]
     fn explicit_season_mapping_uses_exact_pairs(){

@@ -489,30 +489,34 @@ fn verified_unmarked_anime_range_imdb(
 /// an episode-specific crosswalk identify one and only one IMDb work.
 /// Do not require optional anime_ids decoration or a production year when
 /// the actual episode relationship has already been proved.
+/// Verify the *ranked IMDb winner*, not every Anime-Lists ID associated
+/// with the same AniDB title. One AniDB work may have many related IMDb
+/// identities (films, specials, season entries); they must not veto the
+/// already-chosen canonical series. Preserve the normal V4 ranking.
 fn verified_unmarked_single_anime_imdb(
-    db:&Connection,key:&str,episode:i64,
+    db:&Connection,candidate_title:&str,raw_title:&str,
+    year:Option<i32>,episode:i64,
 )->Result<Option<String>,String>{
+    let key=matchlab_matcher::clean_title(candidate_title);
     if key.len()<4 || !(1..=99_999).contains(&episode){return Ok(None);}
-    let ids=tantivy_search::anime_aliases(db,key,4)?
+    let exact_ids=tantivy_search::anime_aliases(db,&key,4)?
         .into_iter().filter(|alias|alias.clean_title==key)
         .map(|alias|alias.imdb_id)
         .collect::<std::collections::BTreeSet<_>>();
-    if ids.is_empty()||ids.len()>32{return Ok(None);}
-    let mut unique=None;
-    for imdb in ids {
-        let Some(mapped)=anime_resolver::resolve_absolute(db,&imdb,episode)
-            .map_err(|e|e.to_string())? else {continue};
-        // The requested coordinate must also be possible for this IMDb
-        // season when reliable season bounds exist.
-        if !candidate_has_episode(db,&imdb,mapped.season,mapped.episode)?{
-            continue;
-        }
-        if unique.replace(imdb).is_some(){
-            // Colliding anime series both verify this episode: no guessing.
-            return Ok(None);
-        }
+    if exact_ids.is_empty(){return Ok(None);}
+    // Use the same deterministic matcher that /match uses. Resolve only
+    // its highest-ranked IMDb title. Never count other IMDb IDs linked to
+    // this AniDB work as competing proofs of an episode's identity.
+    let ranked=matchlab_matcher::search(db,candidate_title,year,true,0,raw_title,true,20)
+        .map_err(|e|e.to_string())?;
+    let Some(winner)=ranked.first()else{return Ok(None)};
+    if !exact_ids.contains(&winner.imdb_id){return Ok(None);}
+    let Some(mapped)=anime_resolver::resolve_absolute(db,&winner.imdb_id,episode)
+        .map_err(|e|e.to_string())? else{return Ok(None)};
+    if !candidate_has_episode(db,&winner.imdb_id,mapped.season,mapped.episode)?{
+        return Ok(None);
     }
-    Ok(unique)
+    Ok(Some(winner.imdb_id.clone()))
 }
 
 /// Public requests apply the release identity gate; dashboard diagnostics
@@ -631,10 +635,11 @@ fn diagnose_with_policy(
         )
     {
         let candidate_title = title.to_owned();
-        let candidate_key = matchlab_matcher::clean_title(&candidate_title);
         if (1..=99_999).contains(&episode)
             && let Some(verified)=verified_unmarked_single_anime_imdb(
-                &db,&candidate_key,episode)?
+                &db,&candidate_title,&req.title,
+                req.year.or_else(||parsed_value.get("year")
+                    .and_then(Value::as_i64).map(|n|n as i32)),episode)?
         {
             verified_absolute_episode_imdb=Some(verified);
             if let Some(parsed)=parsed_value.as_object_mut(){
@@ -795,9 +800,11 @@ fn diagnose_with_policy(
         .and_then(Value::as_str)
         .or(anime_subfolder_title.as_deref()).unwrap_or(title);
     let anime_resolve_key=matchlab_matcher::clean_title(anime_resolve_title);
-    let anime = if verified_chinese_override.is_some() {
-        // The validated IMDb candidate owns this crosswalk; do not select
-        // an unrelated anime with the same alias through anime_priority.
+    let anime = if verified_chinese_override.is_some()
+        || verified_absolute_episode_imdb.is_some() {
+        // The ranked IMDb winner already owns a verified absolute crosswalk.
+        // Do not run the global anime-priority resolver across the remaining
+        // Anime-Lists IMDb IDs: they are not alternative release winners.
         None
     } else if series {
         if let Some(ep)=episodes.first(){
@@ -859,7 +866,9 @@ fn diagnose_with_policy(
         // Always select a candidate. A verified anime crosswalk takes priority;
         // otherwise MatchLab ranking (including stable IMDb ID tie-break) wins.
         let mut chosen_index=0usize;
-        if series {
+        // For a verified unmarked absolute episode, the normal V4 ranking
+        // selected index 0. Do not re-rank based on other AniDB crosswalks.
+        if series && verified_absolute_episode_imdb.is_none() {
             if let Some(ep)=episodes.first().copied() {
                 for (index,candidate) in imdb.iter().enumerate() {
                     let mapped=match seasons.first().copied() {
@@ -1758,6 +1767,9 @@ mod tests {
                 ('100','bleachtv',1,14,300,319,-299,''),
                 ('100','bleachtv',1,15,320,340,-319,''),
                 ('100','bleachtv',1,16,341,366,-340,''),
+                -- A newer Bleach cour belongs to the same TVDB family but
+                -- must not compete with the explicitly mapped series.
+                ('901','bleachtv',1,17,0,0,0,''),
                 ('200','duketv',1,-1,13,24,0,''),
                 ('200','duketv',1,2,13,24,-12,''),
                 ('300','chaostv',1,-1,1,12,0,''),
@@ -1795,6 +1807,20 @@ mod tests {
                 "sid_start":"tt0000101:14:1",
                 "sid_end":"tt0000101:14:1",
                 "asid_start":"100:300","asid_end":"100:300"
+            }),"{title}");
+        }
+        // Regression for production's 'Bleach 320': shared TVDB sibling
+        // defaults must not suppress a uniquely bounded episode mapping.
+        // Fixture coordinates are synthetic: absolute 320 -> S15E01.
+        for title in ["Bleach 320","Bleach_320","Bleach.320"] {
+            let d=diagnose(&path,&MatchRequest{
+                title:title.into(),year:None,series:None}).unwrap();
+            let selected=d.selected.expect("bounded Bleach 320 match");
+            assert_eq!(selected["match_source"],"imdb","{title}: {selected}");
+            assert_eq!(public_match_response(Some(selected)),json!({
+                "sid_start":"tt0000101:15:1",
+                "sid_end":"tt0000101:15:1",
+                "asid_start":"100:320","asid_end":"100:320"
             }),"{title}");
         }
         let d=diagnose(&path,&MatchRequest{
@@ -1860,6 +1886,73 @@ mod tests {
             "sid_start":"tt0000404:3:8","sid_end":"tt0000404:3:8",
             "asid_start":"400:8","asid_end":"400:8"
         }));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
+    fn bleach_absolute_episode_uses_ranked_winner_despite_five_anime_list_imdb_ids(){
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-bleach-five-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+                imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,
+                category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES
+                ('tt0434665','Bleach','bleach',2004,'series','',1,0,'tvSeries'),
+                ('tt1105263','Bleach OVA A','bleachovaa',2008,'movie','',1,0,'movie'),
+                ('tt1148261','Bleach Film B','bleachfilmb',2009,'movie','',1,0,'movie'),
+                ('tt1339302','Bleach Film C','bleachfilmc',2010,'movie','',1,0,'movie'),
+                ('tt1785394','Bleach Special D','bleachspeciald',2011,'movie','',1,0,'tvMovie');
+            INSERT INTO seasons VALUES ('tt0434665',16);
+            INSERT INTO season_episodes VALUES ('tt0434665',15,26,26);
+            INSERT INTO anime_series_map VALUES
+                ('tt0434665','2369','74796',0),
+                ('tt1105263','2369','74796',0),
+                ('tt1148261','2369','74796',0),
+                ('tt1339302','2369','74796',0),
+                ('tt1785394','2369','74796',0);
+            INSERT INTO anidb_titles VALUES('2369','Bleach','bleach','main','en');
+            INSERT INTO episode_map VALUES
+                ('2369','74796',1,-1,1,366,0,''),
+                ('2369','74796',1,15,317,342,-316,'');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        // The Anime-Lists crosswalk really resolves all five IMDb IDs;
+        // reverse lookup must remain ambiguous, but /match must use the
+        // already-ranked original TV-series winner.
+        for id in ["tt0434665","tt1105263","tt1148261",
+            "tt1339302","tt1785394"] {
+            let mapped=anime_resolver::resolve_absolute(&db,id,320).unwrap()
+                .expect("crosswalk must map episode 320");
+            assert_eq!((mapped.season,mapped.episode),(15,4));
+        }
+        drop(db);
+        for title in ["Bleach 320","Bleach_320","Bleach.320"] {
+            let d=diagnose(&path,&MatchRequest{
+                title:title.into(),year:None,series:None}).unwrap();
+            let selected=d.selected.expect("ranked Bleach series winner");
+            assert_eq!(selected["imdb_id"],"tt0434665");
+            assert_eq!(selected["match_source"],"imdb");
+            assert_eq!(public_match_response(Some(selected)),json!({
+                "sid_start":"tt0434665:15:4",
+                "sid_end":"tt0434665:15:4",
+                "asid_start":"2369:320","asid_end":"2369:320"
+            }),"{title}");
+        }
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
     }
