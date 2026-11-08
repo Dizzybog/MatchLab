@@ -2,7 +2,7 @@
 //! Builds a staging SQLite database and publishes it only after a complete import.
 use std::{error::Error,fs::{self,File},io::{Read,BufReader},path::Path,time::{SystemTime,UNIX_EPOCH,Instant}};
 use rusqlite::{params,Connection};
-use crate::matchlab_matcher::clean_title as clean;
+use crate::imdb_matcher::clean_title as clean;
 
 fn reader(path:&Path)->Result<csv::Reader<Box<dyn Read>>,Box<dyn Error>>{
     let file=File::open(path)?;
