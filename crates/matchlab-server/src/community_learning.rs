@@ -40,6 +40,7 @@ pub async fn status()->Json<Value>{
         "build_sha":valid_sha(build_sha()).then_some(build_sha()),
         "upload":"one_daily_github_issue_with_opt_in_batch_comments",
         "batch_interval_hours":24,"max_reports_per_batch":MAX_BATCH,
+        "older_build_reports":"accepted_as_unverified_until_current_replay",
         "note":"Reports are untrusted signals, never verified training labels"}))
 }
 fn hex_digest(value:&str)->String{format!("{:x}",Sha256::digest(value.as_bytes()))}
@@ -209,11 +210,17 @@ fn request_json(response:reqwest::blocking::Response)->Result<Value,String>{
     let text=response.text().map_err(|e|e.to_string())?;
     serde_json::from_str(&text).map_err(|e|e.to_string())
 }
-fn current_build(client:&reqwest::blocking::Client)->Result<bool,String>{
-    let data=request_json(client.get(format!("https://api.github.com/repos/{REPO}/commits/main"))
+// Older official source revisions are allowed: they may still expose bugs
+// not fixed in the latest parser. Eligibility does not mean correctness.
+// Intake independently replays each report using the current source.
+fn known_main_ancestor(client:&reqwest::blocking::Client)->Result<bool,String>{
+    if !valid_sha(build_sha()){return Ok(false);}
+    let data=request_json(client.get(format!(
+        "https://api.github.com/repos/{REPO}/compare/{}...main",build_sha()))
         .header("Accept","application/vnd.github+json")
         .send().map_err(|e|e.to_string())?)?;
-    Ok(data["sha"].as_str()==Some(build_sha()))
+    Ok(data["behind_by"].as_i64()==Some(0)
+       && matches!(data["status"].as_str(),Some("identical"|"ahead")))
 }
 // GitHub Actions creates ONE daily issue for all installations. Clients never
 // create Issues, only one batch comment in the current daily issue.
@@ -299,9 +306,11 @@ fn cycle(history:&Path,storage:&Path,token:&str)->Result<(),String>{
         put(&db,"window_start",&time.to_string())?;
         return Ok(());
     };
-    // All version/network checks are done at most once per daily submission.
+    // Older builds may report; GitHub Action replays their observations against
+    // the current parser and excludes resolved errors before review/training.
+    // Network eligibility is checked only once for the daily submission.
     let client=github_client()?;
-    if !current_build(&client)?{return Ok(());}
+    if !known_main_ancestor(&client)?{return Ok(());}
     let Some(issue)=daily_thread(&client,time)?else{
         // If GitHub Actions missed the daily thread, do not create issues.
         return Ok(());
