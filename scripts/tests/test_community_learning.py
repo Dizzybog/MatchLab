@@ -91,6 +91,30 @@ class CommunityTests(unittest.TestCase):
         self.assertEqual(again,[])
         self.assertEqual(again_seen,seen)
 
+    def test_bleach_s16_anidb_range_failure_not_discarded_as_parsing_fix(self):
+        # Old client reports a season pack where IMDb endpoints exist, but
+        # the AniDB range is incomplete. Parsing S16 correctly on main does
+        # NOT prove that its AniDB episode mapping was fixed.
+        row=make_report("Bleach S16",["incomplete_anime_episode_range"])
+        row["parsed"]={"title":"Bleach","seasons":[16],"episodes":[]}
+        row["selected"]={"imdb_id":"tt0434665","season":16,"episode":1}
+        payload=[make_comment([row])]
+        result,seen=cl.intake(payload,LATEST,datetime.now(timezone.utc),
+            set(),"unused",lambda *_:True,lambda *_:{
+                "title":"Bleach","seasons":[16],"episodes":[]})
+        self.assertEqual(len(result),1)
+        self.assertEqual(result[0]["status"],"needs_current_metadata_review")
+        self.assertEqual(len(seen),1)
+        # The normalized fingerprints prevent another report for the same
+        # issue when title separators change.
+        other=make_report("Bleach.S16",["incomplete_anime_episode_range"])
+        self.assertEqual(row["fingerprint"],other["fingerprint"])
+        after,after_seen=cl.intake([make_comment([other])],LATEST,
+            datetime.now(timezone.utc),seen,"unused",
+            lambda *_:True,lambda *_:{"title":"Bleach","seasons":[16]})
+        self.assertEqual(after,[])
+        self.assertEqual(after_seen,seen)
+
     def test_reject_duplicate_rows_and_overlong_payload(self):
         row=make_report()
         self.assertIsNone(cl.validate_comment(make_comment([row,row]),
