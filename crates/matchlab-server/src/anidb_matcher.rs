@@ -96,10 +96,16 @@ pub fn named_part_season(db:&Connection,title:&str)->Result<Option<NamedPart>,St
 /// also qualify, even for an AniDB work not linked to any IMDb series.
 fn proves_absolute(rows:&[Mapping],episode:i64)->bool{
     rows.iter().any(|m| {
-        m.pairs.iter().any(|(ani,_)|*ani==episode)
-        || (m.start>0 && m.end>=m.start
-            && (m.season>0||m.season==-1)
-            && (m.start..=m.end).contains(&episode))
+        // A sparse explicit episode list overrides the broad range.
+        // Treating an unlisted episode inside start/end as verified would
+        // invent ASIDs that the canonical crosswalk intentionally rejects.
+        if !m.pairs.is_empty(){
+            m.pairs.iter().any(|(ani,tv)|*ani==episode && *tv>0)
+        }else{
+            m.start>0 && m.end>=m.start
+                && (m.season>0||m.season==-1)
+                && (m.start..=m.end).contains(&episode)
+        }
     })
 }
 
@@ -191,6 +197,7 @@ mod tests{
                 ('701','Ambiguous Show','ambiguousshow','main','en'),
                 ('702','Ambiguous Show','ambiguousshow','main','en'),
                 ('800','Unbounded','unbounded','main','en'),
+                ('900','Sparse OVA','sparseova','main','en'),
                 ('16187','Jojo Stone Ocean','jojostoneocean','main','en');
             INSERT INTO episode_map VALUES
                 ('2369','74796',1,-1,1,366,0,''),
@@ -200,6 +207,7 @@ mod tests{
                 ('701','other',1,1,1,12,0,''),
                 ('702','other',1,1,1,12,0,''),
                 ('800','other',1,1,1,0,0,''),
+                ('900','other',1,1,1,10,0,'1-1;3-3;'),
                 -- Real Anime-Lists season evidence: an open-ended default
                 -- for JoJo Stone Ocean, TVDB season 5.
                 ('16187','262954',1,5,1,0,0,'');
@@ -230,6 +238,10 @@ mod tests{
         assert_eq!(match_absolute(&db,"Ambiguous Show",7).unwrap(),None);
         assert_eq!(match_season(&db,"Ambiguous Show",1,7).unwrap(),None);
         assert_eq!(match_absolute(&db,"Unbounded",320).unwrap(),None);
+        assert_eq!(match_absolute(&db,"Sparse OVA",3).unwrap(),
+            Some(VerifiedEpisode{anidb_id:"900".into(),episode:3}));
+        assert_eq!(match_absolute(&db,"Sparse OVA",2).unwrap(),None);
+        assert_eq!(match_absolute_range(&db,"Sparse OVA",1,3).unwrap(),None);
         assert_eq!(match_absolute(&db,"Independent Anime",11).unwrap(),None);
         assert_eq!(match_absolute(&db,"Independent Anime",0).unwrap(),None);
         assert_eq!(named_part_season(&db,"Jojo Stone Ocean").unwrap(),
