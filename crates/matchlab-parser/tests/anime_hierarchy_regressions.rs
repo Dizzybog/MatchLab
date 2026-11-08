@@ -65,3 +65,28 @@ fn season_only_and_title_only_releases_remain_distinct_from_single_episode() {
     assert_eq!(chaos["seasons"], json!([]));
     assert_eq!(chaos["episodes"], json!([]));
 }
+
+#[test]
+fn fansub_season_number_dash_episode_is_not_a_numeric_batch() {
+    let raw = "[Erai-raws] Jihanki 3 - 08 [1080p CR WEBRip HEVC AAC][MultiSub][C869EEDC].mkv";
+    let parsed = parse_title(raw, false).unwrap();
+    let hint = &parsed["anime_season_episode_candidate"];
+    assert_eq!(hint["title"], "Jihanki", "{parsed:?}");
+    assert_eq!(hint["season"], 3, "{parsed:?}");
+    assert_eq!(hint["episode"], 8, "{parsed:?}");
+    assert_eq!(hint["verified"], false);
+    assert!(parsed.get("anime_episode_range_candidate").is_none(),
+        "S03E08 must not also be published as episode range 3..8: {parsed:?}");
+
+    // Real anime batch "26 - 50" must not become fake season 26.
+    let batch = parse_title("[AG] Turn A Gundam 26 - 50 [BD]", false).unwrap();
+    assert!(batch.get("anime_season_episode_candidate").is_none(), "{batch:?}");
+    assert_eq!(batch["anime_episode_range_candidate"]["start"], 26, "{batch:?}");
+    assert_eq!(batch["anime_episode_range_candidate"]["end"], 50, "{batch:?}");
+    // Without a release group or with a zero-padded range start,
+    // the numeric shape remains ambiguous and must not imply S03E08.
+    for raw in ["Jihanki 3 - 08", "[Fansub] Jihanki 03 - 08 [1080p]"] {
+        let parsed = parse_title(raw, false).unwrap();
+        assert!(parsed.get("anime_season_episode_candidate").is_none(), "{raw}: {parsed:?}");
+    }
+}
