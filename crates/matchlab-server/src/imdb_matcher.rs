@@ -285,7 +285,7 @@ mod tests{
         let found=search(&db,"The Voice US",None,true,3,"The.Voice.US.S03E02.1080p",true,10).unwrap();
         assert_eq!(found[0].imdb_id,"tt100");
     }
-    #[test] fn v4_exact_year_and_series_cap() {
+    #[test] fn imdb_exact_year_and_series_cap() {
         let db=Connection::open_in_memory().unwrap();
         db.create_scalar_function("reverse",1,
             rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC|rusqlite::functions::FunctionFlags::SQLITE_UTF8,
