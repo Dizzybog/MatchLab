@@ -1,0 +1,47 @@
+name: Community learning review
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "19 3 * * *"
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  review:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Read recent public community issues as data
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh api --method GET \
+            "/repos/${GH_REPO}/issues?state=open&sort=created&direction=desc&per_page=100" \
+            > "$RUNNER_TEMP/community-issues.json"
+      - name: Validate exact latest SHA and epoch; train shadow-only model
+        env:
+          LATEST_SHA: ${{ github.sha }}
+        run: |
+          python3 scripts/community_learning.py \
+            --issues "$RUNNER_TEMP/community-issues.json" \
+            --verified learning/verified.jsonl \
+            --sha "$LATEST_SHA" \
+            --review-output "$RUNNER_TEMP/community-review.jsonl" \
+            --model-output "$RUNNER_TEMP/community-shadow-model.json"
+      - name: Publish bounded review artifact (never production)
+        uses: actions/upload-artifact@v4
+        with:
+          name: community-learning-review
+          path: |
+            ${{ runner.temp }}/community-review.jsonl
+            ${{ runner.temp }}/community-shadow-model.json
+          retention-days: 7
+          if-no-files-found: error
