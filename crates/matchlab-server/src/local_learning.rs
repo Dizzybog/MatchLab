@@ -220,12 +220,16 @@ pub fn benchmark_native_model()->Result<Value,String>{
     let mut model=crate::online_model::OnlineModel::load(&db)?;
     const N:usize=10_000;
     let start=std::time::Instant::now();
+    // Mirror actual worker's batched transaction rather than benchmarking
+    // 10,000 standalone SQLite fsyncs as if they were model training.
+    let tx=db.unchecked_transaction().map_err(|e|e.to_string())?;
     for n in 0..N{
         let (field,signal)=if n%2==0{("resolution","2160p")}
             else{("codec","x265")};
         let title=format!("Benchmark.Work.{n}.2160p.x265.WEB-DL");
-        model.observe(&db,&title,field,signal)?;
+        model.observe(&tx,&title,field,signal)?;
     }
+    tx.commit().map_err(|e|e.to_string())?;
     let training_ms=start.elapsed().as_secs_f64()*1000.0;
     let start=std::time::Instant::now();
     for n in 0..N{
@@ -249,7 +253,7 @@ pub fn benchmark_native_model()->Result<Value,String>{
         "benchmark":"synthetic_offline_single_thread",
         "warning":"not a representative dataset or a parser-accuracy claim",
         "samples_per_stage":N,
-        "ftrl_train_ms":training_ms,
+        "ftrl_train_with_sqlite_dedup_ms":training_ms,
         "ftrl_inference_ms":inference_ms,
         "canonical_parse_ms":parse_ms,
         "ftrl_parameter_bytes":128*1024,
