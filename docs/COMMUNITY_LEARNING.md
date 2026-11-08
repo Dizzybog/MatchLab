@@ -13,14 +13,10 @@ Both opt-in flags default to disabled, and no ML worker/model or GitHub
 uploader runs in the default mode.
 
 - **Default:** no flags; normal match/parse behavior, no local learning,
-  no GitHub calls related to Community Learning. The standard Docker image
-  is built without the `ml-ort` Cargo feature and has no ONNX Runtime dependency.
+  no GitHub calls related to Community Learning. The official Docker image already includes the ONNX Runtime CPU library and its tiny model, but **neither loads** unless ML is explicitly enabled.
 - **Offline local learning:** `MATCHLAB_ML_ENABLED=true` only; a bounded
   background Rust worker tracks hashed field-pattern frequencies. No token
-  or GitHub connection is required. If the optional `ml-ort` feature and
-  a small compatible ONNX model/runtime are installed, it also performs
-  single-threaded ONNX inference; otherwise it tracks patterns without ML
-  model inference. No changes to live SID/ASID are authorized.
+  or GitHub connection is required. In the official image, a tiny ONNX model and CPU runtime are already present for AMD64 and ARM64. Activating ML starts single-threaded inference without a network download, extra mount or a second image. Ordinary Rust builds may still omit the feature. No changes to live SID/ASID are authorized.
 - **Community sharing:** both `MATCHLAB_ML_ENABLED=true` and
   `MATCHLAB_COMMUNITY_LEARNING_ENABLED=true` plus the user's GitHub token.
   This explicitly opts into uploading selected, bounded 24-hour batches.
@@ -32,6 +28,10 @@ regex patch pull requests**. Auto-generated code PRs must only be introduced
 with independent verified labels, negative tests, regression/performance gates
 and a clearly scoped rule-creation mechanism. GitHub PR creation and merging
 must never be assumed from an Issue comment.
+
+## Bundled inference and supply-chain integrity
+
+The official MatchLab Dockerfile compiles the `ml-ort` Rust feature, generates a deterministic bootstrap ONNX ranker using Rust in the builder stage, and copies both that model and Microsoft ONNX Runtime CPU-only libraries into `/opt/matchlab/ml/`. Both `linux/amd64` and `linux/arm64` archives are pinned to **ONNX Runtime 1.30.0** with architecture-specific SHA-256 checks. The wrapper uses the corresponding minimum API feature (`api-30`). ONNX Runtime is only dynamically loaded by the opt-in learning worker after `MATCHLAB_ML_ENABLED=true`; no inference worker or native library initialization is executed on default startups. Model weights are initial heuristics; scores are only for prioritization, not proof of correctness. The CI production-image smoke test executes the included model to detect library/model mismatches.
 
 ## Local storage budget and reuse
 
