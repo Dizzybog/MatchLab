@@ -106,10 +106,27 @@ pub fn resolve_episode_from_exact_part_title(
 )->rusqlite::Result<Option<episode_crosswalk::Episode>>{
     if episode<=0{return Ok(None);}
     let Some(inferred_season)=season_from_title(db,imdb,title)? else{return Ok(None)};
-    // anime_title::resolve interprets season=1 as the FIRST season of
-    // the named AniDB part (not the series' absolute TVDB season).
+    let key=imdb_matcher::clean_title(title);
+    let ids=aliases(db,imdb,&key)?.into_iter()
+        .filter_map(|(id,alias)|(alias==key).then_some(id))
+        .collect::<BTreeSet<_>>();
+    if ids.len()!=1{return Ok(None);}
+    let named_id=ids.iter().next().unwrap();
+    // A named part's TVDB/IMDb season can be 5 while its AniDB local
+    // episodes start at 1 (JoJo Stone Ocean), even when the only metadata
+    // row is an open-ended default. Resolve the known season directly,
+    // and require the mapped AniDB ID to equal the exact named part.
+    if let Some(mapped)=episode_crosswalk::resolve_season(
+        db,imdb,inferred_season,episode)?
+        && mapped.anidb_id==*named_id {
+        return Ok(Some(mapped));
+    }
+    // Other split-cour layouts require interpreting season=1 as the first
+    // season *within* the named AniDB part. Keep the existing verified
+    // split-part mapping rather than assuming every part has one season.
     let mapped=resolve(db,imdb,title,1,episode)?;
-    Ok(mapped.filter(|m|m.season==inferred_season))
+    Ok(mapped.filter(|m|m.season==inferred_season
+        && m.anidb_id==*named_id))
 }
 
 /// Infer an IMDb/TVDB season from a title-specific AniDB alias without an episode.
