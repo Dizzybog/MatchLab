@@ -1,6 +1,6 @@
 //! MatchLab's anime part-title matcher and local-season resolver.
 use rusqlite::{params,Connection,OptionalExtension};
-use crate::{anime_resolver,matchlab_matcher};
+use crate::{anime_resolver,imdb_matcher};
 use std::collections::BTreeSet;
 
 #[derive(Debug,Clone)]
@@ -17,7 +17,7 @@ fn aliases(db:&Connection,imdb:&str,key:&str)->rusqlite::Result<Vec<(String,Stri
 pub fn resolve(db:&Connection,imdb:&str,title:&str,season:i64,episode:i64)
     -> rusqlite::Result<Option<anime_resolver::Episode>> {
     if season<=0||episode<=0{return Ok(None);}
-    let key=matchlab_matcher::clean_title(title);
+    let key=imdb_matcher::clean_title(title);
     if key.len()<4{return Ok(None);}
     let mut aliases=aliases(db,imdb,&key)?;
     if aliases.is_empty(){return Ok(None);}
@@ -78,7 +78,7 @@ pub fn resolve(db:&Connection,imdb:&str,title:&str,season:i64,episode:i64)
 }
 
 pub fn has_specific_alias(db:&Connection,imdb:&str,title:&str)->rusqlite::Result<bool>{
-    let key=matchlab_matcher::clean_title(title);
+    let key=imdb_matcher::clean_title(title);
     if key.len()<4{return Ok(false);}
     let mut aliases=aliases(db,imdb,&key)?;
     if aliases.is_empty(){return Ok(false);}
@@ -116,7 +116,7 @@ pub fn resolve_episode_from_exact_part_title(
 /// Only publish a season when one uniquely identified AniDB work maps to exactly
 /// one positive TVDB season. Never manufacture an episode or an ASID.
 pub fn season_from_title(db:&Connection,imdb:&str,title:&str)->rusqlite::Result<Option<i64>>{
-    let key=matchlab_matcher::clean_title(title);
+    let key=imdb_matcher::clean_title(title);
     if key.len()<4{return Ok(None);}
     let ids=aliases(db,imdb,&key)?.into_iter().filter(|(_,alias)|alias==&key)
         .collect::<Vec<_>>();
