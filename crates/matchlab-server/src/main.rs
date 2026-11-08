@@ -13,6 +13,7 @@ mod country_aliases;
 mod dashboard_history;
 mod debug_feed;
 mod field_audit;
+mod field_learning;
 mod community_learning;
 mod local_learning;
 mod learning_cache;
@@ -101,18 +102,22 @@ static PARSE_CACHE:OnceLock<Mutex<HashMap<String,(Instant,u64,Value)>>>=OnceLock
 fn cache_generation_current(saved:u64,at:Instant,current:u64)->bool{
     saved==current && at.elapsed()<PARSE_TTL
 }
+fn parse_rules_revision()->u64{
+    learned_regex::revision().rotate_left(1) ^ field_learning::revision().rotate_left(17)
+}
 fn parse_cached(title:&str)->Result<Value,String>{
     if title.trim().is_empty()||title.len()>4096 {
         return Err("title must be 1–4096 bytes".into());
     }
-    let generation=learned_regex::revision();
+    let generation=parse_rules_revision();
     let cache=PARSE_CACHE.get_or_init(||Mutex::new(HashMap::new()));
     if let Ok(guard)=cache.lock(){
         if let Some((at,saved_generation,value))=guard.get(title){
             if cache_generation_current(*saved_generation,*at,generation){
                 let mut enriched=value.clone();
+                field_learning::apply(title,&mut enriched);
                 learned_regex::apply(title,&mut enriched);
-                if learned_regex::revision()==generation {
+                if parse_rules_revision()==generation {
                     return Ok(enriched);
                 }
                 // Rules changed during the cache read; reparse below.
@@ -128,7 +133,7 @@ fn parse_cached(title:&str)->Result<Value,String>{
         Value::Object(matchlab_parser::parse_title(title,false)
             .map_err(|e|e.to_string())?)
     };
-    if learned_regex::revision()!=generation {
+    if parse_rules_revision()!=generation {
         // A new local rule was installed while loading. Do not cache or
         // return a base parse computed in an older rule generation.
         value=Value::Object(matchlab_parser::parse_title(title,false)
@@ -140,7 +145,7 @@ fn parse_cached(title:&str)->Result<Value,String>{
     if let Ok(mut guard)=cache.lock(){
         const CAPACITY:usize=1024;
         if guard.len()>=CAPACITY {
-            let latest=learned_regex::revision();
+            let latest=parse_rules_revision();
             guard.retain(|_,(at,old,_)|cache_generation_current(*old,*at,latest));
             if guard.len()>=CAPACITY {
                 if let Some(oldest)=guard.iter()
@@ -149,10 +154,11 @@ fn parse_cached(title:&str)->Result<Value,String>{
                 }
             }
         }
-        guard.insert(title.to_string(),(Instant::now(),learned_regex::revision(),value.clone()));
+        guard.insert(title.to_string(),(Instant::now(),parse_rules_revision(),value.clone()));
     }
     let mut enriched=value;
-    learned_regex::apply(title,&mut enriched);
+    field_learning::apply(title,&mut enriched);
+                learned_regex::apply(title,&mut enriched);
     Ok(enriched)
 }
 fn numbers(v: Option<&Value>) -> Vec<i64> {
