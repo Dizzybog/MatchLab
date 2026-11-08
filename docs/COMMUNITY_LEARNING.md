@@ -74,6 +74,10 @@ The safety boundary is the GitHub Action, not the reported version:
 - Parse each candidate title again using the **current Rust parser** compiled
   by the workflow from main. If an explicitly marked season/episode
   disagreement is **demonstrably fixed**, discard that candidate.
+- Example: `Bleach S16` may parse season 16 and find a complete IMDb
+  episode range, while its AniDB mapping remains incomplete. This now
+  produces a separate `incomplete_anime_episode_range` review alert.
+  Correct parsing of `S16` is **not** evidence that ASID start/end work.
 - For matching or AniDB/IMDb crosswalk problems, simple parsing alone is
   **not enough** to establish that the bug is still present or fixed.
   Mark these cases `needs_current_metadata_review` for independent
