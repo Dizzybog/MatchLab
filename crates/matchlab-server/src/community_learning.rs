@@ -105,6 +105,8 @@ fn proven_coordinate_gap(meta:&Connection,parsed:&Value,selected:&Value,code:&st
             .is_some_and(|value|value!=season),
         "field_mismatch_episode"=>selected["episode"].as_i64()
             .is_some_and(|value|value!=episode),
+        "explicit_episode_mismatch"=>selected["season"].as_i64()!=Some(season)
+            ||selected["episode"].as_i64()!=Some(episode),
         _=>false,
     };
     mismatch && crate::anime_resolver::resolve_season(meta,imdb,season,episode)
@@ -113,7 +115,8 @@ fn proven_coordinate_gap(meta:&Connection,parsed:&Value,selected:&Value,code:&st
 fn safe_issue_code(code:&str,meta:Option<&Connection>,parsed:&Value,selected:&Value)->bool{
     if matches!(code,"field_unresolved_season"|"field_unresolved_episode"|
         "field_mismatch_season"|"field_mismatch_episode"|
-        "field_missing_anime_episode"|"unresolved_absolute_anime_episode"){
+        "field_missing_anime_episode"|"unresolved_absolute_anime_episode"|
+        "explicit_episode_mismatch"){
         return meta.is_some_and(|db|proven_coordinate_gap(db,parsed,selected,code));
     }
     // Year differences are observations, not proof. They must be inspected
@@ -121,7 +124,7 @@ fn safe_issue_code(code:&str,meta:Option<&Connection>,parsed:&Value,selected:&Va
     if code=="field_mismatch_year"{return false;}
     matches!(code,
         "matching_error"|"invalid_selected_coordinate"|"unusual_season_number"|
-        "unmatched_explicit_episode"|"explicit_episode_mismatch"|
+        "unmatched_explicit_episode"|
         "parser_marker_disagreement"|"incomplete_anime_episode_range"|
         "reversed_selected_range"|"field_missing_title"|
         "field_missing_resolution"|"field_missing_codec"|
