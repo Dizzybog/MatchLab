@@ -86,6 +86,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
     // not every 15 seconds when nothing in history changed.
     if revalidate||crate::field_learning::revision()==0{
         crate::field_learning::reconcile(local)?;
+        crate::tv_learning::reconcile(local)?;
     }
     let history_db=Connection::open_with_flags(history,OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e|e.to_string())?;
@@ -124,6 +125,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
     let mut model=crate::online_model::OnlineModel::load(local)?;
     let tx=local.transaction().map_err(|e|e.to_string())?;
     let mut evidence=crate::field_learning::count_evidence(&tx)?;
+    let mut tv_evidence=crate::tv_learning::count(&tx)?;
     let mut discovery=crate::candidate_discovery::budget(&tx)?;
     let mut samples=count(&tx,"samples")?;
     let mut patterns=count(&tx,"patterns")?;
@@ -142,6 +144,10 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
             continue;
         };
         let base=Value::Object(canonical);
+        for (field,signal) in crate::tv_learning::observe(
+            &tx,&title,&base,&mut tv_evidence)? {
+            model.observe(&tx,&title,&field,&signal)?;
+        }
         if let Some(ref metadata)=meta{
             crate::learned_regex::observe(&tx,metadata,&title,&details,&base)?;
         }
@@ -199,6 +205,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
         crate::learned_regex::reconcile(local,metadata)?;
     }
     crate::field_learning::reconcile(local)?;
+        crate::tv_learning::reconcile(local)?;
     Ok(())
 }
 pub fn verify_native_model()->Result<(),String>{
