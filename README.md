@@ -32,12 +32,20 @@ requires public metadata feeds for first-time initialization and refresh;
 IMDb/AniDB metadata without downloads.
 
 **This is an evolving system, not a general-purpose AI that invents regex.**
-The current live rule generator covers carefully restricted absolute anime
-episode markers. Other fields (title, year, season, episode, quality and
-language) are monitored for anomalies, but broad automatic regex patching
-for those fields is not yet implemented. The bundled ONNX bootstrap ranker
-has fixed weights and is not retrained online; a high score cannot by
-itself approve a rule or establish a correct IMDb ID.
+The Rust worker now supports two local rule families:
+(1) restricted absolute-anime episode markers, which require a current
+AniDB/TVDB crosswalk before changing the selected episode; and
+(2) conservative *field-specific technical release tags* (resolution, codec,
+quality, audio, bit depth, HDR, channels, languages, subtitle/dub flags and
+file extension). The second family learns bounded literal-marker regexes
+from the canonical parser's raw, non-ML output, not from its own corrections.
+It can fill a missing field with 8 concordant examples / 4 distinct title
+identities, or override a conflicting field with 16 / 6, but rejects
+ambiguous or contradicting markers. Title, production year, season,
+ordinary TV episode and IMDb/AniDB IDs are observed, **not blindly replaced**
+by technical-field regexes: those require separate authoritative validators.
+The bundled ONNX bootstrap ranker has fixed weights and is not retrained
+online; an ML score does not itself approve a rule or establish an IMDb ID.
 
 **Want to help?** Set `MATCHLAB_ML_ENABLED=true` to learn privately.
 To contribute proposals to the shared GitHub review pipeline, also enable
@@ -56,9 +64,10 @@ MatchLab can **learn repeatable patterns from torrent names** without a
 cloud AI service. Local learning is disabled by default: enable it with
 `MATCHLAB_ML_ENABLED=true` and a background Rust worker examines parser
 fields and metadata-backed IMDb/AniDB matches. It can **hot-load safe regex
-exceptions** for overlooked or incorrectly parsed absolute anime episodes,
-but every ID and episode change must still pass the current AniDB/TVDB
-crosswalk. Normal matching works without ML.
+exceptions** for overlooked or incorrectly parsed absolute anime episodes
+and technical release-field markers. Every anime ID/episode change must
+still pass the current AniDB/TVDB crosswalk, and technical fields require
+multiple concordant base-parser observations. Normal matching works without ML.
 
 The official Linux AMD64/ARM64 Docker image includes the tiny ONNX model
 and CPU runtime. **No extra downloads or model mounts are needed.** Inference
@@ -73,7 +82,7 @@ authorize rules, not an arbitrary AI-written PCRE2 expression.
 | **Observe** | Identify mismatches in season, episode, year, title, quality and other parser fields |
 | **Learn offline** | Cluster observations in a bounded local SQLite corpus |
 | **Validate** | Verify exact episode crosswalks, diverse examples, restricted linear-time regex and negative tests |
-| **Activate live** | Hot-load verified local episode-marker rules; allow narrow, crosswalk-confirmed exceptions to existing regex |
+| **Activate live** | Hot-load verified local episode and technical-field rules; allow narrow, independently checked overrides of existing regex |
 | **Preserve** | Keep obsolete learning evidence as cache, but recompute stale completed parse/match answers |
 | **Share optionally** | Upload one deduplicated daily GitHub batch containing high-evidence rules and qualifying anomalies |
 | **Review upstream** | GitHub Actions screens the current Rust parser, runs regression tests and opens at most one human-review PR per day |
@@ -90,8 +99,13 @@ environment:
 Locally activated episode-marker rules require at least **8 separately
 verified examples from two IMDb identities and three episodes**.
 Community PR proposals require **12 examples, four identities and five
-episodes**. Other parser fields currently feed the learning/anomaly model;
-they do not yet create arbitrary regex patterns. PRs **never auto-merge**.
+episodes**. Technical release fields can learn restricted local literal-marker
+regexes after 8 concordant examples across 4 identities; replacing an
+existing technical field needs 16 across 6. Conflicting evidence is
+quarantined. Title, year, normal season/episode and identity signals
+remain audit-only until independent, field-specific verification exists.
+Community GitHub rule PRs still currently target absolute-anime markers.
+PRs **never auto-merge**.
 
 The two switches are independent: ordinary MatchLab requires neither,
 local learning requires only `MATCHLAB_ML_ENABLED`, and sharing requires
