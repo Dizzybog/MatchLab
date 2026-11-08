@@ -604,7 +604,7 @@ fn title_aliases_exact_uncached(db:&Connection,key:&str)->Result<Vec<TitleAlias>
     Ok(aliases)
 }
 
-/// Complete prefix/suffix search. All candidates are retained until the V4
+/// Complete prefix/suffix search. All candidates are retained until the IMDb
 /// ranker applies its deterministic rules; no top-N cutoff is introduced.
 fn title_aliases_uncached(db:&Connection,key:&str,suffix:bool)->Result<Vec<TitleAlias>,String>{
     if key.is_empty(){return Ok(Vec::new());}
@@ -674,9 +674,9 @@ fn has_duplicate_title_uncached(db:&Connection,key:&str)->Result<bool,String>{
 
 /// Returns candidate IMDb IDs; the deterministic MatchLab ranker remains authoritative.
 /// Uses exhaustive document collection before ID deduplication.
-/// Year is intentionally not a hard filter: V4 ranks year proximity and
+/// Year is intentionally not a hard filter: IMDb ranks year proximity and
 /// permits matches outside a one-year window.
-/// The limit parameter is retained for API compatibility; V4 ranking must
+/// The limit parameter is retained for API compatibility; IMDb ranking must
 /// receive the complete matching set, so it does not truncate this result.
 #[cfg(test)]
 pub fn candidates(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,limit:usize)->Result<Vec<String>,String>{
@@ -705,7 +705,7 @@ fn candidates_internal(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,lim
     let mut ids=Vec::new();
     let mut seen=std::collections::HashSet::new();
     // Exhaustive candidate collection prevents arbitrary TopDocs truncation
-    // from discarding a valid year or longer alias before V4 ranking.
+    // from discarding a valid year or longer alias before IMDb ranking.
     let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
     for addr in hits {
         let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
@@ -715,7 +715,7 @@ fn candidates_internal(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,lim
             if anime_only && !crate::metadata_import::valid_imdb_id(imdb){continue;}
             if seen.insert(imdb.to_string()){ids.push(imdb.to_string());}
         }
-        // Do not truncate candidates before deterministic V4 ranking.
+        // Do not truncate candidates before deterministic IMDb ranking.
     }
     if let Some(directory)=memory_dir {
         drop(search);
