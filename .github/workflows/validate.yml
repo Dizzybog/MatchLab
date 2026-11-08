@@ -22,3 +22,15 @@ jobs:
         run: docker build -t matchlab:test .
       - name: Verify bundled ONNX CPU inference without ML enabled
         run: docker run --rm -e MATCHLAB_ML_ENABLED=true --entrypoint /usr/local/bin/matchlab-server matchlab:test verify-ml-image
+
+  arm64-onnx-image:
+    # Native ARM64 build and actual ONNX inference; this is the same CPU
+    # architecture as Oracle A1 ARM hosts. No QEMU emulation.
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build official ARM64 image with embedded model and runtime
+        run: docker build --platform linux/arm64 -t matchlab:arm64-test .
+      - name: Verify embedded ARM64 ONNX model under explicit opt-in
+        run: docker run --rm -e MATCHLAB_ML_ENABLED=true --entrypoint /usr/local/bin/matchlab-server matchlab:arm64-test verify-ml-image
