@@ -647,23 +647,17 @@ fn diagnose_with_policy(
         )
     {
         let candidate_title=title.to_owned();
-        if let Some(verified)=anidb_matcher::match_absolute(
-            &db,&candidate_title,episode)?{
-            verified_anidb_absolute=Some(verified);
-            if let Some(parsed)=parsed_value.as_object_mut(){
-                parsed.insert("title".into(),json!(candidate_title));
-                parsed.insert("episodes".into(),json!([episode]));
-                parsed.insert("seasons".into(),json!([]));
-                parsed.insert("anime_title_verified".into(),json!(true));
-            }
-        }else if let Some(winning_imdb)=verified_unmarked_single_anime_imdb(
+        // Preserve the existing deterministic IMDb-verification decision
+        // regardless of whether the new independent AniDB check succeeds.
+        // That retains all legacy ranking and anime-priority safeguards.
+        verified_absolute_episode_imdb=verified_unmarked_single_anime_imdb(
             &db,&candidate_title,&req.title,
             req.year.or_else(||parsed_value.get("year")
-                .and_then(Value::as_i64).map(|n|n as i32)),episode)? {
-            // Preserve the existing IMDb-winner-specific episode proof,
-            // including legitimate legacy split/offset cases unsupported
-            // by the stricter AniDB-only finite-range proof.
-            verified_absolute_episode_imdb=Some(winning_imdb);
+                .and_then(Value::as_i64).map(|n|n as i32)),episode)?;
+        verified_anidb_absolute=anidb_matcher::match_absolute(
+            &db,&candidate_title,episode)?;
+        if verified_absolute_episode_imdb.is_some()
+            || verified_anidb_absolute.is_some() {
             if let Some(parsed)=parsed_value.as_object_mut(){
                 parsed.insert("title".into(),json!(candidate_title));
                 parsed.insert("episodes".into(),json!([episode]));
@@ -672,11 +666,9 @@ fn diagnose_with_policy(
             }
         }else if let Some(part)=anidb_matcher::named_part_season(
             &db,&candidate_title)?{
-            // "Stone Ocean 27" is a local episode of a named anime
-            // part. Recognizing the exact title and its mapped TVDB season
-            // allows IMDb matching against the canonical parent series;
-            // an open-ended default does NOT independently verify ASID 27.
-            // The selected IMDb title must later prove the crosswalk.
+            // A named sequel can identify a local season even without
+            // finite AniDB episode evidence. Episode and SID still require
+            // the established crosswalk to prove the final coordinates.
             if let Some(parsed)=parsed_value.as_object_mut(){
                 parsed.insert("title".into(),json!(candidate_title));
                 parsed.insert("episodes".into(),json!([episode]));
@@ -839,7 +831,6 @@ fn diagnose_with_policy(
         .or(anime_subfolder_title.as_deref()).unwrap_or(title);
     let anime_resolve_key=imdb_matcher::clean_title(anime_resolve_title);
     let anime = if verified_chinese_override.is_some()
-        || verified_anidb_absolute.is_some()
         || verified_absolute_episode_imdb.is_some() {
         // A separately verified absolute episode owns its crosswalk.
         // Otherwise retain the established anime-priority path, including
@@ -907,8 +898,7 @@ fn diagnose_with_policy(
         // The original anime-aware crosswalk remains authoritative when
         // a season marker or unverified unmarked episode leaves several
         // IMDb candidates. The standalone AniDB verifier is additive.
-        if series && verified_anidb_absolute.is_none()
-            && verified_absolute_episode_imdb.is_none() {
+        if series && verified_absolute_episode_imdb.is_none() {
             if let Some(ep)=episodes.first().copied(){
                 for (index,candidate) in imdb.iter().enumerate(){
                     let mapped=match seasons.first().copied(){
