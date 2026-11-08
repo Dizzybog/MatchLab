@@ -24,9 +24,10 @@ When community sharing is also enabled, sufficiently validated proposals can
 be sent to GitHub for independent review and inclusion in a future image.
 
 **Local learning needs no GitHub account, API token, hosted AI service or
-runtime model download.** The official AMD64/ARM64 image bundles its tiny
-ONNX model and CPU runtime. Ordinary parsing and matching remain available
-when learning is disabled. MatchLab's existing *metadata importer* still
+runtime model download.** The official AMD64/ARM64 image includes a compact,
+trainable **FTRL-Proximal online model implemented entirely in Rust**. No
+ONNX Runtime, Python backend, external ML API, GPU or model download is needed.
+Ordinary parsing and matching remain available when learning is disabled. MatchLab's existing *metadata importer* still
 requires public metadata feeds for first-time initialization and refresh;
 "offline learning" does not mean the entire application can bootstrap
 IMDb/AniDB metadata without downloads.
@@ -49,8 +50,10 @@ and contradicting evidence are not automatically treated as correct labels.
 Neither stream may train on previously learned parser overlays. Title, production year, season,
 ordinary TV episode and IMDb/AniDB IDs are observed, **not blindly replaced**
 by technical-field regexes: those require separate authoritative validators.
-The bundled ONNX bootstrap ranker has fixed weights and is not retrained
-online; an ML score does not itself approve a rule or establish an IMDb ID.
+The native Rust FTRL model **does update its weights** from independently
+validated local examples. Counterfactual wrong-field examples supply explicit
+negative training labels. Its score is uncalibrated and **shadow-only**:
+it never approves a rule or establishes an IMDb ID.
 
 **Want to help?** Set `MATCHLAB_ML_ENABLED=true` to learn privately.
 To contribute proposals to the shared GitHub review pipeline, also enable
@@ -76,18 +79,20 @@ explicit independent raw-marker validation for initially missing fields.
 Previously learned outputs never become their own training labels.
 Normal matching works without ML.
 
-The official Linux AMD64/ARM64 Docker image includes the tiny ONNX model
-and CPU runtime. **No extra downloads or model mounts are needed.** Inference
-is single-threaded, outside the API request path. The starting ONNX model is
-a **fixed-weight bootstrap anomaly ranker**, not a calibrated or continuously
-trained neural network; its score alone is not evidence of correctness.
-Repeated matching data, independent crosswalk checks and regression tests
-authorize rules, not an arbitrary AI-written PCRE2 expression.
+The official Linux AMD64/ARM64 Docker image contains the **native online
+FTRL model and CPU-only learning worker**, with no external ML runtime
+or downloads. The model uses 16,384 hashed feature slots (128 KiB of
+z/n parameters), trains incrementally from independently validated raw
+technical markers and canonical-parser evidence, and persists its weights
+atomically with the learning cursor. Predictions are used only to prioritize
+observations; the model is **not** a calibrated probability estimator and
+cannot authorize regex, IMDb identity, or episode changes. Verification,
+diverse evidence and negative regression probes remain mandatory.
 
 | Stage | What happens |
 | --- | --- |
 | **Observe** | Identify mismatches in season, episode, year, title, quality and other parser fields |
-| **Learn offline** | Cluster observations in a bounded local SQLite corpus |
+| **Learn offline** | Train a compact Rust FTRL-Proximal model from independently validated labels and collect bounded SQL evidence |
 | **Validate** | Verify exact episode crosswalks, diverse examples, restricted linear-time regex and negative tests |
 | **Activate live** | Hot-load verified local episode and technical-field rules; allow narrow, independently checked overrides of existing regex |
 | **Preserve** | Keep obsolete learning evidence as cache, but recompute stale completed parse/match answers |
@@ -306,7 +311,6 @@ IMDb basics, alternative titles, episodes, ratings, animeApi, Anime-Lists, and A
 | `MATCHLAB_ML_MAX_STORAGE_GB` | `1` | Learning/cached-data budget in GiB (1–128), e.g. `10` for a 10 GiB local corpus |
 | `MATCHLAB_ML_CACHE_ENABLED` | `true` when local learning is on | Reuse versioned parser and matcher results; disabled when local learning is off |
 | `MATCHLAB_ML_STATE_FILE` | `/data/local-learning.sqlite3` | Shared local SQLite file for learned rules, evidence, pattern statistics and result cache |
-| `MATCHLAB_ML_MODEL_PATH` | `/opt/matchlab/ml/tiny-anomaly.onnx` (bundled) | Preinstalled lightweight ONNX model; advanced override optional, no extra downloads or mounts |
 | `MATCHLAB_COMMUNITY_STATE_FILE` | `/data/community-learning.sqlite3` | Bounded pending batch queue, persistent fingerprints and 24h submission state |
 | `MATCHLAB_METADATA_URLS` | Built-in HTTPS feeds | Optional seven-source override; legacy six-source lists are supported |
 | `RUST_LOG` | `matchlab_server=info` | Logging verbosity |
@@ -317,9 +321,19 @@ For importer options and the exact source URLs, see [Metadata lifecycle](docs/LO
 
 **Security:** The optional parsing debug feed requires its own bearer token and is unavailable when `MATCHLAB_DEBUG_API_TOKEN` is absent or shorter than 32 bytes. The remaining API and dashboard have no built-in authentication. This example binds the port to **localhost**; put the service behind an authenticated HTTPS reverse proxy before exposing it over a network. Debug history may contain private torrent filenames. Use HTTPS, protect the other endpoints at the proxy, and never put the token in a URL. The debug feed is a polling surface, not an autonomous reviewer or a scheduled PR author. [Feed usage and cursor semantics](docs/API.md#read-only-parsing-diagnostics-feed).
 
-### Bundled ML assets and local opt-in
+### Native Rust model and local opt-in
 
-All machine-learning inference assets are installed into the official Docker image at `/opt/matchlab/ml/`. The model and ONNX Runtime library are **dormant by default** (`MATCHLAB_ML_ENABLED=false`). Enabling local ML initializes a one-thread CPU inference session in a background worker; core `/parse` and `/match` continue to work normally without ML. The model is a small **bootstrap anomaly ranker with fixed weights**, not yet a production-trained accuracy-calibrated model. Its score alone cannot authorize a regex override or establish IMDb/AniDB truth. GitHub reporting additionally requires its own explicit opt-in and contributor token.
+The official image bundles all necessary Rust code for **online FTRL-Proximal
+training and inference**, and no extra ML assets. The worker is dormant by
+default (`MATCHLAB_ML_ENABLED=false`); enabling it uses a bounded, one-thread
+background loop. Model weights and hashed training-example deduplication
+persist in `/data/local-learning.sqlite3`. The model receives positive labels
+only from the original parser and independently interpretable raw markers,
+not its own previous predictions. Incorrect field assignments provide
+counterfactual negative labels. The model is a shadow-only ranker: it never
+directly replaces an IMDb/AniDB result, changes episode coordinates or
+authorizes a regex. Rule promotion still requires separate verifiers.
+GitHub reporting additionally requires its own explicit opt-in and token.
 
 ### Local learning storage and cache
 
@@ -420,8 +434,7 @@ MatchLab is an independent project informed by these open-source projects:
 - **[StremThru](https://github.com/MunifTanjim/stremthru)** — metadata ingestion and matching architecture.
 - **[AIOStreams](https://github.com/Viren070/AIOStreams)** and its **[@aiostreams/release-parser](https://github.com/AIOStreams/release-parser)** (MIT) — comprehensive release-name handling, ordered parser handlers, match validators, season/episode safeguards, title cleanup, and file/folder metadata merging.
 - **[TheBeastLT / parse-torrent-title](https://github.com/TheBeastLT/parse-torrent-title)** (MIT) — the Rust release-name parser used by [Torrentio](https://github.com/TheBeastLT/torrentio-scraper); reference for fractional anime-episode flags, Cyrillic episode-marker normalization, East Asian season notation and false-positive regression tests. MatchLab ports selected parsing ideas independently; it does not bundle the upstream crate or copy its runtime implementation.
-- **[ort](https://github.com/pykeio/ort)** (MIT/Apache-2.0) — optional Rust bindings for bundled ONNX inference.
-- **[ONNX Runtime](https://github.com/microsoft/onnxruntime)** (MIT) — CPU runtime included in the official AMD64/ARM64 image.
+- **[FTRL-Proximal](https://research.google.com/pubs/archive/41159.pdf)** — research basis for MatchLab's independent, native-Rust sparse online logistic learner (not a bundled third-party runtime).
 - **[Rakun](https://github.com/lowlighter/rakun)** (MIT) — anime fansub naming conventions, `#episode` markers, multilingual labelled episode ranges, bracketed group/CRC metadata, and distinction between seasons, parts, volumes, and episodes.
 
 The anime-specific improvements in this repository are **independently implemented in Rust**, not copied TypeScript code. See the [parser research and regression coverage](docs/ANIME_PARSER_RESEARCH.md) for the techniques studied, changes implemented, and intentionally excluded heuristics.
