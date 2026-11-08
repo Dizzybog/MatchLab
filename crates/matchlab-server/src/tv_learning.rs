@@ -205,6 +205,39 @@ pub fn apply(name:&str,parsed:&mut Value){
     if !crate::local_learning::active(){return;}
     if let Ok(guard)=registry().read(){propose(name,parsed,&guard);}
 }
+/// Independently replayable, privacy-safe proposals for the community.
+/// Only fixed pattern families and aggregate evidence, never filenames.
+pub fn community_proposals(db:&Connection)->Result<Vec<Value>,String>{
+    let active=select(db)?;
+    let mut out=Vec::new();
+    for rule in active {
+        let Some((_,expression))=templates().iter()
+            .find(|(name,_)|*name==rule.family)else{continue;};
+        let (count,identities,confirmed):(i64,i64,i64)=db.query_row(
+            "SELECT COUNT(*),COUNT(DISTINCT identity_hash),
+                SUM(canonical_aligned)
+             FROM learned_tv_regex_evidence
+             WHERE family=?1 AND source_build=?2",
+            params![rule.family,build()],
+            |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))
+        ).map_err(|e|e.to_string())?;
+        if count<12||identities<4||confirmed<2{continue;}
+        out.push(json!({
+            "kind":"learned_tv_regex",
+            "fingerprint":hash(&format!("community-tv:{}",rule.family)),
+            "family":rule.family,
+            "fields":["seasons","episodes"],
+            "regex":expression.as_str(),
+            "evidence_count":count,
+            "distinct_titles":identities,
+            "canonical_confirmations":confirmed,
+            "source_build":build(),
+            "verification":"explicit_tv_marker_and_canonical_confirmations",
+        }));
+    }
+    Ok(out)
+}
+
 pub fn status()->Value{
     let rules=registry().read().ok().map(|r|r.clone()).unwrap_or_default();
     json!({"active_rule_count":rules.len(),
