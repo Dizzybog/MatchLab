@@ -248,6 +248,32 @@ mod tests{
         assert_eq!(pack["seasons"],json!([1,2]));
     }
     #[test]
+    fn promotion_needs_diverse_titles_and_canonical_replay(){
+        let db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        let mut count=0;
+        for n in 0..7 {
+            let name=format!("Series{n}.S02E07.1080p");
+            let parsed=json!({"title":format!("Series{n}"),
+                "seasons":[2],"episodes":[7]});
+            observe(&db,&name,&parsed,&mut count).unwrap();
+        }
+        assert!(select(&db).unwrap().is_empty());
+        observe(&db,"Series7.S02E07.1080p",
+            &json!({"title":"Series7","seasons":[2],"episodes":[7]}),
+            &mut count).unwrap();
+        let rules=select(&db).unwrap();
+        assert_eq!(rules.len(),1);
+        assert!(!rules[0].may_override);
+        for n in 8..16 {
+            let name=format!("Series{n}.S02E07.1080p");
+            let parsed=json!({"title":format!("Series{n}"),
+                "seasons":[2],"episodes":[7]});
+            observe(&db,&name,&parsed,&mut count).unwrap();
+        }
+        assert!(select(&db).unwrap()[0].may_override);
+    }
+    #[test]
     fn training_never_uses_previous_overlay_as_canonical(){
         let db=Connection::open_in_memory().unwrap();
         init(&db).unwrap();
