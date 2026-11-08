@@ -227,9 +227,12 @@ pub fn observe(db: &Connection, title: &str, details: &Value) -> Result<(), Stri
             [&source_build], |row| row.get(0)).map_err(|e| e.to_string())?;
         if existing >= MAX_EVIDENCE { return Ok(()); }
         db.execute(
-            "INSERT OR IGNORE INTO learned_field_evidence(
+            "INSERT INTO learned_field_evidence(
                 field,signal,example_hash,identity_hash,canonical,source_build,first_seen)
-             VALUES(?1,?2,?3,?4,?5,?6,strftime('%s','now'))",
+             VALUES(?1,?2,?3,?4,?5,?6,strftime('%s','now'))
+             ON CONFLICT(field,signal,example_hash) DO UPDATE SET
+                identity_hash=excluded.identity_hash,canonical=excluded.canonical,
+                source_build=excluded.source_build,first_seen=excluded.first_seen",
             params![field,signal,key,identity,canonical,source_build])
             .map_err(|e| e.to_string())?;
     }
@@ -240,6 +243,7 @@ pub fn observe(db: &Connection, title: &str, details: &Value) -> Result<(), Stri
 /// exceeded; never discard active-build evidence to make room for guesses.
 pub fn evict_obsolete(db: &Connection, limit: i64) -> Result<i64, String> {
     if limit <= 0 { return Ok(0); }
+    init(db)?;
     db.execute(
         "DELETE FROM learned_field_evidence WHERE rowid IN (
             SELECT rowid FROM learned_field_evidence WHERE source_build<>?1
@@ -428,12 +432,12 @@ mod tests {
         let details=json!({"parsed":{"title":"Example","codec":"x265",
             "learned_field_overrides":[{"field":"codec","value":"x265"}]}});
         observe(&db,"Example.x265.WEB-DL",&details).unwrap();
-        let n:i64=db.query_row("SELECT count(*) FROM learned_field_evidence",[],
+        let n:i64=db.query_row("SELECT count(*) FROM learned_field_evidence WHERE field=\'codec\'",[],
             |row|row.get(0)).unwrap();
         // An observation is only accepted if the *base* parser recognized
         // and independently supplied the exact same value.
         let original=matchlab_parser::parse_title("Example.x265.WEB-DL",false).unwrap();
-        assert_eq!(n>0,original["codec"].as_str()==Some("x265"));
+        assert_eq!(n>0,original["codec"].as_str().is_some_and(|value|normalize(value)=="x265"));
     }
     #[test]
     fn requires_diverse_label_agreement_before_activation() {
