@@ -2002,6 +2002,59 @@ mod tests {
     }
 
     #[test]
+    fn independent_anidb_match_publishes_asid_without_any_imdb_identity(){
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-anidb-only-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,
+                ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            INSERT INTO anidb_titles VALUES
+                ('700','Independent Anime','independentanime','main','en'),
+                ('701','Ambiguous Show','ambiguousshow','main','en'),
+                ('702','Ambiguous Show','ambiguousshow','main','en');
+            INSERT INTO episode_map VALUES
+                ('700','notimdb',1,1,1,10,0,''),
+                ('701','other',1,1,1,12,0,''),
+                ('702','other',1,1,1,12,0,'');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        let d=diagnose(&path,&MatchRequest{
+            title:"Independent.Anime.S01E07".into(),
+            year:None,series:None}).unwrap();
+        let winner=d.selected.expect("independent AniDB identity");
+        assert!(winner["imdb_id"].is_null(),"{winner}");
+        assert_eq!(winner["match_source"],"anidb_only");
+        assert_eq!(winner["anidb_independent_verified"],true);
+        assert_eq!(public_match_response(Some(winner)),json!({
+            "sid_start":null,"sid_end":null,
+            "asid_start":"700:7","asid_end":"700:7"}));
+        let ambiguous=diagnose(&path,&MatchRequest{
+            title:"Ambiguous.Show.S01E07".into(),
+            year:None,series:None}).unwrap();
+        assert!(ambiguous.anidb_candidate.is_none());
+        assert_eq!(public_match_response(ambiguous.selected),json!({
+            "sid_start":null,"sid_end":null,
+            "asid_start":null,"asid_end":null}));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
     fn public_match_rejects_invalid_anidb_asids_without_losing_imdb_identity(){
         for malformed in ["732:190315","436:180525","6424:431078",
             "732:0","732:foo","bad:3","732:3:4"]{
