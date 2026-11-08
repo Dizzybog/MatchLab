@@ -153,7 +153,9 @@ pub fn init(db:&Connection)->Result<(),String>{
             state_reason TEXT NOT NULL DEFAULT '',
             evaluated_build TEXT NOT NULL DEFAULT '',
             evaluated_metadata TEXT NOT NULL DEFAULT '',
-            last_evaluated INTEGER NOT NULL DEFAULT 0);
+            last_evaluated INTEGER NOT NULL DEFAULT 0,
+            obsolete INTEGER NOT NULL DEFAULT 0,obsolete_at INTEGER,
+            obsolete_reason TEXT NOT NULL DEFAULT '');
          CREATE TABLE IF NOT EXISTS learned_regex_evidence(
             marker TEXT NOT NULL REFERENCES learned_regex_candidates(marker)
               ON DELETE CASCADE,
@@ -177,6 +179,9 @@ pub fn init(db:&Connection)->Result<(),String>{
         ("learned_regex_candidates","evaluated_metadata","evaluated_metadata TEXT NOT NULL DEFAULT ''"),
         ("learned_regex_candidates","last_evaluated","last_evaluated INTEGER NOT NULL DEFAULT 0"),
         ("learned_regex_evidence","epoch","epoch INTEGER NOT NULL DEFAULT 1"),
+        ("learned_regex_candidates","obsolete","obsolete INTEGER NOT NULL DEFAULT 0"),
+        ("learned_regex_candidates","obsolete_at","obsolete_at INTEGER"),
+        ("learned_regex_candidates","obsolete_reason","obsolete_reason TEXT NOT NULL DEFAULT ''"),
     ]{
         let sql=format!("PRAGMA table_info({table})");
         let mut stmt=db.prepare(&sql).map_err(|e|e.to_string())?;
@@ -273,6 +278,8 @@ pub fn reconcile(db:&mut Connection,metadata:&Connection)->Result<(),String>{
         .optional().map_err(|e|e.to_string())?;
     let tx=db.transaction().map_err(|e|e.to_string())?;
     if previous_epoch.as_deref().is_some_and(|v|v!=epoch) {
+        tx.execute("UPDATE learned_regex_evidence SET epoch=0 WHERE epoch<>0",[])
+            .map_err(|e|e.to_string())?;
         tx.execute("DELETE FROM learned_regex_active",[])
             .map_err(|e|e.to_string())?;
         tx.execute("UPDATE learned_regex_candidates SET obsolete=1,
@@ -291,9 +298,8 @@ pub fn reconcile(db:&mut Connection,metadata:&Connection)->Result<(),String>{
         .collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;
     drop(stmt);
     for (marker,obsolete) in &candidates {
-        // Old epochs require new evidence; retain retired examples solely as
-        // a cache and regression corpus, not as active learned labels.
-        if *obsolete!=0 {continue;}
+        // Obsolete cache can be reactivated if fresh evidence becomes valid.
+        let _=obsolete;
         let old:Option<(String,String)>=tx.query_row(
             "SELECT verified_build,verified_metadata FROM learned_regex_active
              WHERE marker=?1",[marker],|r|Ok((r.get(0)?,r.get(1)?)))
@@ -313,6 +319,9 @@ pub fn reconcile(db:&mut Connection,metadata:&Connection)->Result<(),String>{
         if !verified && old.is_some(){
             retire_rule(&tx,marker,"mapping_no_longer_verified")?;
         }else if verified && qualifies(&tx,marker)? {
+            tx.execute("UPDATE learned_regex_candidates SET obsolete=0,
+                obsolete_at=NULL,obsolete_reason='' WHERE marker=?1",[marker])
+                .map_err(|e|e.to_string())?;
             tx.execute("INSERT INTO learned_regex_active(
                  marker,pattern,verified_build,verified_metadata,activated_at)
                  VALUES(?1,?2,?3,?4,strftime('%s','now'))
