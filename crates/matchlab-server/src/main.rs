@@ -737,10 +737,10 @@ fn diagnose_with_policy(
         .or(anime_subfolder_title.as_deref()).unwrap_or(title);
     let anime_resolve_key=imdb_matcher::clean_title(anime_resolve_title);
     let anime = if verified_chinese_override.is_some()
-        || verified_anidb_absolute.is_some() {
-        // The ranked IMDb winner already owns a verified absolute crosswalk.
-        // Do not run the global anime-priority resolver across the remaining
-        // Anime-Lists IMDb IDs: they are not alternative release winners.
+        || verified_anidb_absolute.is_some() || !imdb.is_empty() {
+        // IMDb candidate selection belongs to imdb_matcher. The older
+        // anime-priority fallback is only allowed when IMDb ranking has no
+        // eligible candidate; it must never replace an IMDb winner.
         None
     } else if series {
         if let Some(ep)=episodes.first(){
@@ -801,33 +801,9 @@ fn diagnose_with_policy(
         // silently returning the first equally plausible candidate.
         // Always select a candidate. A verified anime crosswalk takes priority;
         // otherwise MatchLab ranking (including stable IMDb ID tie-break) wins.
-        let mut chosen_index=0usize;
-        // For a verified unmarked absolute episode, the normal IMDb ranking
-        // selected index 0. Do not re-rank based on other AniDB crosswalks.
-        if series && verified_anidb_absolute.is_none() {
-            if let Some(ep)=episodes.first().copied() {
-                for (index,candidate) in imdb.iter().enumerate() {
-                    let mapped=match seasons.first().copied() {
-                        Some(season) => {
-                            let titled=anime_title::resolve(&db,&candidate.imdb_id,anime_resolve_title,season,ep)
-                                .map_err(|e|e.to_string())?;
-                            if titled.is_some(){titled}
-                            else if anime_title::has_specific_alias(&db,&candidate.imdb_id,anime_resolve_title)
-                                .map_err(|e|e.to_string())? {None}
-                            else {episode_crosswalk::resolve_season(&db,&candidate.imdb_id,season,ep)
-                                .map_err(|e|e.to_string())?}
-                        }
-                        None => episode_crosswalk::resolve_absolute(&db,&candidate.imdb_id,ep)
-                            .map_err(|e|e.to_string())?,
-                    };
-                    if mapped.is_some() {
-                        chosen_index=index;
-                        break;
-                    }
-                }
-            }
-        }
-        let chosen=imdb.get(chosen_index);
+        // Keep the deterministic IMDb winner. Crosswalk evidence may
+        // enrich its coordinates, but must not reorder IMDb identities.
+        let chosen=imdb.first();
         if let Some(c)=chosen {
             let mut selected_season=seasons.first().copied();
             if series && selected_season.is_none() && episodes.is_empty() {
