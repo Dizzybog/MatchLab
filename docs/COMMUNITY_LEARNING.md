@@ -42,7 +42,9 @@ or trigger an automatic merge.
    five minutes, adds **up to 16 distinct suspicious examples** to a
    persistent pending SQLite table, and waits until **24 hours have elapsed**.
    It then posts at most **one batch comment** to today's shared daily
-   GitHub Issue. It does not create its own Issues. Failed checks are retried
+   GitHub Issue, **only if that Issue was created by `github-actions[bot]`**.
+   This prevents malicious users from impersonating a daily thread by title.
+   It does not create its own Issues. Failed checks are retried
    later; after an attempted POST a batch is marked as sent *before* the
    network call, so an uncertain timeout cannot cause repeated comments.
    This trades possible lost submissions for safety against GitHub spam.
