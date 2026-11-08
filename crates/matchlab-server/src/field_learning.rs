@@ -403,6 +403,25 @@ fn propose_from(title: &str, parsed: &mut Value, active: &[FieldRule]) {
         map.insert("learned_field_overrides".into(),Value::Array(changes));
     }
 }
+/// Privacy-preserving operator observability. Never return filenames,
+/// release history, hashes, canonical labels from private observations or IDs.
+pub fn status() -> Value {
+    let mut fields = BTreeMap::<String, usize>::new();
+    if let Ok(active) = registry().read() {
+        for rule in active.iter() {
+            *fields.entry(rule.field.clone()).or_default() += 1;
+        }
+        return json!({"enabled":crate::local_learning::active(),
+            "active_rule_count":active.len(),"active_rules_by_field":fields,
+            "revision":format!("{:016x}",revision()),
+            "training_source":"canonical_rust_parser",
+            "model":"fixed_bootstrap_anomaly_ranker",
+            "identity_and_coordinate_override":"separate_metadata_verification"});
+    }
+    json!({"enabled":crate::local_learning::active(),
+        "active_rule_count":0,"active_rules_by_field":{},
+        "error":"rule_registry_unavailable"})
+}
 pub fn apply(title: &str, parsed: &mut Value) {
     if !crate::local_learning::active() { return; }
     if let Ok(guard) = registry().read() {
