@@ -197,8 +197,9 @@ fn maintain_with_budget(db:&Connection,metadata:&Path,budget:u64)->Result<(),Str
     if occupied>budget{
         for _ in 0..64 {
             if occupied<=budget{break;}
-            let deleted=crate::learned_regex::evict_obsolete(db,32)?;
-            if deleted==0{break;}
+            let regex_deleted=crate::learned_regex::evict_obsolete(db,32)?;
+            let fields_deleted=crate::field_learning::evict_obsolete(db,512)?;
+            if regex_deleted+fields_deleted==0{break;}
             occupied=used_bytes(db)?;
         }
     }
