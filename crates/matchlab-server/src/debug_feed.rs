@@ -177,7 +177,9 @@ pub(crate) fn community_alerts(title:&str,status:&str,details:&Value)->Vec<Value
 }
 
 fn alerts(title: &str, status: &str, details: &Value) -> Vec<Value> {
-    let mut findings = Vec::new();
+    let mut findings = if status!="error"{
+        crate::field_audit::audit(title,&details["parsed"],&details["selected"])
+    }else{Vec::new()};
     if status == "error" {
         findings.push(json!({
             "code":"matching_error","severity":"error",
