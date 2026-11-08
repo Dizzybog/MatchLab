@@ -53,8 +53,8 @@ fn metadata_stamp(path:&Path)->Option<String>{
     Some(digest(&format!("{base}:{wal}")))
 }
 fn revision()->String{
-    format!("{}:{}:{:016x}",option_env!("MATCHLAB_BUILD_SHA").unwrap_or("dev"),
-        2,crate::learned_regex::revision())
+    format!("{}:{}:{:016x}:{:016x}",option_env!("MATCHLAB_BUILD_SHA").unwrap_or("dev"),
+        3,crate::learned_regex::revision(),crate::field_learning::revision())
 }
 fn namespace(kind:&str,metadata:Option<&Path>)->Option<String>{
     let stamp=if kind=="match" {metadata_stamp(metadata?)?}else{String::new()};
