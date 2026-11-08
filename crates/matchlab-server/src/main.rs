@@ -1625,24 +1625,30 @@ mod tests {
                 ('tt0000101','Bleach','bleach',2004,'series','',1,0,'tvSeries'),
                 ('tt0000202','The Duke of Death and His Maid',
                   'thedukeofdeathandhismaid',2021,'series','',1,0,'tvSeries'),
-                ('tt0000303','Chaos;Head','chaoshead',2008,'series','',1,0,'tvSeries');
-            INSERT INTO seasons VALUES ('tt0000101',16),('tt0000202',3),('tt0000303',1);
+                ('tt0000303','Chaos;Head','chaoshead',2008,'series','',1,0,'tvSeries'),
+                ('tt0000404','Reborn as a Vending Machine',
+                 'rebornasavendingmachine',2023,'series','',1,0,'tvSeries');
+            INSERT INTO seasons VALUES ('tt0000101',16),('tt0000202',3),
+                ('tt0000303',1),('tt0000404',3);
             INSERT INTO season_episodes VALUES
                 ('tt0000101',2,21,21),('tt0000202',2,12,12),
-                ('tt0000303',1,12,12);
+                ('tt0000303',1,12,12),('tt0000404',3,12,12);
             INSERT INTO anime_series_map VALUES
                 ('tt0000101','100','bleachtv',0),
                 ('tt0000202','200','duketv',0),
-                ('tt0000303','300','chaostv',0);
+                ('tt0000303','300','chaostv',0),
+                ('tt0000404','400','jihankitv',0);
             INSERT INTO anime_ids VALUES
                 ('tt0000101','anidb','100'),
                 ('tt0000202','anidb','200'),
-                ('tt0000303','anidb','300');
+                ('tt0000303','anidb','300'),
+                ('tt0000404','anidb','400');
             INSERT INTO anidb_titles VALUES
                 ('100','Bleach','bleach','main','en'),
                 ('200','Shinigami Bocchan to Kuro Maid',
                  'shinigamibocchantokuromaid','synonym','ja'),
-                ('300','Chaos Head','chaoshead','main','en');
+                ('300','Chaos Head','chaoshead','main','en'),
+                ('400','Jihanki','jihanki','synonym','ja');
             INSERT INTO episode_map VALUES
                 ('100','bleachtv',1,-1,1,366,0,''),
                 ('100','bleachtv',1,2,22,42,-21,''),
@@ -1651,7 +1657,9 @@ mod tests {
                 ('200','duketv',1,-1,13,24,0,''),
                 ('200','duketv',1,2,13,24,-12,''),
                 ('300','chaostv',1,-1,1,12,0,''),
-                ('300','chaostv',1,1,1,12,0,'');").unwrap();
+                ('300','chaostv',1,1,1,12,0,''),
+                ('400','jihankitv',1,-1,1,36,0,''),
+                ('400','jihankitv',1,3,1,12,0,'');").unwrap();
         tantivy_search::warmup(&db).unwrap();
         drop(db);
         let d=diagnose(&path,&MatchRequest{
@@ -1693,6 +1701,18 @@ mod tests {
         assert_eq!(public_match_response(Some(selected)),json!({
             "sid_start":"tt0000303:1:1","sid_end":"tt0000303:1:12",
             "asid_start":"300:1","asid_end":"300:12"
+        }));
+        let d=diagnose(&path,&MatchRequest{
+            title:"[Erai-raws] Jihanki 3 - 08 [1080p CR WEBRip HEVC AAC][MultiSub][C869EEDC].mkv".into(),
+            year:None,series:None}).unwrap();
+        assert_eq!(d.parsed["anime_title_verified"],true,"{:?}",d.parsed);
+        assert_eq!(d.parsed["seasons"],json!([3]));
+        assert_eq!(d.parsed["episodes"],json!([8]));
+        assert!(d.parsed.get("episode_start").is_none());
+        let selected=d.selected.expect("metadata verifies season 3 episode 08");
+        assert_eq!(public_match_response(Some(selected)),json!({
+            "sid_start":"tt0000404:3:8","sid_end":"tt0000404:3:8",
+            "asid_start":"400:8","asid_end":"400:8"
         }));
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
