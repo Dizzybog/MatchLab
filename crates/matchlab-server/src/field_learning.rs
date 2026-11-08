@@ -321,7 +321,9 @@ pub fn init(db: &Connection) -> Result<(), String> {
 #[cfg(test)]
 pub fn observe(db: &Connection, title: &str, details: &Value)
     -> Result<Vec<(String,String)>,String> {
-    observe_with_budget(db,title,details,&mut count_evidence(db)?)
+    let parsed=Value::Object(matchlab_parser::parse_title(title,false)
+        .map_err(|e|e.to_string())?);
+    observe_with_budget(db,title,details,&parsed,&mut count_evidence(db)?)
 }
 pub fn count_evidence(db:&Connection)->Result<i64,String>{
     init(db)?;
@@ -331,15 +333,12 @@ pub fn count_evidence(db:&Connection)->Result<i64,String>{
         [build()],|row|row.get(0)).map_err(|e|e.to_string())
 }
 pub fn observe_with_budget(db:&Connection,title:&str,details:&Value,
-    count:&mut i64)->Result<Vec<(String,String)>,String>{
+    parsed:&Value,count:&mut i64)->Result<Vec<(String,String)>,String>{
     let mut labels=Vec::new();
     if !safe_title(title){return Ok(labels);}
-    // Crucial anti-feedback guard: never accept a previously learned overlay
-    // as training truth. Re-parse from the canonical Rust parser.
-    let canonical = matchlab_parser::parse_title(title,false)
-        .map_err(|e| e.to_string())?;
-    let parsed = Value::Object(canonical);
-    let selected = &details["selected"];
+    // The worker supplies a *fresh canonical parser result*, not the
+    // possibly cached or ML-decorated parsed response from request history.
+    let selected=&details["selected"];
     let Some(identity)=observed_identity(&parsed,selected)else{return Ok(labels);};
     let Some(object)=parsed.as_object()else{return Ok(labels);};
     let source_build = build();
