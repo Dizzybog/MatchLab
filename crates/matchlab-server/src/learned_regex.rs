@@ -80,7 +80,7 @@ fn base_handles(marker:&str)->bool{
 fn technical_suffix(s:&str)->bool{
     let rest=s.trim_matches(|c:char|matches!(c,' '|'.'|'_'|'-'));
     if rest.is_empty(){return true;}
-    rest.split(|c:char|matches!(c,' '|'.'_'|'-'))
+    rest.split(|c:char|matches!(c,' '|'.'|'_'|'-'))
         .filter(|s|!s.is_empty())
         .all(|p|matches!(p.to_ascii_lowercase().as_str(),
             "1080p"|"2160p"|"720p"|"480p"|"x264"|"x265"|"h264"|
