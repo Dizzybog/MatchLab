@@ -32,4 +32,4 @@ chrono.workspace = true
 
 # Optional CPU-only ONNX inference. Built only with `--features ml-ort`.
 # `load-dynamic` avoids a mandatory ONNX Runtime library for ordinary builds.
-ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "api-31"], optional = true }
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "api-30"], optional = true }
