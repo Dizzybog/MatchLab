@@ -6,11 +6,50 @@ It can parse names such as `Breaking.Bad.S02E03.1080p.WEB-DL`, recognize season 
 
 ## Features
 
-- **Fast title matching:** Tantivy indexes IMDb titles, alternate titles, and AniDB aliases. MatchLab ranks exact titles, country aliases, year, and media type using deterministic rules.
+- **Fast title matching:** Tantivy indexes IMDb titles, alternate titles, and AniDB aliases. The independent `imdb_matcher` ranks exact titles, country aliases, year, and media type using deterministic rules.
 - **Anime support:** AniDB, animeApi, and Anime-Lists provide verified identities and episode conversions, including split seasons and absolute episode numbering.
 - **Full release parsing:** Extracts title, year, season, episodes, resolution, languages, release tags, and more. Supports filenames inside folder paths.
 - **Easy deployment:** Native Rust server with Docker, an HTTP API, a dashboard, and automatic metadata refresh.
 - **Safe updates:** SQLite stores metadata relationships; Tantivy generations are built and validated before metadata is switched.
+
+## Independent IMDb and AniDB matchers
+
+MatchLab runs two independent identity lanes after parsing a release:
+
+1. **\`imdb_matcher\`** ranks IMDb title identities using its existing deterministic
+   Tantivy lookup, year/type rules, season eligibility and tie breakers. It
+   never needs to discover an AniDB identity first.
+2. **\`anidb_matcher\`** finds exact AniDB title aliases directly in the
+   Tantivy index, including anime without any IMDb links, and verifies
+   absolute or season-relative episode coordinates using Anime-Lists'
+   relational \`episode_map\`. Only explicit episode pairs or finite,
+   bounded ranges are proof; generic open-ended defaults are not. Several
+   IMDb links to the *same* AniDB work count as one anime identity, while
+   multiple distinct AniDB works with equally verified episodes remain
+   ambiguous.
+3. **Crosswalk enrichment** converts the *already selected* IMDb title to
+   season and episode coordinates when a unique mapping exists; it does
+   not rerank the IMDb title because another linked work also has an
+   episode mapping. Independently confirmed AniDB IDs are preserved even
+   if IMDb has no match. Conflicting crosswalk identities are not silently
+   combined.
+
+A single verified anime episode can therefore produce an **ASID without
+an IMDb SID**: \`sid_start\` and \`sid_end\` are \`null\`, while
+\`asid_start\` and \`asid_end\` contain the canonical \`anidb:episode\`.
+This is deliberate and follows the existing four-field API contract. If
+the IMDb matcher finds a valid title, its SID is reported separately.
+ASID-only matches require an exact AniDB alias and bounded metadata
+evidence, never a guessed season or unverified bare number.
+
+An unmarked anime batch must pass an independent completeness check
+for **every** episode in the advertised range and must stay within one
+AniDB work before ASID endpoints are published. This avoids treating
+incomplete \`320–400\` packs as fully verified.
+
+\`POST /debug/match\` includes a separate additive
+\`anidb_candidate\` field to explain the independent AniDB decision;
+\`anime_candidate\` is retained for older crosswalk-oriented consumers.
 
 ## Dashboard
 
