@@ -195,7 +195,7 @@ IMDb basics, alternative titles, episodes, ratings, animeApi, Anime-Lists, and A
 | `MATCHLAB_ML_MAX_STORAGE_GB` | `1` | Learning/cached-data budget in GiB (1–128), e.g. `10` for a 10 GiB local corpus |
 | `MATCHLAB_ML_CACHE_ENABLED` | `true` when local learning is on | Reuse versioned parser and matcher results; disabled when local learning is off |
 | `MATCHLAB_ML_STATE_FILE` | `/data/local-learning.sqlite3` | Shared local SQLite file for learned rules, evidence, pattern statistics and result cache |
-| `MATCHLAB_ML_MODEL_PATH` | Unset | Optional ONNX model (only when compiled with `ml-ort`) |
+| `MATCHLAB_ML_MODEL_PATH` | `/opt/matchlab/ml/tiny-anomaly.onnx` (bundled) | Preinstalled lightweight ONNX model; advanced override optional, no extra downloads or mounts |
 | `MATCHLAB_COMMUNITY_STATE_FILE` | `/data/community-learning.sqlite3` | Bounded pending batch queue, persistent fingerprints and 24h submission state |
 | `MATCHLAB_METADATA_URLS` | Built-in HTTPS feeds | Optional seven-source override; legacy six-source lists are supported |
 | `RUST_LOG` | `matchlab_server=info` | Logging verbosity |
@@ -205,6 +205,10 @@ IMDb basics, alternative titles, episodes, ratings, animeApi, Anime-Lists, and A
 For importer options and the exact source URLs, see [Metadata lifecycle](docs/LOCAL_METADATA.md). For index internals and crash-safety considerations, see [Tantivy architecture](docs/TANTIVY_RUNTIME.md).
 
 **Security:** The optional parsing debug feed requires its own bearer token and is unavailable when `MATCHLAB_DEBUG_API_TOKEN` is absent or shorter than 32 bytes. The remaining API and dashboard have no built-in authentication. This example binds the port to **localhost**; put the service behind an authenticated HTTPS reverse proxy before exposing it over a network. Debug history may contain private torrent filenames. Use HTTPS, protect the other endpoints at the proxy, and never put the token in a URL. The debug feed is a polling surface, not an autonomous reviewer or a scheduled PR author. [Feed usage and cursor semantics](docs/API.md#read-only-parsing-diagnostics-feed).
+
+### Bundled ML assets and local opt-in
+
+All machine-learning inference assets are installed into the official Docker image at `/opt/matchlab/ml/`. The model and ONNX Runtime library are **dormant by default** (`MATCHLAB_ML_ENABLED=false`). Enabling local ML initializes a one-thread CPU inference session in a background worker; core `/parse` and `/match` continue to work normally without ML. The model is a small **bootstrap anomaly ranker with fixed weights**, not yet a production-trained accuracy-calibrated model. Its score alone cannot authorize a regex override or establish IMDb/AniDB truth. GitHub reporting additionally requires its own explicit opt-in and contributor token.
 
 ### Local learning storage and cache
 
