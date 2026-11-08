@@ -57,7 +57,7 @@ crosswalk-backed absolute-anime proposals, not arbitrary technical edits.
 
 The lightweight **native Rust FTRL-Proximal model now genuinely learns**
 online: it updates bounded, sparse logistic weights from verified technical
-release markers and canonical parser evidence. Each accepted field example
+release markers, explicit TV coordinates and canonical parser evidence. Each accepted field example
 also creates a counterfactual label for a *different field*. This is a
 valid **field-classification negative**, not evidence that a media title
 or a candidate IMDb identity is wrong. The model's score is **uncalibrated
@@ -65,6 +65,50 @@ and advisory only**. It cannot establish IMDb truth or authorize regex
 or episode overrides. Rule activation still uses independent evidence
 counts, diversity, crosswalk metadata, negative probes, and regression
 checks, not model-score thresholds.
+
+### Full parser-rule awareness and live source replacements
+
+The learner can inspect the **complete generated Rust parser handler
+catalogue**, including the original regex, target field, transform, flags
+and handler index. This is read in the background, not per request. It
+distinguishes three possible outcomes:
+
+- **Additional field regex:** detect a missing technical marker without
+  altering existing parser source handlers.
+- **Broader source-handler regex:** for sufficiently verified simple
+  resolution, codec and bit-depth markers, keep the original pattern as
+  one branch of a new bounded expression and widen it with the learned
+  marker. The handler retains its original ordering and transformation.
+  Rust compiles a replacement parser engine outside the HTTP path,
+  validates the regex using a linear-time grammar and swaps it atomically.
+- **Review-only proposals:** complicated existing PCRE patterns, ambiguous
+  titles, dates, unknown values and unverified identity/coordinate
+  corrections must not be silently replaced.
+
+The original engine remains available for canonical replay during
+training. Learned/modified output can **never** become an independent
+training label. In-memory and persistent parse/match cache namespaces
+include the active source-patch and local-rule revisions.
+
+### Ordinary TV season and episode learning
+
+Normal TV coordinates are **not anime-only**. A separate Rust learner now
+collects independently readable explicit `S02E07`, `2x07` and
+`Season 2 Episode 7` examples. The source grammar rejects multiple
+conflicting marker instances and implausible values. At least 8 distinct
+observations from 4 title identities, including 2 original-parser
+confirmations, are needed to activate a missing-field rule. More than
+16 observations across 6 identities, with 4 canonical confirmations,
+can correct one conflicting season or episode; season packs and ranges
+are not overwritten. Ordinary matching never retrains or recompiles regex.
+Unknown absolute-only episode numbers remain distinct from independently
+verified anime crosswalk corrections.
+
+All other parsed fields, including title, year, edition, network, release
+type and flags, remain available for discrepancy auditing. A general
+model score does not prove the correct value of a disputed field, so the
+individual validator for that field must authorize activation. This is
+important for titles containing numbers that look like seasons or years.
 
 ## Opt-in modes
 
