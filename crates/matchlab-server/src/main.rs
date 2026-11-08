@@ -524,6 +524,42 @@ fn diagnose_with_policy(
         parsed.insert("episodes".into(),json!([]));
         parsed.insert("seasons".into(),json!([]));
     }
+    // Bracketed anime fansub notation "<title> 3 - 08" may mean S03E08
+    // rather than absolute episodes 3..8. Promote only after a unique exact
+    // AniDB alias and known IMDb season bounds or a verified crosswalk
+    // confirm that the advertised season contains the requested episode.
+    // Never publish the same marker as an unmarked episode batch.
+    if let Some((Some(hint_title),Some(season),Some(episode)))=
+        parsed_value.get("anime_season_episode_candidate").map(|candidate|(
+            candidate.get("title").and_then(Value::as_str),
+            candidate.get("season").and_then(Value::as_i64),
+            candidate.get("episode").and_then(Value::as_i64),
+        ))
+    {
+        let hint_title=hint_title.to_owned();
+        let key=matchlab_matcher::clean_title(&hint_title);
+        let verified=if req.series==Some(false) || !(1..=12).contains(&season)
+            || !(1..=99).contains(&episode) {false}
+        else if let Some(imdb)=exact_anime_identity(&db,&key)? {
+            season_episode_end(&db,&imdb,season)?
+                .is_some_and(|end|episode<=end)
+                || anime_resolver::resolve_season(&db,&imdb,season,episode)
+                    .map_err(|error|error.to_string())?.is_some()
+        } else {false};
+        if let Some(parsed)=parsed_value.as_object_mut(){
+            // Generic regex handlers may mistake "3 - 08" for a batch.
+            // Preserve the candidate for diagnostics but do not expose
+            // unverified coordinates to downstream matching consumers.
+            parsed.insert("episodes".into(),json!([]));
+            parsed.insert("seasons".into(),json!([]));
+            if verified {
+                parsed.insert("title".into(),json!(hint_title));
+                parsed.insert("seasons".into(),json!([season]));
+                parsed.insert("episodes".into(),json!([episode]));
+                parsed.insert("anime_title_verified".into(),json!(true));
+            }
+        }
+    }
     // A bare final number ("Stone Ocean 27") is not a trusted episode:
     // require an exact and unambiguous anime alias in Tantivy before
     // changing the parsed show title or promoting the episode coordinate.
@@ -932,6 +968,7 @@ fn diagnose_with_policy(
     if episodes.is_empty() && !parsed.contains_key("episode_start")
         && !parsed.contains_key("anime_episode_candidate")
         && !parsed.contains_key("anime_episode_range_candidate")
+        && !parsed.contains_key("anime_season_episode_candidate")
         && season_range.is_none() {
         if let Some(winner)=selected.as_mut(){
             if let Some(imdb_id)=winner["imdb_id"].as_str().map(str::to_owned){
