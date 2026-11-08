@@ -35,7 +35,7 @@ RUN set -eux; \
     rm -rf /tmp/onnxruntime /tmp/onnxruntime.tgz
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini curl \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini curl libstdc++6 libgomp1 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --create-home app \
     && mkdir -p /data /opt/matchlab/ml \
