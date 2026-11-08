@@ -1663,7 +1663,7 @@ mod tests {
                 ('200','Shinigami Bocchan to Kuro Maid',
                  'shinigamibocchantokuromaid','synonym','ja'),
                 ('300','Chaos Head','chaoshead','main','en'),
-                ('400','Jihanki','jihanki','synonym','ja');
+                ('400','Jihanki 3','jihanki3','synonym','ja');
             INSERT INTO episode_map VALUES
                 ('100','bleachtv',1,-1,1,366,0,''),
                 ('100','bleachtv',1,2,22,42,-21,''),
@@ -1723,6 +1723,8 @@ mod tests {
         assert_eq!(d.parsed["anime_title_verified"],true,"{:?}",d.parsed);
         assert_eq!(d.parsed["seasons"],json!([3]));
         assert_eq!(d.parsed["episodes"],json!([8]));
+        assert_eq!(d.parsed["anime_season_episode_base_title"],"Jihanki");
+        assert_eq!(d.parsed["title"],"Jihanki 3");
         assert!(d.parsed.get("episode_start").is_none());
         let selected=d.selected.expect("metadata verifies season 3 episode 08");
         assert_eq!(public_match_response(Some(selected)),json!({
