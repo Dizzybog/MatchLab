@@ -575,6 +575,9 @@ fn diagnose_with_policy(
     // changing the parsed show title or promoting the episode coordinate.
     // This shares the same crosswalk verification as "Stone Ocean - 27".
     if req.series != Some(false)
+        // An already recognized "Jihanki 3 - 08" cannot be demoted to a
+        // bare absolute episode 8 by the generic dash/episode hint.
+        && parsed_value.get("anime_season_episode_candidate").is_none()
         && let Some(candidate) = parsed_value.get("anime_episode_candidate")
         && let (Some(title),Some(episode)) = (
             candidate.get("title").and_then(Value::as_str),
@@ -658,6 +661,12 @@ fn diagnose_with_policy(
     }else{imdb};
     let chinese_absolute_hint=parsed.get("absolute_episode_candidate").and_then(Value::as_i64);
     let mut chinese_absolute_by_imdb=HashMap::<String,anime_resolver::Episode>::new();
+    // Episode maxima in user-contributed IMDb data can lag behind actual
+    // broadcasts (e.g. Cops.S36.E41). Apply episode-count pruning only
+    // when the season/title filters leave more than two plausible identities.
+    // With one or two identities, preserve them and the requested episode,
+    // while still allowing independently verified absolute crosswalk fixes.
+    let apply_episode_filter=imdb.len()>2;
     let imdb=if seasons.len()==1 && episodes.len()==1 {
         let season=seasons[0];
         let episode=episodes[0];
@@ -672,18 +681,18 @@ fn diagnose_with_policy(
                             chinese_absolute_by_imdb.insert(candidate.imdb_id.clone(),mapped);
                             Some(candidate)
                         }
-                        Ok(None)=>None,
+                        Ok(None)=>(!apply_episode_filter).then_some(candidate),
                         Err(error)=>{
                             tracing::warn!(imdb_id=%candidate.imdb_id,%error,
                                 "Chinese absolute episode crosswalk unavailable");
-                            None
+                            (!apply_episode_filter).then_some(candidate)
                         }
                     }
                 },
                 Err(error)=>{
                     tracing::warn!(imdb_id=%candidate.imdb_id,%error,
                         "season episode metadata unavailable for candidate");
-                    None
+                    (!apply_episode_filter).then_some(candidate)
                 }
             }
         }).collect::<Vec<_>>()
