@@ -7,9 +7,10 @@ optional GitHub community contributions. Both default to **off**.
 
 No remote AI service, external training API, model download, account or
 GitHub connection is needed for the local learning engine. The official
-AMD64 and ARM64 Docker image contains the Rust application, a tiny ONNX
-bootstrap model and a pinned CPU-only ONNX Runtime library. The image
-also supports normal parsing/matching with no ML worker initialized.
+AMD64 and ARM64 Docker image contains the Rust parser and a compact,
+trainable **FTRL-Proximal** model implemented in Rust. There is no ONNX
+Runtime or runtime model download. Normal parsing/matching still starts
+without any learning worker when the feature is disabled.
 
 ## Goals, scope and what the ML model really does
 
@@ -54,18 +55,20 @@ remain *review-only* unless their own independent source-of-truth checks
 can establish a correction. The GitHub PR exporter still accepts only
 crosswalk-backed absolute-anime proposals, not arbitrary technical edits.
 
-The lightweight ONNX ranker currently uses *fixed bootstrap weights*.
-This is **not a continuously retrained neural network**, and scores are
-not calibrated probabilities. We do not describe a score as 99% certain
-or treat it as ground truth. Rule activation and GitHub proposals use
-independent evidence counts, diversity, current metadata, negative
-tests, and regression checks. The ONNX score only helps prioritize
-anomaly patterns. Future supervised training can update the model
-after independently verified positive and negative labels exist.
+The lightweight **native Rust FTRL-Proximal model now genuinely learns**
+online: it updates bounded, sparse logistic weights from verified technical
+release markers and canonical parser evidence. Each accepted field example
+also creates a counterfactual label for a *different field*. This is a
+valid **field-classification negative**, not evidence that a media title
+or a candidate IMDb identity is wrong. The model's score is **uncalibrated
+and advisory only**. It cannot establish IMDb truth or authorize regex
+or episode overrides. Rule activation still uses independent evidence
+counts, diversity, crosswalk metadata, negative probes, and regression
+checks, not model-score thresholds.
 
 ## Opt-in modes
 
-| Mode | Environment | Data sharing | ONNX and local worker |
+| Mode | Environment | Data sharing | Native Rust learning worker |
 | --- | --- | --- | --- |
 | Standard (default) | No ML variables | None | Dormant |
 | Local learning | `MATCHLAB_ML_ENABLED=true` | None; works offline | One CPU worker, local cache and live regex overlays |
@@ -86,25 +89,26 @@ services:
 ~~~
 
 Only `MATCHLAB_ML_ENABLED` is required. An ML-disabled container
-never creates the learning worker, initializes the ONNX CPU runtime, or
+never creates the learning worker or
 opens the community uploader. A GitHub token by itself is insufficient
 to activate anything. The Rust matcher still works without a token.
 
 ### Technical resources
 
-- The official Docker image bundles the CPU ONNX Runtime binary for each
-  platform and an ONNX graph generated entirely in Rust at build time.
-  Both assets are dormant until opt-in. CI performs real inference on
-  **linux/amd64** and **linux/arm64**.
-- Local observations are collected in bounded background batches; ONNX
-  inference uses **one CPU thread**, not GPUs. No Python backend or Ollama.
+- The production Docker image includes **no native ONNX library**.
+  All learning and inference run in Rust with a single background worker.
+  CI compiles and runs actual training and inference on **linux/amd64**
+  and native **linux/arm64**.
+- The FTRL model has 16,384 hash slots and only **128 KiB of z/n parameters**;
+  additional runtime memory holds bounded observations and compiled rules.
+  No Python backend, Ollama, external training process or GPU.
 - The local SQLite file is `/data/local-learning.sqlite3` by default,
   and the logical storage target `MATCHLAB_ML_MAX_STORAGE_GB`
   defaults to **1 GiB**, supporting 1–128 GiB. The budget is a
   best-effort on-disk quota, not an exact hard filesystem partition.
 - Persistent caching can be disabled independently with
   `MATCHLAB_ML_CACHE_ENABLED=false`; rule learning can remain active.
-- Ordinary parser/matcher hot paths do not execute ONNX. Compiled
+- Ordinary parser/matcher hot paths never train or infer with the model. Compiled
   lightweight community-approved regex patterns can run even when
   local ML is off, but still require current metadata validation
   before changing final episode coordinates.
@@ -179,8 +183,8 @@ release markers that lack an independently defensible label remain
 observations to investigate; the learner does not manufacture ground truth
 from repetition. For example, an explicit `2160p` can train a missing
 resolution, while an unknown string resembling a resolution cannot be
-assigned a value merely because it appears frequently. The ONNX bootstrap
-ranker supplies prioritization only. Full automatic override coverage
+assigned a value merely because it appears frequently. The native FTRL
+model supplies advisory prioritization only. Full automatic override coverage
 will require independent, field-specific validators and negative
 regression datasets before that scope can be safely extended.
 
@@ -281,8 +285,8 @@ full IMDb/AniDB metadata database in the bot review job. Thus a
 valid-looking mapping supplied by a client is still a **claim**,
 not authoritative proof. The bot may open a review PR but cannot
 approve or merge a proposed rule autonomously. Also, the current
-local ONNX model is a deterministic bootstrap ranker; claims of
-calibrated 99% certainty would be misleading.
+local FTRL model is not probability-calibrated; claims of calibrated
+99% certainty would be misleading.
 
 ## Maintainer setup
 
@@ -313,18 +317,19 @@ After merging the implementation PR and verifying the Docker image:
 
 **No external Learning Hub server is required.** Python in the hosted
 GitHub Actions review job is not part of the MatchLab image or its
-weak-host runtime; core parser/matcher, local learning, ONNX
-inference and local regex application all run in Rust.
+weak-host runtime; core parser/matcher, online model training/inference
+and local regex application all run in Rust.
 
 ## Troubleshooting and security boundaries
 
-- `MATCHLAB_ML_ENABLED=false`: no local worker, ONNX session or
+- `MATCHLAB_ML_ENABLED=false`: no local training worker or
   learning-specific GitHub traffic. The usual matching API works.
 - Local ML on, sharing off: no GitHub traffic related to learning.
 - Sharing on without local ML/token/official SHA: uploader refuses
   to start. See `/api/community/status` and container logs.
-- ONNX asset missing or incompatible: learning observation counts
-  continue without ONNX scoring; the core matcher is unaffected.
+- Local model storage missing or damaged: the worker rebuilds the small
+  model from fresh, independently validated observations. Normal parsing
+  and matching are unaffected.
 - An ambiguous episode, an unverifiable IMDb identity, stale
   metadata, or insufficient independent evidence cannot
   activate a local override or authorize a GitHub PR.
