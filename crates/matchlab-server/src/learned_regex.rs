@@ -468,7 +468,8 @@ mod tests{
         db.execute_batch("CREATE TABLE settings(k TEXT PRIMARY KEY,v TEXT NOT NULL);").unwrap();
         init(&db).unwrap();
         db.execute("INSERT INTO learned_regex_candidates(marker,created_at) VALUES('epis',1)",[]).unwrap();
-        db.execute("INSERT INTO learned_regex_evidence VALUES(
+        db.execute("INSERT INTO learned_regex_evidence(
+            marker,example_hash,imdb_id,absolute_episode,season,episode,anidb_id,anidb_episode) VALUES(
            'epis','key','tt1234567',300,14,1,'100',300)",[]).unwrap();
         db.execute("INSERT INTO learned_regex_active VALUES(
             'epis','some-regex','old-sha','old-meta',1)",[]).unwrap();
@@ -497,7 +498,8 @@ mod tests{
              INSERT INTO anime_series_map VALUES('tt1234567','100','200',0);
              INSERT INTO episode_map VALUES('100','200',1,2,1,30,0,'');").unwrap();
         local.execute("INSERT INTO learned_regex_candidates(marker,created_at) VALUES('epis',1)",[]).unwrap();
-        local.execute("INSERT INTO learned_regex_evidence VALUES(
+        local.execute("INSERT INTO learned_regex_evidence(
+            marker,example_hash,imdb_id,absolute_episode,season,episode,anidb_id,anidb_episode) VALUES(
              'epis','key','tt1234567',300,14,1,'100',300)",[]).unwrap();
         local.execute("INSERT INTO learned_regex_active VALUES(
              'epis','old-regex','old-build','old-metadata',1)",[]).unwrap();
@@ -513,19 +515,26 @@ mod tests{
         assert_eq!(local.query_row(
             "SELECT count(*) FROM learned_regex_evidence",[],
             |r|r.get::<_,i64>(0)).unwrap(),1);
-        assert_eq!(evict_obsolete(&local,1).unwrap(),1);
+        // Below capacity: keep the redundant rule and its evidence as cache.
+        assert!(reserve_space(&local,"new",true,2,2).unwrap());
+        assert_eq!(local.query_row(
+            "SELECT count(*) FROM learned_regex_evidence",[],
+            |r|r.get::<_,i64>(0)).unwrap(),1);
+        // A new observation would exceed the strict limit: evict only then.
+        assert!(reserve_space(&local,"new",true,1,1).unwrap());
         assert_eq!(local.query_row(
             "SELECT count(*) FROM learned_regex_evidence",[],
             |r|r.get::<_,i64>(0)).unwrap(),0);
     }
     #[test]
-    fn incompatible_rule_epoch_clears_all_rules_and_supporting_examples(){
+    fn incompatible_rule_epoch_quarantines_cache_without_erasing_examples(){
         let mut local=Connection::open_in_memory().unwrap();
         local.execute_batch("CREATE TABLE settings(k TEXT PRIMARY KEY,v TEXT NOT NULL);
              INSERT INTO settings VALUES('learned_regex_epoch','0');").unwrap();
         init(&local).unwrap();
-        local.execute("INSERT INTO learned_regex_candidates VALUES('epis',1)",[]).unwrap();
-        local.execute("INSERT INTO learned_regex_evidence VALUES(
+        local.execute("INSERT INTO learned_regex_candidates(marker,created_at) VALUES('epis',1)",[]).unwrap();
+        local.execute("INSERT INTO learned_regex_evidence(
+            marker,example_hash,imdb_id,absolute_episode,season,episode,anidb_id,anidb_episode) VALUES(
              'epis','key','tt1234567',300,14,1,'100',300)",[]).unwrap();
         let meta=Connection::open_in_memory().unwrap();
         meta.execute_batch("CREATE TABLE metadata_state(
@@ -539,6 +548,24 @@ mod tests{
             "SELECT obsolete FROM learned_regex_candidates WHERE marker='epis'",
             [],|r|r.get(0)).unwrap();
         assert_eq!(obsolete,1);
+        let epoch:i64=local.query_row(
+            "SELECT epoch FROM learned_regex_evidence WHERE marker='epis'",
+            [],|r|r.get(0)).unwrap();
+        assert_eq!(epoch,0,"old cached labels cannot authorize rules in a new epoch");
+    }
+    #[test]
+    fn full_cache_of_useful_rules_refuses_eviction(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE settings(k TEXT PRIMARY KEY,v TEXT NOT NULL);").unwrap();
+        init(&db).unwrap();
+        db.execute("INSERT INTO learned_regex_candidates(marker,created_at)
+           VALUES('good',1)",[]).unwrap();
+        db.execute("INSERT INTO learned_regex_evidence(
+           marker,example_hash,imdb_id,absolute_episode,season,episode,anidb_id,anidb_episode)
+           VALUES('good','hash','tt1234567',5,1,5,'100',5)",[]).unwrap();
+        assert!(!reserve_space(&db,"other",true,1,1).unwrap());
+        assert_eq!(db.query_row("SELECT count(*) FROM learned_regex_evidence",
+            [],|r|r.get::<_,i64>(0)).unwrap(),1);
     }
     #[test]
     fn disabled_rules_never_patch_parser_outputs(){
