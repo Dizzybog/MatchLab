@@ -43,6 +43,20 @@ fn season_tagged_absolute_anime_pack_removes_season_from_alias() {
 }
 
 #[test]
+fn underscore_delimited_absolute_anime_range_remains_tentative() {
+    let raw = "Bleach_320-360";
+    let parsed = parse_title(raw, false).unwrap();
+    let hint = &parsed["anime_episode_range_candidate"];
+    assert_eq!(hint["title"], "Bleach", "{parsed:?}");
+    assert_eq!(hint["start"], 320, "{parsed:?}");
+    assert_eq!(hint["end"], 360, "{parsed:?}");
+    assert_eq!(hint["numbering"], "absolute", "{parsed:?}");
+    assert_eq!(hint["verified"], false, "{parsed:?}");
+    assert!(parsed.get("episode_start").is_none(),
+        "without AniDB verification a bare numeric range is only a hint: {parsed:?}");
+}
+
+#[test]
 fn season_only_and_title_only_releases_remain_distinct_from_single_episode() {
     let bleach = parse_title("Bleach_S02", false).unwrap();
     assert_eq!(bleach["seasons"], json!([2]));
