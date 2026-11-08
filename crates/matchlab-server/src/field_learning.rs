@@ -161,25 +161,43 @@ fn independent_marker_value(field:&str,signal:&str)->Option<Value>{
     };
     validated_value(field,signal,&value).then_some(value)
 }
-fn independent_context_valid(raw:&str,field:&str,signal:&str)->bool{
-    if !context_valid(raw,field,signal){return false;}
+// Compile negative probes once. Compiling many regexes on the HTTP hot
+// path is forbidden: ordinary parsing must remain low-CPU.
+fn conflict_patterns()->&'static BTreeMap<&'static str,Vec<(&'static str,Regex)>>{
+    static INDEX:OnceLock<BTreeMap<&'static str,Vec<(&'static str,Regex)>>>
+        =OnceLock::new();
+    INDEX.get_or_init(||{
+        let families:&[(&'static str,&[&'static str])]=&[
+            ("resolution",&["4320p","2160p","1080p","720p","576p","480p","4k","8k"]),
+            ("codec",&["x264","x265","h264","h265","hevc","av1","vp9"]),
+            ("quality",&["web_dl","webdl","webrip","bluray","bdrip","brrip","hdtv","dvdrip"]),
+            ("audio",&["aac","ac3","eac3","ddp","dts","flac","truehd","opus"]),
+            ("bit_depth",&["8bit","10bit","12bit","10bits","12bits"]),
+            ("channels",&["5.1","7.1","2.0"]),
+            ("languages",&["norwegian","norsk","swedish","svenska","danish","dansk",
+                "french","german","italian","japanese"]),
+        ];
+        let mut result=BTreeMap::new();
+        for &(field,signals) in families{
+            let variants=signals.iter().filter_map(|&signal|
+                pattern_for(field,signal).map(|regex|(signal,regex))).collect();
+            result.insert(field,variants);
+        }
+        result
+    })
+}
+fn independent_context_with_re(raw:&str,field:&str,signal:&str,re:&Regex)->bool{
+    if !context_valid_with_re(raw,field,re){return false;}
     let name=leaf(raw);
     if field=="extension" && !name.to_ascii_lowercase()
         .ends_with(&format!(".{signal}")){return false;}
-    // Reject overlapping or contradictory media markers as negative probes.
-    let alternatives:&[&str]=match field{
-        "resolution"=>&["4320p","2160p","1080p","720p","576p","480p","4k","8k"],
-        "codec"=>&["x264","x265","h264","h265","hevc","av1","vp9"],
-        "quality"=>&["web_dl","webdl","webrip","bluray","bdrip","brrip","hdtv","dvdrip"],
-        "audio"=>&["aac","ac3","eac3","ddp","dts","flac","truehd","opus"],
-        "bit_depth"=>&["8bit","10bit","12bit","10bits","12bits"],
-        "channels"=>&["5.1","7.1","2.0"],
-        "languages"=>&["norwegian","norsk","swedish","svenska","danish","dansk",
-            "french","german","italian","japanese"],
-        _=>&[],
-    };
-    !alternatives.iter().filter(|other|**other!=signal).any(|other|
-        pattern_for(field,other).is_some_and(|re|re.is_match(name)))
+    !conflict_patterns().get(field).is_some_and(|alternatives|
+        alternatives.iter().any(|(other,regex)|
+            *other!=signal && regex.is_match(name)))
+}
+fn independent_context_valid(raw:&str,field:&str,signal:&str)->bool{
+    let Some(re)=pattern_for(field,signal)else{return false;};
+    independent_context_with_re(raw,field,signal,&re)
 }
 fn empty_field(value:Option<&Value>)->bool{
     match value{
@@ -222,9 +240,12 @@ fn signals(title: &str) -> Vec<(String, String)> {
     }
     out.into_iter().collect()
 }
-fn context_valid(raw: &str, field: &str, signal: &str) -> bool {
-    let title = leaf(raw);
-    let Some(re) = pattern_for(field, signal) else { return false; };
+fn context_valid(raw:&str,field:&str,signal:&str)->bool{
+    let Some(re)=pattern_for(field,signal)else{return false;};
+    context_valid_with_re(raw,field,&re)
+}
+fn context_valid_with_re(raw:&str,field:&str,re:&Regex)->bool{
+    let title=leaf(raw);
     // Repeated markers or a bare filename that's *just* a field token are
     // ambiguous. Likewise, "German Connection" is not a language tag.
     if re.find_iter(title).take(2).count() != 1 { return false; }
@@ -471,7 +492,9 @@ fn propose_from(title: &str, parsed: &mut Value, active: &[FieldRule]) {
     // IMDb/AniDB identity or season/episode coordinates.
     let mut candidates: BTreeMap<&str, Vec<&FieldRule>> = BTreeMap::new();
     for rule in active {
-        if !independent_context_valid(title,&rule.field,&rule.signal) { continue; }
+        if !independent_context_with_re(title,&rule.field,&rule.signal,&rule.regex) {
+            continue;
+        }
         if !rule.regex.is_match(leaf(title)) { continue; }
         candidates.entry(&rule.field).or_default().push(rule);
     }
