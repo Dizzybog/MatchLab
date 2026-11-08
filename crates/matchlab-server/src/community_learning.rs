@@ -466,9 +466,9 @@ mod tests{
             &details["selected"],"field_unresolved_episode"));
         assert!(proven_coordinate_gap(&meta,&details["parsed"],
             &details["selected"],"field_unresolved_season"));
-        let report=report("Test.Show.S02E07","matched",&details,Some(&meta))
+        let submitted=report("Test.Show.S02E07","matched",&details,Some(&meta))
             .expect("verified missing matcher episode should qualify");
-        assert!(report["alerts"].as_array().unwrap().iter().any(|code|
+        assert!(submitted["alerts"].as_array().unwrap().iter().any(|code|
             code=="field_unresolved_episode"));
         assert!(report("Test.Show.S02E07","matched",&details,None).is_none());
         let other=json!({"parsed":{"year":2025,"title":"Test Show"},
