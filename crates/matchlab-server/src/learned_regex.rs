@@ -242,33 +242,58 @@ fn negative_probes(marker:&str,re:&Regex)->bool{
     !negatives.iter().any(|t|match_release(re,t).is_some())
         && !base_handles(marker)
 }
-/// Evaluate active rules after any image/parser update and metadata refresh.
-/// Transactionally remove the candidate + ALL supporting evidence on a
-/// redundant rule, invalid regex, changed mapping or incompatible epoch.
-/// A missing metadata snapshot keeps rules quarantined, without data loss.
+/// Retire immediately, but retain the original verified observations. Under
+/// storage pressure the budget worker evicts these candidates AND their
+/// dependent evidence in one transaction using foreign-key cascades.
+fn retire_rule(db:&Connection,marker:&str,reason:&str)->Result<(),String>{
+    db.execute("DELETE FROM learned_regex_active WHERE marker=?1",[marker])
+        .map_err(|e|e.to_string())?;
+    db.execute("UPDATE learned_regex_candidates
+        SET obsolete=1,obsolete_at=COALESCE(obsolete_at,strftime('%s','now')),
+            obsolete_reason=?2 WHERE marker=?1",params![marker,reason])
+        .map_err(|e|e.to_string())?;
+    Ok(())
+}
+/// On image and metadata changes revalidate learned regex rules against the
+/// current source of truth. A stale/unsafe rule is NOT active, but its
+/// historical evidence remains available until the storage quota is reached.
 pub fn reconcile(db:&mut Connection,metadata:&Connection)->Result<(),String>{
     init(db)?;
-    let revision=metadata_revision(metadata)?;
+    let revision=match metadata_revision(metadata) {
+        Ok(r)=>r,
+        Err(e)=>{
+            install(Vec::new()); // fail closed with no verified metadata
+            return Err(e);
+        }
+    };
     let current=build();
     let epoch=EPOCH.to_string();
     let previous_epoch:Option<String>=db.query_row(
         "SELECT v FROM settings WHERE k='learned_regex_epoch'",[],|r|r.get(0))
         .optional().map_err(|e|e.to_string())?;
     let tx=db.transaction().map_err(|e|e.to_string())?;
-    if previous_epoch.is_some_and(|v|v!=epoch){
-        // Incompatible format: delete rules AND training basis together.
-        tx.execute("DELETE FROM learned_regex_candidates",[]).map_err(|e|e.to_string())?;
+    if previous_epoch.as_deref().is_some_and(|v|v!=epoch) {
+        tx.execute("DELETE FROM learned_regex_active",[])
+            .map_err(|e|e.to_string())?;
+        tx.execute("UPDATE learned_regex_candidates SET obsolete=1,
+            obsolete_at=COALESCE(obsolete_at,strftime('%s','now')),
+            obsolete_reason='incompatible_epoch'",[])
+            .map_err(|e|e.to_string())?;
     }
     tx.execute("INSERT INTO settings(k,v) VALUES('learned_regex_epoch',?1)
         ON CONFLICT(k) DO UPDATE SET v=excluded.v",[&epoch])
         .map_err(|e|e.to_string())?;
-    let mut stmt=tx.prepare("SELECT marker FROM learned_regex_candidates
+    let mut stmt=tx.prepare("SELECT marker,obsolete FROM learned_regex_candidates
         ORDER BY marker LIMIT 65").map_err(|e|e.to_string())?;
-    let candidates=stmt.query_map([],|r|r.get::<_,String>(0))
+    let candidates=stmt.query_map([],|r|Ok((
+        r.get::<_,String>(0)?,r.get::<_,i64>(1)?)))
         .map_err(|e|e.to_string())?
         .collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;
     drop(stmt);
-    for marker in &candidates {
+    for (marker,obsolete) in &candidates {
+        // Old epochs require new evidence; retain retired examples solely as
+        // a cache and regression corpus, not as active learned labels.
+        if *obsolete!=0 {continue;}
         let old:Option<(String,String)>=tx.query_row(
             "SELECT verified_build,verified_metadata FROM learned_regex_active
              WHERE marker=?1",[marker],|r|Ok((r.get(0)?,r.get(1)?)))
@@ -277,22 +302,17 @@ pub fn reconcile(db:&mut Connection,metadata:&Connection)->Result<(),String>{
             continue;
         }
         let Some(re)=regex_for(marker)else{
-            tx.execute("DELETE FROM learned_regex_candidates WHERE marker=?1",[marker])
-                .map_err(|e|e.to_string())?;
+            retire_rule(&tx,marker,"invalid_pattern")?;
             continue;
         };
         if !negative_probes(marker,&re) {
-            tx.execute("DELETE FROM learned_regex_candidates WHERE marker=?1",[marker])
-                .map_err(|e|e.to_string())?;
+            retire_rule(&tx,marker,"now_handled_or_unsafe")?;
             continue;
         }
         let verified=validate_examples(&tx,metadata,marker)?;
         if !verified && old.is_some(){
-            // It was previously active, but the evidence no longer matches
-            // current AniDB/TVDB truth: remove it and its basis.
-            tx.execute("DELETE FROM learned_regex_candidates WHERE marker=?1",[marker])
-                .map_err(|e|e.to_string())?;
-        } else if verified && qualifies(&tx,marker)? {
+            retire_rule(&tx,marker,"mapping_no_longer_verified")?;
+        }else if verified && qualifies(&tx,marker)? {
             tx.execute("INSERT INTO learned_regex_active(
                  marker,pattern,verified_build,verified_metadata,activated_at)
                  VALUES(?1,?2,?3,?4,strftime('%s','now'))
@@ -305,6 +325,16 @@ pub fn reconcile(db:&mut Connection,metadata:&Connection)->Result<(),String>{
     }
     tx.commit().map_err(|e|e.to_string())?;
     reload(db,&current,&revision)
+}
+/// Delete only obsolete candidates, never active rules. Cascading deletes
+/// remove their evidence atomically. Called exclusively once the local
+/// learning DB's configured budget has been exceeded.
+pub fn evict_obsolete(db:&Connection,max_rows:i64)->Result<i64,String>{
+    init(db)?;
+    db.execute("DELETE FROM learned_regex_candidates WHERE marker IN(
+        SELECT marker FROM learned_regex_candidates WHERE obsolete=1
+        ORDER BY obsolete_at ASC,created_at ASC LIMIT ?1
+    )",[max_rows]).map(|v|v as i64).map_err(|e|e.to_string())
 }
 fn reload(db:&Connection,build:&str,revision:&str)->Result<(),String>{
     let mut stmt=db.prepare("SELECT marker FROM learned_regex_active
@@ -377,6 +407,12 @@ pub fn observe(db:&Connection,metadata:&Connection,title:&str,details:&Value)->R
             VALUES(?1,strftime('%s','now'))",[&marker])
             .map_err(|e|e.to_string())?;
         let fingerprint=hash(&format!("{imdb}:{absolute}:{}",name.to_lowercase()));
+        // Retired observations remain cached but cannot silently retrain a
+        // rule retired by a newer parser/metadata version.
+        let retired:i64=db.query_row("SELECT obsolete FROM learned_regex_candidates
+            WHERE marker=?1",[&marker],|r|r.get(0))
+            .map_err(|e|e.to_string())?;
+        if retired!=0 {continue;}
         db.execute("INSERT OR IGNORE INTO learned_regex_evidence(
              marker,example_hash,imdb_id,absolute_episode,season,episode,
              anidb_id,anidb_episode) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
@@ -409,7 +445,7 @@ mod tests{
         let mut db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE settings(k TEXT PRIMARY KEY,v TEXT NOT NULL);").unwrap();
         init(&db).unwrap();
-        db.execute("INSERT INTO learned_regex_candidates VALUES('epis',1)",[]).unwrap();
+        db.execute("INSERT INTO learned_regex_candidates(marker,created_at) VALUES('epis',1)",[]).unwrap();
         db.execute("INSERT INTO learned_regex_evidence VALUES(
            'epis','key','tt1234567',300,14,1,'100',300)",[]).unwrap();
         db.execute("INSERT INTO learned_regex_active VALUES(
@@ -438,19 +474,27 @@ mod tests{
                  start INTEGER,end INTEGER,offset INTEGER,map TEXT);
              INSERT INTO anime_series_map VALUES('tt1234567','100','200',0);
              INSERT INTO episode_map VALUES('100','200',1,2,1,30,0,'');").unwrap();
-        local.execute("INSERT INTO learned_regex_candidates VALUES('epis',1)",[]).unwrap();
+        local.execute("INSERT INTO learned_regex_candidates(marker,created_at) VALUES('epis',1)",[]).unwrap();
         local.execute("INSERT INTO learned_regex_evidence VALUES(
              'epis','key','tt1234567',300,14,1,'100',300)",[]).unwrap();
         local.execute("INSERT INTO learned_regex_active VALUES(
              'epis','old-regex','old-build','old-metadata',1)",[]).unwrap();
-        // The prior image trusted absolute episode 300. Current metadata
-        // cannot reproduce it; remove both the rule and the observation.
+        // Current metadata cannot reproduce the old mapping: retire the
+        // rule but retain its examples until storage quota needs reclaim.
         reconcile(&mut local,&meta).unwrap();
-        for table in ["learned_regex_candidates","learned_regex_evidence",
-             "learned_regex_active"]{
-            let query=format!("SELECT count(*) FROM {table}");
-            assert_eq!(local.query_row(&query,[],|r|r.get::<_,i64>(0)).unwrap(),0);
-        }
+        assert_eq!(local.query_row(
+            "SELECT count(*) FROM learned_regex_active",[],
+            |r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(local.query_row(
+            "SELECT obsolete FROM learned_regex_candidates WHERE marker='epis'",[],
+            |r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(local.query_row(
+            "SELECT count(*) FROM learned_regex_evidence",[],
+            |r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(evict_obsolete(&local,1).unwrap(),1);
+        assert_eq!(local.query_row(
+            "SELECT count(*) FROM learned_regex_evidence",[],
+            |r|r.get::<_,i64>(0)).unwrap(),0);
     }
     #[test]
     fn incompatible_rule_epoch_clears_all_rules_and_supporting_examples(){
@@ -468,10 +512,11 @@ mod tests{
         reconcile(&mut local,&meta).unwrap();
         let count:i64=local.query_row("SELECT count(*) FROM learned_regex_evidence",
             [],|r|r.get(0)).unwrap();
-        assert_eq!(count,0);
-        let count:i64=local.query_row("SELECT count(*) FROM learned_regex_candidates",
+        assert_eq!(count,1);
+        let obsolete:i64=local.query_row(
+            "SELECT obsolete FROM learned_regex_candidates WHERE marker='epis'",
             [],|r|r.get(0)).unwrap();
-        assert_eq!(count,0);
+        assert_eq!(obsolete,1);
     }
     #[test]
     fn disabled_rules_never_patch_parser_outputs(){
