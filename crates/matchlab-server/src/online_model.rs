@@ -371,6 +371,25 @@ impl OnlineModel{
 mod tests{
     use super::*;
     #[test]
+    fn shadow_model_observes_all_field_categories_with_bounded_work(){
+        let db=Connection::open_in_memory().unwrap();
+        let mut learner=OnlineModel::load(&db).unwrap();
+        let parsed=json!({"title":"Example Work","year":2024,
+            "seasons":[2],"episodes":[7],"resolution":"1080p",
+            "quality":"WEB-DL","codec":"hevc","audio":["AAC"],
+            "edition":"Director Cut","network":"Apple TV",
+            "subbed":true,"group":"EXAMPLE"});
+        let n=learner.observe_canonical_fields(
+            &db,"Example.Work.S02E07.2024.1080p.WEB-DL",&parsed).unwrap();
+        assert_eq!(n,6,"per-release background updates must be bounded");
+        let again=learner.observe_canonical_fields(
+            &db,"Example.Work.S02E07.2024.1080p.WEB-DL",&parsed).unwrap();
+        assert_eq!(again,0,"repeated queries must not retrain the same title");
+        let stored:i64=db.query_row("SELECT COUNT(*) FROM online_model_seen",[],
+            |r|r.get(0)).unwrap();
+        assert_eq!(stored,6);
+    }
+    #[test]
     fn learns_real_examples_and_rejects_counterfactual_fields(){
         let mut model=OnlineModel::new();
         for k in 0..160{
