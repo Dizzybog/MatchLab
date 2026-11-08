@@ -14,6 +14,7 @@ mod dashboard_history;
 mod debug_feed;
 mod field_audit;
 mod community_learning;
+mod local_learning;
 mod query_cache;
 use axum::{extract::{Query, State}, http::{StatusCode,header}, routing::{get,post}, Json, Router};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -1608,6 +1609,7 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
     }
     if history_ready {
         community_learning::start(PathBuf::from(&history_db),PathBuf::from(&db));
+        local_learning::start(PathBuf::from(&history_db));
     }
     // A pre-existing volume may need a fresh Tantivy schema generation.
     // Start this in the blocking pool only after all service configuration is
