@@ -1656,12 +1656,25 @@ fn unmarked_anime_episode_candidate(
                 "720p","2160p","480p","web","bd","bdrip","bluray","mkv","mp4"]
                 .iter().any(|tag|suffix_lower.starts_with(tag))
             && !suffix.starts_with('+') {continue;}
-        let candidate_title=ENGINE.parse(prefix,translate_languages)?
-            .get("title").and_then(Value::as_str).unwrap_or(prefix).trim().to_owned();
+        // "Title S2 [13-24]" is an *absolute* anime episode pack with
+        // season context, not season 2 episodes 13..24. Strip the explicit
+        // short season marker before verifying the show's AniDB alias.
+        let clean_prefix=prefix.trim_end_matches(|c:char|
+            c.is_whitespace()||matches!(c,'['|'('|'_'|'-'|'.'));
+        let season_match=PACK_SEASON_SUFFIX_RE.captures(clean_prefix)
+            .map_err(|e|ParseError::Regex(e.to_string()))?;
+        let season_hint=season_match.as_ref().and_then(|caps|caps.get(1))
+            .and_then(|m|m.as_str().parse::<i64>().ok());
+        let title_prefix=season_match.as_ref()
+            .and_then(|caps|caps.get(0))
+            .map(|marker|clean_prefix[..marker.start()].trim())
+            .filter(|title|!title.is_empty()).unwrap_or(clean_prefix);
+        let candidate_title=ENGINE.parse(title_prefix,translate_languages)?
+            .get("title").and_then(Value::as_str).unwrap_or(title_prefix).trim().to_owned();
         if candidate_title.is_empty(){continue;}
         return Ok(Some(json!({
             "title":candidate_title, "start":start, "end":end,
-            "numbering":"absolute","verified":false
+            "numbering":"absolute","verified":false,"season_hint":season_hint
         })));
     }
     Ok(None)
@@ -2349,20 +2362,38 @@ static BARE_ANIME_EPISODE_RE: Lazy<Regex> = Lazy::new(|| {
         r"(?i)^(.+?)[ ._]+(0*[1-9][0-9]{0,4})(?:\.(?:mkv|mp4|avi|m4v|webm|ts|m2ts))?$"
     ).expect("valid bare final anime episode pattern")
 });
+// A fansub leaf often has an absolute episode followed by its episode title
+// or release metadata: "Bleach - 295 - Title" / "Bleach - 215 (BD)".
+// It is only a candidate until a unique AniDB-linked title is verified.
+static DASH_ANIME_EPISODE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)^(.+?)[ ._]+-[ ._]+(0*[1-9][0-9]{0,4})(?=$|[ ._\[(])")
+        .expect("valid dash anime episode pattern")
+});
+static PACK_SEASON_SUFFIX_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)(?:^|[ ._-])s0?([1-9][0-9]?)[ ._-]*$")
+        .expect("valid anime pack season suffix")
+});
 fn unmarked_single_anime_episode_candidate(
     raw: &str, result: &Map<String, Value>, translate_languages: bool,
 ) -> Result<Option<Value>, ParseError> {
     if result.get("seasons").and_then(Value::as_array).is_some_and(|a| !a.is_empty())
-        || result.get("episodes").and_then(Value::as_array).is_some_and(|a| !a.is_empty())
+        || result.get("episodes").and_then(Value::as_array).is_some_and(|a| a.len() > 1)
         || result.contains_key("episode_start")
         || EXPLICIT_EPISODE_SHAPE_RE.is_match(raw)
             .map_err(|e| ParseError::Regex(e.to_string()))?
     {
         return Ok(None);
     }
-    let Some(caps) = BARE_ANIME_EPISODE_RE.captures(raw)
-        .map_err(|e| ParseError::Regex(e.to_string()))?
-    else { return Ok(None); };
+    // A generic handler may already have guessed the bare episode. Retain
+    // the verified-absolute hint so a parent "Season 14" cannot turn
+    // "Bleach - 295" into invalid season-relative episode 295.
+    let caps = if let Some(caps) = DASH_ANIME_EPISODE_RE.captures(raw)
+        .map_err(|e| ParseError::Regex(e.to_string()))? {
+        caps
+    } else if let Some(caps) = BARE_ANIME_EPISODE_RE.captures(raw)
+        .map_err(|e| ParseError::Regex(e.to_string()))? {
+        caps
+    } else { return Ok(None); };
     let (Some(prefix),Some(number)) = (caps.get(1), caps.get(2)) else {
         return Ok(None);
     };
