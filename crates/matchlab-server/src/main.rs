@@ -1271,11 +1271,13 @@ fn diagnose_with_policy(
                 && winner["category"]=="series" {
                 match winner.pointer("/anime/asid").and_then(Value::as_str) {
                     Some(existing) if existing!=independent_asid => {
-                        // Disagreeing, independently verified paths are a
-                        // conflict, not permission to publish either ASID.
+                        // The existing IMDb-aware resolver has already
+                        // verified a complete SID/ASID crosswalk. The new
+                        // AniDB-only lane is supplementary and must not
+                        // erase a previously valid match. Record conflicts
+                        // for diagnostics instead of publishing its guess.
                         winner["anidb_conflict"]=json!({
                             "independent":independent_asid,"imdb_crosswalk":existing});
-                        winner["anime"]=Value::Null;
                     },
                     _ => {
                         winner["anime"]=json!({"anidb_id":item.anidb_id,
@@ -1521,13 +1523,13 @@ fn public_match_response(selected: Option<Value>) -> Value {
         }).collect::<Option<Vec<_>>>()?;
         Some((mapped.first()?.0.clone(),mapped.last()?.1.clone()))
     });
-    let independent_range_conflict=winner["anidb_independent_verified"]==true
-        && winner.get("anidb_range").and_then(|r|r["anidb_id"].as_str())
-            .is_some_and(|id|segments.is_some_and(|entries|
-                entries.iter().any(|segment|
-                    segment["anidb_id"].as_str().is_some_and(|other|other!=id))));
+    // Preserve the existing crosswalk as the authority on IMDb-linked
+    // ranges. Independent AniDB-only proof may fill an ASID where the
+    // legacy matcher has no range relationship at all, but may not
+    // contradict a fully verified multi-cour IMDb mapping or turn an
+    // incomplete legacy range into a guessed complete one.
     let independent_range=if winner["anidb_independent_verified"]==true
-        && !independent_range_conflict {
+        && segments.is_none() && !has_range {
         winner.get("anidb_range").and_then(|r|{
             let id=r["anidb_id"].as_str()?;
             let start=r["start"].as_i64()?;
@@ -1537,16 +1539,12 @@ fn public_match_response(selected: Option<Value>) -> Value {
                 episode_crosswalk::canonical_asid(id,end)?))
         })
     }else{None};
-    let (asid_start,asid_end)=if independent_range_conflict {
-        // Two verified identity lanes disagree. Neither ASID may be
-        // published until the metadata conflict is reconciled.
-        (Value::Null,Value::Null)
-    }else if let Some((start,end))=independent_range {
-        (json!(start),json!(end))
-    }else if segments.is_some() {
-        // IMDb-derived ranges require every segment to be valid and complete.
+    let (asid_start,asid_end)=if segments.is_some() {
+        // Existing mapped ranges and incomplete-range safeguards win.
         range_asids.map_or((Value::Null,Value::Null),|(start,end)|
             (json!(start),json!(end)))
+    }else if let Some((start,end))=independent_range {
+        (json!(start),json!(end))
     }else{
         (json!(direct_asid),json!(direct_asid))
     };
