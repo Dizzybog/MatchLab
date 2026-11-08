@@ -511,3 +511,71 @@ For a season-only release such as `Supernatural.S02`, the selected match receive
 
 The season table uses IMDb season numbering; anime crosswalk mappings may use different TVDB-style season conventions.
 
+
+
+### Read-only parsing diagnostics feed
+
+The separate, opt-in debug feed allows an external reviewer or scheduled monitor
+to poll the same **last 1,000** retained matching requests that the dashboard uses.
+It **never triggers a new match** and does not alter history, metadata or the
+Tantivy index. It has no extra SQLite table or schema migration.
+
+Set a randomly generated secret of at least **32 bytes**:
+
+
+```bash
+export MATCHLAB_DEBUG_API_TOKEN="$(openssl rand -hex 32)"
+```
+
+Pass this variable into the MatchLab container using your secrets or Compose
+configuration. Without a valid configuration, debug feed routes return 404.
+With a configured secret, missing or incorrect bearer authorization returns 401.
+Use HTTPS and protect the rest of the application behind your reverse proxy:
+this token does **not** protect the pre-existing public dashboard endpoints.
+
+```bash
+# First, learn the latest retained request ID.
+curl -fsS -H "Authorization: Bearer $MATCHLAB_DEBUG_API_TOKEN" \
+  https://matchlab.example.com/api/debug/parsing/status
+
+# Catch up from a saved cursor; request IDs are monotonically increasing.
+curl -fsS -H "Authorization: Bearer $MATCHLAB_DEBUG_API_TOKEN" \
+  'https://matchlab.example.com/api/debug/parsing?after_id=0&limit=100&suspect_only=true'
+
+# Inspect a specific retained request's complete diagnostic and candidates.
+curl -fsS -H "Authorization: Bearer $MATCHLAB_DEBUG_API_TOKEN" \
+  https://matchlab.example.com/api/debug/parsing/42
+```
+
+/api/debug/parsing query parameters:
+- `after_id`: Nonnegative, exclusive numeric cursor; defaults to 0. Use
+  `status.latest_id` as the initial cursor if you only want future requests.
+- `limit`: Scan 1–100 raw requests per page, default 100.
+- `suspect_only=true`: Return only rows with heuristic anomaly
+  flags. **Still advance** using `next_after_id` even when `items` is empty,
+  to avoid re-reading unflagged requests indefinitely.
+- `include_details=true`: Add the full stored diagnostic (including
+  ranked candidate details). The default includes the original release title,
+  timestamp, status, selected and parsed values, and anomaly flags.
+
+The response returns `oldest_id`, `latest_id`, `retained`,
+`next_after_id`, `has_more`, and `cursor_expired`.
+When `has_more=true`, request the next page immediately. When it is false,
+poll again later from `next_after_id`. If `cursor_expired=true`, the 1,000-row
+retention cap caused a data gap; reset to the earliest available history and
+record the gap. The feed is not a permanent historical archive.
+
+The anomaly flags are **conservative review hints**, not automatic corrections.
+Current checks cover explicit `SxxEyy` disagreement with selected or parsed
+coordinates, unmatched explicitly episodic releases, impossible nonpositive
+coordinates, unusually large seasons, reversed episode ranges, and matching
+errors. A verified AniDB mapping that deliberately changes an explicit episode
+is not reported as an explicit-marker mismatch.
+
+**Security:** Only the HTTPS `Authorization: Bearer` header is accepted,
+never URL tokens, cookies, or HTTP Basic Auth. Results carry
+`Cache-Control: no-store`. Keep the token out of logs, browser URLs,
+commits and GitHub issues. An API consumer must have a network route to the
+service; deploying this endpoint does not itself make an unreachable hostname
+accessible. Reviewers or automation can use the feed to prepare and verify PRs,
+but no unattended polling or PR creation is started merely by enabling it.
