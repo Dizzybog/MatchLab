@@ -592,7 +592,10 @@ control for enabling learning or approving rules.
 
 The JSON fields include `enabled`, `active_rule_count`,
 `active_rules_by_field`, `revision`, `training_source`, `model`,
-and `identity_and_coordinate_override`. The safe in-memory status
+and `identity_and_coordinate_override`. The `training_source` value
+now distinguishes the canonical Rust parser and independently allowlisted
+raw filename markers for missing technical fields; this is not proof of
+ML model retraining or permission to infer IMDb IDs. The safe in-memory status
 does not query SQLite or run ONNX inference on HTTP requests.
 
 Set `MATCHLAB_ML_ENABLED=true` on the MatchLab container to opt in.
