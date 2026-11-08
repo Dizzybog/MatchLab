@@ -171,6 +171,7 @@ pub fn init(db:&Connection)->Result<(),String>{
             episode INTEGER NOT NULL,anidb_id TEXT NOT NULL,
             anidb_episode INTEGER NOT NULL,
             epoch INTEGER NOT NULL DEFAULT 1,
+            release_title TEXT NOT NULL DEFAULT '',
             PRIMARY KEY(marker,example_hash));
          CREATE TABLE IF NOT EXISTS learned_regex_active(
             marker TEXT PRIMARY KEY REFERENCES learned_regex_candidates(marker)
@@ -186,6 +187,7 @@ pub fn init(db:&Connection)->Result<(),String>{
         ("learned_regex_candidates","evaluated_metadata","evaluated_metadata TEXT NOT NULL DEFAULT ''"),
         ("learned_regex_candidates","last_evaluated","last_evaluated INTEGER NOT NULL DEFAULT 0"),
         ("learned_regex_evidence","epoch","epoch INTEGER NOT NULL DEFAULT 1"),
+        ("learned_regex_evidence","release_title","release_title TEXT NOT NULL DEFAULT ''"),
         ("learned_regex_candidates","obsolete","obsolete INTEGER NOT NULL DEFAULT 0"),
         ("learned_regex_candidates","obsolete_at","obsolete_at INTEGER"),
         ("learned_regex_candidates","obsolete_reason","obsolete_reason TEXT NOT NULL DEFAULT ''"),
@@ -217,24 +219,40 @@ fn check_verified(metadata:&Connection,imdb:&str,absolute:i64,
         && found.anidb_id==anidb && found.anidb_episode==anidb_ep
 }
 fn validate_examples(db:&Connection,metadata:&Connection,marker:&str)->Result<bool,String>{
+    let Some(regex)=regex_for(marker)else{return Ok(false);};
     let mut stmt=db.prepare("SELECT imdb_id,absolute_episode,season,episode,
-        anidb_id,anidb_episode FROM learned_regex_evidence WHERE marker=?1 AND epoch=?2")
+        anidb_id,anidb_episode,release_title
+        FROM learned_regex_evidence WHERE marker=?1 AND epoch=?2")
         .map_err(|e|e.to_string())?;
-    let mut good=true;
-    let mut count=0i64;
+    let mut valid=0i64;
     let rows=stmt.query_map(params![marker,EPOCH],|r|Ok((
         r.get::<_,String>(0)?,r.get::<_,i64>(1)?,
         r.get::<_,i64>(2)?,r.get::<_,i64>(3)?,
-        r.get::<_,String>(4)?,r.get::<_,i64>(5)?)))
+        r.get::<_,String>(4)?,r.get::<_,i64>(5)?,
+        r.get::<_,String>(6)?)))
         .map_err(|e|e.to_string())?;
-    for row in rows {
-        let (imdb,absolute,season,episode,anidb,anidb_ep)=row.map_err(|e|e.to_string())?;
-        count+=1;
-        if !check_verified(metadata,&imdb,absolute,season,episode,&anidb,anidb_ep){
-            good=false; break;
+    for row in rows{
+        let (imdb,abs,season,episode,anidb,anidb_ep,title)=row.map_err(|e|e.to_string())?;
+        // Previous schema cached no raw title. Keep those observations,
+        // but never let them authorize a live override or GitHub proposal.
+        if title.is_empty(){return Ok(false);}
+        let Some((base,num))=match_release(&regex,&title)else{return Ok(false);};
+        if num!=abs || crate::matchlab_matcher::clean_title(base).is_empty(){
+            return Ok(false);
         }
+        if !check_verified(metadata,&imdb,abs,season,episode,&anidb,anidb_ep){
+            return Ok(false);
+        }
+        let Ok(parsed)=matchlab_parser::parse_title(&title,false)else{return Ok(false);};
+        let ordinary=Value::Object(parsed);
+        if ordinary["anime_episode_candidate"]["episode"].as_i64()==Some(abs)
+            ||ordinary["episodes"].as_array().is_some_and(|list|
+               list.len()==1 && list[0].as_i64()==Some(abs)){
+            return Ok(false); // already solved by the current core parser
+        }
+        valid+=1;
     }
-    Ok(good&&count>=MIN_EXAMPLES)
+    Ok(valid>=MIN_EXAMPLES)
 }
 fn qualifies(db:&Connection,marker:&str)->Result<bool,String>{
     let (samples,series,eps):(i64,i64,i64)=db.query_row(
@@ -460,14 +478,14 @@ pub fn observe(db:&Connection,metadata:&Connection,title:&str,details:&Value)->R
         // provenance; merely retaining cached data never revalidates it.
         db.execute("INSERT INTO learned_regex_evidence(
              marker,example_hash,imdb_id,absolute_episode,season,episode,
-             anidb_id,anidb_episode,epoch) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+             anidb_id,anidb_episode,epoch,release_title) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
              ON CONFLICT(marker,example_hash) DO UPDATE SET
                imdb_id=excluded.imdb_id,absolute_episode=excluded.absolute_episode,
                season=excluded.season,episode=excluded.episode,
                anidb_id=excluded.anidb_id,anidb_episode=excluded.anidb_episode,
-               epoch=excluded.epoch",
+               epoch=excluded.epoch,release_title=excluded.release_title",
              params![marker,fingerprint,imdb,absolute,mapped.season,
-                mapped.episode,mapped.anidb_id,mapped.anidb_episode,EPOCH])
+                mapped.episode,mapped.anidb_id,mapped.anidb_episode,EPOCH,title])
             .map_err(|e|e.to_string())?;
         seen+=1;
         if seen>=1 {break;}
