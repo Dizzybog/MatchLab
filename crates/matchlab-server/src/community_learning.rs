@@ -7,7 +7,7 @@ use sha2::{Digest,Sha256};
 use std::{env,fs,path::{Path,PathBuf},time::{Duration,SystemTime,UNIX_EPOCH}};
 
 const REPO:&str="Dizzybog/MatchLab";
-const PROTOCOL:u32=2;
+const PROTOCOL:u32=3;
 const EPOCH:u32=1;
 const DAY_SECS:u64=86_400;
 const POLL_SECS:u64=300;
@@ -16,7 +16,7 @@ const MAX_PAGES:usize=5;
 const MAX_BATCH:usize=16;
 const MAX_SEEN:i64=50_000;
 const MAX_BODY:usize=16_384;
-const MARKER:&str="<!-- matchlab-community-batch-v2 -->";
+const MARKER:&str="<!-- matchlab-community-batch-v3 -->";
 
 fn now()->u64{
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
@@ -45,6 +45,7 @@ pub async fn status()->Json<Value>{
         "build_sha":valid_sha(build_sha()).then_some(build_sha()),
         "upload":"one_daily_github_issue_with_opt_in_batch_comments",
         "batch_interval_hours":24,"max_reports_per_batch":MAX_BATCH,
+        "uploads":"verified_regex_proposals_and_strict_anomalies",
         "older_build_reports":"accepted_as_unverified_until_current_replay",
         "note":"Reports are untrusted signals, never verified training labels"}))
 }
@@ -261,6 +262,38 @@ fn scan(db:&Connection,history:&Path,metadata:&Path,time:u64)->Result<(),String>
     }
     Ok(())
 }
+/// Gather high-evidence rule suggestions from the local offline learning DB.
+/// No rule is sent merely because a model assigned a large confidence value.
+/// Each proposal must already be locally active, evidence-diverse, and
+/// independently revalidated using the current AniDB/TVDB mapping.
+fn collect_rule_proposals(db:&Connection,metadata:&Path,time:u64)->Result<(),String>{
+    let state=env::var("MATCHLAB_ML_STATE_FILE")
+        .unwrap_or_else(|_|"/data/local-learning.sqlite3".into());
+    let Ok(local)=Connection::open_with_flags(
+        &state,OpenFlags::SQLITE_OPEN_READ_ONLY
+    )else{return Ok(());};
+    let _=local.busy_timeout(Duration::from_millis(250));
+    let Ok(meta)=Connection::open_with_flags(
+        metadata,OpenFlags::SQLITE_OPEN_READ_ONLY
+    )else{return Ok(());};
+    let Ok(rules)=crate::learned_regex::proposals(&local,&meta)else{return Ok(());};
+    let mut count:i64=db.query_row("SELECT COUNT(*) FROM pending",[],|r|r.get(0))
+        .map_err(|e|e.to_string())?;
+    for proposal in rules.into_iter().take(2){
+        if count>=MAX_BATCH as i64{break;}
+        let Some(key)=proposal["fingerprint"].as_str()else{continue;};
+        let seen:i64=db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM reported WHERE fingerprint=?1)",
+            [key],|r|r.get(0)).map_err(|e|e.to_string())?;
+        if seen!=0{continue;}
+        let rows=db.execute(
+            "INSERT OR IGNORE INTO pending(fingerprint,payload,created_at)
+             VALUES(?1,?2,?3)",params![key,proposal.to_string(),time as i64])
+            .map_err(|e|e.to_string())?;
+        count+=rows as i64;
+    }
+    Ok(())
+}
 fn github_client()->Result<reqwest::blocking::Client,String>{
     reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(12))
@@ -318,15 +351,24 @@ fn build_batch(db:&Connection,time:u64)->Result<Option<(String,Value,Vec<String>
         .map_err(|e|e.to_string())?;
     if rows.is_empty(){return Ok(None);}
     let fingerprints=rows.iter().map(|(k,_)|k.clone()).collect::<Vec<_>>();
-    let reports=rows.iter().map(|(_,v)|
+    let items=rows.iter().map(|(_,v)|
         serde_json::from_str::<Value>(v).map_err(|e|e.to_string()))
         .collect::<Result<Vec<_>,_>>()?;
+    let mut reports=Vec::new();
+    let mut rules=Vec::new();
+    for item in items{
+        if item["kind"]=="verified_regex_proposal"{
+            rules.push(item);
+        }else{
+            reports.push(item);
+        }
+    }
     let batch_id=hex_digest(&format!("{}\n{}\n{}",
         build_sha(),EPOCH,fingerprints.join("\n")));
     let batch=json!({"protocol":PROTOCOL,"learning_epoch":EPOCH,
         "build_sha":build_sha(),"source":"matchlab-community-batch",
         "batch_id":batch_id,"created_unix":time,"verified":false,
-        "reports":reports});
+        "reports":reports,"rules":rules});
     Ok(Some((batch_id,batch,fingerprints)))
 }
 // Commit report digests BEFORE a network write. On a timeout/crash we may
@@ -367,6 +409,7 @@ fn cycle(history:&Path,metadata:&Path,storage:&Path,token:&str)->Result<(),Strin
     let time=now();
     let mut db=connect(storage)?;
     ensure_version(&mut db,history,time)?;
+    collect_rule_proposals(&db,metadata,time)?;
     scan(&db,history,metadata,time)?;
     let started=setting(&db,"window_start")?
         .and_then(|v|v.parse::<u64>().ok()).unwrap_or(time);
