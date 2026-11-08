@@ -3,40 +3,95 @@ name: Community learning review
 on:
   workflow_dispatch:
   schedule:
-    - cron: "19 3 * * *"
+    - cron: "23 0 * * *"
 
+# Trusted default branch only; untrusted issue text is data, never code.
 permissions:
-  contents: read
-  issues: read
+  contents: write
+  issues: write
+
+concurrency:
+  group: matchlab-community-learning-daily
+  cancel-in-progress: false
 
 jobs:
   review:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
         with:
+          fetch-depth: 0
           persist-credentials: false
-      - name: Read recent public community issues as data
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test intake and historical-version validation
+        run: python3 -m unittest discover -s scripts/tests -v
+      - name: Create or reuse ONE daily GitHub Issue; collect yesterday's comments
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh api --method GET \
-            "/repos/${GH_REPO}/issues?state=open&sort=created&direction=desc&per_page=100" \
-            > "$RUNNER_TEMP/community-issues.json"
-      - name: Validate exact latest SHA and epoch; train shadow-only model
+          set -euo pipefail
+          TODAY="$(date -u +%F)"
+          YESTERDAY="$(date -u -d 'yesterday' +%F)"
+          gh api "/repos/${GH_REPO}/issues?state=all&sort=created&direction=desc&per_page=100" > "$RUNNER_TEMP/recent-issues.json"
+          today_number="$(jq -r --arg title "[community-learning] $TODAY" '.[] | select(.title==$title) | .number' "$RUNNER_TEMP/recent-issues.json" | head -n1)"
+          if [ -z "$today_number" ]; then
+            gh issue create --repo "$GH_REPO" \
+              --title "[community-learning] $TODAY" \
+              --body "One shared daily thread for opt-in MatchLab reports. Candidate batches are not ground truth."
+          fi
+          yesterday_number="$(jq -r --arg title "[community-learning] $YESTERDAY" '.[] | select(.title==$title) | .number' "$RUNNER_TEMP/recent-issues.json" | head -n1)"
+          if [ -z "$yesterday_number" ]; then
+            echo '[]' > "$RUNNER_TEMP/community-comments.json"
+          else
+            gh api --paginate --slurp "/repos/${GH_REPO}/issues/$yesterday_number/comments?per_page=100" \
+              > "$RUNNER_TEMP/community-comments.json"
+          fi
+      - name: Load persistent fingerprint ledger (GitHub Release asset)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh release view community-learning-ledger --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release download community-learning-ledger --repo "$GH_REPO" \
+              --pattern fingerprints.txt --dir "$RUNNER_TEMP"
+          else
+            touch "$RUNNER_TEMP/fingerprints.txt"
+          fi
+      - name: Build latest Rust parser for safe replay
+        run: cargo build --release -p matchlab-parser --example community_replay
+      - name: Replay historical reports, dedup globally, train verified-only shadow model
         env:
           LATEST_SHA: ${{ github.sha }}
         run: |
           python3 scripts/community_learning.py \
-            --issues "$RUNNER_TEMP/community-issues.json" \
+            --comments "$RUNNER_TEMP/community-comments.json" \
             --verified learning/verified.jsonl \
             --sha "$LATEST_SHA" \
+            --parser-bin target/release/examples/community_replay \
+            --seen "$RUNNER_TEMP/fingerprints.txt" \
+            --seen-output "$RUNNER_TEMP/fingerprints-updated.txt" \
             --review-output "$RUNNER_TEMP/community-review.jsonl" \
             --model-output "$RUNNER_TEMP/community-shadow-model.json"
-      - name: Publish bounded review artifact (never production)
+      - name: Persist global dedup ledger (no changes to main or production)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cp "$RUNNER_TEMP/fingerprints-updated.txt" "$RUNNER_TEMP/fingerprints.txt"
+          if ! gh release view community-learning-ledger --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release create community-learning-ledger --repo "$GH_REPO" \
+              --title "Community learning dedup ledger" \
+              --notes "Machine-maintained report hashes; no training labels." \
+              --latest=false
+          fi
+          gh release upload community-learning-ledger "$RUNNER_TEMP/fingerprints.txt" \
+            --repo "$GH_REPO" --clobber
+      - name: Publish bounded review artifact; no automatic model activation
         uses: actions/upload-artifact@v4
         with:
           name: community-learning-review
