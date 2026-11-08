@@ -214,6 +214,7 @@ impl OptionalModel {
 }
 #[cfg(feature="ml-ort")]
 pub fn verify_image_assets()->Result<(),String>{
+    if !active(){return Err("set MATCHLAB_ML_ENABLED=true to verify ML inference".into());}
     let mut model=OptionalModel::new();
     if model.session.is_none(){
         return Err("bundled ONNX Runtime or model could not be loaded".into());
