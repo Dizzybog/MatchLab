@@ -190,8 +190,8 @@ IMDb basics, alternative titles, episodes, ratings, animeApi, Anime-Lists, and A
 | `MATCHLAB_MAX_CONCURRENT_MATCHES` | `4` | Limit simultaneous match operations (1–64) |
 | `MATCHLAB_DEBUG_API_TOKEN` | Unset (disabled) | Enable authenticated, read-only parsing diagnostics with a random token of at least 32 bytes |
 | `MATCHLAB_COMMUNITY_LEARNING_ENABLED` | `false` | Explicit opt-in to upload selected suspected anomalies as public GitHub Issues |
-| `MATCHLAB_COMMUNITY_GITHUB_TOKEN` | Unset | Fine-grained GitHub PAT scoped to `Dizzybog/MatchLab` with Issues: write |
-| `MATCHLAB_COMMUNITY_STATE_FILE` | `/data/community-learning-state.json` | Persisted reporting cursor and daily upload limit; resets on new builds/epochs |
+| `MATCHLAB_COMMUNITY_GITHUB_TOKEN` | Unset | Contributor-owned GitHub token with permission to comment on public upstream Issues; members may use fine-grained PAT, outsiders need classic `public_repo` |
+| `MATCHLAB_COMMUNITY_STATE_FILE` | `/data/community-learning.sqlite3` | Bounded pending batch queue, persistent fingerprints and 24h submission state |
 | `MATCHLAB_METADATA_URLS` | Built-in HTTPS feeds | Optional seven-source override; legacy six-source lists are supported |
 | `RUST_LOG` | `matchlab_server=info` | Logging verbosity |
 
@@ -203,21 +203,29 @@ For importer options and the exact source URLs, see [Metadata lifecycle](docs/LO
 
 ## Contribute to Community Learning
 
-**Community Learning is off by default.** Enable it only if you consent to
-publishing selected torrent *basenames* as **public GitHub Issues**. Even
-basenames can reveal private information, so do not enable it for a
-sensitive library. No original torrent files, paths, tracker URLs, API
-credentials or full debug payloads are uploaded.
+**Off by default. No extra learning server required.** Community Learning
+uses GitHub Issues and Actions. Opt-in users contribute suspected errors to
+**one shared GitHub Issue per UTC day**, as a **single comment containing
+at most 16 unique reports after a full 24-hour collection window**. Repeated
+anomalies are suppressed across days, other installations and upgrades.
+Issues are public: even release basenames may contain personal information.
+Do not enable this on a sensitive library.
 
-To join:
+To contribute:
 
-1. Run the latest **official** MatchLab Docker image. It contains a
-   compile-time Git SHA; outdated/unofficial builds cannot upload reports.
-2. Create a [fine-grained GitHub token](https://github.com/settings/personal-access-tokens/new)
-   restricted to repository **Dizzybog/MatchLab** with **Issues: Read and write**
-   only. Never share the token.
-3. Set these variables in your local Compose file, keeping the actual
-   token in a **private**, uncommitted `.env` file:
+1. Run an official MatchLab Docker image. **Older releases are accepted** if
+   their source commit is an ancestor of current main and the reported
+   problem still needs review; never automatically trust an old prediction.
+2. Create a **personal GitHub token**. Repository members can use a
+   [fine-grained token](https://github.com/settings/personal-access-tokens/new)
+   with **Issues: Write** for Dizzybog/MatchLab. GitHub does not support
+   fine-grained token contributions to public repositories where the user
+   is not a member: external contributors need a
+   [classic token](https://github.com/settings/tokens) with
+   `public_repo`, which is broader, or they may submit issues manually.
+   Never share the token.
+3. Add this to your local Compose environment, storing the token in a
+   **private**, uncommitted `.env` or secret provider:
 
    ~~~yaml
    environment:
@@ -225,27 +233,22 @@ To join:
      MATCHLAB_COMMUNITY_GITHUB_TOKEN: ${MATCHLAB_COMMUNITY_GITHUB_TOKEN}
    ~~~
 
-4. Redeploy; open `/api/community/status`. Both `enabled` and `ready`
-   must show `true`. To stop sharing, set the enabled flag to `false`,
-   restart, and optionally revoke the token.
-5. Selected anomaly reports are sent at most **4 per UTC day**. When
-   a new official build becomes available, older builds automatically
-   stop sending, and upgraded installs **do not replay old request
-   history**. GitHub Actions independently rejects stale versions.
-   Uploaded reports are **not automatically trusted or learned from**.
+4. Redeploy and check `GET /api/community/status`; both `enabled`
+   and `ready` should be true. Disable the flag and restart to opt out.
 
-The daily GitHub Actions workflow validates version and epoch, deduplicates
-candidate reports, and generates a bounded review artifact plus an optional
-**shadow-mode machine learning model** trained only on independently
-reviewed, current-build labels. **It does not change production matching,
-publish active ML rules, or auto-merge PRs.** This prevents outdated or
-unverified results from poisoning the learning dataset.
+GitHub Actions parses submitted batch comments as untrusted data, validates
+the contributor's source SHA against upstream Git history, replays examples
+with the **current Rust parser**, and discards problems proven fixed.
+Identity/episode mapping problems that require current IMDb/AniDB metadata
+are held for manual verification, not guessed. A GitHub Release asset
+persists dedup fingerprints across daily runs.
 
-For manual contributions, open a GitHub Issue containing only a
-non-sensitive example, expected result and verifiable IMDb/AniDB evidence.
+Only independently verified, current-build examples can train a small
+**shadow-mode ML model**. The model does **not** affect live matching,
+activate rules or auto-merge PRs. This is a carefully isolated intake and
+learning foundation, not unreviewed self-training.
 
-**Full setup, security policy and maintainer guide:**
-[Community Learning](docs/COMMUNITY_LEARNING.md).
+**Complete contribution and maintainer guide:** [Community Learning](docs/COMMUNITY_LEARNING.md).
 
 ## Build and test
 
