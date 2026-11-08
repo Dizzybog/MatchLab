@@ -70,6 +70,14 @@ fn capture(name:&str,re:&Regex)->Option<Coordinates>{
 }
 fn detected(name:&str)->Option<(&'static str,Coordinates)>{
     if !safe_name(name){return None;}
+    // A release pack/range must not be collapsed to its first episode,
+    // including S02E07-E08 and 2x07-08 variants that have only one
+    // SxxExx/NxM prefix. Reject before learning and before hot application.
+    static RANGE:OnceLock<Regex>=OnceLock::new();
+    let range=RANGE.get_or_init(||Regex::new(
+        r"(?i)(?:s[0-9]{1,3}[ ._-]*e[0-9]{1,5}|[0-9]{1,3}x[0-9]{1,5}|season[ ._-]+[0-9]{1,3}[ ._-]+episode[ ._-]+[0-9]{1,5})[ ._-]*(?:-|to|through)[ ._-]*(?:e(?:p(?:isode)?)?[ ._-]*)?[0-9]{1,5}(?:$|[ ._-])"
+    ).expect("bounded TV range guard"));
+    if range.is_match(name){return None;}
     let mut winner=None;
     for (family,re) in templates(){
         if let Some(coordinates)=capture(name,re){
@@ -256,6 +264,8 @@ mod tests{
             Coordinates{season:2,episode:7});
         assert!(detected("Show.02x07.720p").is_some());
         assert!(detected("Show.S02E07.S03E08.1080p").is_none());
+        assert!(detected("Show.S02E07-E08.1080p").is_none());
+        assert!(detected("Show.02x07-08.1080p").is_none());
         assert!(detected("Show.2024.WEB-DL").is_none());
     }
     #[test]
