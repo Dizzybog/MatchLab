@@ -800,9 +800,11 @@ fn diagnose_with_policy(
         .and_then(Value::as_str)
         .or(anime_subfolder_title.as_deref()).unwrap_or(title);
     let anime_resolve_key=matchlab_matcher::clean_title(anime_resolve_title);
-    let anime = if verified_chinese_override.is_some() {
-        // The validated IMDb candidate owns this crosswalk; do not select
-        // an unrelated anime with the same alias through anime_priority.
+    let anime = if verified_chinese_override.is_some()
+        || verified_absolute_episode_imdb.is_some() {
+        // The ranked IMDb winner already owns a verified absolute crosswalk.
+        // Do not run the global anime-priority resolver across the remaining
+        // Anime-Lists IMDb IDs: they are not alternative release winners.
         None
     } else if series {
         if let Some(ep)=episodes.first(){
@@ -864,7 +866,9 @@ fn diagnose_with_policy(
         // Always select a candidate. A verified anime crosswalk takes priority;
         // otherwise MatchLab ranking (including stable IMDb ID tie-break) wins.
         let mut chosen_index=0usize;
-        if series {
+        // For a verified unmarked absolute episode, the normal V4 ranking
+        // selected index 0. Do not re-rank based on other AniDB crosswalks.
+        if series && verified_absolute_episode_imdb.is_none() {
             if let Some(ep)=episodes.first().copied() {
                 for (index,candidate) in imdb.iter().enumerate() {
                     let mapped=match seasons.first().copied() {
@@ -1832,6 +1836,7 @@ mod tests {
             let d=diagnose(&path,&MatchRequest{
                 title:title.into(),year:None,series:None}).unwrap();
             let selected=d.selected.expect("bounded Bleach 320 match");
+            assert_eq!(selected["match_source"],"imdb","{title}: {selected}");
             assert_eq!(public_match_response(Some(selected)),json!({
                 "sid_start":"tt0000101:15:1",
                 "sid_end":"tt0000101:15:1",
