@@ -252,6 +252,25 @@ fn alerts(title: &str, status: &str, details: &Value) -> Vec<Value> {
             "candidate_episode":parsed["anime_episode_candidate"]["episode"]
         }));
     }
+    // Season packs can have a complete IMDb interval while the AniDB/TVDB
+    // crosswalk remains incomplete. This is a *mapping* anomaly, not a parser
+    // error: do not mark it resolved merely because "Bleach S16" parses S16.
+    let anime_range=&selected["anime_range_diagnostics"];
+    if is_series
+        && selected["season"].as_i64().is_some()
+        && selected["season_end"].as_i64().is_some()
+        && selected["episode_end"].as_i64().is_some()
+        && anime_range.is_object()
+        && anime_range["complete"]==false
+    {
+        findings.push(json!({
+            "code":"incomplete_anime_episode_range","severity":"review",
+            "message":"IMDb season endpoints are known but the verified AniDB range is incomplete",
+            "imdb_season":selected["season"],
+            "imdb_episode_end":selected["episode_end"],
+            "unmapped_count":anime_range.get("unmapped_count")
+        }));
+    }
     if is_series {
         let end_season = selected["season_end"].as_i64();
         let end_episode = selected["episode_end"].as_i64();
@@ -532,6 +551,34 @@ mod tests {
         });
         assert!(alerts("Stone Ocean 27","matched",&details).iter()
             .any(|a|a["code"]=="unresolved_absolute_anime_episode"));
+    }
+
+    #[test]
+    fn bleach_s16_complete_imdb_but_incomplete_anidb_is_reported() {
+        let details=json!({
+            "parsed":{"title":"Bleach","seasons":[16],"episodes":[]},
+            "selected":{"imdb_id":"tt0434665","category":"series",
+                "season":16,"episode":1,"season_end":16,"episode_end":26,
+                "episode_range":{"source":"imdb_season_episodes"},
+                "anime_range_diagnostics":{"complete":false,"unmapped_count":1}}
+        });
+        let flags=alerts("Bleach S16","matched",&details);
+        assert!(flags.iter().any(|a|a["code"]=="incomplete_anime_episode_range"));
+        // The issue is the missing verified ASID bounds, NOT parsing S16.
+        assert!(!flags.iter().any(|a|a["code"]=="parser_marker_disagreement"));
+        let complete=json!({
+            "parsed":{"title":"Bleach","seasons":[16],"episodes":[]},
+            "selected":{"imdb_id":"tt0434665","category":"series",
+                "season":16,"episode":1,"season_end":16,"episode_end":26,
+                "anime_range_diagnostics":{"complete":true,"unmapped_count":0}}
+        });
+        assert!(!alerts("Bleach S16","matched",&complete).iter()
+            .any(|a|a["code"]=="incomplete_anime_episode_range"));
+        let no_anime=json!({"selected":{
+            "imdb_id":"tt0123456","category":"series",
+            "season":16,"episode":1,"season_end":16,"episode_end":26}});
+        assert!(!alerts("Other Show S16","matched",&no_anime).iter()
+            .any(|a|a["code"]=="incomplete_anime_episode_range"));
     }
 
     #[test]
