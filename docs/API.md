@@ -601,6 +601,20 @@ The native online model trains in the background but its score remains
 shadow-only and never authorizes an IMDb, episode or regex override.
 The in-memory status does not query SQLite or run inference.
 
+`online_learner` is a privacy-safe object describing the native FTRL
+classifier, its 128 KiB parameter state, accepted independent labels,
+counterfactual negatives, title-group holdout pairs, pairwise accuracy,
+recent pairwise accuracy and the conservative `drift_review_suggested`
+flag. These are **shadow evaluation statistics**, not calibrated scores or
+actual IMDb parsing/matching accuracy. The model is never run on an HTTP
+request and can never authorize a regex or identifier change.
+
+`candidate_discovery` exposes only grouped counts of unknown release
+markers eligible for human review. The underlying marker strings, titles,
+hashes and model candidate predictions do not leave the local opt-in
+SQLite corpus; these candidates cannot automatically become active
+regexes or GitHub proposals.
+
 Set `MATCHLAB_ML_ENABLED=true` on the MatchLab container to opt in.
 Absolute-anime episode rules and technical-field overlays operate under
 separate validators; this endpoint enumerates the technical-field rules.
