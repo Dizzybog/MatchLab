@@ -33,6 +33,31 @@ with independent verified labels, negative tests, regression/performance gates
 and a clearly scoped rule-creation mechanism. GitHub PR creation and merging
 must never be assumed from an Issue comment.
 
+## Local storage budget and reuse
+
+Opt-in local learning uses a private SQLite corpus that also caches
+parser and matcher results to reduce repeat computation.
+Set `MATCHLAB_ML_MAX_STORAGE_GB=10` to allocate a **10 GiB**
+logical target (supported range: 1–128 GiB); the default is 1 GiB.
+`MATCHLAB_ML_CACHE_ENABLED=false` disables persistent cached responses
+without disabling local pattern learning. The base system always
+uses its existing short in-memory parser cache.
+
+A cache response is only served when the exact title/arguments and
+current binary build, active learned-regex fingerprint and current
+metadata file signature match. Old records are retained for historical
+inspection but cannot be used as active matches. The learning worker
+marks obsolete records after every upgrade or metadata revision and
+evicts them **only under storage pressure**. Obsolete learned rules
+are immediately deactivated, while their supporting evidence remains
+stored until the configured quota is exceeded; eviction uses
+SQLite foreign-key cascades so rule/evidence removal is atomic.
+
+No external network access or GitHub account is required for either
+local learning or its cache. Their persisted contents may contain
+sensitive release titles and match outputs, so protect the Docker
+volume and do not upload the database.
+
 ## How to contribute
 
 1. Install an official published MatchLab Docker image.
