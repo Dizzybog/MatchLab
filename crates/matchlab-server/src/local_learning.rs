@@ -178,11 +178,8 @@ impl OptionalModel {
                 let library=env::var("ORT_DYLIB_PATH")
                     .map_err(|_|"ORT_DYLIB_PATH is unset")?;
                 let location=env::var("MATCHLAB_ML_MODEL_PATH")
-                    .unwrap_or_else(|_|"/data/learning-model.onnx".into());
+                    .unwrap_or_else(|_|"/opt/matchlab/ml/tiny-anomaly.onnx".into());
                 let path=Path::new(&location);
-                if env::var("MATCHLAB_ML_MODEL_PATH").is_err() {
-                    crate::tiny_onnx::ensure(path)?;
-                }
                 if !path.is_file()||path.metadata().map_err(|e|e.to_string())?.len()>4*1024*1024{
                     return Err("ONNX model must be a local file <=4MiB".into());
                 }
@@ -213,6 +210,17 @@ impl OptionalModel {
             let (_,values)=result[0].try_extract_tensor::<f32>().ok()?;
             values.first().copied().filter(|v|v.is_finite()&&(0.0..=1.0).contains(v))
         }
+    }
+}
+#[cfg(feature="ml-ort")]
+pub fn verify_image_assets()->Result<(),String>{
+    let mut model=OptionalModel::new();
+    if model.session.is_none(){
+        return Err("bundled ONNX Runtime or model could not be loaded".into());
+    }
+    match model.score(vector("field_unresolved_episode",8)){
+        Some(score) if (0.0..=1.0).contains(&score)=>Ok(()),
+        _=>Err("bundled ONNX model inference failed".into()),
     }
 }
 pub fn start(history:PathBuf,metadata:PathBuf){
