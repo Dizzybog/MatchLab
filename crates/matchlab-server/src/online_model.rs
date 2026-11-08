@@ -17,6 +17,10 @@ const MAX_EXAMPLES:i64=10_000_000;
 const MAX_SEEN:i64=80_000;
 static POSITIVE:AtomicI64=AtomicI64::new(0);
 static NEGATIVE:AtomicI64=AtomicI64::new(0);
+static HOLDOUT:AtomicI64=AtomicI64::new(0);
+static HOLDOUT_CORRECT:AtomicI64=AtomicI64::new(0);
+static RECENT_HOLDOUT:AtomicI64=AtomicI64::new(0);
+static RECENT_CORRECT:AtomicI64=AtomicI64::new(0);
 const ALPHA:f32=0.12;
 const BETA:f32=1.0;
 const L1:f32=0.0001;
@@ -27,6 +31,10 @@ pub struct OnlineModel{
     n:Vec<f32>,
     positives:i64,
     negatives:i64,
+    holdout:i64,
+    correct:i64,
+    recent_window:u32,
+    recent_count:u8,
 }
 fn digest(s:&str)->String{format!("{:x}",Sha256::digest(s.as_bytes()))}
 fn hash(s:&str)->usize{
@@ -37,6 +45,18 @@ fn hash(s:&str)->usize{
         h=h.wrapping_mul(0x100000001b3);
     }
     (h as usize)&(DIM-1)
+}
+fn identity_group(title:&str)->String{
+    let mut group=Vec::new();
+    for word in title.split(|c:char|!c.is_ascii_alphanumeric())
+        .filter(|s|!s.is_empty()).take(12){
+        let lower=word.to_ascii_lowercase();
+        if ["2160p","1080p","720p","4320p","4k","8k","x264","x265",
+            "hevc","av1","webrip","webdl","bluray","hdtv","aac","ddp",
+            "ac3","mkv","mp4"].contains(&lower.as_str()){break;}
+        group.push(lower);
+    }
+    group.into_iter().take(8).collect::<Vec<_>>().join(" ")
 }
 fn features(field:&str,signal:&str,title:&str)->Vec<usize>{
     // Include no film-specific names: only structural features, field/tag
@@ -74,7 +94,8 @@ fn features(field:&str,signal:&str,title:&str)->Vec<usize>{
 }
 impl OnlineModel{
     pub fn new()->Self{
-        Self{z:vec![0.0;DIM],n:vec![0.0;DIM],positives:0,negatives:0}
+        Self{z:vec![0.0;DIM],n:vec![0.0;DIM],positives:0,negatives:0,
+            holdout:0,correct:0,recent_window:0,recent_count:0}
     }
     fn weight(&self,i:usize)->f32{
         let z=self.z[i];
@@ -107,13 +128,28 @@ impl OnlineModel{
     pub fn publish_status(&self){
         POSITIVE.store(self.positives,Ordering::Release);
         NEGATIVE.store(self.negatives,Ordering::Release);
+        HOLDOUT.store(self.holdout,Ordering::Release);
+        HOLDOUT_CORRECT.store(self.correct,Ordering::Release);
+        RECENT_HOLDOUT.store(i64::from(self.recent_count),Ordering::Release);
+        RECENT_CORRECT.store(i64::from(self.recent_window.count_ones()),Ordering::Release);
     }
     pub fn status()->Value{
         let positive=POSITIVE.load(Ordering::Acquire);
         let negative=NEGATIVE.load(Ordering::Acquire);
+        let holdout=HOLDOUT.load(Ordering::Acquire);
+        let correct=HOLDOUT_CORRECT.load(Ordering::Acquire);
+        let recent=RECENT_HOLDOUT.load(Ordering::Acquire);
+        let recent_good=RECENT_CORRECT.load(Ordering::Acquire);
         json!({"engine":"rust_ftrl_proximal","shadow_only":true,
             "weight_slots":DIM,"parameter_bytes":MAX_BYTES,
             "positive_labels":positive,"counterfactual_negative_labels":negative,
+            "holdout_pairs":holdout,
+            "holdout_pair_accuracy":if holdout>0{
+                Some(correct as f64/holdout as f64)}else{None},
+            "recent_holdout_pairs":recent,
+            "recent_pair_accuracy":if recent>0{
+                Some(recent_good as f64/recent as f64)}else{None},
+            "drift_review_suggested":recent>=24 && recent_good*4<recent*3,
             "trained":positive>=16 && negative>=16,
             "can_authorize_rules":false})
     }
@@ -122,7 +158,11 @@ impl OnlineModel{
                 epoch INTEGER PRIMARY KEY,parameters BLOB NOT NULL,
                 positives INTEGER NOT NULL,negatives INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS online_model_seen(
-                sample_hash TEXT PRIMARY KEY,seen_at INTEGER NOT NULL);")
+                sample_hash TEXT PRIMARY KEY,seen_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS online_model_holdout(
+                epoch INTEGER PRIMARY KEY,holdout INTEGER NOT NULL,
+                correct INTEGER NOT NULL,recent_window INTEGER NOT NULL,
+                recent_count INTEGER NOT NULL);")
             .map_err(|e|e.to_string())
     }
     pub fn load(db:&Connection)->Result<Self,String>{
@@ -154,6 +194,20 @@ impl OnlineModel{
         }
         model.positives=positives;
         model.negatives=negatives;
+        let quality:Option<(i64,i64,i64,i64)>=db.query_row(
+            "SELECT holdout,correct,recent_window,recent_count
+             FROM online_model_holdout WHERE epoch=?1",[EPOCH],
+            |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))
+        ).optional().map_err(|e|e.to_string())?;
+        if let Some((holdout,correct,window,count))=quality
+            && holdout>=0 && (0..=holdout).contains(&correct)
+            && (0..=u32::MAX as i64).contains(&window)
+            && (0..=32).contains(&count){
+            model.holdout=holdout;
+            model.correct=correct;
+            model.recent_window=window as u32;
+            model.recent_count=count as u8;
+        }
         Ok(model)
     }
     pub fn save(&self,db:&Connection)->Result<(),String>{
@@ -165,6 +219,14 @@ impl OnlineModel{
              negatives=excluded.negatives",
              params![EPOCH,data,self.positives,self.negatives])
             .map_err(|e|e.to_string())?;
+        db.execute("INSERT INTO online_model_holdout(
+                epoch,holdout,correct,recent_window,recent_count)
+             VALUES(?1,?2,?3,?4,?5)
+             ON CONFLICT(epoch) DO UPDATE SET holdout=excluded.holdout,
+                 correct=excluded.correct,recent_window=excluded.recent_window,
+                 recent_count=excluded.recent_count",
+             params![EPOCH,self.holdout,self.correct,i64::from(self.recent_window),
+                i64::from(self.recent_count)]).map_err(|e|e.to_string())?;
         Ok(())
     }
     pub fn observe(&mut self,db:&Connection,title:&str,field:&str,
@@ -191,10 +253,25 @@ impl OnlineModel{
             }
         }
         let real=features(field,signal,title);
-        self.learn(&real,true);
         let false_field=if field=="codec"{"resolution"}else{"codec"};
         let negative=features(false_field,signal,title);
-        self.learn(&negative,false);
+        let group=identity_group(title);
+        // A deterministic title-group holdout prevents ordinary examples
+        // for the same recognized work leaking between train and review.
+        // This is an advisory pairwise check, NOT calibrated production
+        // precision or independently verified IMDb matching accuracy.
+        if !group.is_empty() && hash(&format!("holdout:{group}"))%5==0{
+            if self.positives>=16&&self.negatives>=16{
+                let passed=self.raw_score(&real)>self.raw_score(&negative);
+                self.holdout+=1;
+                if passed{self.correct+=1;}
+                self.recent_window=(self.recent_window<<1)|u32::from(passed);
+                self.recent_count=self.recent_count.saturating_add(1).min(32);
+            }
+        }else{
+            self.learn(&real,true);
+            self.learn(&negative,false);
+        }
         Ok(true)
     }
 }
@@ -226,7 +303,8 @@ mod tests{
         assert!(!model.observe(&db,"Film0.x265","codec","x265").unwrap());
         model.save(&db).unwrap();
         let loaded=OnlineModel::load(&db).unwrap();
-        assert_eq!(loaded.trained(),(20,20));
+        assert!(loaded.trained().0>0);
+        assert_eq!(loaded.trained(),model.trained());
         assert_eq!(loaded.score("codec","x265","Film.x265"),
             model.score("codec","x265","Film.x265"));
         let size:i64=db.query_row(
