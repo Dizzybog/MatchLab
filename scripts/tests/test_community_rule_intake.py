@@ -53,11 +53,15 @@ class CommunityRuleTests(unittest.TestCase):
         self.assertEqual(len(rules.parse_batch(batch,SHA,lambda *_:True)),1)
         out,seen=rules.collect([batch],SHA,set(),NOW,lambda *_:True)
         self.assertEqual(len(out),1)
-        self.assertEqual(len(seen),1)
-        # The same daily batch never creates a second proposal.
+        self.assertEqual(len(seen),0)
+        # Untrusted reports cannot poison the permanent ledger: rejected
+        # proposals may be reconsidered after independent evidence appears.
         out2,seen2=rules.collect([batch],SHA,seen,NOW,lambda *_:True)
-        self.assertEqual(out2,[])
+        self.assertEqual(len(out2),1)
         self.assertEqual(seen2,seen)
+        accepted={out[0]['fingerprint']}
+        out3,_=rules.collect([batch],SHA,accepted,NOW,lambda *_:True)
+        self.assertEqual(out3,[])
         # Rule-only batches remain valid for the legacy anomaly reviewer.
         self.assertEqual(original.validate_comment(batch,SHA,lambda *_:True),[])
 
