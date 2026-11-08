@@ -137,11 +137,47 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
         if !rows.is_empty(){stage="half_prefix";}
     }
     if rows.is_empty()&&series&&key.len()>=4{
-        let ids=crate::tantivy_search::anime_candidates(db,&key).map_err(index_error)?;
+        // IMDb's English primary title need not appear in the release at
+        // all: e.g. Shinigami Bocchan to Kuro Maid is indexed under its
+        // English title. The exact/longest AniDB alias provides identity;
+        // requiring release.contains(imdb_alias) silently rejects it.
+        // Search via the existing Tantivy anime index, not SQLite title scans.
+        let anime_aliases=crate::tantivy_search::anime_aliases(db,&key,4)
+            .map_err(index_error)?;
+        let best_len=anime_aliases.first().map(|alias|alias.clean_title.len())
+            .unwrap_or(0);
+        let ids=anime_aliases.into_iter()
+            .filter(|alias|alias.clean_title.len()==best_len
+                && key.starts_with(&alias.clean_title))
+            .map(|alias|alias.imdb_id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter().collect::<Vec<_>>();
         if !ids.is_empty(){
             let aliases=crate::tantivy_search::titles_by_ids(db,&ids).map_err(index_error)?;
-            rows=filter(db,aliases.into_iter().map(Aka::from).collect(),
-                &release,series,year,required_season)?;
+            let mut eligibility=std::collections::HashMap::new();
+            for row in aliases.into_iter().map(Aka::from) {
+                if !is_series(&row.media_type){continue;}
+                let yes=if let Some(&cached)=eligibility.get(&row.imdb_id){cached}
+                    else {
+                        let value=eligible(db,&row,required_season)?;
+                        eligibility.insert(row.imdb_id.clone(),value);
+                        value
+                    };
+                if yes{rows.push(row);}
+            }
+        }
+        if rows.is_empty(){
+            // Keep the original exact indexed anime-ID discovery path as
+            // a conservative fallback, for legacy datasets and alias
+            // shapes that the prefix lookup cannot represent.
+            let ids=crate::tantivy_search::anime_candidates(db,&key)
+                .map_err(index_error)?;
+            if !ids.is_empty(){
+                let aliases=crate::tantivy_search::titles_by_ids(db,&ids)
+                    .map_err(index_error)?;
+                rows=filter(db,aliases.into_iter().map(Aka::from).collect(),
+                    &release,series,year,required_season)?;
+            }
         }
         if !rows.is_empty(){stage="anime_alias";}
     }

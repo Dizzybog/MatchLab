@@ -13,7 +13,7 @@ mod country_aliases;
 mod dashboard_history;
 mod query_cache;
 use axum::{extract::{Query, State}, http::{StatusCode,header}, routing::{get,post}, Json, Router};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 #[cfg(test)]
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -216,6 +216,18 @@ fn anime_identity(db:&Connection,key:&str)->rusqlite::Result<Option<String>>{
         return Ok(None);
     }
     Ok(Some(best_imdb.clone()))
+}
+
+/// Return an IMDb identity only when the release title itself is an exact,
+/// unique AniDB alias. This is stricter than the prefix-based fallback used
+/// to rank title candidates and safe for season-pack inference.
+fn exact_anime_identity(db:&Connection,key:&str)->Result<Option<String>,String>{
+    if key.len()<4{return Ok(None);}
+    let ids=tantivy_search::anime_aliases(db,key,4)?.into_iter()
+        .filter(|alias|alias.clean_title==key)
+        .map(|alias|alias.imdb_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    if ids.len()==1{Ok(ids.into_iter().next())}else{Ok(None)}
 }
 
 /// Resolve every absolute episode independently: an anime range may span
@@ -512,11 +524,60 @@ fn diagnose_with_policy(
         parsed.insert("episodes".into(),json!([]));
         parsed.insert("seasons".into(),json!([]));
     }
+    // Bracketed anime fansub notation "<title> 3 - 08" may mean S03E08
+    // rather than absolute episodes 3..8. Promote only after a unique exact
+    // AniDB alias and known IMDb season bounds or a verified crosswalk
+    // confirm that the advertised season contains the requested episode.
+    // Never publish the same marker as an unmarked episode batch.
+    if let Some((Some(hint_title),Some(season),Some(episode)))=
+        parsed_value.get("anime_season_episode_candidate").map(|candidate|(
+            candidate.get("title").and_then(Value::as_str),
+            candidate.get("season").and_then(Value::as_i64),
+            candidate.get("episode").and_then(Value::as_i64),
+        ))
+    {
+        let hint_title=hint_title.to_owned();
+        // Anime-Lists may index "Jihanki 3" as a season-specific synonym
+        // without ever indexing bare "Jihanki". Prefer the more specific
+        // exact part alias when it proves an IMDb season-episode coordinate.
+        // No substring search and no guessing a short alias.
+        let mut verified_title=None;
+        if req.series!=Some(false) && (1..=12).contains(&season)
+            && (1..=99).contains(&episode) {
+            for candidate_title in [format!("{hint_title} {season}"),hint_title.clone()] {
+                let key=matchlab_matcher::clean_title(&candidate_title);
+                if let Some(imdb)=exact_anime_identity(&db,&key)? {
+                    let valid=season_episode_end(&db,&imdb,season)?
+                        .is_some_and(|end|episode<=end)
+                        || anime_resolver::resolve_season(&db,&imdb,season,episode)
+                            .map_err(|error|error.to_string())?.is_some();
+                    if valid {verified_title=Some(candidate_title);break;}
+                }
+            }
+        }
+        if let Some(parsed)=parsed_value.as_object_mut(){
+            // Generic regex handlers may mistake "3 - 08" for a batch.
+            // Preserve the candidate for diagnostics but do not expose
+            // unverified coordinates to downstream matching consumers.
+            parsed.insert("episodes".into(),json!([]));
+            parsed.insert("seasons".into(),json!([]));
+            if let Some(verified_title)=verified_title {
+                parsed.insert("title".into(),json!(verified_title));
+                parsed.insert("seasons".into(),json!([season]));
+                parsed.insert("episodes".into(),json!([episode]));
+                parsed.insert("anime_season_episode_base_title".into(),json!(hint_title));
+                parsed.insert("anime_title_verified".into(),json!(true));
+            }
+        }
+    }
     // A bare final number ("Stone Ocean 27") is not a trusted episode:
     // require an exact and unambiguous anime alias in Tantivy before
     // changing the parsed show title or promoting the episode coordinate.
     // This shares the same crosswalk verification as "Stone Ocean - 27".
     if req.series != Some(false)
+        // An already recognized "Jihanki 3 - 08" cannot be demoted to a
+        // bare absolute episode 8 by the generic dash/episode hint.
+        && parsed_value.get("anime_season_episode_candidate").is_none()
         && let Some(candidate) = parsed_value.get("anime_episode_candidate")
         && let (Some(title),Some(episode)) = (
             candidate.get("title").and_then(Value::as_str),
@@ -575,7 +636,8 @@ fn diagnose_with_policy(
         // coordinates is a movie candidate, even if an anime alias exists.
         None if year.is_some() => false,
         None => anime_title::season_from_any_exact_title(&db,&key)
-            .map_err(|e|e.to_string())?.is_some(),
+            .map_err(|e|e.to_string())?.is_some()
+            || exact_anime_identity(&db,&key)?.is_some(),
     };
     let imdb = matchlab_matcher::search(&db,title,year,series,seasons.iter().copied().max().unwrap_or(0),&req.title,
         !episodes.is_empty()||parsed.contains_key("episode_start"),20)
@@ -599,6 +661,12 @@ fn diagnose_with_policy(
     }else{imdb};
     let chinese_absolute_hint=parsed.get("absolute_episode_candidate").and_then(Value::as_i64);
     let mut chinese_absolute_by_imdb=HashMap::<String,anime_resolver::Episode>::new();
+    // Episode maxima in user-contributed IMDb data can lag behind actual
+    // broadcasts (e.g. Cops.S36.E41). Apply episode-count pruning only
+    // when the season/title filters leave more than two plausible identities.
+    // With one or two identities, preserve them and the requested episode,
+    // while still allowing independently verified absolute crosswalk fixes.
+    let apply_episode_filter=imdb.len()>2;
     let imdb=if seasons.len()==1 && episodes.len()==1 {
         let season=seasons[0];
         let episode=episodes[0];
@@ -613,18 +681,18 @@ fn diagnose_with_policy(
                             chinese_absolute_by_imdb.insert(candidate.imdb_id.clone(),mapped);
                             Some(candidate)
                         }
-                        Ok(None)=>None,
+                        Ok(None)=>(!apply_episode_filter).then_some(candidate),
                         Err(error)=>{
                             tracing::warn!(imdb_id=%candidate.imdb_id,%error,
                                 "Chinese absolute episode crosswalk unavailable");
-                            None
+                            (!apply_episode_filter).then_some(candidate)
                         }
                     }
                 },
                 Err(error)=>{
                     tracing::warn!(imdb_id=%candidate.imdb_id,%error,
                         "season episode metadata unavailable for candidate");
-                    None
+                    (!apply_episode_filter).then_some(candidate)
                 }
             }
         }).collect::<Vec<_>>()
@@ -667,7 +735,12 @@ fn diagnose_with_policy(
     let anime_subfolder_title=if series {
         verified_anime_subfolder_title(&db,parsed,&imdb)?
     }else {None};
-    let anime_resolve_title=anime_subfolder_title.as_deref().unwrap_or(title);
+    // A verified numeric season marker already supplies series-relative
+    // coordinates. Resolve against the base title rather than treating
+    // an exact "Jihanki 3" part alias as a local "season 3 of part 3".
+    let anime_resolve_title=parsed.get("anime_season_episode_base_title")
+        .and_then(Value::as_str)
+        .or(anime_subfolder_title.as_deref()).unwrap_or(title);
     let anime_resolve_key=matchlab_matcher::clean_title(anime_resolve_title);
     let anime = if verified_chinese_override.is_some() {
         // The validated IMDb candidate owns this crosswalk; do not select
@@ -911,11 +984,46 @@ fn diagnose_with_policy(
         winner["episode_range"]=json!({"start_season":start,"end_season":end,
             "source":"imdb_season_pack"});
     }
-    if episodes.is_empty() && seasons.len()==1 {
+    // A season-only release needs both IMDb AND AniDB endpoints. Prior
+    // code stopped at IMDb season_episodes, so /match always returned null
+    // ASIDs for "Bleach_S02". Also support an exact, title-only anime pack
+    // whose metadata verified season 1 (e.g. [Group][Chaos_Head][BDRip]).
+    // A supplied episode or batch is never expanded to the entire season.
+    if episodes.is_empty() && !parsed.contains_key("episode_start")
+        && !parsed.contains_key("anime_episode_candidate")
+        && !parsed.contains_key("anime_episode_range_candidate")
+        && !parsed.contains_key("anime_season_episode_candidate")
+        && season_range.is_none() {
         if let Some(winner)=selected.as_mut(){
             if let Some(imdb_id)=winner["imdb_id"].as_str().map(str::to_owned){
-                let season=seasons[0];
-                if let Some(end)=season_episode_end(&db,&imdb_id,season)?{
+                let selected_season=seasons.first().copied()
+                    .or_else(||winner["season"].as_i64());
+                let linked_anime=winner["anime_ids"].as_object()
+                    .is_some_and(|ids|!ids.is_empty())
+                    || imdb.iter().any(|candidate|candidate.imdb_id==imdb_id
+                        && !candidate.anime_ids.is_empty());
+                // Avoid an extra Tantivy title lookup for a season pack
+                // already linked through the selected IMDb identity.
+                let exact_anime=if linked_anime && !seasons.is_empty(){
+                    false
+                }else{
+                    exact_anime_identity(&db,&key)?
+                        .is_some_and(|id|id==imdb_id)
+                };
+                let season=if let Some(season)=selected_season{
+                    Some(season)
+                } else if exact_anime {
+                    // Only infer a missing season if IMDb knows the series
+                    // has exactly one season. Never guess season 1 for a
+                    // long-running anime or a generic folder title.
+                    let max=db.query_row("SELECT max_season FROM seasons
+                        WHERE imdb_id=?1",[&imdb_id],|row|row.get::<_,i64>(0))
+                        .optional().map_err(|e|e.to_string())?;
+                    (max==Some(1)).then_some(1)
+                }else{None};
+                if let Some(season)=season
+                    && let Some(end)=season_episode_end(&db,&imdb_id,season)?
+                {
                     winner["season"]=json!(season);
                     winner["episode"]=json!(1);
                     winner["season_end"]=json!(season);
@@ -924,6 +1032,22 @@ fn diagnose_with_policy(
                         "end_season":season,"end_episode":end,
                         "source":"imdb_season_episodes"});
                     winner["sid"]=json!(format!("{imdb_id}:{season}:1"));
+                    let has_anime=linked_anime || exact_anime;
+                    if has_anime {
+                        let mapped=mapped_season_episode_range(
+                            &db,&imdb_id,anime_resolve_title,season,1,end)?;
+                        // AniDB endpoints are published only when every
+                        // requested IMDb episode has an unambiguous mapping.
+                        // Incomplete maps keep the verified IMDb range.
+                        if mapped["complete"]==true
+                            && mapped["segments"].as_array().is_some_and(|s|!s.is_empty())
+                            && mapped["start_season"].as_i64()==Some(season)
+                            && mapped["start_episode"].as_i64()==Some(1)
+                            && mapped["end_episode"].as_i64()==Some(end)
+                        {
+                            winner["episode_range"]=mapped;
+                        }
+                    }
                 }
             }
         }
@@ -1500,6 +1624,127 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     #[test]
+    fn season_only_anime_packs_expose_complete_imdb_and_anidb_ranges() {
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-anime-packs-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+                imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,
+                category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES
+                ('tt0000101','Bleach','bleach',2004,'series','',1,0,'tvSeries'),
+                ('tt0000202','The Duke of Death and His Maid',
+                  'thedukeofdeathandhismaid',2021,'series','',1,0,'tvSeries'),
+                ('tt0000303','Chaos;Head','chaoshead',2008,'series','',1,0,'tvSeries'),
+                ('tt0000404','Reborn as a Vending Machine',
+                 'rebornasavendingmachine',2023,'series','',1,0,'tvSeries');
+            INSERT INTO seasons VALUES ('tt0000101',16),('tt0000202',3),
+                ('tt0000303',1),('tt0000404',3);
+            INSERT INTO season_episodes VALUES
+                ('tt0000101',2,21,21),('tt0000202',2,12,12),
+                ('tt0000303',1,12,12),('tt0000404',3,12,12);
+            INSERT INTO anime_series_map VALUES
+                ('tt0000101','100','bleachtv',0),
+                ('tt0000202','200','duketv',0),
+                ('tt0000303','300','chaostv',0),
+                ('tt0000404','400','jihankitv',0);
+            INSERT INTO anime_ids VALUES
+                ('tt0000101','anidb','100'),
+                ('tt0000202','anidb','200'),
+                ('tt0000303','anidb','300'),
+                ('tt0000404','anidb','400');
+            INSERT INTO anidb_titles VALUES
+                ('100','Bleach','bleach','main','en'),
+                ('200','Shinigami Bocchan to Kuro Maid',
+                 'shinigamibocchantokuromaid','synonym','ja'),
+                ('300','Chaos Head','chaoshead','main','en'),
+                ('400','Jihanki 3','jihanki3','synonym','ja');
+            INSERT INTO episode_map VALUES
+                ('100','bleachtv',1,-1,1,366,0,''),
+                ('100','bleachtv',1,2,22,42,-21,''),
+                ('100','bleachtv',1,15,320,340,-319,''),
+                ('100','bleachtv',1,16,341,366,-340,''),
+                ('200','duketv',1,-1,13,24,0,''),
+                ('200','duketv',1,2,13,24,-12,''),
+                ('300','chaostv',1,-1,1,12,0,''),
+                ('300','chaostv',1,1,1,12,0,''),
+                ('400','jihankitv',1,-1,1,36,0,''),
+                ('400','jihankitv',1,3,1,12,0,'');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        let d=diagnose(&path,&MatchRequest{
+            title:"Bleach_S02".into(),year:None,series:None}).unwrap();
+        let selected=d.selected.expect("Bleach season pack IMDb");
+        assert_eq!(selected["episode_range"]["complete"],true,"{selected}");
+        assert_eq!(public_match_response(Some(selected)),json!({
+            "sid_start":"tt0000101:2:1","sid_end":"tt0000101:2:21",
+            "asid_start":"100:22","asid_end":"100:42"
+        }));
+        // Absolute episode batches can cross IMDb seasons without becoming
+        // a season-local episode range or requiring a separate "E" marker.
+        let d=diagnose(&path,&MatchRequest{
+            title:"Bleach_320-360".into(),year:None,series:None}).unwrap();
+        assert_eq!(d.parsed["anime_title_verified"],true);
+        assert_eq!(d.parsed["episode_range_numbering"],"absolute");
+        let selected=d.selected.expect("Bleach absolute batch identity");
+        assert_eq!(selected["episode_range"]["complete"],true,"{selected}");
+        assert_eq!(selected["episode_range"]["segments"]
+            .as_array().expect("range segments").len(),2);
+        assert_eq!(public_match_response(Some(selected)),json!({
+            "sid_start":"tt0000101:15:1","sid_end":"tt0000101:16:20",
+            "asid_start":"100:320","asid_end":"100:360"
+        }));
+        // No English IMDb alias appears anywhere in the romanized release.
+        let d=diagnose(&path,&MatchRequest{
+            title:"[orion origin] Shinigami Bocchan to Kuro Maid S2 [13-24]  [WebRip] [1080p] [H265 AAC] [CHS＆JPN]".into(),
+            year:None,series:None}).unwrap();
+        let selected=d.selected.expect("romanized AniDB alias matched to English IMDb title");
+        assert_eq!(selected["episode_range"]["complete"],true,"{selected}");
+        assert_eq!(public_match_response(Some(selected)),json!({
+            "sid_start":"tt0000202:2:1","sid_end":"tt0000202:2:12",
+            "asid_start":"200:13","asid_end":"200:24"
+        }));
+        let d=diagnose(&path,&MatchRequest{
+            title:"[HKG&SumiSora&CASO][Chaos_Head][BDRip]".into(),
+            year:None,series:None}).unwrap();
+        let selected=d.selected.expect("exact anime pack identity");
+        assert_eq!(public_match_response(Some(selected)),json!({
+            "sid_start":"tt0000303:1:1","sid_end":"tt0000303:1:12",
+            "asid_start":"300:1","asid_end":"300:12"
+        }));
+        let d=diagnose(&path,&MatchRequest{
+            title:"[Erai-raws] Jihanki 3 - 08 [1080p CR WEBRip HEVC AAC][MultiSub][C869EEDC].mkv".into(),
+            year:None,series:None}).unwrap();
+        assert_eq!(d.parsed["anime_title_verified"],true,"{:?}",d.parsed);
+        assert_eq!(d.parsed["seasons"],json!([3]));
+        assert_eq!(d.parsed["episodes"],json!([8]));
+        assert_eq!(d.parsed["anime_season_episode_base_title"],"Jihanki");
+        assert_eq!(d.parsed["title"],"Jihanki 3");
+        assert!(d.parsed.get("episode_start").is_none());
+        let selected=d.selected.expect("metadata verifies season 3 episode 08");
+        assert_eq!(public_match_response(Some(selected)),json!({
+            "sid_start":"tt0000404:3:8","sid_end":"tt0000404:3:8",
+            "asid_start":"400:8","asid_end":"400:8"
+        }));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
     fn public_match_rejects_invalid_anidb_asids_without_losing_imdb_identity(){
         for malformed in ["732:190315","436:180525","6424:431078",
             "732:0","732:foo","bad:3","732:3:4"]{
@@ -2024,8 +2269,17 @@ mod tests {
         let unavailable=diagnose(&path,&MatchRequest{
             title:"Dragon.Ball.Super.S01E999.DUBBED".into(),
             year:None,series:None}).unwrap();
-        assert!(unavailable.selected.is_none(),
-            "IMDb season bounds must still reject nonexistent episodes");
+        // With only one title/season identity, a low IMDb episode maximum
+        // must not discard that identity. The separate anime crosswalk
+        // safety guard still withholds an unverified S01E999 and ASID.
+        let unmatched=unavailable.selected.expect("retain unique anime identity");
+        assert_eq!(unmatched["imdb_id"],"tt4644488");
+        assert!(unmatched["episode"].is_null(),
+            "do not publish an unverified anime episode");
+        assert_eq!(public_match_response(Some(unmatched)),json!({
+            "sid_start":"tt4644488","sid_end":"tt4644488",
+            "asid_start":null,"asid_end":null
+        }));
         // No Sxx token must not overwrite an absolute episode that can
         // be verified to belong to a later season of One Piece.
         let absolute=diagnose(&path,&MatchRequest{
@@ -2369,6 +2623,73 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
     }
+    #[test]
+    fn imdb_episode_bounds_only_filter_when_more_than_two_season_candidates_remain() {
+        // IMDb can list fewer episodes than aired: Cops S36E41 must match
+        // when the title+season search has 1 or 2 plausible identities.
+        // Three identities are disambiguated by the episode maximum.
+        // The final case starts with three title IDs but only two pass the
+        // season filter: the episode filter must remain inactive.
+        for (tag,records,expected_ids) in [
+            ("single",vec![(36,22)],vec!["tt0000001"]),
+            ("two",vec![(36,22),(36,30)],
+                vec!["tt0000001","tt0000002"]),
+            ("three",vec![(36,22),(36,30),(36,55)],
+                vec!["tt0000003"]),
+            ("season_filter_first",vec![(36,22),(36,30),(1,55)],
+                vec!["tt0000001","tt0000002"]),
+        ] {
+            let stamp=std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+            let path=std::env::temp_dir().join(format!(
+                "matchlab-cops-{}-{tag}-{stamp}.sqlite3",std::process::id()));
+            let db=Connection::open(&path).unwrap();
+            db.execute_batch("CREATE TABLE titles(
+                    imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,
+                    category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+                CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+                CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                    episode_count INTEGER,max_episode INTEGER);
+                CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+                CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                    tvdb_id TEXT,trakt_season INTEGER);
+                CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                    anidb_season INTEGER,tvdb_season INTEGER,
+                    start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+                CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);").unwrap();
+            for (index,(max_season,max_episode)) in records.into_iter().enumerate() {
+                let id=format!("tt{:07}",index+1);
+                db.execute("INSERT INTO titles VALUES(?1,'Cops','cops',1989,
+                    'series','US',1,0,'tvSeries')",[&id]).unwrap();
+                db.execute("INSERT INTO seasons VALUES(?1,?2)",
+                    rusqlite::params![id,max_season]).unwrap();
+                db.execute("INSERT INTO season_episodes VALUES(?1,36,?2,?2)",
+                    rusqlite::params![id,max_episode]).unwrap();
+            }
+            tantivy_search::warmup(&db).unwrap();
+            drop(db);
+            for release in ["Cops.S36.E41","Cops.S36E41"] {
+                let result=diagnose(&path,&MatchRequest{
+                    title:release.into(),year:None,series:None}).unwrap();
+                assert_eq!(result.parsed["seasons"],json!([36]),
+                    "{tag} {release}: {:?}",result.parsed);
+                assert_eq!(result.parsed["episodes"],json!([41]),
+                    "{tag} {release}: {:?}",result.parsed);
+                let ids=result.imdb_candidates.iter()
+                    .map(|candidate|candidate.imdb_id.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(ids,expected_ids,"{tag} {release}: {ids:?}");
+                let selected=result.selected.expect("Cops title+season candidate retained");
+                let response=public_match_response(Some(selected));
+                assert_eq!(response["sid_start"],format!("{}:36:41",expected_ids[0]),
+                    "{tag} {release}");
+                assert_eq!(response["sid_end"],response["sid_start"]);
+            }
+            std::fs::remove_file(&path).unwrap();
+            std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+        }
+    }
+
     #[test]
     fn requested_episode_must_exist_within_known_season_bounds() {
         let db=Connection::open_in_memory().unwrap();
