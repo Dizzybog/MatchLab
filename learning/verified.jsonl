@@ -1,0 +1,2 @@
+# Only maintainer-reviewed, independently reproduced examples. See docs/COMMUNITY_LEARNING.md.
+# Each JSON record requires protocol, learning_epoch, validated_on_sha, verified=true, label=true/false, title, status, alerts, parsed, selected, evidence.
