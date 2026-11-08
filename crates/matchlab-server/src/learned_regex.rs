@@ -530,10 +530,13 @@ pub fn observe(db:&Connection,metadata:&Connection,title:&str,details:&Value)->R
     if title.len()>240||title.contains(['/', '\\','@','\n','\r','\0']){return Ok(());}
     let parsed=&details["parsed"];
     let selected=&details["selected"];
-    if selected["category"]!="series"{return Ok(());}
-    let Some(imdb)=selected["imdb_id"].as_str()else{return Ok(());};
-    if !imdb.starts_with("tt")||!(9..=10).contains(&imdb.len())
-        ||!imdb[2..].bytes().all(|b|b.is_ascii_digit()){return Ok(());}
+    // Matched and unmatched titles can teach a pattern. We must never
+    // learn from a selected movie (numeric suffixes may be film titles).
+    if selected["category"]=="movie"{return Ok(());}
+    let selected_imdb=selected["imdb_id"].as_str();
+    if selected_imdb.is_some_and(|imdb|
+        !imdb.starts_with("tt")||!(9..=10).contains(&imdb.len())||
+        !imdb[2..].bytes().all(|b|b.is_ascii_digit())){return Ok(());}
     let plain=matchlab_parser::parse_title(title,false)
         .map_err(|e|e.to_string())?;
     let base=Value::Object(plain);
@@ -558,16 +561,23 @@ pub fn observe(db:&Connection,metadata:&Connection,title:&str,details:&Value)->R
         };
         if name.len()<2 {continue;}
         let expected=crate::matchlab_matcher::clean_title(name);
-        // Exact IMDb canonical title is a second independent identity check.
-        let canonical:i64=metadata.query_row(
-            "SELECT EXISTS(SELECT 1 FROM titles
-                WHERE imdb_id=?1 AND clean_title=?2 LIMIT 1)",
-            params![imdb,expected],|r|r.get(0)).unwrap_or(0);
-        if canonical==0{continue;}
+        // Exact Tantivy anime alias identity, not an expensive SQLite
+        // text query. This also lets *unmatched* releases supply independent
+        // learning examples when their name and episode mapping are unique.
+        if expected.len()<4{continue;}
+        let aliases=crate::tantivy_search::anime_aliases(
+            metadata,&expected,expected.len()).unwrap_or_default();
+        let mut identities=aliases.into_iter().filter(|alias|
+            alias.clean_title==expected).map(|alias|alias.imdb_id)
+            .collect::<Vec<_>>();
+        identities.sort();identities.dedup();
+        if identities.len()!=1{continue;}
+        let imdb=&identities[0];
+        if selected_imdb.is_some_and(|old|old!=imdb){continue;}
         let Some(mapped)=crate::anime_resolver::resolve_absolute(
             metadata,imdb,absolute).map_err(|e|e.to_string())?
             else{continue;};
-        if mapped.imdb_id!=imdb {continue;}
+        if mapped.imdb_id!=*imdb {continue;}
         // Evidence from a selected contradictory episode is not trustworthy.
         if let Some(season)=selected["season"].as_i64()
             && season!=mapped.season{continue;}
