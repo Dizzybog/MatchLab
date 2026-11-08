@@ -3,7 +3,7 @@
 //! provides episode evidence; an IMDb crosswalk is optional and later.
 use std::collections::BTreeSet;
 use rusqlite::Connection;
-use crate::{anime_resolver,tantivy_search::{self,AliasLookupKind},title_normalization};
+use crate::{identifiers,tantivy_search::{self,AliasLookupKind},title_normalization};
 
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub struct VerifiedEpisode {
@@ -66,7 +66,7 @@ fn exact_anidb_ids(db:&Connection,title:&str)->Result<BTreeSet<String>,String>{
     Ok(entries.into_iter()
         .filter(|row|row.source=="anidb" && row.normalized==key)
         .filter_map(|row|row.anidb_id)
-        .filter(|id|anime_resolver::canonical_asid(id,1).is_some())
+        .filter(|id|identifiers::canonical_asid(id,1).is_some())
         .collect())
 }
 
@@ -107,7 +107,7 @@ pub fn match_absolute(
     if !(1..=99_999).contains(&episode){return Ok(None);}
     let mut winner=None;
     for id in exact_anidb_ids(db,title)?{
-        if anime_resolver::canonical_asid(&id,episode).is_none(){continue;}
+        if identifiers::canonical_asid(&id,episode).is_none(){continue;}
         if !proves_absolute(&mappings(db,&id)?,episode){continue;}
         if winner.is_some(){return Ok(None);}
         winner=Some(VerifiedEpisode{anidb_id:id,episode});
@@ -126,7 +126,7 @@ pub fn match_season(
     let mut winner=None;
     for id in exact_anidb_ids(db,title)?{
         let Some(ani)=season_episode(&mappings(db,&id)?,season,episode)else{continue};
-        if anime_resolver::canonical_asid(&id,ani).is_none(){continue;}
+        if identifiers::canonical_asid(&id,ani).is_none(){continue;}
         if winner.is_some(){return Ok(None);}
         winner=Some(VerifiedEpisode{anidb_id:id,episode:ani});
     }
@@ -142,7 +142,7 @@ pub fn match_absolute_range(
         || end>99_999 {return Ok(None);}
     let mut winner=None;
     for id in exact_anidb_ids(db,title)?{
-        if anime_resolver::canonical_asid(&id,end).is_none(){continue;}
+        if identifiers::canonical_asid(&id,end).is_none(){continue;}
         let maps=mappings(db,&id)?;
         if !(start..=end).all(|ep|proves_absolute(&maps,ep)){continue;}
         if winner.is_some(){return Ok(None);}
