@@ -3,10 +3,12 @@ FROM rust:1-bookworm AS builder
 WORKDIR /build
 ARG RUSTFLAGS="-D warnings"
 ARG MATCHLAB_BUILD_SHA=""
+ARG MATCHLAB_FEATURES=""
 ENV MATCHLAB_BUILD_SHA=$MATCHLAB_BUILD_SHA
 ENV RUSTFLAGS=$RUSTFLAGS
 COPY . .
-RUN cargo build --release -p matchlab-server
+RUN if [ -n "$MATCHLAB_FEATURES" ]; then cargo build --release -p matchlab-server --features "$MATCHLAB_FEATURES"; \
+    else cargo build --release -p matchlab-server; fi
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini curl \
