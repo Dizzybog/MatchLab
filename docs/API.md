@@ -580,3 +580,23 @@ commits and GitHub issues. An API consumer must have a network route to the
 service; deploying this endpoint does not itself make an unreachable hostname
 accessible. Reviewers or automation can use the feed to prepare and verify PRs,
 but no unattended polling or PR creation is started merely by enabling it.
+
+## Local Machine Learning status
+
+`GET /api/ml/status` reports whether the local learning worker is
+enabled, the number of currently active field-specific technical regex
+overlays, counts grouped by technical field, and the rule-generation hash.
+It returns **no torrent names, IMDb IDs, history, private hashes, or model
+inputs**. No GitHub token is required. This is a monitoring endpoint, not a
+control for enabling learning or approving rules.
+
+The JSON fields include `enabled`, `active_rule_count`,
+`active_rules_by_field`, `revision`, `training_source`, `model`,
+and `identity_and_coordinate_override`. The safe in-memory status
+does not query SQLite or run ONNX inference on HTTP requests.
+
+Set `MATCHLAB_ML_ENABLED=true` on the MatchLab container to opt in.
+Absolute-anime episode rules and technical-field overlays operate under
+separate validators; this endpoint enumerates the technical-field rules.
+See [Community Learning](COMMUNITY_LEARNING.md) for evidence thresholds,
+limitations, privacy and the separate GitHub sharing opt-in.
