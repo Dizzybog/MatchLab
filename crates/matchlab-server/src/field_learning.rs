@@ -310,16 +310,29 @@ pub fn init(db: &Connection) -> Result<(), String> {
             identity_count INTEGER NOT NULL, PRIMARY KEY(field,signal));"
     ).map_err(|e| e.to_string())
 }
-pub fn observe(db: &Connection, title: &str, details: &Value) -> Result<(), String> {
-    if !safe_title(title) { return Ok(()); }
+pub fn observe(db: &Connection, title: &str, details: &Value)
+    -> Result<Vec<(String,String)>,String> {
+    observe_with_budget(db,title,details,&mut count_evidence(db)?)
+}
+pub fn count_evidence(db:&Connection)->Result<i64,String>{
+    init(db)?;
+    db.query_row(
+        "SELECT (SELECT COUNT(*) FROM learned_field_evidence WHERE source_build=?1)
+              +(SELECT COUNT(*) FROM learned_field_gap_evidence WHERE source_build=?1)",
+        [build()],|row|row.get(0)).map_err(|e|e.to_string())
+}
+pub fn observe_with_budget(db:&Connection,title:&str,details:&Value,
+    count:&mut i64)->Result<Vec<(String,String)>,String>{
+    let mut labels=Vec::new();
+    if !safe_title(title){return Ok(labels);}
     // Crucial anti-feedback guard: never accept a previously learned overlay
     // as training truth. Re-parse from the canonical Rust parser.
     let canonical = matchlab_parser::parse_title(title,false)
         .map_err(|e| e.to_string())?;
     let parsed = Value::Object(canonical);
     let selected = &details["selected"];
-    let Some(identity) = observed_identity(&parsed, selected) else { return Ok(()); };
-    let Some(object) = parsed.as_object() else { return Ok(()); };
+    let Some(identity)=observed_identity(&parsed,selected)else{return Ok(labels);};
+    let Some(object)=parsed.as_object()else{return Ok(labels);};
     let source_build = build();
     for (field, signal) in signals(title) {
         if !context_valid(title, &field, &signal) { continue; }
@@ -327,11 +340,7 @@ pub fn observe(db: &Connection, title: &str, details: &Value) -> Result<(), Stri
             else {continue;};
         let canonical=serde_json::to_string(&value).map_err(|e|e.to_string())?;
         let key=digest(&format!("{}:{field}:{signal}",title.to_ascii_lowercase()));
-        let existing:i64=db.query_row(
-            "SELECT (SELECT count(*) FROM learned_field_evidence WHERE source_build=?1)
-                  + (SELECT count(*) FROM learned_field_gap_evidence WHERE source_build=?1)",
-            [&source_build],|row|row.get(0)).map_err(|e|e.to_string())?;
-        if existing>=MAX_EVIDENCE{
+        if *count>=MAX_EVIDENCE{
             let lookup=if from_gap{
                 "SELECT count(*) FROM learned_field_gap_evidence
                  WHERE field=?1 AND signal=?2 AND example_hash=?3"
@@ -360,10 +369,22 @@ pub fn observe(db: &Connection, title: &str, details: &Value) -> Result<(), Stri
                 identity_hash=excluded.identity_hash,canonical=excluded.canonical,
                 source_build=excluded.source_build,first_seen=excluded.first_seen"
         };
+        let previously_known:i64=db.query_row(
+            if from_gap {
+                "SELECT EXISTS(SELECT 1 FROM learned_field_gap_evidence
+                 WHERE field=?1 AND signal=?2 AND example_hash=?3)"
+            }else{
+                "SELECT EXISTS(SELECT 1 FROM learned_field_evidence
+                 WHERE field=?1 AND signal=?2 AND example_hash=?3)"
+            },params![field,signal,key],|row|row.get(0)).map_err(|e|e.to_string())?;
         db.execute(sql,params![field,signal,key,identity,canonical,source_build])
             .map_err(|e|e.to_string())?;
+        if previously_known==0{
+            *count+=1;
+            labels.push((field,signal));
+        }
     }
-    Ok(())
+    Ok(labels)
 }
 /// Old evidence is reusable for forensic review but cannot authorize rules
 /// for a different parser build. Reclaim it only when the global quota is
