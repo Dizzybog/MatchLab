@@ -10,6 +10,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      - name: Test community learning security and stale-data gates
+        run: python3 -m unittest discover -s scripts/tests -v
       - name: Test native Rust backend
         run: RUSTFLAGS="-D warnings" cargo test --workspace
       - name: Check all Rust targets, including parser benchmarks
