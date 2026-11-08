@@ -124,7 +124,7 @@ def parse_batch(comment,current_sha,ancestor=git_ancestor):
     if batch["batch_id"]!=expected:return None
     return rules
 
-def collect(all_comments,sha,seen,now=None):
+def collect(all_comments,sha,seen,now=None,ancestor=git_ancestor):
     if now is None:now=datetime.now(timezone.utc)
     cutoff=now-timedelta(days=2)
     output=[]
@@ -138,7 +138,7 @@ def collect(all_comments,sha,seen,now=None):
             except (ValueError,TypeError,KeyError,AttributeError):
                 continue
             if not cutoff<=created<=now+timedelta(minutes=5):continue
-            rules=parse_batch(comment,sha)
+            rules=parse_batch(comment,sha,ancestor)
             if rules is None:continue
             for rule in rules:
                 if rule["fingerprint"] in seen:continue
