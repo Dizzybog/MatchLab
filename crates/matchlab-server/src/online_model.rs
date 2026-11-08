@@ -102,6 +102,7 @@ impl OnlineModel{
         if self.positives<16||self.negatives<16{return None;}
         Some(self.raw_score(&features(field,signal,title)))
     }
+    #[cfg(test)]
     pub fn trained(&self)->(i64,i64){(self.positives,self.negatives)}
     pub fn publish_status(&self){
         POSITIVE.store(self.positives,Ordering::Release);
