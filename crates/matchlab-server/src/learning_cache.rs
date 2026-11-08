@@ -63,18 +63,28 @@ fn namespace(kind:&str,metadata:Option<&Path>)->Option<String>{
 fn key(namespace:&str,title:&str,year:Option<i32>,series:Option<bool>)->String{
     digest(&format!("{namespace}\0{title}\0{year:?}\0{series:?}"))
 }
+/// Obsolete entries are retained ONLY as historical evidence. Neither an
+/// expired result nor one from an old parser/regex/metadata namespace may
+/// serve a request: both must be parsed/matched again, then cached with
+/// current provenance. Recheck the namespace after reading to close the race
+/// against a concurrent local-rule or metadata refresh.
+fn read_current(db:&Connection,cache_key:&str,ns:&str,time:i64)->Option<Value>{
+    let raw:Option<Vec<u8>>=db.query_row(
+        "SELECT payload FROM learning_cache
+         WHERE cache_key=?1 AND namespace=?2 AND obsolete=0
+           AND expires_at>?3",
+        params![cache_key,ns,time],|r|r.get(0)
+    ).optional().ok()?;
+    serde_json::from_slice(raw?.as_slice()).ok()
+}
 fn read(kind:&str,title:&str,year:Option<i32>,series:Option<bool>,
     metadata:Option<&Path>)->Option<Value>{
     if !enabled(){return None;}
     let ns=namespace(kind,metadata)?;
     let db=Connection::open_with_flags(state_file(),OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
     db.busy_timeout(Duration::from_millis(BUSY_MS)).ok()?;
-    let raw:Option<Vec<u8>>=db.query_row(
-        "SELECT payload FROM learning_cache WHERE cache_key=?1
-         AND namespace=?2 AND expires_at>?3",
-        params![key(&ns,title,year,series),ns,now()],|r|r.get(0)
-    ).optional().ok()?;
-    serde_json::from_slice(raw?.as_slice()).ok()
+    let value=read_current(&db,&key(&ns,title,year,series),&ns,now())?;
+    (namespace(kind,metadata).as_deref()==Some(ns.as_str())).then_some(value)
 }
 fn write(kind:&str,title:&str,year:Option<i32>,series:Option<bool>,
     metadata:Option<&Path>,value:&Value){
@@ -235,6 +245,28 @@ mod tests{
             key("match","Show S01E02",None,None));
         assert_ne!(key("match","Show S01E02",None,None),
             key("match","Show S01E02",Some(2005),Some(true)));
+    }
+    #[test]
+    fn stale_cache_must_miss_and_cannot_skip_reparse_or_rematch(){
+        let db=Connection::open_in_memory().unwrap();
+        initialize(&db).unwrap();
+        let ns="current-verified";
+        let k=key(ns,"Bleach_300",None,None);
+        db.execute("INSERT INTO learning_cache
+          (cache_key,namespace,kind,payload,bytes,created_at,expires_at,obsolete)
+          VALUES(?1,?2,'match',?3,2,1,?4,0)",
+          params![k,ns,b"{}".to_vec(),now()+3600]).unwrap();
+        assert_eq!(read_current(&db,&k,ns,now()),Some(serde_json::json!({})));
+        db.execute("UPDATE learning_cache SET obsolete=1 WHERE cache_key=?1",
+            [&k]).unwrap();
+        assert!(read_current(&db,&k,ns,now()).is_none(),
+            "an obsolete match must be recomputed, not treated as a hit");
+        db.execute("UPDATE learning_cache SET obsolete=0 WHERE cache_key=?1",
+            [&k]).unwrap();
+        assert!(read_current(&db,&k,"new-parser-build",now()).is_none(),
+            "a different parser/rules/metadata namespace must recompute");
+        assert!(read_current(&db,&k,ns,now()+3601).is_none(),
+            "expired results must recompute");
     }
     #[test]
     fn obsolete_cache_survives_until_pressure_then_is_evicted_first(){
