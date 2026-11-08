@@ -930,6 +930,8 @@ fn diagnose_with_policy(
     // whose metadata verified season 1 (e.g. [Group][Chaos_Head][BDRip]).
     // A supplied episode or batch is never expanded to the entire season.
     if episodes.is_empty() && !parsed.contains_key("episode_start")
+        && !parsed.contains_key("anime_episode_candidate")
+        && !parsed.contains_key("anime_episode_range_candidate")
         && season_range.is_none() {
         if let Some(winner)=selected.as_mut(){
             if let Some(imdb_id)=winner["imdb_id"].as_str().map(str::to_owned){
