@@ -43,10 +43,15 @@ logical target (supported range: 1–128 GiB); the default is 1 GiB.
 without disabling local pattern learning. The base system always
 uses its existing short in-memory parser cache.
 
-A cache response is only served when the exact title/arguments and
-current binary build, active learned-regex fingerprint and current
-metadata file signature match. Old records are retained for historical
-inspection but cannot be used as active matches. The learning worker
+A cached answer is valid only when its exact input, build, learned
+regex generation, metadata revision, expiry and **non-obsolete** state
+all match the current request. A cache hit is checked again for concurrent
+version changes before returning. Obsolete rows stay as local historical
+evidence, but **must never supply final parsed fields, an IMDb ID or
+an AniDB episode**. On the next request MatchLab runs the current parser
+and matcher again, then stores the fresh result in a different cache
+namespace. There is no eager replay of the entire old cache after an
+update, avoiding CPU spikes on weaker hosts. The learning worker
 marks obsolete records after every upgrade or metadata revision and
 evicts them **only under storage pressure**. Obsolete learned rules
 are immediately deactivated, while their supporting evidence remains
