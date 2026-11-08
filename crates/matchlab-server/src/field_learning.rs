@@ -310,6 +310,7 @@ pub fn init(db: &Connection) -> Result<(), String> {
             identity_count INTEGER NOT NULL, PRIMARY KEY(field,signal));"
     ).map_err(|e| e.to_string())
 }
+#[cfg(test)]
 pub fn observe(db: &Connection, title: &str, details: &Value)
     -> Result<Vec<(String,String)>,String> {
     observe_with_budget(db,title,details,&mut count_evidence(db)?)
