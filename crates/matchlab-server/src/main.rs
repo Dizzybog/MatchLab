@@ -1676,14 +1676,19 @@ mod tests {
                   'thedukeofdeathandhismaid',2021,'series','',1,0,'tvSeries'),
                 ('tt0000303','Chaos;Head','chaoshead',2008,'series','',1,0,'tvSeries'),
                 ('tt0000404','Reborn as a Vending Machine',
-                 'rebornasavendingmachine',2023,'series','',1,0,'tvSeries');
+                 'rebornasavendingmachine',2023,'series','',1,0,'tvSeries'),
+                ('tt0000505','Bleach side story','bleachsidestory',2005,
+                 'movie','',1,0,'movie');
             INSERT INTO seasons VALUES ('tt0000101',16),('tt0000202',3),
                 ('tt0000303',1),('tt0000404',3);
             INSERT INTO season_episodes VALUES
-                ('tt0000101',2,21,21),('tt0000202',2,12,12),
+                ('tt0000101',1,20,20),('tt0000101',2,21,21),
+                ('tt0000202',2,12,12),
                 ('tt0000303',1,12,12),('tt0000404',3,12,12);
             INSERT INTO anime_series_map VALUES
                 ('tt0000101','100','bleachtv',0),
+                ('tt0000101','101','otherbleachtv',0),
+                ('tt0000505','500','sidebleachtv',0),
                 ('tt0000202','200','duketv',0),
                 ('tt0000303','300','chaostv',0),
                 ('tt0000404','400','jihankitv',0);
@@ -1694,12 +1699,17 @@ mod tests {
                 ('tt0000404','anidb','400');
             INSERT INTO anidb_titles VALUES
                 ('100','Bleach','bleach','main','en'),
+                ('101','Bleach','bleach','synonym','en'),
+                ('500','Bleach','bleach','synonym','en'),
                 ('200','Shinigami Bocchan to Kuro Maid',
                  'shinigamibocchantokuromaid','synonym','ja'),
                 ('300','Chaos Head','chaoshead','main','en'),
                 ('400','Jihanki 3','jihanki3','synonym','ja');
             INSERT INTO episode_map VALUES
                 ('100','bleachtv',1,-1,1,366,0,''),
+                ('100','bleachtv',1,1,1,20,0,''),
+                ('101','otherbleachtv',1,99,1,12,0,''),
+                ('500','sidebleachtv',1,1,1,2,0,''),
                 ('100','bleachtv',1,2,22,42,-21,''),
                 ('100','bleachtv',1,15,320,340,-319,''),
                 ('100','bleachtv',1,16,341,366,-340,''),
@@ -1711,6 +1721,29 @@ mod tests {
                 ('400','jihankitv',1,3,1,12,0,'');").unwrap();
         tantivy_search::warmup(&db).unwrap();
         drop(db);
+        // IMDb already knows the complete first season. Equal Bleach
+        // aliases for an unrelated film and a separate AniDB part must not
+        // suppress the one fully verified season mapping.
+        let d=diagnose(&path,&MatchRequest{
+            title:"Bleach S01".into(),year:None,series:None}).unwrap();
+        let selected=d.selected.expect("Bleach S01 IMDb match");
+        assert_eq!(selected["episode_range"]["complete"],true,"{selected}");
+        assert_eq!(selected["anime_range_diagnostics"]["unmapped_count"],0);
+        assert_eq!(public_match_response(Some(selected)),json!({
+            "sid_start":"tt0000101:1:1","sid_end":"tt0000101:1:20",
+            "asid_start":"100:1","asid_end":"100:20"
+        }));
+        // An absolute episode matches only when one IMDb identity has
+        // a verified crosswalk for it, despite shared AniDB title aliases.
+        let d=diagnose(&path,&MatchRequest{
+            title:"Bleach_338".into(),year:None,series:None}).unwrap();
+        let selected=d.selected.expect("Bleach absolute episode 338 match");
+        assert_eq!(selected["season"],15,"{selected}");
+        assert_eq!(selected["episode"],19,"{selected}");
+        assert_eq!(public_match_response(Some(selected)),json!({
+            "sid_start":"tt0000101:15:19","sid_end":"tt0000101:15:19",
+            "asid_start":"100:338","asid_end":"100:338"
+        }));
         let d=diagnose(&path,&MatchRequest{
             title:"Bleach_S02".into(),year:None,series:None}).unwrap();
         let selected=d.selected.expect("Bleach season pack IMDb");
