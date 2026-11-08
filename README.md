@@ -111,7 +111,7 @@ On first startup, MatchLab downloads **seven public metadata feeds** and builds 
 
 For updates, run `docker compose pull && docker compose up -d`.
 
-> **Resource limits:** The example restricts MatchLab to **1 CPU, 6 GB RAM, and 256 processes/threads**, with up to **40 simultaneous matching operations**. These are starting values, not verified minimum requirements. Increase the RAM/CPU limits if full metadata imports exceed them. Disk space must cover both the active and incoming metadata/index generations.
+> **Resource limits:** The example restricts MatchLab to **2 CPUs, 6 GB RAM, and 256 processes/threads**, with up to **2 simultaneous matching operations**. These are conservative starting values, not verified minimum requirements. Increase the RAM/CPU limits if full metadata imports exceed them. Disk space must cover both the active and incoming metadata/index generations.
 
 ## HTTP API
 
@@ -161,7 +161,7 @@ episode number can default to a tentative first-season SID when the
 crosswalk cannot resolve it, but never claim an unverified ASID.
 Verified absolute numbering and named anime parts take priority.
 
-**Dashboard behavior:** The dashboard tester (`POST /debug/match`) intentionally
+**Dashboard behavior:** The dashboard tester (`POST /api/dashboard/diagnose`) intentionally
 does not apply the public API's production-year/quality eligibility gate.
 Entering `Fight Club` alone will still return ranked title matches without
 requiring a year, season, anime identity or release-quality tag. The public
