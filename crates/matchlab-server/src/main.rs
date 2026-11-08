@@ -12,6 +12,7 @@ mod anime_title;
 mod country_aliases;
 mod dashboard_history;
 mod debug_feed;
+mod field_audit;
 mod community_learning;
 mod query_cache;
 use axum::{extract::{Query, State}, http::{StatusCode,header}, routing::{get,post}, Json, Router};
