@@ -6,12 +6,17 @@
 //! evidence; counterfactual *different field* labels are explicit negatives.
 use rusqlite::{params,Connection,OptionalExtension};
 use sha2::{Digest,Sha256};
+use serde_json::{json,Value};
+use std::sync::atomic::{AtomicI64,Ordering};
 use std::collections::BTreeSet;
 
 const EPOCH:i64=1;
 const DIM:usize=1<<14;
 const MAX_BYTES:usize=DIM*8;
-const MAX_EXAMPLES:i64=40_000;
+const MAX_EXAMPLES:i64=10_000_000;
+const MAX_SEEN:i64=80_000;
+static POSITIVE:AtomicI64=AtomicI64::new(0);
+static NEGATIVE:AtomicI64=AtomicI64::new(0);
 const ALPHA:f32=0.12;
 const BETA:f32=1.0;
 const L1:f32=0.0001;
@@ -87,7 +92,8 @@ impl OnlineModel{
             let g=gradient;
             let n=self.n[i];
             let sigma=((n+g*g).sqrt()-n.sqrt())/ALPHA;
-            self.z[i]+=g-sigma*self.weight(i);
+            let old_weight=self.weight(i);
+            self.z[i]+=g-sigma*old_weight;
             self.n[i]=n+g*g;
         }
         if positive{self.positives+=1;}else{self.negatives+=1;}
@@ -97,6 +103,19 @@ impl OnlineModel{
         Some(self.raw_score(&features(field,signal,title)))
     }
     pub fn trained(&self)->(i64,i64){(self.positives,self.negatives)}
+    pub fn publish_status(&self){
+        POSITIVE.store(self.positives,Ordering::Release);
+        NEGATIVE.store(self.negatives,Ordering::Release);
+    }
+    pub fn status()->Value{
+        let positive=POSITIVE.load(Ordering::Acquire);
+        let negative=NEGATIVE.load(Ordering::Acquire);
+        json!({"engine":"rust_ftrl_proximal","shadow_only":true,
+            "weight_slots":DIM,"parameter_bytes":MAX_BYTES,
+            "positive_labels":positive,"counterfactual_negative_labels":negative,
+            "trained":positive>=16 && negative>=16,
+            "can_authorize_rules":false})
+    }
     pub fn init(db:&Connection)->Result<(),String>{
         db.execute_batch("CREATE TABLE IF NOT EXISTS online_model(
                 epoch INTEGER PRIMARY KEY,parameters BLOB NOT NULL,
@@ -114,12 +133,20 @@ impl OnlineModel{
         let Some((data,positives,negatives))=saved else{return Ok(Self::new());};
         if data.len()!=MAX_BYTES||positives<0||negatives<0
             ||positives>MAX_EXAMPLES||negatives>MAX_EXAMPLES*2{
+            db.execute("DELETE FROM online_model_seen",[])
+                .map_err(|e|e.to_string())?;
+            db.execute("DELETE FROM online_model WHERE epoch=?1",[EPOCH])
+                .map_err(|e|e.to_string())?;
             return Ok(Self::new());
         }
         let mut model=Self::new();
         for (i,chunk) in data.chunks_exact(4).enumerate(){
             let value=f32::from_le_bytes([chunk[0],chunk[1],chunk[2],chunk[3]]);
-            if !value.is_finite()||value<0.0 && i>=DIM||value.abs()>1.0e9{
+            if !value.is_finite()||(value<0.0 && i>=DIM)||value.abs()>1.0e9{
+                db.execute("DELETE FROM online_model_seen",[])
+                    .map_err(|e|e.to_string())?;
+                db.execute("DELETE FROM online_model WHERE epoch=?1",[EPOCH])
+                    .map_err(|e|e.to_string())?;
                 return Ok(Self::new());
             }
             if i<DIM{model.z[i]=value;}else{model.n[i-DIM]=value;}
@@ -146,12 +173,22 @@ impl OnlineModel{
         // The original Rust parser and field validator already established
         // the positive. A mismatched field is a safe counterfactual negative,
         // not an inferred claim about the film or the final match.
-        let sample=digest(&format!("{field}:{signal}:{title}"));
+        let sample=digest(&format!("{EPOCH}:{field}:{signal}:{title}"));
         let inserted=db.execute(
             "INSERT OR IGNORE INTO online_model_seen(sample_hash,seen_at)
              VALUES(?1,strftime('%s','now'))",[sample])
             .map_err(|e|e.to_string())?;
         if inserted==0{return Ok(false);}
+        if self.positives>0&&self.positives%10_000==0{
+            let seen:i64=db.query_row("SELECT count(*) FROM online_model_seen",[],
+                |row|row.get(0)).map_err(|e|e.to_string())?;
+            if seen>MAX_SEEN{
+                db.execute("DELETE FROM online_model_seen WHERE sample_hash IN (
+                    SELECT sample_hash FROM online_model_seen
+                    ORDER BY seen_at,sample_hash LIMIT 10_000)",[])
+                    .map_err(|e|e.to_string())?;
+            }
+        }
         let real=features(field,signal,title);
         self.learn(&real,true);
         let false_field=if field=="codec"{"resolution"}else{"codec"};
