@@ -639,6 +639,7 @@ pub fn status() -> Value {
             "model":"rust_ftrl_proximal",
             "online_learner":crate::online_model::OnlineModel::status(),
             "candidate_discovery":crate::candidate_discovery::status(),
+            "tv_coordinate_learning":crate::tv_learning::status(),
             "identity_and_coordinate_override":"separate_metadata_verification"});
     }
     json!({"enabled":crate::local_learning::active(),
