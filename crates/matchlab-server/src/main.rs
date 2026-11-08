@@ -2269,8 +2269,17 @@ mod tests {
         let unavailable=diagnose(&path,&MatchRequest{
             title:"Dragon.Ball.Super.S01E999.DUBBED".into(),
             year:None,series:None}).unwrap();
-        assert!(unavailable.selected.is_none(),
-            "IMDb season bounds must still reject nonexistent episodes");
+        // With only one title/season identity, a low IMDb episode maximum
+        // must not discard that identity. The separate anime crosswalk
+        // safety guard still withholds an unverified S01E999 and ASID.
+        let unmatched=unavailable.selected.expect("retain unique anime identity");
+        assert_eq!(unmatched["imdb_id"],"tt4644488");
+        assert!(unmatched["episode"].is_null(),
+            "do not publish an unverified anime episode");
+        assert_eq!(public_match_response(Some(unmatched)),json!({
+            "sid_start":"tt4644488","sid_end":"tt4644488",
+            "asid_start":null,"asid_end":null
+        }));
         // No Sxx token must not overwrite an absolute episode that can
         // be verified to belong to a later season of One Piece.
         let absolute=diagnose(&path,&MatchRequest{
