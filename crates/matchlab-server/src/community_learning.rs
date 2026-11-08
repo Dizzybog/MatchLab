@@ -33,8 +33,11 @@ fn github_token()->Option<String>{
     env::var("MATCHLAB_COMMUNITY_GITHUB_TOKEN").ok()
         .filter(|v|!v.trim().is_empty())
 }
-fn enabled()->bool{crate::local_learning::active()
-    && opted_in() && github_token().is_some() && valid_sha(build_sha())}
+fn eligible(local:bool,share:bool,has_token:bool,official_build:bool)->bool{
+    local && share && has_token && official_build
+}
+fn enabled()->bool{eligible(crate::local_learning::active(),opted_in(),
+    github_token().is_some(),valid_sha(build_sha()))}
 pub async fn status()->Json<Value>{
     Json(json!({"enabled":opted_in(),"local_learning_enabled":crate::local_learning::active(),
         "ready":enabled(),
@@ -419,6 +422,19 @@ pub fn start(history:PathBuf,metadata:PathBuf){
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn community_upload_requires_two_distinct_opt_ins(){
+        for (local,share,token,official,allowed) in [
+            (false,false,false,false,false),
+            (true,false,false,true,false),
+            (false,true,true,true,false),
+            (true,true,false,true,false),
+            (true,true,true,false,false),
+            (true,true,true,true,true),
+        ]{
+            assert_eq!(eligible(local,share,token,official),allowed);
+        }
+    }
     #[test]
     fn canonical_fingerprints_ignore_release_separator_variations(){
         let code=vec!["unresolved_absolute_anime_episode".into()];
