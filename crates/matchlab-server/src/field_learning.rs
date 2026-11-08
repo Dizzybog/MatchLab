@@ -18,7 +18,7 @@ use std::sync::{
     OnceLock, RwLock,
 };
 
-const EPOCH: i64 = 2;
+const EPOCH: i64 = 3;
 const MIN_EXAMPLES: i64 = 8;
 const MIN_TITLES: i64 = 4;
 const MIN_OVERRIDE_EXAMPLES: i64 = 16;
@@ -105,7 +105,7 @@ fn consistent(field: &str, signal: &str, value: &Value) -> bool {
         "languages" => {
             let Some(code) = language_code(signal) else { return false; };
             value.as_array().is_some_and(|values|
-                values.len() <= 8 && values.iter().any(|value| {
+                values.len() == 1 && values.iter().any(|value| {
                     value.as_str().is_some_and(|v|
                         v.eq_ignore_ascii_case(code)
                         || (code == "no" && matches!(v, "nb" | "nn")))
@@ -174,6 +174,8 @@ fn independent_context_valid(raw:&str,field:&str,signal:&str)->bool{
         "audio"=>&["aac","ac3","eac3","ddp","dts","flac","truehd","opus"],
         "bit_depth"=>&["8bit","10bit","12bit","10bits","12bits"],
         "channels"=>&["5.1","7.1","2.0"],
+        "languages"=>&["norwegian","norsk","swedish","svenska","danish","dansk",
+            "french","german","italian","japanese"],
         _=>&[],
     };
     !alternatives.iter().filter(|other|**other!=signal).any(|other|
@@ -190,6 +192,7 @@ fn empty_field(value:Option<&Value>)->bool{
 }
 fn training_label(title:&str,field:&str,signal:&str,
     parsed:&serde_json::Map<String,Value>)->Option<(Value,bool)>{
+    if !independent_context_valid(title,field,signal){return None;}
     if let Some(value)=parsed.get(field)
         && validated_value(field,signal,value){
         return Some((value.clone(),false));
@@ -197,7 +200,7 @@ fn training_label(title:&str,field:&str,signal:&str,
     // A present but disagreeing field is NOT considered missing. Only
     // independently explicit markers can train a missing-field rule.
     if !empty_field(parsed.get(field))
-        || !independent_context_valid(title,field,signal){return None;}
+        {return None;}
     independent_marker_value(field,signal).map(|v|(v,true))
 }
 fn signals(title: &str) -> Vec<(String, String)> {
@@ -468,7 +471,7 @@ fn propose_from(title: &str, parsed: &mut Value, active: &[FieldRule]) {
     // IMDb/AniDB identity or season/episode coordinates.
     let mut candidates: BTreeMap<&str, Vec<&FieldRule>> = BTreeMap::new();
     for rule in active {
-        if !context_valid(title,&rule.field,&rule.signal) { continue; }
+        if !independent_context_valid(title,&rule.field,&rule.signal) { continue; }
         if !rule.regex.is_match(leaf(title)) { continue; }
         candidates.entry(&rule.field).or_default().push(rule);
     }
@@ -577,6 +580,15 @@ mod tests {
         assert_eq!(parsed["codec"],"x264");
     }
     #[test]
+    fn even_a_single_active_rule_must_reject_competing_raw_markers() {
+        let mut parsed=json!({"title":"Film"});
+        propose_from("Film.1080p.2160p",&mut parsed,&[
+            rule("resolution","1080p",json!("1080p"),20,8)
+        ]);
+        assert!(parsed.get("resolution").is_none());
+        assert!(!consistent("languages","norwegian",&json!(["no","sv"])));
+    }
+    #[test]
     fn competing_signals_fail_closed() {
         let mut parsed=json!({"title":"Film","resolution":"720p"});
         propose_from("Film.1080p.2160p",&mut parsed,&[
@@ -633,6 +645,9 @@ mod tests {
         assert!(training_label("Film.1080p.2160p","resolution","1080p",&empty).is_none());
         assert!(training_label("Film.1080p.2160p","resolution","2160p",&empty).is_none());
         assert!(training_label("Film.AAC.DTS.WEB-DL","audio","aac",&empty).is_none());
+        let mut confident=serde_json::Map::new();
+        confident.insert("codec".into(),json!("x264"));
+        assert!(training_label("Film.x264.x265","codec","x264",&confident).is_none());
         assert!(training_label("The Danish Girl.1080p","languages","danish",&empty).is_none());
         assert!(training_label("Film.1080p.mkv.WEB-DL","extension","mkv",&empty).is_none());
         let mut populated=serde_json::Map::new();
