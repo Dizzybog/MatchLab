@@ -69,14 +69,6 @@ fn regex_for(marker:&str)->Option<Regex>{
     let text=pattern_for(marker)?;
     RegexBuilder::new(&text).size_limit(16*1024).build().ok()
 }
-fn base_handles(marker:&str)->bool{
-    let title=format!("Generic Sample {}300",marker);
-    let Ok(parsed)=matchlab_parser::parse_title(&title,false)else{return true;};
-    let value=Value::Object(parsed);
-    value["episodes"].as_array().is_some_and(|v|v.iter().any(|e|e.as_i64()==Some(300)))
-        ||value["anime_episode_candidate"]["episode"].as_i64()==Some(300)
-        ||value["absolute_episode_candidate"].as_i64()==Some(300)
-}
 fn technical_suffix(s:&str)->bool{
     let rest=s.trim_matches(|c:char|matches!(c,' '|'.'|'_'|'-'));
     if rest.is_empty(){return true;}
@@ -115,35 +107,50 @@ fn install(rows:Vec<ActiveRule>){
         RULESET_REVISION.store(u64::from_le_bytes(bits),Ordering::Release);
     }
 }
-/// Hot path: only a tiny set of precompiled linear-time expressions and an
-/// uncontended read lock; completely inactive when MATCHLAB_ML_ENABLED=false.
-pub fn apply(title:&str,parsed:&mut Value){
-    if !crate::local_learning::active(){return;}
+/// Learned overrides are *proposals* only. Even if the built-in parser
+/// extracted another value, this may propose a more specific candidate.
+/// The public matcher must independently verify its exact anime identity
+/// and absolute episode in the current AniDB/TVDB crosswalk before it can
+/// change any parsed value. /parse never silently rewrites coordinates.
+fn propose_from(title:&str,parsed:&mut Value,active:&[ActiveRule]){
     let Some(map)=parsed.as_object_mut()else{return;};
-    if map.get("anime_episode_candidate").is_some() ||
-       map.get("anime_episode_range_candidate").is_some() ||
-       map.get("anime_season_episode_candidate").is_some() ||
-       map.get("episode_start").is_some() ||
-       map.get("seasons").and_then(Value::as_array).is_some_and(|v|!v.is_empty()) ||
-       map.get("episodes").and_then(Value::as_array).is_some_and(|v|!v.is_empty()){
-        return;
-    }
-    let Ok(active)=rules().read()else{return;};
+    // Explicit SxxExx coordinates always take precedence over a learned
+    // marker; also do not reinterpret existing verified anime candidates.
+    static EXPLICIT:OnceLock<Regex>=OnceLock::new();
+    let explicit=EXPLICIT.get_or_init(||Regex::new(
+        r"(?i)(?:^|[ ._-])s[0-9]{1,3}[ ._-]*e[0-9]{1,4}(?:$|[ ._-])"
+    ).expect("explicit episode guard"));
+    if explicit.is_match(title) || map["anime_title_verified"]==true
+        || map.get("learned_regex_candidate").is_some(){return;}
     let mut winner=None;
-    for rule in active.iter(){
-        if let Some((name,episode))=match_release(&rule.pattern,title) {
-            if winner.replace((name.to_owned(),episode,rule.marker.clone())).is_some(){
-                return; // ambiguity: never promote more than one learned hint
-            }
+    for rule in active{
+        let Some((name,episode))=match_release(&rule.pattern,title)else{continue;};
+        // Built-in already got the exact coordinate: no learned override.
+        if map["episodes"].as_array().is_some_and(|episodes|
+            episodes.len()==1&&episodes[0].as_i64()==Some(episode))
+            && map["seasons"].as_array().is_none_or(|seasons|seasons.is_empty()){
+            return;
+        }
+        if winner.replace((name.to_owned(),episode,rule.marker.clone())).is_some(){
+            return; // ambiguity: do not choose between competing ML patterns
         }
     }
     if let Some((title,episode,marker))=winner{
-        map.insert("anime_episode_candidate".into(),json!({
-            "title":title,"episode":episode,"source":"local_learned_regex",
-            "marker":marker
+        map.insert("learned_regex_candidate".into(),json!({
+            "title":title,"episode":episode,"marker":marker,
+            "source":"local_learned_regex","needs_crosswalk_verification":true
         }));
     }
 }
+/// Runs only when local opt-in is enabled. This never overwrites parser
+/// coordinates by itself, and the default matcher has no ML dependency.
+pub fn apply(title:&str,parsed:&mut Value){
+    if !crate::local_learning::active(){return;}
+    if let Ok(active)=rules().read(){
+        propose_from(title,parsed,&active);
+    }
+}
+
 pub fn init(db:&Connection)->Result<(),String>{
     db.execute_batch(
         "PRAGMA foreign_keys=ON;
@@ -244,8 +251,8 @@ fn negative_probes(marker:&str,re:&Regex)->bool{
         "Naruto x265 1080p", "Episode 300 Explained",
         "The Series EPIS 300 Documentary", "Show EPIS300 trailer",
     ];
+    let _=marker;
     !negatives.iter().any(|t|match_release(re,t).is_some())
-        && !base_handles(marker)
 }
 /// Retire immediately, but retain the original verified observations. Under
 /// storage pressure the budget worker evicts these candidates AND their
@@ -359,6 +366,18 @@ fn reserve_space(db:&Connection,marker:&str,new_candidate:bool,
     }
     Ok(false)
 }
+/// Called only by global storage maintenance AFTER the configured
+/// learning database quota has been exceeded. Never delete an active rule.
+pub fn evict_obsolete(db:&Connection,max_rows:i64)->Result<i64,String>{
+    if max_rows<=0{return Ok(0);}
+    init(db)?;
+    db.execute("DELETE FROM learned_regex_candidates WHERE marker IN (
+       SELECT c.marker FROM learned_regex_candidates c
+       LEFT JOIN learned_regex_active a ON a.marker=c.marker
+       WHERE c.obsolete=1 AND a.marker IS NULL
+       ORDER BY c.obsolete_at,c.created_at,c.marker LIMIT ?1
+    )",[max_rows]).map(|n|n as i64).map_err(|e|e.to_string())
+}
 fn reload(db:&Connection,build:&str,revision:&str)->Result<(),String>{
     let mut stmt=db.prepare("SELECT marker FROM learned_regex_active
         WHERE verified_build=?1 AND verified_metadata=?2
@@ -385,16 +404,25 @@ pub fn observe(db:&Connection,metadata:&Connection,title:&str,details:&Value)->R
     let plain=matchlab_parser::parse_title(title,false)
         .map_err(|e|e.to_string())?;
     let base=Value::Object(plain);
-    if base["episodes"].as_array().is_some_and(|e|!e.is_empty())
-        ||base.get("anime_episode_candidate").is_some()
-        ||base.get("anime_episode_range_candidate").is_some(){return Ok(());}
+    if base.get("anime_episode_range_candidate").is_some()
+        ||base.get("anime_season_episode_candidate").is_some()
+        ||base["anime_title_verified"]==true{return Ok(());}
     let mut seen=0;
     for caps in marker_re().captures_iter(title){
-        let (Some(marker),Some(number))=(caps.get(1),caps.get(2))else{continue;};
+        let (Some(marker),Some(_number))=(caps.get(1),caps.get(2))else{continue;};
         let marker=marker.as_str().to_ascii_lowercase();
         if !safe_marker(&marker) {continue;}
         let Some(re)=regex_for(&marker)else{continue;};
-        let Some((name,absolute))=match_release(&re,title)else{continue;};
+        let Some((name,absolute))=match_release(&re,title)else{continue;}
+        // Learn an *exception* only if the built-in parser missed or
+        // misinterpreted this actual absolute coordinate. This also lets
+        // the model correct existing context-dependent regex handlers.
+        if base["episodes"].as_array().is_some_and(|episodes|
+            episodes.len()==1 && episodes[0].as_i64()==Some(absolute))
+            || base["anime_episode_candidate"]["episode"].as_i64()==Some(absolute)
+            || base["absolute_episode_candidate"].as_i64()==Some(absolute){
+            continue;
+        };
         if name.len()<2 {continue;}
         let expected=crate::matchlab_matcher::clean_title(name);
         // Exact IMDb canonical title is a second independent identity check.
