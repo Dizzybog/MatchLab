@@ -74,20 +74,76 @@ fn trim_numbers(value:&Value,key:&str)->Value{
         .take(12).filter_map(Value::as_i64)
         .filter(|n|(0..=99_999).contains(n)).collect::<Vec<_>>())
 }
-fn report(title:&str,status:&str,details:&Value)->Option<Value>{
+// Guardrail: a difference is not necessarily a bad match. Require
+// independently imported AniDB/TVDB episode crosswalk evidence before
+// sharing a parsed-versus-matched coordinate discrepancy as a bug.
+fn proven_coordinate_gap(meta:&Connection,parsed:&Value,selected:&Value,code:&str)->bool{
+    if selected["category"]!="series"{return false;}
+    let Some(imdb)=selected["imdb_id"].as_str()else{return false;};
+    if !(9..=10).contains(&imdb.len())||!imdb.starts_with("tt")
+        ||!imdb[2..].bytes().all(|b|b.is_ascii_digit()){return false;}
+    let mapped_remap=selected["anime"].is_object()
+        ||selected["episode_range"]["complete"]==true;
+    if mapped_remap{return false;}
+    if matches!(code,"field_missing_anime_episode"|"unresolved_absolute_anime_episode"){
+        let Some(ep)=parsed["anime_episode_candidate"]["episode"].as_i64()
+            .filter(|n|(1..=99_999).contains(n))else{return false;};
+        return crate::anime_resolver::resolve_absolute(meta,imdb,ep)
+            .ok().flatten().is_some()
+            &&selected["anime"].is_null();
+    }
+    let Some(seasons)=parsed["seasons"].as_array().filter(|a|a.len()==1)else{return false;};
+    let Some(episodes)=parsed["episodes"].as_array().filter(|a|a.len()==1)else{return false;};
+    let (Some(season),Some(episode))=(seasons[0].as_i64(),episodes[0].as_i64())else{
+        return false;
+    };
+    if !(1..=9999).contains(&season)||!(1..=99_999).contains(&episode){return false;}
+    let mismatch=match code{
+        "field_unresolved_season"=>selected["season"].is_null(),
+        "field_unresolved_episode"=>selected["episode"].is_null(),
+        "field_mismatch_season"=>selected["season"].as_i64()
+            .is_some_and(|value|value!=season),
+        "field_mismatch_episode"=>selected["episode"].as_i64()
+            .is_some_and(|value|value!=episode),
+        _=>false,
+    };
+    mismatch && crate::anime_resolver::resolve_season(meta,imdb,season,episode)
+        .ok().flatten().is_some()
+}
+fn safe_issue_code(code:&str,meta:Option<&Connection>,parsed:&Value,selected:&Value)->bool{
+    if matches!(code,"field_unresolved_season"|"field_unresolved_episode"|
+        "field_mismatch_season"|"field_mismatch_episode"|
+        "field_missing_anime_episode"|"unresolved_absolute_anime_episode"){
+        return meta.is_some_and(|db|proven_coordinate_gap(db,parsed,selected,code));
+    }
+    // Year differences are observations, not proof. They must be inspected
+    // locally by the opt-in model and cannot create public issues on their own.
+    if code=="field_mismatch_year"{return false;}
+    matches!(code,
+        "matching_error"|"invalid_selected_coordinate"|"unusual_season_number"|
+        "unmatched_explicit_episode"|"explicit_episode_mismatch"|
+        "parser_marker_disagreement"|"incomplete_anime_episode_range"|
+        "reversed_selected_range"|"field_missing_title"|
+        "field_missing_resolution"|"field_missing_codec"|
+        "field_missing_quality"|"field_missing_audio"|
+        "field_missing_bit_depth"|"field_missing_hdr"|
+        "field_missing_channels"|"field_missing_languages"|
+        "field_missing_subbed"|"field_missing_dubbed"|
+        "field_missing_seasons"|"field_missing_episodes"|
+        "field_missing_extension"|"field_missing_year")
+}
+
+fn report(title:&str,status:&str,details:&Value,metadata:Option<&Connection>)->Option<Value>{
     if !matches!(status,"matched"|"unmatched"|"error"){return None;}
     let title=safe_leaf(title)?;
     let flags=crate::debug_feed::community_alerts(&title,status,details);
-    let mut codes:Vec<String>=flags.into_iter().filter_map(|flag|
-        flag["code"].as_str().filter(|code|matches!(*code,
-            "matching_error"|"invalid_selected_coordinate"|"unusual_season_number"|
-            "unmatched_explicit_episode"|"explicit_episode_mismatch"|
-            "parser_marker_disagreement"|"unresolved_absolute_anime_episode"|
-            "incomplete_anime_episode_range"|"reversed_selected_range"|"field_missing_title"|"field_missing_resolution"|"field_missing_codec"|"field_missing_quality"|"field_missing_audio"|"field_missing_bit_depth"|"field_missing_hdr"|"field_missing_channels"|"field_missing_languages"|"field_missing_subbed"|"field_missing_dubbed"|"field_missing_seasons"|"field_missing_episodes"|"field_missing_extension"|"field_missing_year"|"field_missing_anime_episode")).map(str::to_owned)).collect();
-    codes.sort();codes.dedup();
-    if codes.is_empty(){return None;}
     let parsed=&details["parsed"];
     let selected=&details["selected"];
+    let mut codes:Vec<String>=flags.into_iter().filter_map(|flag|
+        flag["code"].as_str().filter(|code|safe_issue_code(code,metadata,parsed,selected))
+        .map(str::to_owned)).collect();
+    codes.sort();codes.dedup();
+    if codes.is_empty(){return None;}
     let parsed_title=parsed["title"].as_str().and_then(safe_leaf);
     let imdb=selected["imdb_id"].as_str().filter(|id|
         (9..=10).contains(&id.len())&&id.starts_with("tt")
@@ -150,13 +206,14 @@ fn ensure_version(db:&mut Connection,history:&Path,time:u64)->Result<(),String>{
     put(&tx,"window_start",&time.to_string())?;
     tx.commit().map_err(|e|e.to_string())
 }
-fn scan(db:&Connection,history:&Path,time:u64)->Result<(),String>{
+fn scan(db:&Connection,history:&Path,metadata:&Path,time:u64)->Result<(),String>{
     let mut after=setting(db,"after_id")?.and_then(|v|v.parse::<i64>().ok()).unwrap_or(0);
     let seen:i64=db.query_row("SELECT count(*) FROM reported",[],|r|r.get(0))
         .map_err(|e|e.to_string())?;
     let mut pending:i64=db.query_row("SELECT count(*) FROM pending",[],|r|r.get(0))
         .map_err(|e|e.to_string())?;
     if seen>=MAX_SEEN{return Ok(());}
+    let metadata_db=Connection::open_with_flags(metadata,OpenFlags::SQLITE_OPEN_READ_ONLY).ok();
     let history_db=Connection::open_with_flags(history,OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e|e.to_string())?;
     for _ in 0..MAX_PAGES{
@@ -175,7 +232,7 @@ fn scan(db:&Connection,history:&Path,time:u64)->Result<(),String>{
         for (id,title,status,details) in rows{
             if pending<MAX_BATCH as i64{
                 let details:Value=serde_json::from_str(&details).unwrap_or(Value::Null);
-                if let Some(candidate)=report(&title,&status,&details){
+                if let Some(candidate)=report(&title,&status,&details,metadata_db.as_ref()){
                     let key=candidate["fingerprint"].as_str().unwrap_or_default();
                     let exists=db.query_row(
                         "SELECT EXISTS(SELECT 1 FROM reported WHERE fingerprint=?1)",
@@ -298,11 +355,11 @@ fn submit_comment(client:&reqwest::blocking::Client,token:&str,
     }
     Ok(())
 }
-fn cycle(history:&Path,storage:&Path,token:&str)->Result<(),String>{
+fn cycle(history:&Path,metadata:&Path,storage:&Path,token:&str)->Result<(),String>{
     let time=now();
     let mut db=connect(storage)?;
     ensure_version(&mut db,history,time)?;
-    scan(&db,history,time)?;
+    scan(&db,history,metadata,time)?;
     let started=setting(&db,"window_start")?
         .and_then(|v|v.parse::<u64>().ok()).unwrap_or(time);
     if time<started.saturating_add(DAY_SECS){return Ok(());}
@@ -327,7 +384,7 @@ fn cycle(history:&Path,storage:&Path,token:&str)->Result<(),String>{
     mark_attempted(&mut db,time,&id,&fingerprints)?;
     submit_comment(&client,token,issue,&batch)
 }
-pub fn start(history:PathBuf){
+pub fn start(history:PathBuf,metadata:PathBuf){
     if !enabled(){
         if opted_in(){
             tracing::warn!("community learning unavailable: token and official SHA-stamped build required");
@@ -341,9 +398,10 @@ pub fn start(history:PathBuf){
     tokio::spawn(async move{
         loop{
             let db=history.clone();
+            let metadata_path=metadata.clone();
             let local=storage.clone();
             let key=token.clone();
-            match tokio::task::spawn_blocking(move||cycle(&db,&local,&key)).await{
+            match tokio::task::spawn_blocking(move||cycle(&db,&metadata_path,&local,&key)).await{
                 Ok(Ok(()))=>{},
                 Ok(Err(error))=>tracing::warn!(%error,
                     "community learning batch unavailable; no automatic retry of posted reports"),
@@ -391,13 +449,41 @@ mod tests{
         let _=fs::remove_file(path);
     }
     #[test]
+    fn only_independently_verified_episode_discrepancies_are_uploadable(){
+        let meta=Connection::open_in_memory().unwrap();
+        meta.execute_batch("CREATE TABLE anime_series_map(
+            imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,start INTEGER,
+                end INTEGER,offset INTEGER,map TEXT);
+            INSERT INTO anime_series_map VALUES('tt1234567','100','200',0);
+            INSERT INTO episode_map VALUES('100','200',1,2,1,12,0,'');").unwrap();
+        let details=json!({"parsed":{"title":"Test Show",
+            "seasons":[2],"episodes":[7]},
+            "selected":{"category":"series","imdb_id":"tt1234567",
+                "season":null,"episode":null}});
+        assert!(proven_coordinate_gap(&meta,&details["parsed"],
+            &details["selected"],"field_unresolved_episode"));
+        assert!(proven_coordinate_gap(&meta,&details["parsed"],
+            &details["selected"],"field_unresolved_season"));
+        let report=report("Test.Show.S02E07","matched",&details,Some(&meta))
+            .expect("verified missing matcher episode should qualify");
+        assert!(report["alerts"].as_array().unwrap().iter().any(|code|
+            code=="field_unresolved_episode"));
+        assert!(report("Test.Show.S02E07","matched",&details,None).is_none());
+        let other=json!({"parsed":{"year":2025,"title":"Test Show"},
+            "selected":{"year":2020,"category":"movie","imdb_id":"tt1234567"}});
+        assert!(report("Test.Show.2025.WEB-DL","matched",&other,Some(&meta)).is_none(),
+            "year mismatch is not independent proof of wrong IMDb matching");
+    }
+    #[test]
     fn unverified_reports_never_include_full_diagnostics(){
         let details=json!({"parsed":{"title":"Bleach","episodes":[338],
                 "api_key":"SECRET"},"selected":{"imdb_id":"tt0434665",
                 "private_path":"/private/file.mkv"},
                 "reason":"free form text that should not be exported"});
         // A reporting alert is needed: normal successful matches are not uploaded.
-        assert!(report("Bleach_338","matched",&details).is_none());
+        assert!(report("Bleach_338","matched",&details,None).is_none());
         assert!(!valid_sha("latest"));
     }
 }
