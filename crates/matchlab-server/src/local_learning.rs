@@ -144,6 +144,9 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
             continue;
         };
         let base=Value::Object(canonical);
+        // Every canonical parser field can train the shadow ranker;
+        // promotions remain governed by independent field validators.
+        model.observe_canonical_fields(&tx,&title,&base)?;
         for (field,signal) in crate::tv_learning::observe(
             &tx,&title,&base,&mut tv_evidence)? {
             model.observe(&tx,&title,&field,&signal)?;
