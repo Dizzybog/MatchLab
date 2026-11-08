@@ -1541,6 +1541,18 @@ fn public_match_response(selected: Option<Value>) -> Value {
         else if let (Some(se),Some(ep))=(end_season,end_episode){
             json!(format!("{imdb}:{se}:{ep}"))
         }else if has_range{Value::Null}else{json!(imdb)};
+    // An explicit second season without a corresponding last episode is
+    // *not* a complete multi-season range. Previously the start episode
+    // was silently reused as the last episode, or the end degraded to a
+    // bare IMDb ID, creating invalid or misleading SID endpoints. Keep
+    // only the proven start; no range-wide ASID can be inferred.
+    let missing_cross_season_end=matches!((start_season,end_season),
+        (Some(start),Some(end)) if end!=start)
+        && winner["episode_end"].as_i64().is_none();
+    if missing_cross_season_end {
+        return json!({"sid_start":sid_start,"sid_end":null,
+            "asid_start":null,"asid_end":null});
+    }
     // StremThru accepts a pair only when both sides have the same ID,
     // both are either bare titles or episode coordinates, and coordinate
     // end is not before coordinate start. A malformed range must never
@@ -3487,9 +3499,10 @@ mod tests {
             "imdb_id":"tt1234567","category":"series","season":2,
             "episode":8,"season_end":3,"anime":{"asid":"2369:8"}
         })));
-        assert_eq!(mixed["sid_start"],"tt1234567");
-        assert_eq!(mixed["sid_end"],"tt1234567");
+        assert_eq!(mixed["sid_start"],"tt1234567:2:8");
+        assert!(mixed["sid_end"].is_null());
         assert!(mixed["asid_start"].is_null());
+        assert!(mixed["asid_end"].is_null());
         let valid=public_match_response(Some(json!({
             "imdb_id":"tt1234567","category":"series","season":2,
             "episode":8,"season_end":3,"episode_end":2
