@@ -33,9 +33,11 @@ fn github_token()->Option<String>{
     env::var("MATCHLAB_COMMUNITY_GITHUB_TOKEN").ok()
         .filter(|v|!v.trim().is_empty())
 }
-fn enabled()->bool{opted_in()&&github_token().is_some()&&valid_sha(build_sha())}
+fn enabled()->bool{crate::local_learning::active()
+    && opted_in() && github_token().is_some() && valid_sha(build_sha())}
 pub async fn status()->Json<Value>{
-    Json(json!({"enabled":opted_in(),"ready":enabled(),
+    Json(json!({"enabled":opted_in(),"local_learning_enabled":crate::local_learning::active(),
+        "ready":enabled(),
         "protocol":PROTOCOL,"learning_epoch":EPOCH,
         "build_sha":valid_sha(build_sha()).then_some(build_sha()),
         "upload":"one_daily_github_issue_with_opt_in_batch_comments",
@@ -390,7 +392,7 @@ fn cycle(history:&Path,metadata:&Path,storage:&Path,token:&str)->Result<(),Strin
 pub fn start(history:PathBuf,metadata:PathBuf){
     if !enabled(){
         if opted_in(){
-            tracing::warn!("community learning unavailable: token and official SHA-stamped build required");
+            tracing::warn!("community learning unavailable: requires local ML opt-in, GitHub token and official SHA-stamped build");
         }
         return;
     }
