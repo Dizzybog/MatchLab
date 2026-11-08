@@ -127,7 +127,6 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
     let mut samples=count(&tx,"samples")?;
     let mut patterns=count(&tx,"patterns")?;
     let now=chrono::Utc::now().timestamp();
-    let mut newly_trained=false;
     for (id,title,raw) in rows{
         after=id;
         let Ok(details)=serde_json::from_str::<Value>(&raw)else{continue};
@@ -147,7 +146,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
         }
         for (field,signal) in crate::field_learning::observe_with_budget(
             &tx,&title,&details,&base,&mut evidence)?{
-            newly_trained|=model.observe(&tx,&title,&field,&signal)?;
+            model.observe(&tx,&title,&field,&signal)?;
         }
         crate::candidate_discovery::observe(&tx,&title,&base,
             &model,&mut discovery)?;
@@ -187,13 +186,9 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
             }
         }
     }
-    // Holdout-only batches update evaluation counters without changing
-    // weights. Persist those counters atomically with the history cursor,
-    // otherwise the next batch silently loses evaluation observations.
-    if newly_trained{model.save(&tx)?;}else{
-        // save() is bounded (128 KiB) and keeps holdout provenance durable.
-        model.save(&tx)?;
-    }
+    // Persist both trained weights and holdout-only evaluation counters
+    // atomically with the consumed history cursor.
+    model.save(&tx)?;
     // The cursor and learned model are committed in the same transaction.
     put(&tx,"after_id",&after.to_string())?;
     tx.commit().map_err(|e|e.to_string())?;
