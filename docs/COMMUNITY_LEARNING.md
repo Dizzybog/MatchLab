@@ -82,8 +82,12 @@ services:
     image: ghcr.io/dizzybog/matchlab:latest
     environment:
       MATCHLAB_ML_ENABLED: "true"
-      MATCHLAB_ML_MAX_STORAGE_GB: "1"
+      MATCHLAB_ML_MAX_STORAGE_GB: "10"
+      MATCHLAB_ML_TRAINING_MAX_EXAMPLES: "500000"
       MATCHLAB_ML_CACHE_ENABLED: "true"
+      MATCHLAB_ML_CACHE_MAX_ENTRIES: "200000"
+      MATCHLAB_ML_CACHE_TTL_HOURS: "720"
+      MATCHLAB_ML_UNMATCHED_CACHE_TTL_MINUTES: "30"
     volumes:
       - metadata:/data
 ~~~
@@ -106,6 +110,14 @@ to activate anything. The Rust matcher still works without a token.
   and the logical storage target `MATCHLAB_ML_MAX_STORAGE_GB`
   defaults to **1 GiB**, supporting 1–128 GiB. The budget is a
   best-effort on-disk quota, not an exact hard filesystem partition.
+  `MATCHLAB_ML_TRAINING_MAX_EXAMPLES` (default 12,000, range
+  100–2,000,000) separately controls the **number of retained independently
+  validated technical field observations per current build**, not physical
+  GiB or the number of unique torrent names. The background worker can
+  reclaim the oldest unpromoted evidence when the corpus fills but protects
+  active rule provenance. `MATCHLAB_ML_CACHE_MAX_ENTRIES` controls derived
+  cache rows separately (default 100,000), and the cache's positive/missing
+  result TTLs can be set in hours/minutes. Cache entries never train models.
 - Persistent caching can be disabled independently with
   `MATCHLAB_ML_CACHE_ENABLED=false`; rule learning can remain active.
 - Ordinary parser/matcher hot paths never train or infer with the model. Compiled
