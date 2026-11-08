@@ -1,6 +1,7 @@
-//! Local opt-in learning: hashed field-pattern frequencies, no raw filenames
-//! persisted, no network, no changes to production SID/ASID. Optional ONNX
-//! scoring is entirely outside request handling and limited to one CPU thread.
+//! Offline, native-Rust field-learning worker.
+//! It collects independent evidence, trains a bounded online FTRL model,
+//! and stores all observations in a single transaction per history batch.
+//! Model scores are *shadow-only*: they never authorize regex or SID/ASID.
 use rusqlite::{params,Connection,OpenFlags,OptionalExtension};
 use serde_json::Value;
 use sha2::{Digest,Sha256};
@@ -8,11 +9,10 @@ use std::{env,path::{Path,PathBuf},time::Duration};
 
 const POLL_SECONDS:u64=15;
 const MAX_PATTERNS:i64=2_000;
-// Scale hashed observation capacity with the user's learning-storage budget.
-fn max_examples()->i64{(crate::learning_cache::storage_gb() as i64*20_000).min(2_000_000)}
 const MIN_EXAMPLES:i64=5;
-const FEATURES:usize=8;
-
+fn max_examples()->i64{
+    (crate::learning_cache::storage_gb() as i64*20_000).min(2_000_000)
+}
 pub(crate) fn active()->bool{
     env::var("MATCHLAB_ML_ENABLED").ok()
         .is_some_and(|v|v.eq_ignore_ascii_case("true"))
@@ -39,6 +39,7 @@ fn connect(path:&Path)->Result<Connection,String>{
             key TEXT PRIMARY KEY,pattern_key TEXT NOT NULL,observed_at INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS pattern_samples_idx ON samples(pattern_key);")
         .map_err(|e|e.to_string())?;
+    crate::online_model::OnlineModel::init(&db)?;
     Ok(db)
 }
 fn setting(db:&Connection,key:&str)->Result<Option<String>,String>{
@@ -78,34 +79,23 @@ fn pattern(flag:&Value,details:&Value)->Option<(String,String)>{
     };
     Some((code.to_owned(),digest(&format!("{code}:{feature}"))))
 }
-fn bit(value:bool)->f32{if value{1.0}else{0.0}}
-fn vector(code:&str,count:i64)->[f32;FEATURES]{
-    [
-        bit(code=="field_mismatch_year"),
-        bit(code=="field_unresolved_episode"),
-        bit(code=="field_unresolved_season"),
-        bit(code=="field_mismatch_episode"),
-        bit(code=="field_mismatch_season"),
-        bit(code=="field_missing_anime_episode"),
-        bit(code.starts_with("field_missing_")),
-        ((count as f32).ln_1p()/10.0).min(1.0)
-    ]
-}
-fn scan(history:&Path,metadata:&Path,local:&mut Connection,model:&mut OptionalModel)->Result<(),String>{
-    // Restore verified technical rules even without new requests or metadata.
+fn scan(history:&Path,metadata:&Path,local:&mut Connection)->Result<(),String>{
+    // Both learners reconcile only between batches: no active-registry
+    // mutation occurs inside the evidence transaction.
     crate::field_learning::reconcile(local)?;
     let history_db=Connection::open_with_flags(history,OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e|e.to_string())?;
     history_db.busy_timeout(Duration::from_secs(2)).map_err(|e|e.to_string())?;
     let newest:i64=history_db.query_row("SELECT COALESCE(MAX(id),0) FROM requests",
         [],|r|r.get(0)).map_err(|e|e.to_string())?;
-    // New opt-in does not backfill or export old request history.
     let Some(cursor)=setting(local,"after_id")?else{
+        // Do not silently train on requests made before the opt-in.
         put(local,"after_id",&newest.to_string())?;
         return Ok(());
     };
     let mut after=cursor.parse::<i64>().unwrap_or(newest);
     if newest<after{put(local,"after_id",&newest.to_string())?;return Ok(());}
+    if newest==after{return Ok(());}
     let mut stmt=history_db.prepare("SELECT id,title,details FROM requests
         WHERE id>?1 ORDER BY id ASC LIMIT 1000").map_err(|e|e.to_string())?;
     let rows=stmt.query_map([after],|r|Ok((r.get::<_,i64>(0)?,
@@ -114,118 +104,86 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,model:&mut OptionalMo
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e|e.to_string())?;
     let meta=Connection::open_with_flags(metadata,OpenFlags::SQLITE_OPEN_READ_ONLY).ok();
-    if let Some(ref metadata)=meta {
+    if let Some(ref metadata)=meta{
         crate::learned_regex::reconcile(local,metadata)?;
     }
+    // Load a committed snapshot every batch. If a batch fails, all evidence,
+    // model weights, and the history cursor roll back together.
+    let mut model=crate::online_model::OnlineModel::load(local)?;
+    let tx=local.transaction().map_err(|e|e.to_string())?;
+    let mut evidence=crate::field_learning::count_evidence(&tx)?;
+    let mut samples=count(&tx,"samples")?;
+    let mut patterns=count(&tx,"patterns")?;
     let now=chrono::Utc::now().timestamp();
-    let mut samples=count(local,"samples")?;
-    let mut patterns=count(local,"patterns")?;
-    for (id,title,raw) in rows {
+    let mut newly_trained=false;
+    for (id,title,raw) in rows{
         after=id;
         let Ok(details)=serde_json::from_str::<Value>(&raw)else{continue};
-        if let Some(ref metadata)=meta {
-            crate::learned_regex::observe(local,metadata,&title,&details)?;
+        if let Some(ref metadata)=meta{
+            crate::learned_regex::observe(&tx,metadata,&title,&details)?;
         }
-        crate::field_learning::observe(local,&title,&details)?;
-        let flags=crate::field_audit::audit(&title,&details["parsed"],&details["selected"]);
-        for flag in flags {
+        for (field,signal) in crate::field_learning::observe_with_budget(
+            &tx,&title,&details,&mut evidence)?{
+            newly_trained|=model.observe(&tx,&title,&field,&signal)?;
+        }
+        let flags=crate::field_audit::audit(
+            &title,&details["parsed"],&details["selected"]);
+        for flag in flags{
             let Some((code,group))=pattern(&flag,&details)else{continue};
             if samples>=max_examples(){continue;}
             let sample=digest(&format!("{group}:{}",normalized(&title)));
-            let exists:i64=local.query_row(
-                "SELECT EXISTS(SELECT 1 FROM samples WHERE key=?1)",
-                [&sample],|r|r.get(0)).map_err(|e|e.to_string())?;
-            if exists>0{continue;}
-            let known:i64=local.query_row(
+            // The PRIMARY KEY is the dedup check. No preliminary SELECT
+            // and no per-observation transactions.
+            let known:i64=tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM patterns WHERE key=?1)",
                 [&group],|r|r.get(0)).map_err(|e|e.to_string())?;
             if known==0&&patterns>=MAX_PATTERNS{continue;}
-            let tx=local.transaction().map_err(|e|e.to_string())?;
-            tx.execute("INSERT OR IGNORE INTO samples(key,pattern_key,observed_at)
-                VALUES(?1,?2,?3)",params![sample,group,now])
+            let inserted=tx.execute(
+                "INSERT OR IGNORE INTO samples(key,pattern_key,observed_at)
+                 VALUES(?1,?2,?3)",params![sample,group,now])
                 .map_err(|e|e.to_string())?;
-            tx.execute("INSERT INTO patterns(key,field_code,distinct_examples,first_seen,last_seen)
-                VALUES(?1,?2,1,?3,?3)
-                ON CONFLICT(key) DO UPDATE SET distinct_examples=distinct_examples+1,
-                    last_seen=excluded.last_seen",
-                params![group,code,now]).map_err(|e|e.to_string())?;
-            tx.commit().map_err(|e|e.to_string())?;
+            if inserted==0{continue;}
+            let n:i64=tx.query_row(
+                "INSERT INTO patterns(key,field_code,distinct_examples,first_seen,last_seen)
+                 VALUES(?1,?2,1,?3,?3)
+                 ON CONFLICT(key) DO UPDATE SET
+                   distinct_examples=distinct_examples+1,last_seen=excluded.last_seen
+                 RETURNING distinct_examples",
+                params![group,code,now],|r|r.get(0)).map_err(|e|e.to_string())?;
             samples+=1;
-            patterns+=i64::from(known==0);
-            let n:i64=local.query_row("SELECT distinct_examples FROM patterns
-                WHERE key=?1",[&group],|r|r.get(0)).map_err(|e|e.to_string())?;
-            if n>=MIN_EXAMPLES && let Some(score)=model.score(vector(&code,n)){
-                local.execute("UPDATE patterns SET model_score=?1 WHERE key=?2",
-                    params![score,group]).map_err(|e|e.to_string())?;
+            if known==0{patterns+=1;}
+            if n>=MIN_EXAMPLES{
+                let field=flag["field"].as_str().unwrap_or("");
+                let signal=flag["signal"].as_str().unwrap_or("");
+                if let Some(score)=model.score(field,signal,&title){
+                    tx.execute("UPDATE patterns SET model_score=?1 WHERE key=?2",
+                        params![score,group]).map_err(|e|e.to_string())?;
+                }
             }
         }
     }
-    if let Some(ref metadata)=meta {
+    if newly_trained{model.save(&tx)?;}
+    // The cursor and learned model are committed in the same transaction.
+    put(&tx,"after_id",&after.to_string())?;
+    tx.commit().map_err(|e|e.to_string())?;
+    crate::online_model::publish_status(&model);
+    if let Some(ref metadata)=meta{
         crate::learned_regex::reconcile(local,metadata)?;
     }
     crate::field_learning::reconcile(local)?;
-    put(local,"after_id",&after.to_string())
+    Ok(())
 }
-#[cfg(feature="ml-ort")]
-struct OptionalModel{session:Option<ort::session::Session>}
-#[cfg(not(feature="ml-ort"))]
-struct OptionalModel;
-impl OptionalModel {
-    fn new()->Self{
-        #[cfg(not(feature="ml-ort"))]{
-            tracing::info!("local learning: Rust frequency analysis only; optional ort feature is not compiled");
-            Self
-        }
-        #[cfg(feature="ml-ort")]{
-            use ort::session::Session;
-            let result=(||->Result<Session,String>{
-                let library=env::var("ORT_DYLIB_PATH")
-                    .map_err(|_|"ORT_DYLIB_PATH is unset")?;
-                let location=env::var("MATCHLAB_ML_MODEL_PATH")
-                    .unwrap_or_else(|_|"/opt/matchlab/ml/tiny-anomaly.onnx".into());
-                let path=Path::new(&location);
-                if !path.is_file()||path.metadata().map_err(|e|e.to_string())?.len()>4*1024*1024{
-                    return Err("ONNX model must be a local file <=4MiB".into());
-                }
-                // Single CPU inference thread, no downloads and no GPU EP.
-                let environment=ort::init_from(&library).map_err(|e|e.to_string())?
-                    .build().map_err(|e|e.to_string())?;
-                Session::builder(&environment).map_err(|e|e.to_string())?
-                    .with_intra_threads(1).map_err(|e|e.to_string())?
-                    .with_inter_threads(1).map_err(|e|e.to_string())?
-                    .commit_from_file(path).map_err(|e|e.to_string())
-            })();
-            match result{
-                Ok(session)=>Self{session:Some(session)},
-                Err(error)=>{
-                    tracing::warn!(%error,"optional ONNX model unavailable; Rust pattern statistics remain active");
-                    Self{session:None}
-                }
-            }
-        }
+pub fn verify_native_model()->Result<(),String>{
+    let db=Connection::open_in_memory().map_err(|e|e.to_string())?;
+    let mut model=crate::online_model::OnlineModel::load(&db)?;
+    for n in 0..64{
+        model.observe(&db,&format!("Test{n}.2160p.WEB-DL"),"resolution","2160p")?;
     }
-    fn score(&mut self,x:[f32;FEATURES])->Option<f32>{
-        #[cfg(not(feature="ml-ort"))]{let _=x;None}
-        #[cfg(feature="ml-ort")]{
-            let session=self.session.as_mut()?;
-            let tensor=ort::value::Tensor::from_array((
-                [1usize,FEATURES],x.to_vec().into_boxed_slice())).ok()?;
-            let result=session.run(ort::inputs![tensor]).ok()?;
-            let (_,values)=result[0].try_extract_tensor::<f32>().ok()?;
-            values.first().copied().filter(|v|v.is_finite()&&(0.0..=1.0).contains(v))
-        }
-    }
-}
-#[cfg(feature="ml-ort")]
-pub fn verify_image_assets()->Result<(),String>{
-    if !active(){return Err("set MATCHLAB_ML_ENABLED=true to verify ML inference".into());}
-    let mut model=OptionalModel::new();
-    if model.session.is_none(){
-        return Err("bundled ONNX Runtime or model could not be loaded".into());
-    }
-    match model.score(vector("field_unresolved_episode",8)){
-        Some(score) if (0.0..=1.0).contains(&score)=>Ok(()),
-        _=>Err("bundled ONNX model inference failed".into()),
+    let yes=model.score("resolution","2160p","Other.2160p.WEB-DL");
+    let no=model.score("codec","2160p","Other.2160p.WEB-DL");
+    match (yes,no) {
+        (Some(a),Some(b)) if a>b=>Ok(()),
+        _=>Err("native FTRL self-test failed".into())
     }
 }
 pub fn start(history:PathBuf,metadata:PathBuf){
@@ -234,9 +192,6 @@ pub fn start(history:PathBuf,metadata:PathBuf){
         .unwrap_or_else(|_|"/data/local-learning.sqlite3".into()));
     let worker=std::thread::Builder::new()
         .name("matchlab-local-learning".into()).spawn(move||{
-            let mut model=OptionalModel::new();
-            // Expensive page accounting and eviction run at most every five
-            // minutes; learning scans remain responsive every 15 seconds.
             let mut maintained=std::time::Instant::now()
                 .checked_sub(Duration::from_secs(300))
                 .unwrap_or_else(std::time::Instant::now);
@@ -246,7 +201,7 @@ pub fn start(history:PathBuf,metadata:PathBuf){
                         crate::learning_cache::maintain(&db,&metadata)?;
                         maintained=std::time::Instant::now();
                     }
-                    scan(&history,&metadata,&mut db,&mut model)
+                    scan(&history,&metadata,&mut db)
                 }){
                     tracing::warn!(%error,"local learning cycle skipped");
                 }
@@ -266,7 +221,6 @@ mod tests{
         let (code,key)=pattern(&a,&d).unwrap();
         assert_eq!(code,"field_mismatch_year");
         assert_eq!(key.len(),64);
-        assert_eq!(vector(&code,5)[0],1.0);
     }
     #[test]
     fn episode_gap_patterns_separate_distinct_imdb_works(){
@@ -274,5 +228,9 @@ mod tests{
         let d=json!({"selected":{"imdb_id":"tt1234567"}});
         let e=json!({"selected":{"imdb_id":"tt7654321"}});
         assert_ne!(pattern(&a,&d).unwrap().1,pattern(&a,&e).unwrap().1);
+    }
+    #[test]
+    fn native_inference_is_finite_and_requires_training(){
+        verify_native_model().unwrap();
     }
 }
