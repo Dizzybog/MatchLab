@@ -18,5 +18,7 @@ jobs:
         run: RUSTFLAGS="-D warnings" cargo check --workspace --all-targets
       - name: Check optional ONNX Rust integration (no runtime required)
         run: RUSTFLAGS="-D warnings" cargo check -p matchlab-server --features ml-ort
-      - name: Build production Docker image
+      - name: Build production Docker image with bundled ONNX model and runtime
         run: docker build -t matchlab:test .
+      - name: Verify bundled ONNX CPU inference without ML enabled
+        run: docker run --rm --entrypoint /usr/local/bin/matchlab-server matchlab:test verify-ml-image
