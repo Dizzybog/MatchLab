@@ -12,6 +12,57 @@ It can parse names such as `Breaking.Bad.S02E03.1080p.WEB-DL`, recognize season 
 - **Easy deployment:** Native Rust server with Docker, an HTTP API, a dashboard, and automatic metadata refresh.
 - **Safe updates:** SQLite stores metadata relationships; Tantivy generations are built and validated before metadata is switched.
 
+## Machine Learning — local learning, better matching for everyone
+
+MatchLab can **learn repeatable patterns from torrent names** without a
+cloud AI service. Local learning is disabled by default: enable it with
+`MATCHLAB_ML_ENABLED=true` and a background Rust worker examines parser
+fields and metadata-backed IMDb/AniDB matches. It can **hot-load safe regex
+exceptions** for overlooked or incorrectly parsed absolute anime episodes,
+but every ID and episode change must still pass the current AniDB/TVDB
+crosswalk. Normal matching works without ML.
+
+The official Linux AMD64/ARM64 Docker image includes the tiny ONNX model
+and CPU runtime. **No extra downloads or model mounts are needed.** Inference
+is single-threaded, outside the API request path. The starting ONNX model is
+a **fixed-weight bootstrap anomaly ranker**, not a calibrated or continuously
+trained neural network; its score alone is not evidence of correctness.
+Repeated matching data, independent crosswalk checks and regression tests
+authorize rules, not an arbitrary AI-written PCRE2 expression.
+
+| Stage | What happens |
+| --- | --- |
+| **Observe** | Identify mismatches in season, episode, year, title, quality and other parser fields |
+| **Learn offline** | Cluster observations in a bounded local SQLite corpus |
+| **Validate** | Verify exact episode crosswalks, diverse examples, restricted linear-time regex and negative tests |
+| **Activate live** | Hot-load verified local episode-marker rules; allow narrow, crosswalk-confirmed exceptions to existing regex |
+| **Preserve** | Keep obsolete learning evidence as cache, but recompute stale completed parse/match answers |
+| **Share optionally** | Upload one deduplicated daily GitHub batch containing high-evidence rules and qualifying anomalies |
+| **Review upstream** | GitHub Actions screens the current Rust parser, runs regression tests and opens at most one human-review PR per day |
+
+**Opt-in configuration:**
+
+~~~yaml
+environment:
+  MATCHLAB_ML_ENABLED: "true"  # local only: no GitHub traffic
+  # MATCHLAB_COMMUNITY_LEARNING_ENABLED: "true"
+  # MATCHLAB_COMMUNITY_GITHUB_TOKEN: ${MATCHLAB_COMMUNITY_GITHUB_TOKEN}
+~~~
+
+Locally activated episode-marker rules require at least **8 separately
+verified examples from two IMDb identities and three episodes**.
+Community PR proposals require **12 examples, four identities and five
+episodes**. Other parser fields currently feed the learning/anomaly model;
+they do not yet create arbitrary regex patterns. PRs **never auto-merge**.
+
+The two switches are independent: ordinary MatchLab requires neither,
+local learning requires only `MATCHLAB_ML_ENABLED`, and sharing requires
+both switches plus a user-owned GitHub token. Opt-in shared examples
+appear in public GitHub Issues; filenames may be sensitive.
+
+**[Read the Community Learning guide](docs/COMMUNITY_LEARNING.md)** for
+contributing, technical limits, security and maintainer setup.
+
 ## Dashboard
 
 <img width="1434" height="4096" alt="1000502509" src="https://github.com/user-attachments/assets/e46326cc-3ce7-40ac-be87-4d14bf3ad952" />
@@ -189,7 +240,7 @@ IMDb basics, alternative titles, episodes, ratings, animeApi, Anime-Lists, and A
 | `MATCHLAB_METADATA_REFRESH_HOURS` | `168` | Refresh every 1–720 hours |
 | `MATCHLAB_MAX_CONCURRENT_MATCHES` | `4` | Limit simultaneous match operations (1–64) |
 | `MATCHLAB_DEBUG_API_TOKEN` | Unset (disabled) | Enable authenticated, read-only parsing diagnostics with a random token of at least 32 bytes |
-| `MATCHLAB_COMMUNITY_LEARNING_ENABLED` | `false` | Explicit opt-in to upload selected suspected anomalies as public GitHub Issues |
+| `MATCHLAB_COMMUNITY_LEARNING_ENABLED` | `false` | Separate opt-in for deduplicated GitHub anomaly and high-evidence regex proposals |
 | `MATCHLAB_COMMUNITY_GITHUB_TOKEN` | Unset | Contributor-owned GitHub token with permission to comment on public upstream Issues; members may use fine-grained PAT, outsiders need classic `public_repo` |
 | `MATCHLAB_ML_ENABLED` | `false` | Opt in to the Rust-only local learning worker (never enables sharing by itself) |
 | `MATCHLAB_ML_MAX_STORAGE_GB` | `1` | Learning/cached-data budget in GiB (1–128), e.g. `10` for a 10 GiB local corpus |
@@ -255,53 +306,19 @@ the configured budget.
 
 ## Contribute to Community Learning
 
-### Opt-in modes (independent of normal matching)
+**Help other installations learn accurate regex patterns.** Community
+sharing is off by default and separate from local ML. Once enabled,
+MatchLab sends at most **one batch comment per 24 hours** to one shared
+GitHub Issue per UTC day; matching itself never requires GitHub.
 
-| Configuration | Local learning | Uploads | Matching |
-| --- | --- | --- | --- |
-| Default: neither flag | Disabled (no ML worker/model) | None | Normal Rust matcher |
-| `MATCHLAB_ML_ENABLED=true` | Enabled, fully local | None, no GitHub token needed | Normal Rust matcher |
-| Both flags + GitHub token | Enabled, fully local | Opt-in daily GitHub batch | Normal Rust matcher |
-| Sharing flag only | Disabled | **None**: local opt-in is required | Normal Rust matcher |
-
-The base Docker build does **not** contain ONNX Runtime. Local learning
-starts with bounded, hashed Rust pattern statistics even without ONNX;
-the optional `ml-ort\` Cargo feature enables CPU-only ONNX scoring when a
-compatible ONNX model and runtime library are configured. No local learning
-runs in the request hot path. Local learning never needs a GitHub API token
-or makes GitHub requests by itself.
-
-**Current GitHub integration status:** confirmed anomalies are transported
-as daily, deduplicated Issue comments and reviewed by a GitHub Action.
-This PR does **not yet create automatic parser-regex patch PRs**, nor does
-it automatically approve/merge code. The intended next step is to create
-a code PR **only after** a learned pattern has independently verified
-labels and passes current-source, negative, performance and regression tests.
-
-
-**Off by default. No extra learning server required.** Community Learning
-uses GitHub Issues and Actions. Opt-in users contribute suspected errors to
-**one shared GitHub Issue per UTC day**, as a **single comment containing
-at most 16 unique reports after a full 24-hour collection window**. Repeated
-anomalies are suppressed across days, other installations and upgrades.
-Issues are public: even release basenames may contain personal information.
-Do not enable this on a sensitive library.
-
-To contribute:
-
-1. Run an official MatchLab Docker image. **Older releases are accepted** if
-   their source commit is an ancestor of current main and the reported
-   problem still needs review; never automatically trust an old prediction.
-2. Create a **personal GitHub token**. Repository members can use a
-   [fine-grained token](https://github.com/settings/personal-access-tokens/new)
-   with **Issues: Write** for Dizzybog/MatchLab. GitHub does not support
-   fine-grained token contributions to public repositories where the user
-   is not a member: external contributors need a
-   [classic token](https://github.com/settings/tokens) with
-   `public_repo`, which is broader, or they may submit issues manually.
-   Never share the token.
-3. Add this to your local Compose environment, storing the token in a
-   **private**, uncommitted `.env` or secret provider:
+1. Run an official MatchLab image. Compatible old mainline releases
+   can contribute unresolved anomalies; GitHub rejects already-fixed bugs.
+2. Create a [GitHub token](https://github.com/settings/tokens). Repository
+   members may use a fine-grained token restricted to **Dizzybog/MatchLab,
+   Issues: write**. For external contributors a classic token with
+   `public_repo` may be needed; it has broader permissions.
+3. Keep the token in a **private, uncommitted** `.env` or secret provider.
+   Configure:
 
    ~~~yaml
    environment:
@@ -310,22 +327,19 @@ To contribute:
      MATCHLAB_COMMUNITY_GITHUB_TOKEN: ${MATCHLAB_COMMUNITY_GITHUB_TOKEN}
    ~~~
 
-4. Redeploy and check `GET /api/community/status`; both `enabled`
-   and `ready` should be true. Disable the flag and restart to opt out.
+4. Redeploy and check `GET /api/community/status`. Both
+   `local_learning_enabled` and `ready` should be true. Revoke the token
+   and disable sharing whenever you wish.
 
-GitHub Actions parses submitted batch comments as untrusted data, validates
-the contributor's source SHA against upstream Git history, replays examples
-with the **current Rust parser**, and discards problems proven fixed.
-Identity/episode mapping problems that require current IMDb/AniDB metadata
-are held for manual verification, not guessed. A GitHub Release asset
-persists dedup fingerprints across daily runs.
+GitHub uses a permanent fingerprint ledger to prevent duplicate proposals
+across installs and days; its trusted daily workflow validates canonical
+regexes and runs current Rust tests. At most one regex PR per day is
+created for **independent human review**, never merged automatically.
 
-Only independently verified, current-build examples can train a small
-**shadow-mode ML model**. The model does **not** affect live matching,
-activate rules or auto-merge PRs. This is a carefully isolated intake and
-learning foundation, not unreviewed self-training.
-
-**Complete contribution and maintainer guide:** [Community Learning](docs/COMMUNITY_LEARNING.md).
+Submitted basenames are public and can still disclose private information,
+even when paths, credentials and URLs are excluded. Local learning never
+uploads anything by itself. Read the
+[full contribution and maintainer guide](docs/COMMUNITY_LEARNING.md).
 
 ## Build and test
 
@@ -346,6 +360,8 @@ MatchLab is an independent project informed by these open-source projects:
 - **[StremThru](https://github.com/MunifTanjim/stremthru)** — metadata ingestion and matching architecture.
 - **[AIOStreams](https://github.com/Viren070/AIOStreams)** and its **[@aiostreams/release-parser](https://github.com/AIOStreams/release-parser)** (MIT) — comprehensive release-name handling, ordered parser handlers, match validators, season/episode safeguards, title cleanup, and file/folder metadata merging.
 - **[TheBeastLT / parse-torrent-title](https://github.com/TheBeastLT/parse-torrent-title)** (MIT) — the Rust release-name parser used by [Torrentio](https://github.com/TheBeastLT/torrentio-scraper); reference for fractional anime-episode flags, Cyrillic episode-marker normalization, East Asian season notation and false-positive regression tests. MatchLab ports selected parsing ideas independently; it does not bundle the upstream crate or copy its runtime implementation.
+- **[ort](https://github.com/pykeio/ort)** (MIT/Apache-2.0) — optional Rust bindings for bundled ONNX inference.
+- **[ONNX Runtime](https://github.com/microsoft/onnxruntime)** (MIT) — CPU runtime included in the official AMD64/ARM64 image.
 - **[Rakun](https://github.com/lowlighter/rakun)** (MIT) — anime fansub naming conventions, `#episode` markers, multilingual labelled episode ranges, bracketed group/CRC metadata, and distinction between seasons, parts, volumes, and episodes.
 
 The anime-specific improvements in this repository are **independently implemented in Rust**, not copied TypeScript code. See the [parser research and regression coverage](docs/ANIME_PARSER_RESEARCH.md) for the techniques studied, changes implemented, and intentionally excluded heuristics.
