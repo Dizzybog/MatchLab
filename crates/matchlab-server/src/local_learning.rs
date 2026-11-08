@@ -92,6 +92,8 @@ fn vector(code:&str,count:i64)->[f32;FEATURES]{
     ]
 }
 fn scan(history:&Path,metadata:&Path,local:&mut Connection,model:&mut OptionalModel)->Result<(),String>{
+    // Restore verified technical rules even without new requests or metadata.
+    crate::field_learning::reconcile(local)?;
     let history_db=Connection::open_with_flags(history,OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e|e.to_string())?;
     history_db.busy_timeout(Duration::from_secs(2)).map_err(|e|e.to_string())?;
@@ -114,7 +116,6 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,model:&mut OptionalMo
     let meta=Connection::open_with_flags(metadata,OpenFlags::SQLITE_OPEN_READ_ONLY).ok();
     if let Some(ref metadata)=meta {
         crate::learned_regex::reconcile(local,metadata)?;
-        crate::field_learning::reconcile(local)?;
     }
     let now=chrono::Utc::now().timestamp();
     let mut samples=count(local,"samples")?;
@@ -161,8 +162,8 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,model:&mut OptionalMo
     }
     if let Some(ref metadata)=meta {
         crate::learned_regex::reconcile(local,metadata)?;
-        crate::field_learning::reconcile(local)?;
     }
+    crate::field_learning::reconcile(local)?;
     put(local,"after_id",&after.to_string())
 }
 #[cfg(feature="ml-ort")]
