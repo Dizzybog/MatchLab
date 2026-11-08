@@ -1710,7 +1710,7 @@ static SPANISH_CAP_COORDS_RE: Lazy<Regex> = Lazy::new(|| {
         .expect("valid Spanish CAP season/episode marker")
 });
 
-fn patch_missing_coordinates(raw: &str, result: &mut Map<String, Value>) -> Result<(), ParseError> {
+fn patch_missing_coordinates(raw: &str, translate_languages: bool, result: &mut Map<String, Value>) -> Result<(), ParseError> {
     // A word-based season number is different from an anime *episode* named
     // "Final Season - 05". Only accept the spaced-dash spelling when "Season"
     // is itself a separate release marker ("Show - Season - 04").
@@ -1802,8 +1802,9 @@ fn patch_missing_coordinates(raw: &str, result: &mut Map<String, Value>) -> Resu
     // Spanish CAP.NNN packs a one-digit season and two-digit episode.
     // A stronger SxxExx/1x03/EP03 coordinate always wins, and "capítulo"
     // is deliberately excluded because it can mean an absolute episode.
-    if let Some(caps) = SPANISH_CAP_COORDS_RE
-        .captures(raw).map_err(|e| ParseError::Regex(e.to_string()))?
+    if contains_ascii_fold(raw, "cap")
+        && let Some(caps) = SPANISH_CAP_COORDS_RE
+            .captures(raw).map_err(|e| ParseError::Regex(e.to_string()))?
         && !EXPLICIT_EPISODE_RE.is_match(raw)
             .map_err(|e| ParseError::Regex(e.to_string()))?
         && !X_COORDS_RE.is_match(raw)
@@ -1818,7 +1819,7 @@ fn patch_missing_coordinates(raw: &str, result: &mut Map<String, Value>) -> Resu
             result.insert("seasons".into(), json!([season]));
             result.insert("episodes".into(), json!([episode]));
             if let Some(marker) = caps.get(0) {
-                set_title_from_release_prefix(raw, marker.start(), false, result)?;
+                set_title_from_release_prefix(raw, marker.start(), translate_languages, result)?;
             }
         }
     }
@@ -2482,7 +2483,7 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
         result.insert("episode_count".into(),json!(end-start+1));
         result.insert("episode_range_numbering".into(),json!("absolute"));
     }
-    patch_missing_coordinates(raw,&mut result)?;
+    patch_missing_coordinates(raw,translate_languages,&mut result)?;
     patch_anime_final_episode(raw,translate_languages,&mut result)?;
     patch_multilingual_coordinates(raw,translate_languages,&mut result)?;
     if let Some((season,start,end))=explicit_season_episode_range(raw)?{
