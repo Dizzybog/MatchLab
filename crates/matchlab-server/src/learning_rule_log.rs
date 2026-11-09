@@ -2,7 +2,24 @@
 //! offline archive. No torrent filenames, training samples, or IMDb IDs logged.
 //! This runs only in the learning worker, never on the matching hot path.
 use rusqlite::Connection;
+use serde_json::{json,Value};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool,AtomicU64,Ordering};
+
+static ACTIVE_REGEX:AtomicU64=AtomicU64::new(0);
+static ARCHIVED_REGEX:AtomicU64=AtomicU64::new(0);
+static INVENTORY_READY:AtomicBool=AtomicBool::new(false);
+
+/// Lock-free, privacy-safe dashboard snapshot. The learner updates these
+/// counters after a successful DB scan; HTTP requests never open SQLite.
+pub fn status()->Value{
+    json!({
+        "ready":INVENTORY_READY.load(Ordering::Acquire),
+        "active":ACTIVE_REGEX.load(Ordering::Relaxed),
+        "archived":ARCHIVED_REGEX.load(Ordering::Relaxed),
+        "scope":"active_compiled_custom_regex_and_unique_historical_archive"
+    })
+}
 
 #[derive(Default)]
 pub struct Observer {
@@ -59,6 +76,9 @@ pub fn after_cycle(db:&Connection,observer:&mut Observer)->Result<(),String>{
             startup=first,
             "custom ML regex inventory");
     }
+    ACTIVE_REGEX.store(actual.len() as u64,Ordering::Relaxed);
+    ARCHIVED_REGEX.store(archived.max(0) as u64,Ordering::Relaxed);
+    INVENTORY_READY.store(true,Ordering::Release);
     observer.previous=Some(actual);
     observer.last_archive=archived;
     Ok(())
@@ -77,5 +97,9 @@ mod tests{
         after_cycle(&db,&mut observer).unwrap();
         assert_eq!(observer.last_archive,0);
         assert!(observer.previous.is_some());
+        let counts=status();
+        assert_eq!(counts["ready"],true);
+        assert_eq!(counts["active"],0);
+        assert_eq!(counts["archived"],0);
     }
 }
