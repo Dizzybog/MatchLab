@@ -2897,6 +2897,94 @@ mod tests {
     }
 
     #[test]
+    fn explicit_ep01_24_release_uses_verified_imdb_first_season_range(){
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-born-with-luck-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
+            region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES('tt32592348','Born with Luck','bornwithluck',2026,
+                'series','',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt32592348',1);
+            INSERT INTO season_episodes VALUES('tt32592348',1,24,24);").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        let title="Born.with.Luck.2026.EP01-24.HD1080P.X264.AAC.Mandarin.CHS.XLYS";
+        let result=diagnose(&path,&MatchRequest{
+            title:title.into(),year:None,series:None}).unwrap();
+        assert_eq!(result.parsed["episode_start"],1,"{:?}",result.parsed);
+        assert_eq!(result.parsed["episode_end"],24,"{:?}",result.parsed);
+        assert_eq!(result.parsed["episode_range_numbering"],"absolute");
+        let winner=result.selected.expect("IMDb series identity must match");
+        assert_eq!(winner["imdb_id"],"tt32592348");
+        assert_eq!(winner["episode_range"]["source"],
+            "verified_imdb_single_season_episode_range");
+        assert_eq!(winner["season"],1);
+        assert_eq!(winner["episode"],1);
+        assert_eq!(winner["season_end"],1);
+        assert_eq!(winner["episode_end"],24);
+        assert_eq!(public_match_response(Some(winner)),json!({
+            "sid_start":"tt32592348:1:1","sid_end":"tt32592348:1:24",
+            "asid_start":null,"asid_end":null
+        }));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
+    fn imdb_episode_fallback_requires_single_season_episode_bounds_and_no_anime_link(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE seasons(imdb_id TEXT PRIMARY KEY,
+                max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO seasons VALUES('tt32592348',1);
+            INSERT INTO season_episodes VALUES('tt32592348',1,24,24);").unwrap();
+        let fallback=|title:&str,start:i64,end:i64|{
+            verified_ordinary_imdb_episode_range(
+                &db,"tt32592348","bornwithluck",title,start,end).unwrap()
+        };
+        assert_eq!(fallback("Born with Luck",1,24).unwrap()["complete"],true);
+        assert!(fallback("Other Show",1,24).is_none());
+        assert!(fallback("Born with Luck",1,25).is_none());
+        assert!(fallback("Born with Luck",0,24).is_none());
+        assert!(fallback("Born with Luck",24,1).is_none());
+        db.execute("UPDATE seasons SET max_season=2",[]).unwrap();
+        assert!(fallback("Born with Luck",1,24).is_none(),
+            "multiple-season absolute numbering must remain unresolved");
+        db.execute("UPDATE seasons SET max_season=1",[]).unwrap();
+        db.execute("INSERT INTO anime_series_map VALUES(
+            'tt32592348','321','654',0)",[]).unwrap();
+        assert!(fallback("Born with Luck",1,24).is_none(),
+            "known anime crosswalk takes precedence even when incomplete");
+        db.execute("DELETE FROM anime_series_map",[]).unwrap();
+        db.execute("INSERT INTO anime_ids VALUES(
+            'tt32592348','anidb','321')",[]).unwrap();
+        assert!(fallback("Born with Luck",1,24).is_none());
+        db.execute("DELETE FROM anime_ids",[]).unwrap();
+        db.execute("DELETE FROM season_episodes",[]).unwrap();
+        assert!(fallback("Born with Luck",1,24).is_none(),
+            "unknown IMDb episode bounds cannot authorize fallback");
+    }
+
+    #[test]
     fn anime_batches_verify_unmarked_ranges_and_keep_incomplete_endpoints_null(){
         let suffix=std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
