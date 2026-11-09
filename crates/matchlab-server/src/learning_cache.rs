@@ -6,7 +6,8 @@
 //! a new verified local regex overlay or a metadata snapshot change gives
 //! a different namespace. Stale entries are RETAINED as low-priority cache
 //! evidence and evicted first only when the configured quota is exceeded.
-use rusqlite::{params,Connection,OpenFlags,OptionalExtension};
+use rusqlite::{params,Connection};
+#[cfg(test)] use rusqlite::OptionalExtension;
 use serde_json::{json,Value};
 use std::collections::{HashMap,VecDeque};
 use std::sync::{OnceLock,RwLock,mpsc::{sync_channel,SyncSender,TrySendError,RecvTimeoutError},atomic::{AtomicBool,AtomicU64,Ordering}};
@@ -26,8 +27,7 @@ static CACHE_HITS:AtomicU64=AtomicU64::new(0);
 static CACHE_MISSES:AtomicU64=AtomicU64::new(0);
 // Updated by background maintenance, never by individual request writes.
 static CACHE_WRITES_ALLOWED:AtomicBool=AtomicBool::new(true);
-const BUSY_MS:u64=12;
-// Cache is acceleration only: never compete with the local learner for
+ // Cache is acceleration only: never compete with the local learner for
 // SQLite write locks on each public request.
 const CACHE_QUEUE_SIZE:usize=4096;
 const CACHE_BATCH_SIZE:usize=32;
@@ -104,6 +104,15 @@ fn hot_cache()->&'static RwLock<HotStore>{
 fn hot_insert(key:String,namespace:String,value:Value,expires_at:i64,bytes:usize){
     if let Ok(mut cache)=hot_cache().try_write(){
         cache.insert(key,namespace,value,expires_at,bytes);
+    }
+}
+/// Startup warmup must never overwrite a newer result already submitted by
+/// an API request while the cache actor was still opening SQLite.
+fn hot_restore(key:String,namespace:String,value:Value,expires_at:i64,bytes:usize){
+    if let Ok(mut cache)=hot_cache().try_write(){
+        if !cache.rows.contains_key(&key){
+            cache.insert(key,namespace,value,expires_at,bytes);
+        }
     }
 }
 fn hot_lookup(key:&str,ns:&str,time:i64)->Option<Value>{
@@ -242,8 +251,9 @@ fn hydrate_hot_cache(db:&Connection)->rusqlite::Result<()>{
     let mut stmt=db.prepare(
         "SELECT cache_key,namespace,payload,expires_at,bytes
          FROM learning_cache WHERE obsolete=0 AND expires_at>?1
-         ORDER BY created_at DESC LIMIT 512")?;
-    let rows=stmt.query_map([time],|row|Ok((
+           AND bytes<=?2
+         ORDER BY created_at DESC LIMIT 256")?;
+    let rows=stmt.query_map(params![time,HOT_MAX_ENTRY_BYTES as i64],|row|Ok((
         row.get::<_,String>(0)?,row.get::<_,String>(1)?,
         row.get::<_,Vec<u8>>(2)?,row.get::<_,i64>(3)?,
         row.get::<_,i64>(4)?
@@ -252,7 +262,7 @@ fn hydrate_hot_cache(db:&Connection)->rusqlite::Result<()>{
         let (key,ns,raw,expires,bytes)=row?;
         if bytes<0 || bytes as usize>HOT_MAX_ENTRY_BYTES{continue;}
         if let Ok(value)=serde_json::from_slice::<Value>(&raw){
-            hot_insert(key,ns,value,expires,raw.len());
+            hot_restore(key,ns,value,expires,raw.len());
         }
     }
     Ok(())
@@ -506,6 +516,17 @@ fn maintain_with_budget(db:&Connection,metadata:&Path,budget:u64)->Result<(),Str
     }
     Ok(())
 }
+/// Disk-only regression helper; production never calls this from requests.
+#[cfg(test)]
+fn read_current(db:&Connection,cache_key:&str,ns:&str,time:i64)->Option<Value>{
+    let raw:Option<Vec<u8>>=db.query_row(
+        "SELECT payload FROM learning_cache
+         WHERE cache_key=?1 AND namespace=?2 AND obsolete=0
+           AND expires_at>?3",
+        params![cache_key,ns,time],|r|r.get(0)
+    ).optional().ok()?;
+    serde_json::from_slice(raw?.as_slice()).ok()
+}
 #[cfg(test)]
 mod tests{
     use super::*;
@@ -521,6 +542,32 @@ mod tests{
         assert!(read_current(&db,"key","old",2).is_none());
     }
 
+    #[test]
+    fn hot_cache_ignores_old_versions_and_stays_bounded(){
+        let mut cache=HotStore::default();
+        let expires=now()+300;
+        cache.insert("episode".into(),"v1".into(),json!({"episodes":[1]}),
+            expires,40);
+        assert_eq!(cache.rows["episode"].namespace,"v1");
+        for index in 0..(HOT_MAX_ENTRIES+100){
+            cache.insert(format!("key-{index}"),"v2".into(),json!(index),
+                expires,40);
+        }
+        assert!(cache.rows.len()<=HOT_MAX_ENTRIES);
+        assert!(cache.occupied<=HOT_MAX_BYTES);
+        assert!(!cache.rows.contains_key("episode"));
+        assert!(cache.fifo.len()<=HOT_MAX_ENTRIES*2);
+    }
+    #[test]
+    fn hot_cache_rewrites_keep_fifo_memory_bounded(){
+        let mut cache=HotStore::default();
+        for i in 0..(HOT_MAX_ENTRIES*5){
+            cache.insert("same".into(),"stable".into(),json!(i),
+                now()+60,40);
+        }
+        assert_eq!(cache.rows.len(),1);
+        assert!(cache.fifo.len()<=HOT_MAX_ENTRIES*2);
+    }
     #[test]
     fn configurable_corpus_size_and_cache_limits_reject_invalid_values(){
         assert_eq!(bounded_count(Some("250000"),12_000,100,2_000_000),250_000);
