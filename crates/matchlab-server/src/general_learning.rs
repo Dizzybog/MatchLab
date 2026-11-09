@@ -23,6 +23,7 @@ fn capacity()->i64{
 const MAX_CANDIDATES:usize=4;
 const REVALIDATE_BATCH:i64=128;
 const MAX_TESTS:usize=128;
+const REGRESSION_TITLES:&str=include_str!("../tests/release_titles.txt");
 const NEGATIVES:&[&str]=&[
     "The.Danish.Girl.2015.1080p",
     "The.German.Connection.2005.1080p",
@@ -75,6 +76,13 @@ fn safe(name:&str)->bool{
         &&!name.contains(['/','\\','@','\r','\n','\0'])
         &&!["token=","password=","secret=","apikey=","magnet:","http:"]
             .iter().any(|s|name.to_ascii_lowercase().contains(s))
+}
+fn regression_titles()->Vec<String>{
+    NEGATIVES.iter().copied()
+        .chain(REGRESSION_TITLES.lines()
+            .map(str::trim)
+            .filter(|s|!s.is_empty()&&!s.starts_with('#')))
+        .map(str::to_owned).collect()
 }
 fn present(value:&Value)->bool{
     match value{
@@ -453,7 +461,8 @@ fn replay(db:&Connection,previous:&[Active],all:&[Active],
     }
     // Each example is replayed as original + variant; bound the TOTAL
     // titles, not merely the number of evidence rows.
-    if examples.len().saturating_mul(2)+NEGATIVES.len()+16>MAX_TESTS{
+    if examples.len().saturating_mul(2)
+        +regression_titles().len()+16>MAX_TESTS{
         return Ok(None);
     }
     let mut titles=Vec::new();
@@ -461,7 +470,7 @@ fn replay(db:&Connection,previous:&[Active],all:&[Active],
         titles.push(example.source_release.clone());
         titles.push(example.variant_release.clone());
     }
-    titles.extend(NEGATIVES.iter().map(|x|(*x).into()));
+    titles.extend(regression_titles());
     // Additional natural positives from unrelated field families must be
     // preserved. This detects cross-field overextracts a narrow candidate
     // corpus could otherwise miss.
@@ -546,7 +555,7 @@ fn active_safe(db:&Connection,rules:&[Active])->Result<bool,String>{
     }
     let titles=examples.iter()
         .flat_map(|e|[e.source_release.clone(),e.variant_release.clone()])
-        .chain(NEGATIVES.iter().map(|s|(*s).to_owned()))
+        .chain(regression_titles())
         .collect::<Vec<_>>();
     if titles.len()>MAX_TESTS{return Ok(false);}
     let (patches,mut additions)=crate::field_learning::source_rules_without_general(
@@ -648,10 +657,17 @@ pub fn reconcile(db:&Connection)->Result<(),String>{
     let (patches,mut additions)=crate::field_learning::source_rules_without_general(
         crate::tv_learning::handler_additions())?;
     additions.extend(adds);
+    // Fail closed: compile and validate the complete proposed generation
+    // BEFORE persisting any candidate. A SQLite failure must not publish
+    // unrecorded rules to a live parser.
+    matchlab_parser::replay_handler_rules(
+        &patches,&additions,&corrections,&[])
+        .map_err(|e|format!("general candidate preflight rejected: {e}"))?;
+    persist(db,&ready)?;
+    // Live parser publication is a single immutable generation swap.
     matchlab_parser::install_learned_handler_regex_with_corrections(
         &patches,&additions,&corrections)
         .map_err(|e|format!("general learned parser regex rejected: {e}"))?;
-    persist(db,&ready)?;
     let fp=ready.iter().map(|r|r.key.as_str()).collect::<Vec<_>>().join("|");
     let digest=Sha256::digest(fp.as_bytes());
     let mut bytes=[0u8;8];bytes.copy_from_slice(&digest[..8]);
@@ -784,6 +800,13 @@ mod tests{
             "Personal Server").unwrap()));
         assert!(!shareable_pattern("group",&family_pattern(
             "Private Group").unwrap()));
+    }
+    #[test]
+    fn regression_replay_includes_real_release_smoke_corpus(){
+        let titles=regression_titles();
+        assert!(titles.len()>NEGATIVES.len());
+        assert!(titles.iter().any(|s|s.contains("Bleach")));
+        assert!(titles.iter().any(|s|s.contains("Dune.2021")));
     }
     #[test]
     fn community_never_exports_raw_title_or_release_group_regexes(){
