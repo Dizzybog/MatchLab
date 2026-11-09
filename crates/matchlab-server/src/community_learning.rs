@@ -472,7 +472,7 @@ fn build_batch(db:&Connection,time:u64)->Result<Option<(String,Value,Vec<String>
         let item:Value=serde_json::from_str(&raw).map_err(|e|e.to_string())?;
         let is_rule=matches!(item["kind"].as_str(),
             Some("verified_regex_proposal"|"learned_field_regex"
-            |"learned_tv_regex"|"learned_source_regex_patch"
+            |"learned_tv_regex"|"learned_source_regex_patch"|"learned_corrective_regex"
             |"learned_field_regex_review"|"historical_regex_review"));
         if is_rule&&rules.len()>=MAX_RULES_PER_BATCH{continue;}
         if fingerprints.len()>=MAX_BATCH{break;}
