@@ -66,6 +66,51 @@ These counts are conservative **engineering thresholds**, not statistically cali
 
 For source handlers, MatchLab knows the existing regex catalogue. The learner may submit the **original regex and proposed replacement regex**, with handler identity and supporting evidence. Live changes are limited to safe, verified families; riskier suggestions go to the GitHub review queue.
 
+## Four-error corrective regex learning (experimental)
+
+The audit distinguishes **missing**, **overextracted**, **underextracted** and
+**misassigned/incorrect** parser fields. All fields remain visible to the
+advisory FTRL model. Missing technical markers continue through the ADD
+learner. A separate corrective learner now records independently readable,
+single-release **TV season/episode** evidence:
+
+- **REDUCE / CORRECT:** A release with an unambiguous SxxEyy, NxM, or
+  "Season N Episode M" marker can identify excessive episode values,
+  swapped fields, or incorrect nonempty coordinates. The learner can
+  propose *high-priority native-handler regexes* for both coordinates;
+  unlike ordinary appended rules they may prevent incorrect earlier
+  handlers from winning.
+- **EXPAND:** A bounded, explicitly marked SxxEyy-Ezz interval is checked
+  against the entire extracted episode array. A native \`range_func\`
+  handler can be proposed ahead of existing handlers when the original
+  parser extracted only part of the interval.
+- **ADD:** Missing technical markers and missing single TV coordinates
+  remain handled by existing additive evidence gates.
+
+Corrective rules **do not directly set parsed field values**. They reuse
+the original Rust parser's existing field, transform and option semantics.
+The proposed regex must pass at least eight examples from four distinct
+title identities, including four errors across two identities and two
+canonical confirmations. The worker compiles the candidate privately,
+replays up to 100 locally stored releases plus negative controls and rejects
+it if previously correct values, title boundaries, or unrelated fields
+regress. Failed proposals are kept for review; no live engine changes.
+
+The local corrective corpus stores raw release names in the **local ML
+database only** because replay requires original input. The corpus is
+bounded to 1,024 examples; neither status responses nor GitHub community
+proposals include raw titles. Community proposals contain only allowlisted
+regex text, source handler index, observation counts and failure classes.
+
+**Safety boundary:** Only the independently verifiable TV grammars above
+have live corrective validators at present. Suspicious title boundaries,
+technical mismatches, ambiguous packs and other fields are observed but
+remain review-only until they gain independent validators. The existing
+technical source-handler broadening still preserves its old regex branch;
+that behavior alone does not fix false-positive extraction. A model score
+is never sufficient to enable a correction, and neither parser/matcher IDs
+nor season/episode numbers are written directly by ML.
+
 ## Enable local learning
 
 Add these options to your Compose service's environment:
