@@ -144,10 +144,10 @@ struct ParserEngine {
 }
 
 fn learned_tv_ambiguous(title:&str)->bool{
-    static RANGES:Lazy<Regex>=Lazy::new(|| Regex::new(
+    static RANGES:Lazy<regex::Regex>=Lazy::new(|| regex::Regex::new(
         r"(?i)(?:s[0-9]{1,3}[ ._-]*e[0-9]{1,5}|[0-9]{1,3}x[0-9]{1,5}|season[ ._-]+[0-9]{1,3}[ ._-]+episode[ ._-]+[0-9]{1,5})[ ._-]*(?:-|to|through)[ ._-]*(?:e(?:p(?:isode)?)?[ ._-]*)?[0-9]{1,5}(?:$|[ ._-])"
     ).expect("bounded learned TV pack guard"));
-    static MARKERS:Lazy<Regex>=Lazy::new(|| Regex::new(
+    static MARKERS:Lazy<regex::Regex>=Lazy::new(|| regex::Regex::new(
         r"(?i)(?:^|[ ._-])(?:s[0-9]{1,3}[ ._-]*e[0-9]{1,5}|[0-9]{1,3}x[0-9]{1,5}|season[ ._-]+[0-9]{1,3}[ ._-]+episode[ ._-]+[0-9]{1,5})(?:$|[ ._-])"
     ).expect("bounded learned TV multiple-marker guard"));
     if title.len()>240 || RANGES.is_match(title) {return true;}
