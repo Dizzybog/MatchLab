@@ -163,9 +163,12 @@ jobs:
         run: |
           set -euo pipefail
           branch="bot/community-regex-$(date -u +%Y%m%d)"
+          # A prior review PR may still be pending human approval. Do not
+          # create a second PR for the same unmerged fingerprint on a later day.
+          # The durable backlog keeps other candidates until review completes.
           if gh pr list --repo "$GH_REPO" --state open \
-            --json headRefName --jq '.[] | .headRefName' | grep -Fxq "$branch"; then
-            echo "A daily community rule review PR already exists"
+            --json headRefName --jq '.[] | .headRefName' | grep -q '^bot/community-regex-'; then
+            echo "A community rule review PR is already awaiting human review"
             exit 0
           fi
           git config user.name "github-actions[bot]"
