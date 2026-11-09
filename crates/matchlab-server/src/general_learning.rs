@@ -667,6 +667,9 @@ pub fn reconcile(db:&Connection)->Result<(),String>{
     matchlab_parser::replay_handler_rules(
         &patches,&additions,&corrections,&[])
         .map_err(|e|format!("general candidate preflight rejected: {e}"))?;
+    matchlab_parser::verify_live_regression_corpus(
+        &patches,&additions,&corrections)
+        .map_err(|e|format!("general candidate regression rejected: {e}"))?;
     persist(db,&ready)?;
     // Live parser publication is a single immutable generation swap.
     matchlab_parser::install_learned_handler_regex_with_corrections(
