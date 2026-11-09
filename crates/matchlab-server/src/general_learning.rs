@@ -200,6 +200,13 @@ fn classify(old:&Value,expected:&Value)->Option<&'static str>{
 fn derive(name:&str,ctx:&ParseContext)->Vec<Evidence>{
     if !safe(name){return Vec::new();}
     let Some(identity)=identity(ctx)else{return Vec::new();};
+    // Replayed candidates call the PUBLIC parse_title() path-merging
+    // wrapper. Context parsing intentionally retains internal empty arrays
+    // (e.g. languages=[]), while the public wrapper can omit them.
+    // The comparison reference must therefore use the same output shape.
+    let Ok(expected_public)=matchlab_parser::parse_title_canonical(name,false)
+        else{return Vec::new();};
+    let expected_public=Value::Object(expected_public);
     let mut matches=ctx.matched.iter().filter_map(|(field,match_info)|{
         let index=match_info.source_index?;
         let template=source(index)?;
@@ -242,7 +249,7 @@ fn derive(name:&str,ctx:&ParseContext)->Vec<Evidence>{
                 key,field:field.clone(),source_index:index,pattern:pattern.clone(),
                 mode:mode.into(),identity:identity.clone(),
                 source_release:name.into(),variant_release:mutant,
-                expected:Value::Object(ctx.result.clone())
+                expected:expected_public.clone()
             });
             break;
         }
@@ -764,23 +771,7 @@ mod tests{
             .find(|r|r.field=="edition"&&r.mode=="add")
             .expect("an independently confirmed native edition candidate");
         let measured=replay(&db,&[],&[candidate.clone()],&candidate.key)
-            .unwrap().unwrap_or_else(||{
-                let e=read_examples(&db,&candidate.key,8).unwrap();
-                let (p,a)=crate::field_learning::source_rules_without_general(
-                    crate::tv_learning::handler_additions()).unwrap();
-                let (adds,corr)=rule_parts(&[candidate.clone()]);
-                let mut merged=a.clone();merged.extend(adds);
-                for v in e.iter().take(2){
-                    let titles=[v.source_release.clone(),v.variant_release.clone()];
-                    let before=matchlab_parser::replay_handler_rules(
-                        &p,&a,&[],&titles).unwrap();
-                    let after=matchlab_parser::replay_handler_rules(
-                        &p,&merged,&corr,&titles).unwrap();
-                    eprintln!("{} example={} before={:?} after={:?} expected={}",
-                        candidate.field,v.variant_release,before,after,v.expected);
-                }
-                panic!("candidate failed full replay; inspect diagnostic");
-            });
+            .unwrap().expect("must repair full parser result");
         assert!(measured.1>=MIN_FIXES);
         assert!(measured.0>=MIN_FIXES);
     }
