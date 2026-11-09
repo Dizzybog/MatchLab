@@ -52,6 +52,13 @@ Example response (assuming the selected IMDb identity is `tt0460681`):
 - **Anime:** ASID fields contain `anidb_id:episode` when verified mappings exist. An interval may cross AniDB IDs; the start and end can therefore have different prefixes.
 - **No reliable match:** all four fields are `null`. Missing individual mappings are `null`; no synthetic IDs are returned.
 
+**Series coordinate preservation:** MatchLab keeps explicit `SxxEyy` coordinates attached to the selected IMDb series even when an optional AniDB crosswalk is unavailable. For a single explicitly parsed episode without a season, it defaults to **season 1** unless imported first-season bounds disprove that episode (or an unresolved large anime absolute number makes this unsafe). Verified AniDB/TVDB remapping always wins.
+
+If the title has a season but no episode and the imported `season_episodes` table cannot establish the season's final episode, MatchLab retains the season internally (`POST /debug/match/strict` → `selected.season`) and **does not invent an episode**. The legacy four-field `/match` SID contract cannot serialize a season without an episode: it returns the bare IMDb title ID. Clients such as StremThru can retain the known season from `/parse`. With neither coordinate, the same bare IMDb ID is returned; an independently verified AniDB identity can still return ASIDs with null SIDs if IMDb is unavailable.
+
+For a season-labelled episode range, if the AniDB crosswalk is incomplete but imported IMDb season bounds independently confirm the entire range, MatchLab publishes both IMDb SID endpoints and leaves both ASIDs null. If the IMDb episode table also lacks the bounds, the season is retained in strict diagnostics and the public SID stays a bare title ID. No episode-zero placeholder is ever emitted.
+
+
 For a URL query, use `GET /match?title=Supernatural.S01E01`. Both
 endpoints accept `title` or `t_title` as the request input. A supplied
 `year` can constrain matching.
