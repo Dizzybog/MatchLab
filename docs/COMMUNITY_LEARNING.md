@@ -117,7 +117,7 @@ The trusted GitHub Action:
 
 **No community submission automatically replaces MatchLab source code, activates an unverified regex on another server, or merges its own PR.**
 
-Some reports can contain sanitized filename samples. Removing paths, credentials and URLs does not guarantee a filename is non-sensitive. Read each opt-in's privacy implications before enabling it.
+Some reports can contain sanitized filename samples. **Unverified regex discovery proposals may also include the literal unknown release-marker token and its candidate regex** for human review. These tokens are never included in the local status endpoint. Removing paths, credentials and URLs does not guarantee a filename or marker is non-sensitive. Only enable optional GitHub sharing if you consent to publishing this information.
 
 ### Maintainer setup
 
