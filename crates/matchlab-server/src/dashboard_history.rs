@@ -11,6 +11,7 @@ use std::{
 
 const MAX_HISTORY: i64 = 1_000;
 const PRUNE_BATCH: i64 = 1_000;
+const HISTORY_BATCH_SIZE:usize = 64;
 
 fn connect(path: &Path) -> rusqlite::Result<Connection> {
     if let Some(parent) = path.parent() {
@@ -95,16 +96,10 @@ pub fn initialize(path: &Path) -> Result<(), String> {
                 duration_sum_ms=duration_sum_ms+NEW.duration_ms;
         END;
 
-        -- Keep the physical table bounded as new requests arrive. The
-        -- subquery uses the descending primary-key order and evicts only
-        -- one row; legacy bulk cleanup is handled by the background worker.
-        CREATE TRIGGER IF NOT EXISTS request_history_cap
-        AFTER INSERT ON requests
-        BEGIN
-            DELETE FROM requests WHERE id = (
-                SELECT id FROM requests ORDER BY id DESC LIMIT 1 OFFSET 1000
-            );
-        END;
+        -- Older versions executed a 1,000-row offset lookup and DELETE on
+        -- EVERY insert. The single background writer now trims once per
+        -- transaction of at most 64 requests, keeping writes bounded.
+        DROP TRIGGER IF EXISTS request_history_cap;
 
         -- The history view uses recent IDs; status filtering only scans 1,000.
         DROP INDEX IF EXISTS requests_status;
@@ -113,30 +108,48 @@ pub fn initialize(path: &Path) -> Result<(), String> {
     "#).map_err(|e| e.to_string())
 }
 
-/// Record details and increment minute aggregates atomically through triggers.
-/// A single oldest detail row is evicted once the 1,000-row cap is exceeded;
-/// large legacy purges and aggregate expiry remain background-only.
-pub fn record(
-    path: &Path, title: &str, status: &str,
-    selected: Option<&Value>, details: &Value, duration_ms: u64,
-) {
-    let result = (|| -> rusqlite::Result<()> {
-        let db = connect(path)?;
-        db.execute(
+/// Persist one bounded history batch in a single SQLite transaction. The
+/// minute-level statistics trigger runs for every row; raw-detail retention
+/// runs just once per batch instead of scanning the last 1,000 IDs per row.
+fn persist_batch(db:&mut Connection,items:&[HistoryEvent])->rusqlite::Result<()>{
+    if items.is_empty(){return Ok(());}
+    let tx=db.transaction()?;
+    {
+        let mut insert=tx.prepare_cached(
             "INSERT INTO requests(title,status,imdb_id,match_source,duration_ms,details)
-             VALUES(?1,?2,?3,?4,?5,?6)",
-            params![
-                title, status,
-                selected.and_then(|v| v["imdb_id"].as_str()),
-                selected.and_then(|v| v["match_source"].as_str()),
-                i64::try_from(duration_ms).unwrap_or(i64::MAX),
-                details.to_string()
-            ],
+             VALUES(?1,?2,?3,?4,?5,?6)"
         )?;
-        Ok(())
-    })();
-    if let Err(error) = result {
-        tracing::warn!(%error, "could not persist matching history and statistics");
+        for item in items{
+            insert.execute(params![
+                item.title,item.status,
+                item.selected.as_ref().and_then(|v|v["imdb_id"].as_str()),
+                item.selected.as_ref().and_then(|v|v["match_source"].as_str()),
+                i64::try_from(item.duration_ms).unwrap_or(i64::MAX),
+                item.details.to_string()
+            ])?;
+        }
+    }
+    // Exact cap even when rows have gaps. The transaction commits both the
+    // request aggregates and retention trim, so readers see consistent data.
+    tx.execute("DELETE FROM requests WHERE id < (
+        SELECT id FROM requests ORDER BY id DESC LIMIT 1 OFFSET ?1
+    )",[MAX_HISTORY-1])?;
+    tx.commit()
+}
+
+/// Synchronous single-event writer, also used in tests and fallback paths.
+/// Production requests use the independently bounded asynchronous queue.
+pub fn record(
+    path:&Path,title:&str,status:&str,
+    selected:Option<&Value>,details:&Value,duration_ms:u64,
+){
+    let item=HistoryEvent{
+        path:path.to_path_buf(),title:title.to_owned(),status:status.to_owned(),
+        selected:selected.cloned(),details:details.clone(),duration_ms
+    };
+    let result=connect(path).and_then(|mut db|persist_batch(&mut db,&[item]));
+    if let Err(error)=result{
+        tracing::warn!(%error,"could not persist matching history and statistics");
     }
 }
 
@@ -151,7 +164,9 @@ struct HistoryEvent {
     details:Value,
     duration_ms:u64,
 }
-const HISTORY_QUEUE_SIZE:usize=128;
+// A burst buffer, not a substitute for durable metrics. The single writer
+// drains up to 64 entries per SQLite transaction and never blocks matching.
+const HISTORY_QUEUE_SIZE:usize=4096;
 static HISTORY_QUEUE:OnceLock<Option<SyncSender<HistoryEvent>>>=OnceLock::new();
 static HISTORY_DROPPED:AtomicUsize=AtomicUsize::new(0);
 
@@ -167,9 +182,38 @@ pub fn record_async(
         let (tx,rx)=sync_channel::<HistoryEvent>(HISTORY_QUEUE_SIZE);
         let spawned=std::thread::Builder::new()
             .name("matchlab-history".into()).spawn(move||{
-                while let Ok(item)=rx.recv(){
-                    record(&item.path,&item.title,&item.status,
-                        item.selected.as_ref(),&item.details,item.duration_ms);
+                // Keep SQLite connection and prepared statements hot across
+                // batches. Reopening it for every request exhausted the
+                // bounded queue and lost telemetry under sustained load.
+                let mut connection:Option<(PathBuf,Connection)>=None;
+                while let Ok(first)=rx.recv(){
+                    let mut batch=vec![first];
+                    while batch.len()<HISTORY_BATCH_SIZE {
+                        match rx.try_recv() {
+                            Ok(next) if next.path==batch[0].path =>batch.push(next),
+                            Ok(next)=>{
+                                // Tests and embedded callers may use a second
+                                // DB path; do not mix paths in one transaction.
+                                record(&next.path,&next.title,&next.status,
+                                    next.selected.as_ref(),&next.details,next.duration_ms);
+                            },
+                            Err(_)=>break,
+                        }
+                    }
+                    let path=batch[0].path.clone();
+                    if connection.as_ref().is_none_or(|(p,_)|*p!=path){
+                        connection=connect(&path).ok().map(|db|(path.clone(),db));
+                    }
+                    if let Some((_,db))=connection.as_mut(){
+                        if let Err(error)=persist_batch(db,&batch){
+                            tracing::warn!(%error,events=batch.len(),
+                                "history writer batch failed; telemetry skipped");
+                            connection=None; // discard failed connection/transaction
+                        }
+                    }else{
+                        tracing::warn!(events=batch.len(),
+                            "history database unavailable; telemetry skipped");
+                    }
                 }
             });
         if let Err(error)=spawned{
@@ -338,6 +382,30 @@ mod tests {
     }
 
     #[test]
+    fn bulk_writer_preserves_all_minute_counts_and_caps_details(){
+        let path=path();
+        initialize(&path).unwrap();
+        let mut db=connect(&path).unwrap();
+        let events=(0..1200).map(|i|HistoryEvent{
+            path:path.clone(),title:format!("Episode {i}"),
+            status:"matched".into(),selected:None,details:json!({}),
+            duration_ms:10
+        }).collect::<Vec<_>>();
+        for chunk in events.chunks(HISTORY_BATCH_SIZE){
+            persist_batch(&mut db,chunk).unwrap();
+        }
+        let raw:i64=db.query_row("SELECT COUNT(*) FROM requests",[],
+            |r|r.get(0)).unwrap();
+        assert_eq!(raw,MAX_HISTORY);
+        let total=stats(&path).unwrap();
+        assert_eq!(total["total"],1200);
+        assert_eq!(total["matched"],1200);
+        assert_eq!(total["average_duration_ms"],10.0);
+        drop(db);
+        cleanup(&path);
+    }
+
+    #[test]
     fn records_and_filters_counts_independently() {
         let path = path();
         initialize(&path).unwrap();
@@ -368,13 +436,15 @@ mod tests {
             ).unwrap();
         }
         drop(db);
-        // Even before maintenance the physical table holds only 1,000.
+        // Bulk out-of-band SQL inserts bypass the bounded history writer;
+        // scheduled retention trims them. Normal record_async batches
+        // enforce the exact same cap inside their write transaction.
         let db = connect(&path).unwrap();
-        assert_eq!(db.query_row("SELECT COUNT(*) FROM requests",[],|r|r.get::<_,i64>(0)).unwrap(),1000);
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM requests",[],|r|r.get::<_,i64>(0)).unwrap(),1015);
         drop(db);
+        assert_eq!(prune(&path).unwrap(),15);
         assert_eq!(history(&path,100,999,None).unwrap()["items"].as_array().unwrap().len(),1);
         assert_eq!(history(&path,100,1000,None).unwrap()["items"].as_array().unwrap().len(),0);
-        assert_eq!(prune(&path).unwrap(),0);
         let db = connect(&path).unwrap();
         assert_eq!(db.query_row("SELECT COUNT(*) FROM requests",[],|r|r.get::<_,i64>(0)).unwrap(),1000);
         drop(db);
