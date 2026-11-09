@@ -3524,7 +3524,7 @@ mod tests {
         assert!(unmatched["episode"].is_null(),
             "do not publish an unverified anime episode");
         assert_eq!(public_match_response(Some(unmatched)),json!({
-            "sid_start":"tt4644488","sid_end":"tt4644488",
+            "sid_start":"tt4644488:1","sid_end":"tt4644488:1",
             "asid_start":null,"asid_end":null
         }));
         // No Sxx token must not overwrite an absolute episode that can
@@ -3970,7 +3970,7 @@ mod tests {
         assert_eq!(season_only["season"],5);
         assert!(season_only["episode"].is_null());
         assert_eq!(public_match_response(Some(season_only)),json!({
-            "sid_start":"tt1234567","sid_end":"tt1234567",
+            "sid_start":"tt1234567:5","sid_end":"tt1234567:5",
             "asid_start":null,"asid_end":null
         }));
         let mut neither=input(Value::Null,Value::Null);
@@ -4019,7 +4019,7 @@ mod tests {
             "episode_range":{"complete":false,"segments":[],
                 "start_season":2,"end_season":2}});
         assert_eq!(public_match_response(Some(selected)),json!({
-            "sid_start":"tt1234567","sid_end":"tt1234567",
+            "sid_start":"tt1234567:2","sid_end":"tt1234567:2",
             "asid_start":null,"asid_end":null
         }));
     }
