@@ -21,7 +21,7 @@ CODES={"season","episode","series","part","year","movie","sample",
        "x264","x265","h264","h265","hevc","hdr10","dovi",
        "ep","eps","new","the","eng","sub","dub"}
 MAX_BODY=16384
-MAX_RULES=2
+MAX_RULES=12
 MAX_SAMPLES=12
 
 def canonical(marker):
@@ -48,7 +48,20 @@ def valid_sample(sample,marker):
         return False
     return True
 
-def valid_rule(row,build_sha):
+def historical_source_ok(source_build,batch_sha,epoch,ancestor=git_ancestor):
+    """A previously archived rule carries the SHA that actually validated it.
+    Do not rewrite that provenance to the current container build. Old SHAs
+    must be known ancestors of the current posting build; the workflow then
+    independently replays source-specific safety checks and requires review.
+    """
+    if not isinstance(source_build,str) or not source_build.endswith(f":{epoch}"):
+        return False
+    source_sha=source_build.rsplit(":",1)[0]
+    return valid_sha(source_sha) and (source_sha==batch_sha
+        or ancestor(source_sha,batch_sha))
+
+
+def valid_rule(row,build_sha,ancestor=git_ancestor):
     if not isinstance(row,dict) or set(row)!={
         "kind","fingerprint","marker","regex","source_build","source_metadata",
         "evidence_count","distinct_imdb","distinct_episodes",
@@ -57,7 +70,7 @@ def valid_rule(row,build_sha):
     marker=row["marker"]
     if row["kind"]!="verified_regex_proposal" or canonical(marker)!=row["regex"]:
         return None
-    if row["source_build"]!=build_sha+":1":
+    if not historical_source_ok(row["source_build"],build_sha,1,ancestor):
         return None
     if (not isinstance(row["source_metadata"],str) or
         len(row["source_metadata"])>200):return None
@@ -124,7 +137,7 @@ def technical_pattern(field,signal):
     if not 1<=len(parts)<=4:return None
     pattern=r"(?i)(?:^|[ ._-])(?:"+r"[ ._-]*".join(parts)+r")(?:$|[ ._-])"
     return pattern if len(pattern)<=140 else None
-def valid_extended_rule(r,sha):
+def valid_extended_rule(r,sha,ancestor=git_ancestor):
     if not isinstance(r,dict):return None
     kind=r.get("kind")
     common={"kind","fingerprint","evidence_count","distinct_titles",
@@ -138,7 +151,7 @@ def valid_extended_rule(r,sha):
         # Unknown-field predictions are intentionally review-only.
         # A self-reported model score is not proof of a source regex fix.
         expected=common|{"field","signal","regex","review_only"}
-        if set(r)!=expected or r["source_build"]!=sha+f":{DISCOVERY_EPOCH}":
+        if set(r)!=expected or not historical_source_ok(r["source_build"],sha,DISCOVERY_EPOCH,ancestor):
             return None
         field,signal=r["field"],r["signal"]
         if not isinstance(field,str) or not isinstance(signal,str):
@@ -161,7 +174,7 @@ def valid_extended_rule(r,sha):
         expected_fp=digest(f"community-review:{field}:{signal}:{pattern}")
     elif kind=="learned_field_regex":
         expected=common|{"field","signal","regex","canonical"}
-        if set(r)!=expected or r["source_build"]!=sha+f":{FIELD_EPOCH}":return None
+        if set(r)!=expected or not historical_source_ok(r["source_build"],sha,FIELD_EPOCH,ancestor):return None
         field,signal=r["field"],r["signal"]
         pattern=technical_pattern(field,signal)
         if pattern is None or r["regex"]!=pattern:return None
@@ -178,7 +191,7 @@ def valid_extended_rule(r,sha):
         expected_fp=digest(f"community-field:{field}:{signal}:{canon}")
     elif kind=="learned_tv_regex":
         expected=common|{"family","fields","regex","native_patterns"}
-        if set(r)!=expected or r["source_build"]!=sha+f":{TV_EPOCH}":return None
+        if set(r)!=expected or not historical_source_ok(r["source_build"],sha,TV_EPOCH,ancestor):return None
         family=r["family"]
         if not isinstance(family,str) or family not in TV_GRAMMARS:return None
         if (r["regex"]!=TV_GRAMMARS[family]
@@ -192,7 +205,7 @@ def valid_extended_rule(r,sha):
     elif kind=="learned_source_regex_patch":
         expected=common|{"handler_index","field","signal",
             "original_regex","proposed_regex","transform"}
-        if set(r)!=expected or r["source_build"]!=sha+f":{FIELD_EPOCH}":return None
+        if set(r)!=expected or not historical_source_ok(r["source_build"],sha,FIELD_EPOCH,ancestor):return None
         if not bounded_int(r["handler_index"],0,4096):return None
         if r["field"] not in {"resolution","codec","bit_depth"}:return None
         extra=technical_pattern(r["field"],r["signal"])
@@ -242,9 +255,9 @@ def parse_batch(comment,current_sha,ancestor=git_ancestor):
         return None
     rules=[]
     for candidate in batch["rules"]:
-        valid=(valid_rule(candidate,sha) if isinstance(candidate,dict)
+        valid=(valid_rule(candidate,sha,ancestor) if isinstance(candidate,dict)
                and candidate.get('kind')=='verified_regex_proposal'
-               else valid_extended_rule(candidate,sha))
+               else valid_extended_rule(candidate,sha,ancestor))
         if valid is None:return None
         rules.append(valid)
     fingerprints=[r["fingerprint"] for r in rules]
