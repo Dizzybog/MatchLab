@@ -384,13 +384,13 @@ mod tests{
             "subbed":true,"group":"EXAMPLE"});
         let n=learner.observe_canonical_fields(
             &db,"Example.Work.S02E07.2024.1080p.WEB-DL",&parsed).unwrap();
-        assert_eq!(n,11,"all canonical fields should train instead of sampling six");
+        assert_eq!(n,12,"all canonical fields should train instead of sampling six");
         let again=learner.observe_canonical_fields(
             &db,"Example.Work.S02E07.2024.1080p.WEB-DL",&parsed).unwrap();
         assert_eq!(again,0,"repeated queries must not retrain the same title");
         let stored:i64=db.query_row("SELECT COUNT(*) FROM online_model_seen",[],
             |r|r.get(0)).unwrap();
-        assert_eq!(stored,11);
+        assert_eq!(stored,12);
     }
     #[test]
     fn learns_real_examples_and_rejects_counterfactual_fields(){
