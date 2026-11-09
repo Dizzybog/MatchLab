@@ -672,7 +672,7 @@ fn source_handler_additions(active:&[FieldRule])
         // Context-sensitive tags need additional native parser guards before
         // automation. They can still be shared as human-review proposals.
         if !matches!(rule.field.as_str(),
-            "resolution"|"codec"|"quality"|"bit_depth"|"subbed"|"dubbed"){
+            "resolution"|"codec"|"quality"|"bit_depth"){
             continue;
         }
         let transform=match &rule.value {
@@ -807,6 +807,8 @@ mod tests {
             ("languages","german",json!(["de"])),
             ("channels","5.1",json!("5.1")),
             ("audio","aac",json!("AAC")),
+            ("subbed","subbed",json!(true)),
+            ("dubbed","dubbed",json!(true)),
         ] {
             assert!(source_handler_additions(&[
                 rule(field,signal,value,40,10)]).is_empty());
@@ -921,7 +923,7 @@ mod tests {
         assert!(may_override(&strong));
     }
     #[test]
-    fn gap_only_rule_fills_missing_but_cannot_override_parser() {
+    fn gap_only_rule_is_regex_evidence_not_a_field_override() {
         let db=Connection::open_in_memory().unwrap();
         init(&db).unwrap();
         for n in 0..16 {
