@@ -1028,15 +1028,16 @@ fn diagnose_with_policy(
                     }else if selected_season.is_some() && series &&
                         seasons.len()==1 && episodes.len()==1 &&
                         imdb_matcher::clean_title(&c.title)==key &&
-                        season_episode_end(&db,&c.imdb_id,
-                            selected_season.unwrap_or(0))?
-                            .is_some_and(|last|ep<=last){
-                        // A canonical IMDb title with an explicit season and
-                        // episode may retain its verified IMDb SID even when
-                        // the separate AniDB/TVDB crosswalk lacks an episode.
-                        // Only known IMDb season bounds qualify; do not use
-                        // this fallback for named sequel/part aliases, which
-                        // can map the same local S01E03 into a later season.
+                        candidate_has_episode(&db,&c.imdb_id,
+                            selected_season.unwrap_or(0),ep)?{
+                        // An exact canonical IMDb series winner keeps the
+                        // explicitly parsed SxxExx when there is no proven
+                        // AniDB mapping, unless IMDb metadata definitively
+                        // rules that episode out. A missing season_episode row
+                        // is NOT evidence that S17E01 is invalid (Bleach's
+                        // season 17 is absent from some IMDb snapshots).
+                        // Do not use this for named sequel/part aliases:
+                        // those can remap local S01E03 to another season.
                         // No crosswalk: ASID intentionally stays null.
                     }else if !c.anime_ids.is_empty()||specific{
                         // Never infer anime part or absolute numbering without
@@ -1762,7 +1763,9 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         }
         let count=metadata_import::import_animelists(
             std::path::Path::new(&args[2]),std::path::Path::new(&args[3]))?;
-        tracing::info!("Anime-Lists mappings imported: {count}");
+        let overrides=metadata_import::apply_bundled_animelists_overrides(
+            std::path::Path::new(&args[2]))?;
+        tracing::info!("Anime-Lists mappings imported: {count}, bundled overrides: {overrides}");
         return Ok(());
     }
     if args.get(1).is_some_and(|arg|arg=="refresh-metadata") {
@@ -1806,17 +1809,30 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
             return Err("MATCHLAB_METADATA_REFRESH_HOURS must be between 1 and 720".into());
         }
         let target=PathBuf::from(&db);
+        let override_marker=metadata_import::bundled_animelists_override_marker();
         let refresh_index_state=index_state.clone();
         tokio::spawn(async move {
             let refresh_seconds=hours*3600;
             loop {
                 let check_target=target.clone();
+                let expected_override=override_marker.clone();
                 let last_refresh=tokio::task::spawn_blocking(move || {
                     let db=rusqlite::Connection::open_with_flags(
                         &check_target,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
                     let value:String=db.query_row(
                         "SELECT updated_at FROM metadata_state WHERE source='full_refresh'",
                         [],|row|row.get(0)).ok()?;
+                    // A previously published database may predate the
+                    // embedded mapping exceptions. Rebuild once on startup
+                    // when the baked-in exception list has changed, rather
+                    // than serving stale episode crosswalks for seven days.
+                    let current=db.query_row(
+                        "SELECT 1 FROM metadata_state WHERE source=?1",
+                        [&expected_override],|row|row.get::<_,i64>(0)).is_ok();
+                    if !current {
+                        tracing::info!("bundled Anime-Lists mappings changed; scheduling full metadata refresh");
+                        return None;
+                    }
                     value.parse::<u64>().ok()
                 }).await.ok().flatten();
                 let now=std::time::SystemTime::now()
@@ -2110,6 +2126,23 @@ mod tests {
         }));
         // Absolute episode batches can cross IMDb seasons without becoming
         // a season-local episode range or requiring a separate "E" marker.
+        // Bleach S17 is eligible via the existing season guard even if
+        // IMDb has imported only 16 seasons. Adding E01 must not erase the
+        // explicit coordinates just because AniDB has no provable map.
+        for release in ["bleach.S17E01","bleach.S17.E01"] {
+            let parsed=matchlab_parser::parse_title(release,false).unwrap();
+            assert_eq!(parsed["seasons"],json!([17]),"{release}: {parsed:?}");
+            assert_eq!(parsed["episodes"],json!([1]),"{release}: {parsed:?}");
+            let d=diagnose(&path,&MatchRequest{
+                title:release.into(),year:None,series:None}).unwrap();
+            let selected=d.selected.expect("selected Bleach IMDb series");
+            assert_eq!(selected["imdb_id"],"tt0000101","{release}: {selected}");
+            assert_eq!(selected["season"],17,"{release}: {selected}");
+            assert_eq!(selected["episode"],1,"{release}: {selected}");
+            let response=public_match_response(Some(selected));
+            assert_eq!(response["sid_start"],"tt0000101:17:1","{release}: {response}");
+            assert_eq!(response["sid_end"],"tt0000101:17:1","{release}: {response}");
+        }
         let d=diagnose(&path,&MatchRequest{
             title:"Bleach_320-360".into(),year:None,series:None}).unwrap();
         assert_eq!(d.parsed["anime_title_verified"],true);

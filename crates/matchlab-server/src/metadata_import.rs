@@ -379,10 +379,38 @@ pub fn import_anidb_titles(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error
 /// Explicit XML mapping entries are retained; implicit part-boundary inference
 /// and upstream override merging are handled separately.
 pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>{
+    import_animelists_reader(db_path,BufReader::new(File::open(source)?),false)
+}
+
+/// Apply the checked-in exceptions to the SAME SQLite episode_map used by
+/// ordinary Anime-Lists matches. The XML is embedded in the production Rust
+/// binary, so no extra download, file mount, or runtime configuration is needed.
+/// A stable fingerprint in metadata_state lets the startup scheduler refresh
+/// an older volume when this embedded list changes, without redownloading the
+/// entire catalog on every ordinary image upgrade or restart.
+pub(crate) fn bundled_animelists_override_marker()->String{
+    let mut hash=0xcbf29ce484222325u64;
+    for byte in include_bytes!("../../../data/anime-list.override.xml"){
+        hash=(hash^u64::from(*byte)).wrapping_mul(0x100000001b3);
+    }
+    format!("animelists_override_{hash:016x}")
+}
+pub(crate) fn apply_bundled_animelists_overrides(db_path:&Path)->Result<u64,Box<dyn Error>>{
+    // Build this lookup index only after bulk Anime-Lists import. Override
+    // updates can then preserve IMDb links without a table scan per AniDB ID.
+    let db=Connection::open(db_path)?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS anime_series_by_anidb
+        ON anime_series_map(anidb_id);")?;
+    drop(db);
+    import_animelists_reader(db_path,std::io::Cursor::new(
+        include_str!("../../../data/anime-list.override.xml").as_bytes()),true)
+}
+fn import_animelists_reader<R:std::io::BufRead>(
+    db_path:&Path,source:R,override_existing:bool,
+)->Result<u64,Box<dyn Error>>{
     use quick_xml::{Reader,events::Event};
     use rusqlite::OptionalExtension;
-    let file=File::open(source)?;
-    let mut xml=Reader::from_reader(BufReader::new(file));
+    let mut xml=Reader::from_reader(source);
     xml.config_mut().trim_text(true);
     let mut db=Connection::open(db_path)?;
     let tx=db.transaction()?;
@@ -398,7 +426,8 @@ pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>
     let mut multi_imdb_entries=0u64;
     let started=Instant::now();
     let mut last_logged=0u64;
-    tracing::info!(source="animelists","metadata import started");
+    let source_name=if override_existing{"animelists_override"}else{"animelists"};
+    tracing::info!(source=source_name,"metadata import started");
     loop{
         let event=xml.read_event_into(&mut buf)?;
         let empty_mapping=matches!(&event,Event::Empty(e) if e.name().as_ref()==b"mapping");
@@ -420,6 +449,19 @@ pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>
                 }
                 valid=aid.parse::<u64>().unwrap_or(0)>0 && tvdb.parse::<u64>().unwrap_or(0)>0;
                 if valid{
+                    if override_existing {
+                        // Replace all prior upstream rows for this AniDB work,
+                        // not just matching (season,start,end) keys. Keeping
+                        // stale default rows would create competing mappings.
+                        tx.execute("DELETE FROM episode_map WHERE anidb_id=?1",[&aid])?;
+                        // Existing IMDb links must survive. If the exception
+                        // corrects its TVDB family, migrate the relationship
+                        // instead of accidentally keeping the old family.
+                        tx.execute("UPDATE OR IGNORE anime_series_map SET tvdb_id=?2
+                            WHERE anidb_id=?1",params![aid,tvdb])?;
+                        tx.execute("DELETE FROM anime_series_map
+                            WHERE anidb_id=?1 AND tvdb_id<>?2",params![aid,tvdb])?;
+                    }
                     // A single AniDB entry may represent several films or OVAs,
                     // with a comma-separated IMDb list. Never store that CSV
                     // as one IMDb title ID, and never arbitrarily select its
@@ -537,7 +579,14 @@ pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>
     drop(insert);drop(links);
     if count==0{return Err("Anime-Lists contained no episode mappings".into());}
     let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
-    tx.execute("INSERT OR REPLACE INTO metadata_state VALUES('animelists',?1,?2)",params![now,count])?;
+    tx.execute("INSERT OR REPLACE INTO metadata_state VALUES(?1,?2,?3)",
+        params![source_name,now,count])?;
+    if override_existing{
+        // Published snapshots record which exact embedded XML was applied.
+        // This marker is written in the same transaction as the mappings.
+        tx.execute("INSERT OR REPLACE INTO metadata_state VALUES(?1,?2,?3)",
+            params![bundled_animelists_override_marker(),now,count])?;
+    }
     tx.commit()?;
     Ok(count)
 }
@@ -578,6 +627,11 @@ pub fn refresh_from_files_with_ratings(
         }
         tracing::info!("metadata refresh: importing Anime-Lists");
         let episodes_count=import_animelists(&stage,animelists)?;
+        // Apply the local corrections before building relation indexes,
+        // Tantivy, or publishing the immutable metadata generation.
+        // A malformed override fails the entire staging refresh.
+        let overrides=apply_bundled_animelists_overrides(&stage)?;
+        tracing::info!(overrides,"metadata refresh: applied bundled Anime-Lists mapping exceptions");
         tracing::info!("metadata refresh: importing AniDB titles");
         let aliases=import_anidb_titles(&stage,anidb_titles)?;
         if imdb==0||links==0||episodes_count==0||aliases==0{
@@ -681,6 +735,10 @@ mod tests {
         assert!(indexes.iter().all(|name|!name.starts_with("titles_")));
         let aliases:i64=db.query_row("SELECT COUNT(*) FROM anime_series_map",[],|r|r.get(0)).unwrap();
         assert!(aliases>0);
+        let exceptions:i64=db.query_row("SELECT COUNT(*) FROM episode_map
+            WHERE anidb_id='15449' AND tvdb_id='74796' AND tvdb_season=17",
+            [],|r|r.get(0)).unwrap();
+        assert_eq!(exceptions,1,"bundled mapping exceptions must be in the published SQLite snapshot");
         drop(stmt);drop(db);
         fs::remove_dir_all(folder).unwrap();
     }
@@ -737,6 +795,69 @@ mod tests {
         assert!(explain("SELECT value FROM anime_ids WHERE group_id='tt1' AND type='anidb'")
             .contains("sqlite_autoindex_anime_ids"));
     }
+    #[test]
+    fn bundled_overrides_replace_old_rows_and_share_bleach_tvdb_crosswalk(){
+        let folder=std::env::temp_dir().join(format!(
+            "matchlab-bundled-exceptions-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&folder).unwrap();
+        let path=folder.join("metadata.sqlite3");
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE episode_map(anidb_id TEXT NOT NULL,
+                tvdb_id TEXT NOT NULL,anidb_season INTEGER NOT NULL,
+                tvdb_season INTEGER NOT NULL,start INTEGER NOT NULL,
+                end INTEGER NOT NULL,offset INTEGER NOT NULL,map TEXT NOT NULL);
+            CREATE TABLE anime_series_map(imdb_id TEXT NOT NULL,
+                anidb_id TEXT NOT NULL,tvdb_id TEXT NOT NULL,
+                trakt_season INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(imdb_id,anidb_id,tvdb_id,trakt_season));
+            CREATE TABLE metadata_state(source TEXT PRIMARY KEY,
+                updated_at TEXT NOT NULL,row_count INTEGER NOT NULL);
+            INSERT INTO anime_series_map VALUES('tt0434665','2369','74796',0);
+            INSERT INTO anime_series_map VALUES('tt0434665','15449','99999',0);
+            INSERT INTO episode_map VALUES('2369','74796',1,16,341,366,-340,'');
+            INSERT INTO episode_map VALUES('15449','99999',1,16,1,13,0,'');").unwrap();
+        drop(db);
+        assert!(apply_bundled_animelists_overrides(&path).unwrap()>0);
+        // Running the importer twice must not duplicate or resurrect rows.
+        assert!(apply_bundled_animelists_overrides(&path).unwrap()>0);
+        let db=Connection::open(&path).unwrap();
+        let rows:i64=db.query_row("SELECT COUNT(*) FROM episode_map
+            WHERE anidb_id='15449'",[],|r|r.get(0)).unwrap();
+        assert_eq!(rows,2,"one absolute row and one S17 mapping");
+        let distinct:i64=db.query_row("SELECT COUNT(DISTINCT anidb_id)
+            FROM episode_map WHERE anidb_id<>'2369'",[],|r|r.get(0)).unwrap();
+        assert_eq!(distinct,27,"every bundled exception must enter episode_map");
+        let stale:i64=db.query_row("SELECT COUNT(*) FROM episode_map
+            WHERE anidb_id='15449' AND tvdb_id='99999'",[],|r|r.get(0)).unwrap();
+        assert_eq!(stale,0,"old conflicting mapping must be replaced");
+        let links:i64=db.query_row("SELECT COUNT(*) FROM anime_series_map
+            WHERE imdb_id='tt0434665' AND anidb_id='15449'
+                AND tvdb_id='74796'",[],|r|r.get(0)).unwrap();
+        assert_eq!(links,1,"preserve and correct existing IMDb links");
+        let marker=bundled_animelists_override_marker();
+        let applied:i64=db.query_row("SELECT COUNT(*) FROM metadata_state
+            WHERE source=?1",[&marker],|r|r.get(0)).unwrap();
+        assert_eq!(applied,1,"record the exact list version for startup refreshes");
+        // The ordinary production crosswalk must resolve all three Bleach
+        // cours; the override is not a second or special-case matcher.
+        for (episode,anidb_id,anime_episode) in
+            [(1,"15449",1),(14,"17765",1),(27,"18220",1)] {
+            let mapped=crate::episode_crosswalk::resolve_season(
+                &db,"tt0434665",17,episode).unwrap().unwrap();
+            assert_eq!(mapped.anidb_id,anidb_id);
+            assert_eq!(mapped.anidb_episode,anime_episode);
+            assert_eq!(mapped.season,17);
+            assert_eq!(mapped.episode,episode);
+        }
+        let retained:i64=db.query_row("SELECT COUNT(*) FROM episode_map
+            WHERE anidb_id='2369'",[],|r|r.get(0)).unwrap();
+        assert_eq!(retained,1,"unrelated upstream mappings are preserved");
+        drop(db);
+        fs::remove_dir_all(folder).unwrap();
+    }
+
     #[test]
     fn animelists_preserves_explicit_mapping_text_and_overrides_default() {
         let folder=std::env::temp_dir().join(format!("matchlab-mapping-test-{}-{}",
