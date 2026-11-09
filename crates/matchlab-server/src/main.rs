@@ -1039,10 +1039,15 @@ fn diagnose_with_policy(
                         // can map the same local S01E03 into a later season.
                         // No crosswalk: ASID intentionally stays null.
                     }else if !c.anime_ids.is_empty()||specific{
-                        // Never infer anime part or absolute numbering without
-                        // a verified crosswalk and identity: leave SID at title.
-                        selected_season=None;
-                        selected_episode=None;
+                        // Once IMDb has selected a series, explicit parsed
+                        // SxxExx coordinates are not guesses about the anime
+                        // identity. An absent or ambiguous AniDB crosswalk
+                        // must suppress only ASID, not season/episode or SID.
+                        // Bare/part-local episode guesses remain conservative.
+                        if seasons.len()!=1 || episodes.len()!=1 {
+                            selected_season=None;
+                            selected_episode=None;
+                        }
                     }
                 }
             }
@@ -2110,6 +2115,23 @@ mod tests {
         }));
         // Absolute episode batches can cross IMDb seasons without becoming
         // a season-local episode range or requiring a separate "E" marker.
+        // Bleach S17 is eligible via the existing season guard even if
+        // IMDb has imported only 16 seasons. Adding E01 must not erase the
+        // explicit coordinates just because AniDB has no provable map.
+        for release in ["bleach.S17E01","bleach.S17.E01"] {
+            let parsed=matchlab_parser::parse_title(release,false).unwrap();
+            assert_eq!(parsed["seasons"],json!([17]),"{release}: {parsed:?}");
+            assert_eq!(parsed["episodes"],json!([1]),"{release}: {parsed:?}");
+            let d=diagnose(&path,&MatchRequest{
+                title:release.into(),year:None,series:None}).unwrap();
+            let selected=d.selected.expect("selected Bleach IMDb series");
+            assert_eq!(selected["imdb_id"],"tt0000101","{release}: {selected}");
+            assert_eq!(selected["season"],17,"{release}: {selected}");
+            assert_eq!(selected["episode"],1,"{release}: {selected}");
+            let response=public_match_response(Some(selected));
+            assert_eq!(response["sid_start"],"tt0000101:17:1","{release}: {response}");
+            assert_eq!(response["sid_end"],"tt0000101:17:1","{release}: {response}");
+        }
         let d=diagnose(&path,&MatchRequest{
             title:"Bleach_320-360".into(),year:None,series:None}).unwrap();
         assert_eq!(d.parsed["anime_title_verified"],true);
