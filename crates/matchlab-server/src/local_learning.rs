@@ -74,6 +74,7 @@ fn pattern(flag:&Value,parsed:&Value,selected:&Value)->Option<(String,String)>{
         ||code.starts_with("field_overextracted_")
         ||code.starts_with("field_underextracted_")
         ||code.starts_with("field_misassigned_")
+        ||code.starts_with("field_incorrect_")
         ||matches!(code,"field_mismatch_codec"|"field_mismatch_quality"|
             "field_mismatch_resolution"){
         // Stable, bounded anomaly kind only. Never store a private fragment
@@ -355,6 +356,8 @@ mod tests{
             ("field_misassigned_season_episode","explicit_season_episode_swapped"),
             ("field_misassigned_season","episode_marker_used_as_season"),
             ("field_misassigned_episode","season_marker_used_as_episode"),
+            ("field_incorrect_season","explicit_season_disagrees"),
+            ("field_incorrect_episode","explicit_episode_disagrees"),
         ] {
             let diagnostic=json!({"code":code,"signal":signal,"field":"title"});
             let found=pattern(&diagnostic,&parsed,&unmatched).unwrap();
