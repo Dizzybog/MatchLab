@@ -292,10 +292,9 @@ fn validate_examples(db:&Connection,metadata:&Connection,marker:&str)->Result<bo
         }
         let Ok(parsed)=matchlab_parser::parse_title_canonical(&title,false)else{return Ok(false);};
         let ordinary=Value::Object(parsed);
-        if ordinary["anime_episode_candidate"]["episode"].as_i64()==Some(abs)
-            ||ordinary["episodes"].as_array().is_some_and(|list|
-               list.len()==1 && list[0].as_i64()==Some(abs)){
-            return Ok(false); // already solved by the current core parser
+        if !baseline_needs_absolute_episode(&ordinary,abs){
+            // The original, not the ML-enhanced parser, solved this case.
+            return Ok(false);
         }
         valid+=1;
     }
@@ -308,6 +307,15 @@ fn qualifies(db:&Connection,marker:&str)->Result<bool,String>{
         |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))
         .map_err(|e|e.to_string())?;
     Ok(samples>=MIN_EXAMPLES&&series>=MIN_SERIES&&eps>=MIN_EPISODES)
+}
+/// IMPORTANT: this receives the ORIGINAL bundled parser's result, never a
+/// learned/overlaid/cached parse. A rule that fixes Bleach 326 must not make
+/// itself obsolete simply because /parse now reports episode 326.
+fn baseline_needs_absolute_episode(original:&Value,absolute:i64)->bool{
+    original["anime_episode_candidate"]["episode"].as_i64()!=Some(absolute)
+        && original["absolute_episode_candidate"].as_i64()!=Some(absolute)
+        && !original["episodes"].as_array().is_some_and(|list|
+            list.len()==1 && list[0].as_i64()==Some(absolute))
 }
 fn negative_probes(marker:&str,re:&Regex)->bool{
     let negatives=[
@@ -560,10 +568,9 @@ pub fn observe(db:&Connection,metadata:&Connection,title:&str,
         // Learn an *exception* only if the built-in parser missed or
         // misinterpreted this actual absolute coordinate. This also lets
         // the model correct existing context-dependent regex handlers.
-        if base["episodes"].as_array().is_some_and(|episodes|
-            episodes.len()==1 && episodes[0].as_i64()==Some(absolute))
-            || base["anime_episode_candidate"]["episode"].as_i64()==Some(absolute)
-            || base["absolute_episode_candidate"].as_i64()==Some(absolute){
+        if !baseline_needs_absolute_episode(base,absolute){
+            // Base is supplied by parse_title_canonical, not the active
+            // overlay. Never train against or retire from our own output.
             continue;
         };
         if name.len()<2 {continue;}
@@ -766,6 +773,18 @@ mod tests{
         assert!(!reserve_space(&db,"other",true,1,1).unwrap());
         assert_eq!(db.query_row("SELECT count(*) FROM learned_regex_evidence",
             [],|r|r.get::<_,i64>(0)).unwrap(),1);
+    }
+    #[test]
+    fn bleach_326_rule_cannot_retire_itself_from_its_own_success(){
+        let bundled=json!({"title":"Bleach","episodes":[],"seasons":[]});
+        let learned=json!({"title":"Bleach","episodes":[326],"seasons":[]});
+        assert!(baseline_needs_absolute_episode(&bundled,326),
+            "original parser still requires the learned regex");
+        assert!(!baseline_needs_absolute_episode(&learned,326),
+            "this result must never be used as the retirement reference");
+        let originally_supported=json!({"episodes":[326]});
+        assert!(!baseline_needs_absolute_episode(&originally_supported,326),
+            "a genuine upstream parser fix may make an overlay redundant");
     }
     #[test]
     fn disabled_rules_never_patch_parser_outputs(){
