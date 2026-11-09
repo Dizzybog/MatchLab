@@ -93,6 +93,24 @@ TV_GRAMMARS={
     "x":r"(?i)(?:^|[._ -])(?P<s>[0-9]{1,3})x(?P<e>[0-9]{1,5})(?:$|[._ -])",
     "words":r"(?i)(?:^|[._ -])season[._ -]+(?P<s>[0-9]{1,3})[._ -]+episode[._ -]+(?P<e>[0-9]{1,5})(?:$|[._ -])",
 }
+FIELD_EPOCH=5
+TV_EPOCH=2
+# Must match the restricted native Rust TV regex installed by tv_learning.rs.
+# GitHub receives the exact added patterns, not only the diagnostic grammar.
+TV_NATIVE_PATTERNS={
+    "sxe":{
+        "seasons":r"(?i)(?:^|[._ -])s([0-9]{1,3})[._ -]*e[0-9]{1,5}(?:$|[._ -])",
+        "episodes":r"(?i)(?:^|[._ -])s[0-9]{1,3}[._ -]*e([0-9]{1,5})(?:$|[._ -])",
+    },
+    "x":{
+        "seasons":r"(?i)(?:^|[._ -])([0-9]{1,3})x[0-9]{1,5}(?:$|[._ -])",
+        "episodes":r"(?i)(?:^|[._ -])[0-9]{1,3}x([0-9]{1,5})(?:$|[._ -])",
+    },
+    "words":{
+        "seasons":r"(?i)(?:^|[._ -])season[._ -]+([0-9]{1,3})[._ -]+episode[._ -]+[0-9]{1,5}(?:$|[._ -])",
+        "episodes":r"(?i)(?:^|[._ -])season[._ -]+[0-9]{1,3}[._ -]+episode[._ -]+([0-9]{1,5})(?:$|[._ -])",
+    },
+}
 CATALOG=Path(__file__).resolve().parents[1] / "crates/matchlab-parser/src/generated/handlers.json"
 def digest(s):return hashlib.sha256(s.encode()).hexdigest()
 def bounded_int(v,small=0,big=2_000_000):
@@ -117,7 +135,7 @@ def valid_extended_rule(r,sha):
     if not isinstance(r.get("fingerprint"),str):return None
     if kind=="learned_field_regex":
         expected=common|{"field","signal","regex","canonical"}
-        if set(r)!=expected or r["source_build"]!=sha+":3":return None
+        if set(r)!=expected or r["source_build"]!=sha+f":{FIELD_EPOCH}":return None
         field,signal=r["field"],r["signal"]
         pattern=technical_pattern(field,signal)
         if pattern is None or r["regex"]!=pattern:return None
@@ -133,11 +151,13 @@ def valid_extended_rule(r,sha):
         canon=json.dumps(value,ensure_ascii=False,separators=(",",":"))
         expected_fp=digest(f"community-field:{field}:{signal}:{canon}")
     elif kind=="learned_tv_regex":
-        expected=common|{"family","fields","regex"}
-        if set(r)!=expected or r["source_build"]!=sha+":1":return None
+        expected=common|{"family","fields","regex","native_patterns"}
+        if set(r)!=expected or r["source_build"]!=sha+f":{TV_EPOCH}":return None
         family=r["family"]
         if not isinstance(family,str) or family not in TV_GRAMMARS:return None
-        if r["regex"]!=TV_GRAMMARS[family] or r["fields"]!=["seasons","episodes"]:
+        if (r["regex"]!=TV_GRAMMARS[family]
+            or r["fields"]!=["seasons","episodes"]
+            or r["native_patterns"]!=TV_NATIVE_PATTERNS[family]):
             return None
         if r["verification"]!="explicit_tv_marker_and_canonical_confirmations":
             return None
@@ -146,7 +166,7 @@ def valid_extended_rule(r,sha):
     elif kind=="learned_source_regex_patch":
         expected=common|{"handler_index","field","signal",
             "original_regex","proposed_regex","transform"}
-        if set(r)!=expected or r["source_build"]!=sha+":3":return None
+        if set(r)!=expected or r["source_build"]!=sha+f":{FIELD_EPOCH}":return None
         if not bounded_int(r["handler_index"],0,4096):return None
         if r["field"] not in {"resolution","codec","bit_depth"}:return None
         extra=technical_pattern(r["field"],r["signal"])
