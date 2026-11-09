@@ -8,6 +8,7 @@ use sha2::{Digest,Sha256};
 use std::collections::BTreeMap;
 use std::sync::{OnceLock,RwLock};
 
+const EPOCH:u32=2;
 const MAX_CANDIDATES:i64=256;
 const MAX_EXAMPLES:i64=12_000;
 const MAX_RAW_BYTES:usize=240;
@@ -33,6 +34,9 @@ fn parser_fields()->&'static Vec<String>{
 
 pub struct Budget{candidates:i64,examples:i64,evictions:u8}
 fn hash(raw:&str)->String{format!("{:x}",Sha256::digest(raw.as_bytes()))}
+fn build()->String{
+    format!("{}:{EPOCH}",option_env!("MATCHLAB_BUILD_SHA").unwrap_or("dev"))
+}
 fn valid_name(raw:&str)->bool{
     raw.len()<=MAX_RAW_BYTES && !raw.contains(['/', '\\', '@', '\n','\r','\0'])
         && !["token=","apikey=","password=","secret=","magnet:","http:"]
@@ -77,6 +81,7 @@ pub fn init(db:&Connection)->Result<(),String>{
         marker TEXT NOT NULL,predicted_field TEXT NOT NULL,
         rank REAL NOT NULL,distinct_works INTEGER NOT NULL,
         last_seen INTEGER NOT NULL,
+        source_build TEXT NOT NULL DEFAULT '',
         PRIMARY KEY(marker,predicted_field));
       CREATE TABLE IF NOT EXISTS ml_unknown_examples(
         marker TEXT NOT NULL,predicted_field TEXT NOT NULL,
@@ -84,7 +89,20 @@ pub fn init(db:&Connection)->Result<(),String>{
         PRIMARY KEY(marker,predicted_field,identity_hash));
       CREATE INDEX IF NOT EXISTS ml_unknown_rank
         ON ml_unknown_candidates(predicted_field,distinct_works);")
-        .map_err(|e|e.to_string())
+        .map_err(|e|e.to_string())?;
+    // Existing SQLite volumes may predate build-scoped review evidence.
+    // Old candidate counts must not qualify newly generated GitHub reports.
+    let columns=db.prepare("PRAGMA table_info(ml_unknown_candidates)")
+        .map_err(|e|e.to_string())?
+        .query_map([],|r|r.get::<_,String>(1)).map_err(|e|e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e|e.to_string())?;
+    if !columns.iter().any(|name|name=="source_build"){
+        db.execute("ALTER TABLE ml_unknown_candidates
+            ADD COLUMN source_build TEXT NOT NULL DEFAULT ''",[])
+            .map_err(|e|e.to_string())?;
+    }
+    Ok(())
 }
 pub fn budget(db:&Connection)->Result<Budget,String>{
     init(db)?;
@@ -117,7 +135,8 @@ pub fn observe(db:&Connection,title:&str,parsed:&Value,
     model:&crate::online_model::OnlineModel,remaining:&mut Budget)->Result<(),String>{
     let name=parsed["title"].as_str().unwrap_or("").to_ascii_lowercase();
     if !(4..=120).contains(&name.len()) {return Ok(());}
-    let identity=hash(&name);
+    let source_build=build();
+    let identity=hash(&format!("{source_build}:{name}"));
     for marker in unknown_tokens(title){
         if remaining.examples>=MAX_EXAMPLES.min(
             crate::learning_cache::training_max_examples())
@@ -146,15 +165,60 @@ pub fn observe(db:&Connection,title:&str,parsed:&Value,
         if inserted==0{continue;}
         remaining.examples+=1;
         db.execute("INSERT INTO ml_unknown_candidates(
-            marker,predicted_field,rank,distinct_works,last_seen)
-            VALUES(?1,?2,?3,1,strftime('%s','now'))
+            marker,predicted_field,rank,distinct_works,last_seen,source_build)
+            VALUES(?1,?2,?3,1,strftime('%s','now'),?4)
             ON CONFLICT(marker,predicted_field) DO UPDATE SET
-              rank=excluded.rank,distinct_works=distinct_works+1,
-              last_seen=excluded.last_seen",
-            params![marker,field,score]).map_err(|e|e.to_string())?;
+              rank=excluded.rank,
+              distinct_works=CASE WHEN
+                  ml_unknown_candidates.source_build=excluded.source_build
+                  THEN ml_unknown_candidates.distinct_works+1 ELSE 1 END,
+              last_seen=excluded.last_seen,
+              source_build=excluded.source_build",
+            params![marker,field,score,source_build]).map_err(|e|e.to_string())?;
         if known==0{remaining.candidates+=1;}
     }
     Ok(())
+}
+/// Build-scoped proposals for any original parser field. Unknown-marker
+/// classifications are untrusted and must never auto-activate; a maintainer
+/// needs an independently verified canonical label and field-specific probes.
+pub fn community_proposals(db:&Connection)->Result<Vec<Value>,String>{
+    init(db)?;
+    let source=build();
+    let mut stmt=db.prepare("SELECT marker,predicted_field,distinct_works
+        FROM ml_unknown_candidates
+        WHERE source_build=?1 AND distinct_works>=12
+        ORDER BY distinct_works DESC,marker,predicted_field LIMIT 24")
+        .map_err(|e|e.to_string())?;
+    let candidates=stmt.query_map([&source],|row|Ok((
+        row.get::<_,String>(0)?,row.get::<_,String>(1)?,
+        row.get::<_,i64>(2)?)))
+        .map_err(|e|e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e|e.to_string())?;
+    let mut out=Vec::new();
+    for (marker,field,works) in candidates{
+        if !parser_fields().iter().any(|known|known==&field)
+            ||!(3..=16).contains(&marker.len())
+            ||!marker.bytes().all(|byte|byte.is_ascii_lowercase()
+                ||byte.is_ascii_digit())
+            ||marker.bytes().all(|byte|byte.is_ascii_digit()) {continue;}
+        let pattern=format!(
+            r"(?i)(?:^|[ ._-]){}(?:$|[ ._-])",regex::escape(&marker));
+        out.push(json!({
+            "kind":"learned_field_regex_review",
+            "fingerprint":hash(&format!(
+                "community-review:{field}:{marker}:{pattern}")),
+            "field":field,"signal":marker,"regex":pattern,
+            "canonical_confirmations":0,
+            "evidence_count":works,
+            "distinct_titles":works,
+            "source_build":source,
+            "verification":"unverified_model_discovery_review_only",
+            "review_only":true,
+        }));
+    }
+    Ok(out)
 }
 pub fn publish(db:&Connection)->Result<(),String>{
     init(db)?;
@@ -210,17 +274,44 @@ mod tests{
     fn bounded_review_store_reclaims_noise_but_protects_diverse_examples(){
         let db=Connection::open_in_memory().unwrap();
         init(&db).unwrap();
-        db.execute("INSERT INTO ml_unknown_candidates VALUES(
-            'noise','codec',0.6,1,1)",[]).unwrap();
+        db.execute("INSERT INTO ml_unknown_candidates(
+            marker,predicted_field,rank,distinct_works,last_seen,source_build)
+            VALUES('noise','codec',0.6,1,1,?1)",[build()]).unwrap();
         db.execute("INSERT INTO ml_unknown_examples VALUES(
             'noise','codec','work1')",[]).unwrap();
         let mut usage=budget(&db).unwrap();
         assert!(reclaim_unqualified(&db,&mut usage).unwrap());
         assert_eq!(usage.candidates,0);
         assert_eq!(usage.examples,0);
-        db.execute("INSERT INTO ml_unknown_candidates VALUES(
-            'diverse','codec',0.8,8,1)",[]).unwrap();
+        db.execute("INSERT INTO ml_unknown_candidates(
+            marker,predicted_field,rank,distinct_works,last_seen,source_build)
+            VALUES('diverse','codec',0.8,8,1,?1)",[build()]).unwrap();
         assert!(!reclaim_unqualified(&db,&mut usage).unwrap());
+    }
+    #[test]
+    fn unknown_markers_for_any_parser_field_can_enter_review_only(){
+        let db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        for field in ["group","year","languages","network"] {
+            let marker=format!("marker{}",field.len());
+            db.execute("INSERT INTO ml_unknown_candidates(
+                marker,predicted_field,rank,distinct_works,last_seen,source_build)
+                VALUES(?1,?2,0.7,15,1,?3)",
+                params![marker,field,build()]).unwrap();
+        }
+        db.execute("INSERT INTO ml_unknown_candidates(
+            marker,predicted_field,rank,distinct_works,last_seen,source_build)
+            VALUES('oldtag','codec',0.9,100,1,'old-build:1')",[])
+            .unwrap();
+        let proposals=community_proposals(&db).unwrap();
+        assert_eq!(proposals.len(),4);
+        for proposal in proposals {
+            assert_eq!(proposal["review_only"],true);
+            assert_eq!(proposal["canonical_confirmations"],0);
+            assert_eq!(proposal["verification"],
+                "unverified_model_discovery_review_only");
+            assert_ne!(proposal["field"],"codec");
+        }
     }
     #[test]
     fn never_promotes_raw_unverified_strings_into_active_regex(){
