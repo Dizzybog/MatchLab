@@ -79,8 +79,16 @@ fn ints(parsed:&Value,field:&str)->Vec<i64>{
 fn category(expected:&Expected,parsed:&Value)->&'static str{
     let seasons=ints(parsed,"seasons");
     let episodes=ints(parsed,"episodes");
-    if seasons==[expected.season]&&episodes==expected.episodes{return "aligned";}
-    if seasons.is_empty()||episodes.is_empty(){return "missing";}
+    let full_interval=expected.episodes.len()>1
+        &&parsed["episode_start"].as_i64()==expected.episodes.first().copied()
+        &&parsed["episode_end"].as_i64()==expected.episodes.last().copied()
+        && (episodes.is_empty()
+            ||episodes==[expected.episodes[0]]
+            ||episodes==expected.episodes);
+    if seasons==[expected.season]
+        &&(episodes==expected.episodes||full_interval){return "aligned";}
+    if seasons.is_empty()
+        || (episodes.is_empty()&&!full_interval){return "missing";}
     if episodes.len()>expected.episodes.len()
         && expected.episodes.iter().all(|v|episodes.contains(v)){return "over";}
     if episodes.len()<expected.episodes.len()
@@ -342,6 +350,8 @@ mod tests {
         assert_eq!(e.episodes,vec![3,4,5]);
         assert_eq!(category(&e,&json!({"seasons":[2],"episodes":[3]})),"under");
         assert_eq!(category(&e,&json!({"seasons":[2],"episodes":[3,4,5]})),"aligned");
+        assert_eq!(category(&e,&json!({"seasons":[2],"episodes":[3],
+            "episode_start":3,"episode_end":5,"episode_count":3})),"aligned");
         assert!(expected("Example.Show.S01E02.S02E03").is_none());
         assert!(expected("Example.Show.S01E04-E03").is_none());
     }
