@@ -285,12 +285,14 @@ fn explicit_marker_disagreements(raw:&str,parsed:&Value)->Vec<Value>{
             "signal":"explicit_codec_disagrees","severity":"review",
             "message":"Parsed codec differs from a single explicit release marker"}));
     }
-    let quality=t.iter().filter_map(|v|match v.as_str(){
+    let mut quality=t.iter().filter_map(|v|match v.as_str(){
         "webdl"=>Some("webdl".to_owned()),
         "webrip"=>Some("webrip".to_owned()),
         "bluray"=>Some("bluray".to_owned()),
         "hdtv"=>Some("hdtv".to_owned()),_=>None
     }).collect::<Vec<_>>();
+    if pair(&t,"web","dl"){quality.push("webdl".to_owned());}
+    if pair(&t,"blu","ray"){quality.push("bluray".to_owned());}
     if let Some(marker)=unique(quality)
         &&let Some(value)=parsed["quality"].as_str()
         &&!value.is_empty()
@@ -354,6 +356,24 @@ fn misassigned_coordinates(raw:&str,parsed:&Value)->Vec<Value>{
             "message":"The season marker may have been assigned to episodes"
         }));
     }
+    // Completely incorrect nonempty coordinates are also worth review.
+    // The raw convention is independent evidence, not a writable label.
+    if got_season!=season && !season_from_episode {
+        out.push(json!({
+            "code":"field_incorrect_season","field":"seasons",
+            "confidence":"review","signal":"explicit_season_disagrees",
+            "severity":"review",
+            "message":"Parser season disagrees with an unambiguous season marker"
+        }));
+    }
+    if got_episode!=episode && !episode_from_season {
+        out.push(json!({
+            "code":"field_incorrect_episode","field":"episodes",
+            "confidence":"review","signal":"explicit_episode_disagrees",
+            "severity":"review",
+            "message":"Parser episode disagrees with an unambiguous episode marker"
+        }));
+    }
     out
 }
 /// Skip suspicious canonical outputs when training the advisory online model.
@@ -367,6 +387,7 @@ pub fn canonical_for_training(parsed:&Value,flags:&[Value])->Value{
         if !(code.starts_with("field_overextracted_")
             ||code.starts_with("field_underextracted_")
             ||code.starts_with("field_mismatch_")
+            ||code.starts_with("field_incorrect_")
             ||code.starts_with("field_misassigned_")){continue;}
         if code=="field_misassigned_season_episode" {
             map.remove("seasons");
@@ -633,6 +654,19 @@ mod tests{
             assert!(!issues.iter().any(|s|s.starts_with("field_misassigned_")),
                 "ambiguous ranges/packs cannot prove cross-field assignment");
         }
+    }
+    #[test]
+    fn rejects_other_incorrect_explicit_coordinates_without_guessing(){
+        let issues=codes("Series.S02E07.1080p",
+            json!({"title":"Series","seasons":[9],"episodes":[99]}),
+            Value::Null);
+        assert!(issues.contains(&"field_incorrect_season".into()));
+        assert!(issues.contains(&"field_incorrect_episode".into()));
+        let release=json!({"title":"Series","seasons":[9],"episodes":[99]});
+        let diagnostic=audit("Series.S02E07.1080p",&release,&Value::Null);
+        let clean=canonical_for_training(&release,&diagnostic);
+        assert!(clean.get("seasons").is_none());
+        assert!(clean.get("episodes").is_none());
     }
     #[test]
     fn does_not_use_suspicious_field_values_as_training_truth(){
