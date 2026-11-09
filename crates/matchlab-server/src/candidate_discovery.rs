@@ -14,6 +14,23 @@ const MAX_RAW_BYTES:usize=240;
 const MAX_TOKENS:usize=12;
 const MIN_RANK:f32=0.50;
 static STATUS:OnceLock<RwLock<Value>>=OnceLock::new();
+static FIELD_CATALOG:OnceLock<Vec<String>>=OnceLock::new();
+/// Discover candidates for every field supported by the original MatchLab
+/// parser, rather than hardcoding a few technical labels. This catalog is
+/// read once on the background worker; model scores are review ranks only.
+fn parser_fields()->&'static Vec<String>{
+    FIELD_CATALOG.get_or_init(||{
+        let mut fields=matchlab_parser::existing_regex_rules().into_iter()
+            .filter(|row|row["kind"]=="regex")
+            .filter_map(|row|row["field"].as_str().map(str::to_owned))
+            .filter(|name|!name.is_empty()&&name.len()<=40)
+            .collect::<Vec<_>>();
+        fields.sort();
+        fields.dedup();
+        fields
+    })
+}
+
 pub struct Budget{candidates:i64,examples:i64,evictions:u8}
 fn hash(raw:&str)->String{format!("{:x}",Sha256::digest(raw.as_bytes()))}
 fn valid_name(raw:&str)->bool{
@@ -108,7 +125,7 @@ pub fn observe(db:&Connection,title:&str,parsed:&Value,
         // Learning predictions are only for review prioritization. The
         // actual value and regex are never used in a parser or matcher.
         let mut ranked:Option<(&str,f32)>=None;
-        for field in ["resolution","codec","quality","audio","hdr"]{
+        for field in parser_fields(){
             if let Some(score)=model.score(field,&marker,title)
                 && score>=MIN_RANK
                 && ranked.is_none_or(|(_,best)|score>best){
@@ -156,6 +173,7 @@ pub fn publish(db:&Connection)->Result<(),String>{
     let report=json!({"review_only":true,"unknown_candidate_groups":pending,
         "review_candidates_by_field":by_field,
         "candidate_rule_activation":false,
+        "original_parser_fields_considered":parser_fields().len(),
         "raw_markers_never_in_status_or_community_export":true});
     let slot=STATUS.get_or_init(||RwLock::new(Value::Null));
     if let Ok(mut guard)=slot.write(){*guard=report;}
@@ -169,6 +187,17 @@ pub fn status()->Value{
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn discovery_catalog_includes_every_original_parser_field(){
+        let fields=parser_fields();
+        assert!(fields.len()>35,"expected original generated field schema");
+        for name in ["title","year","group","edition","network","languages",
+            "seasons","episodes","audio","codec","quality","site","date",
+            "release_types","extension"] {
+            assert!(fields.iter().any(|field|field==name),
+                "missing training candidate field: {name}");
+        }
+    }
     #[test]
     fn discovers_only_trailing_unrecognized_tokens(){
         assert_eq!(unknown_tokens("Movie.2160p.X266.WEB-DL"),
