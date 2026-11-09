@@ -4,7 +4,7 @@
 //! only variant must retain the COMPLETE result, or it is not a safe rule.
 //! No network, inference or ML weights execute on the parsing hot path.
 use matchlab_parser::{HandlerAddition,HandlerCorrection,ParseContext};
-use rusqlite::{params,Connection,OptionalExtension};
+use rusqlite::{params,Connection};
 use serde_json::{json,Value};
 use sha2::{Digest,Sha256};
 use std::collections::{BTreeMap,BTreeSet};
