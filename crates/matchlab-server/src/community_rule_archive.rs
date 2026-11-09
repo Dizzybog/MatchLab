@@ -25,6 +25,8 @@ fn current(db:&Connection,meta:Option<&Connection>)->Vec<Value>{
         .unwrap_or_default());
     rules.extend(crate::corrective_learning::community_proposals(db)
         .unwrap_or_default());
+    rules.extend(crate::general_learning::community_proposals(db)
+        .unwrap_or_default());
     rules.extend(crate::candidate_discovery::community_proposals(db)
         .unwrap_or_default());
     if let Some(meta)=meta {
