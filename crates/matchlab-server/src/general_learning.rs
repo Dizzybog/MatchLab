@@ -15,6 +15,9 @@ const MIN_FIXES:usize=4;
 const MIN_IDENTITIES:usize=2;
 const MAX_ACTIVE:usize=48;
 const MAX_EXAMPLES:i64=16_384;
+fn capacity()->i64{
+    MAX_EXAMPLES.min(crate::learning_cache::training_max_examples())
+}
 const MAX_CANDIDATES:usize=24;
 const MAX_TESTS:usize=120;
 const NEGATIVES:&[&str]=&[
@@ -273,13 +276,10 @@ pub fn count(db:&Connection)->Result<i64,String>{
 }
 fn insert(db:&Connection,e:&Evidence)->Result<bool,String>{
     let sample=hash(&format!("{}:{}",e.source_release,e.variant_release));
-    let changed=db.execute("INSERT INTO ml_general_examples(
+    let changed=db.execute("INSERT OR IGNORE INTO ml_general_examples(
         rule_key,example_hash,identity_hash,field,source_index,pattern,mode,
         source_release,variant_release,expected,source_build,observed_at
-    )VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,strftime('%s','now'))
-    ON CONFLICT(rule_key,example_hash) DO UPDATE SET
-        identity_hash=excluded.identity_hash,expected=excluded.expected,
-        source_build=excluded.source_build,observed_at=excluded.observed_at",
+    )VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,strftime('%s','now'))",
         params![e.key,sample,e.identity,e.field,e.source_index as i64,
             e.pattern,e.mode,e.source_release,e.variant_release,
             e.expected.to_string(),build()]
@@ -288,10 +288,22 @@ fn insert(db:&Connection,e:&Evidence)->Result<bool,String>{
 }
 pub fn observe(db:&Connection,name:&str,ctx:&ParseContext,
     budget:&mut i64)->Result<(),String>{
-    if *budget>=MAX_EXAMPLES{return Ok(());}
+    if *budget>=capacity(){
+        // A finite training budget must not permanently stop the learner.
+        // Never evict independently verified active rule evidence.
+        let removed=db.execute("DELETE FROM ml_general_examples WHERE
+            (rule_key,example_hash) IN (
+                SELECT rule_key,example_hash FROM ml_general_examples
+                WHERE rule_key NOT IN (
+                    SELECT rule_key FROM ml_general_verified_rules)
+                ORDER BY observed_at,example_hash LIMIT 64
+            )",[]).map_err(|e|e.to_string())? as i64;
+        *budget=budget.saturating_sub(removed);
+        if *budget>=capacity(){return Ok(());}
+    }
     let evidence=derive(name,ctx);
     for e in evidence{
-        if *budget>=MAX_EXAMPLES{break;}
+        if *budget>=capacity(){break;}
         if insert(db,&e)?{*budget+=1;}
     }
     OBSERVED.store(*budget as u64,Ordering::Relaxed);
@@ -533,6 +545,7 @@ pub fn status()->Value{
         "catalogue_handler_counts":families,
         "catalogue_removing_handlers":removing,
         "candidate_limit":MAX_CANDIDATES,
+        "configured_training_example_limit":capacity(),
         "active_rule_limit":MAX_ACTIVE,
         "active_rules_by_field":fields,
         "active_count":handler_additions().len()+handler_corrections().len(),
