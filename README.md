@@ -79,12 +79,12 @@ services:
     image: ghcr.io/dizzybog/matchlab:latest
     container_name: matchlab
     restart: unless-stopped
-    cpus: 1.0
+    cpus: 2.0
     mem_limit: 6g
     pids_limit: 256
     environment:
       RUST_LOG: matchlab_server=info
-      MATCHLAB_MAX_CONCURRENT_MATCHES: "40"
+      MATCHLAB_MAX_CONCURRENT_MATCHES: "2"
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
@@ -111,7 +111,7 @@ On first startup, MatchLab downloads **seven public metadata feeds** and builds 
 
 For updates, run `docker compose pull && docker compose up -d`.
 
-> **Resource limits:** The example restricts MatchLab to **1 CPU, 6 GB RAM, and 256 processes/threads**, with up to **40 simultaneous matching operations**. These are starting values, not verified minimum requirements. Increase the RAM/CPU limits if full metadata imports exceed them. Disk space must cover both the active and incoming metadata/index generations.
+> **Resource limits:** The example restricts MatchLab to **2 CPUs, 6 GB RAM, and 256 processes/threads**, with up to **2 simultaneous matching operations**. These are conservative starting values, not verified minimum requirements. Increase the RAM/CPU limits if full metadata imports exceed them. Disk space must cover both the active and incoming metadata/index generations.
 
 ## HTTP API
 
@@ -123,7 +123,8 @@ MatchLab listens on port **8765**. Both `GET` and `POST` accept `title` (or `t_t
 | `GET /alias`, `POST /alias` | Exact title/ID lookup across IMDb, AniDB, TVDB, MAL, AniList and Kitsu |
 | `GET /episode/resolve`, `POST /episode/resolve` | Verified IMDb season/episode ↔ AniDB episode conversion |
 | `GET /parse`, `POST /parse` | Parse the full release name without metadata lookups |
-| `POST /debug/match` | Show candidate ranking and episode-mapping details |
+| `POST /debug/match` | **Same strict production identity and ranking as `/match`**, with diagnostics and verified range segments |
+| `POST /api/dashboard/diagnose` | Permissive title exploration for the built-in interactive dashboard (not for integrations) |
 | `GET /api/debug/parsing/status` | Authenticated read-only history cursor and retention information |
 | `GET /api/debug/parsing` | Authenticated incremental parser diagnostics and anomaly hints |
 | `GET /api/debug/parsing/{id}` | Authenticated full diagnostics for one retained request |
@@ -150,7 +151,7 @@ Example response:
 }
 ```
 
-**Strict production year on `/match` only:** Parsed torrent years must match the IMDb
+**Strict production year on `/match` and `/debug/match`:** Parsed torrent years must match the IMDb
 production year **exactly**, not within ±1. When the year is missing or
 different, a candidate requires a parsed series season, linked anime
 identity, or the parser's explicit **quality** field (for example WEB-DL,
@@ -160,11 +161,11 @@ episode number can default to a tentative first-season SID when the
 crosswalk cannot resolve it, but never claim an unverified ASID.
 Verified absolute numbering and named anime parts take priority.
 
-**Dashboard behavior:** The dashboard tester (`POST /debug/match`) intentionally
+**Dashboard behavior:** The dashboard tester (`POST /api/dashboard/diagnose`) intentionally
 does not apply the public API's production-year/quality eligibility gate.
 Entering `Fight Club` alone will still return ranked title matches without
 requiring a year, season, anime identity or release-quality tag. The public
-`GET/POST /match` endpoints retain all the strict checks.
+`GET/POST /match` and `POST /debug/match` endpoints retain all the strict checks.
 
 `/match` **always returns exactly these four fields**. Movies use the IMDb title ID in both SID fields; TV episodes add season/episode coordinates. Verified anime episodes may also include AniDB IDs. If nothing can be matched reliably, the corresponding values are `null`.
 
@@ -243,6 +244,10 @@ IMDb basics, alternative titles, episodes, ratings, animeApi, Anime-Lists, and A
 | `MATCHLAB_DEBUG_API_TOKEN` | Unset (disabled) | Enable authenticated, read-only parsing diagnostics with a random token of at least 32 bytes |
 | `MATCHLAB_METADATA_URLS` | Built-in HTTPS feeds | Optional seven-source override; legacy six-source lists are supported |
 | `RUST_LOG` | `matchlab_server=info` | Logging verbosity |
+
+**Request latency:** Request history is now submitted to a bounded, single-writer background queue so SQLite metric locks never delay `/match` or `/debug/match`. When the queue is full, only telemetry is dropped (with a throttled warning); the matched identity and HTTP response are unaffected. `/debug/match` and `/match` now apply identical strict candidate filtering. Do not use the intentionally loose dashboard-only endpoint for StremThru identity validation.
+
+**CPU and timeout tuning:** On a CPU-limited ARM host, keep `MATCHLAB_MAX_CONCURRENT_MATCHES` close to the service CPU quota (for example `2` match operations with `cpus: 2.0`). Previously the example configured 40 matching operations with only one CPU, which could cause excessive contention and client timeouts. StremThru's client timeout is controlled by StremThru and cannot be extended by MatchLab; check the server-side CPU quota and its 10-second client deadline before increasing concurrency.
 
 **History and statistics retention:** The dashboard keeps at most **1,000 latest individual requests** (including full diagnostics), regardless of age. Its **Requests, Matched, Unmatched, Errors, and average latency** statistics cover all requests from the **last 14 days (UTC, minute precision)**, not just those 1,000 rows. A separate SQLite `request_minute_stats` table accumulates counters by minute; the dashboard activity chart groups them into daily totals. During the first startup after upgrading, the last 14 days are backfilled from any existing legacy request history **before** old request rows are removed. An indexed SQLite trigger evicts only the oldest request detail row on each insert once the 1,000-row cap is reached; it never alters aggregate statistics. A background maintenance task additionally runs at startup and every five minutes to remove bulk legacy history and expire aggregate buckets older than 14 days, off the asynchronous HTTP executor. This does not modify IMDb metadata. SQLite generally reuses freed pages instead of immediately shrinking the existing file; run `VACUUM` during a maintenance window once after upgrading if reclaiming disk space is important. Back up a live SQLite database using a consistent backup method, not a direct file copy.
 

@@ -2,7 +2,12 @@
 //! The metadata database is separate and is never modified here.
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
-use std::{path::Path, time::Duration};
+use std::{
+    path::{Path,PathBuf},
+    sync::{mpsc::{sync_channel,SyncSender,TrySendError},OnceLock,
+           atomic::{AtomicUsize,Ordering}},
+    time::Duration,
+};
 
 const MAX_HISTORY: i64 = 1_000;
 const PRUNE_BATCH: i64 = 1_000;
@@ -132,6 +137,68 @@ pub fn record(
     })();
     if let Err(error) = result {
         tracing::warn!(%error, "could not persist matching history and statistics");
+    }
+}
+
+// History is best-effort telemetry. Never block matching requests on the
+// history SQLite writer's busy timeout: a busy metrics database used to
+// consume most of StremThru's 10-second client deadline.
+struct HistoryEvent {
+    path:PathBuf,
+    title:String,
+    status:String,
+    selected:Option<Value>,
+    details:Value,
+    duration_ms:u64,
+}
+const HISTORY_QUEUE_SIZE:usize=128;
+static HISTORY_QUEUE:OnceLock<Option<SyncSender<HistoryEvent>>>=OnceLock::new();
+static HISTORY_DROPPED:AtomicUsize=AtomicUsize::new(0);
+
+/// Hand the completed diagnostic to one bounded background writer. A full
+/// queue drops only telemetry, never the verified SID/ASID response. The
+/// writer serializes history transactions and cannot block Tokio or matching
+/// worker threads.
+pub fn record_async(
+    path:&Path,title:&str,status:&str,
+    selected:Option<&Value>,details:&Value,duration_ms:u64,
+){
+    let Some(tx)=HISTORY_QUEUE.get_or_init(||{
+        let (tx,rx)=sync_channel::<HistoryEvent>(HISTORY_QUEUE_SIZE);
+        let spawned=std::thread::Builder::new()
+            .name("matchlab-history".into()).spawn(move||{
+                while let Ok(item)=rx.recv(){
+                    record(&item.path,&item.title,&item.status,
+                        item.selected.as_ref(),&item.details,item.duration_ms);
+                }
+            });
+        if let Err(error)=spawned{
+            tracing::warn!(%error,"history writer unavailable");
+            None
+        }else{Some(tx)}
+    }).as_ref()else{return};
+    let event=HistoryEvent{
+        path:path.to_path_buf(),
+        title:title.to_owned(),
+        status:status.to_owned(),
+        selected:selected.cloned(),
+        details:details.clone(),
+        duration_ms,
+    };
+    match tx.try_send(event){
+        Ok(())=>{},
+        Err(TrySendError::Full(_))=>{
+            let n=HISTORY_DROPPED.fetch_add(1,Ordering::Relaxed)+1;
+            if n==1 || n%128==0 {
+                tracing::warn!(dropped=n,"history queue full; skipping telemetry, not match result");
+            }
+        },
+        Err(TrySendError::Disconnected(_))=>{
+            let n=HISTORY_DROPPED.fetch_add(1,Ordering::Relaxed)+1;
+            if n==1 || n%128==0{
+                tracing::warn!(dropped=n,"history writer unavailable; skipping telemetry");
+            }
+        },
     }
 }
 

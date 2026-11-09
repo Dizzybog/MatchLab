@@ -1393,21 +1393,21 @@ fn enrich_selected_anime_episode(
     Ok(())
 }
 
-fn diagnose_logged(state:&AppState,req:&MatchRequest,debug:bool)->Result<Diagnostic,String>{
+fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result<Diagnostic,String>{
     let start=Instant::now();
-    let result=if debug{
-        diagnose_with_policy(&state.db,req,MatchPolicy::DashboardDiagnostic)
-    }else{
+    let result=if matches!(policy,MatchPolicy::PublicApi){
         diagnose(&state.db,req)
+    }else{
+        diagnose_with_policy(&state.db,req,policy)
     };
     let elapsed=start.elapsed().as_millis() as u64;
     match &result {
         Ok(d)=>{
             let status=if d.selected.is_some(){"matched"}else{"unmatched"};
             let details=serde_json::to_value(d).unwrap_or(Value::Null);
-            dashboard_history::record(&state.history,&req.title,status,d.selected.as_ref(),&details,elapsed);
+            dashboard_history::record_async(&state.history,&req.title,status,d.selected.as_ref(),&details,elapsed);
         }
-        Err(error)=>dashboard_history::record(&state.history,&req.title,"error",None,&json!({"error":error}),elapsed),
+        Err(error)=>dashboard_history::record_async(&state.history,&req.title,"error",None,&json!({"error":error}),elapsed),
     }
     result
 }
@@ -1541,6 +1541,54 @@ fn public_match_response(selected: Option<Value>) -> Value {
         else if let (Some(se),Some(ep))=(end_season,end_episode){
             json!(format!("{imdb}:{se}:{ep}"))
         }else if has_range{Value::Null}else{json!(imdb)};
+    // An explicit second season without a corresponding last episode is
+    // *not* a complete multi-season range. Previously the start episode
+    // was silently reused as the last episode, or the end degraded to a
+    // bare IMDb ID, creating invalid or misleading SID endpoints. Keep
+    // only the proven start; no range-wide ASID can be inferred.
+    let missing_cross_season_end=matches!((start_season,end_season),
+        (Some(start),Some(end)) if end!=start)
+        && winner["episode_end"].as_i64().is_none();
+    if missing_cross_season_end {
+        return json!({"sid_start":sid_start,"sid_end":null,
+            "asid_start":null,"asid_end":null});
+    }
+    // StremThru accepts a pair only when both sides have the same ID,
+    // both are either bare titles or episode coordinates, and coordinate
+    // end is not before coordinate start. A malformed range must never
+    // poison an entire torrent's deferred mapping batch.
+    let sid_components=|raw:&str|->Option<(i64,i64)>{
+        let mut parts=raw.split(':');
+        if parts.next()!=Some(imdb){return None;}
+        let season=parts.next()?.parse::<i64>().ok()?;
+        let episode=parts.next()?.parse::<i64>().ok()?;
+        if parts.next().is_some() || !valid_sid_coordinate(season,episode){
+            return None;
+        }
+        Some((season,episode))
+    };
+    if let (Some(start),Some(end))=(sid_start.as_str(),sid_end.as_str()){
+        let start_coords=sid_components(start);
+        let end_coords=sid_components(end);
+        let inconsistent=if start==imdb || end==imdb{
+            start!=end
+        }else{
+            match (start_coords,end_coords){
+                (Some(a),Some(b))=>b<a,
+                _=>true,
+            }
+        };
+        if inconsistent{
+            // Retain a verified range start if the end is missing/bad.
+            // Do not infer an end episode or attach a potentially
+            // mismatched ASID to this partial range.
+            let (safe_start,safe_end)=if has_range && start_coords.is_some(){
+                (sid_start,Value::Null)
+            }else{(json!(imdb),json!(imdb))};
+            return json!({"sid_start":safe_start,"sid_end":safe_end,
+                "asid_start":null,"asid_end":null});
+        }
+    }
     // Public API is a trust boundary: even a stale or malformed crosswalk
     // must never publish out-of-range ASIDs that make consumers retry a
     // whole batch. A valid IMDb SID survives without the invalid ASID.
@@ -1607,20 +1655,28 @@ async fn parse_response(req:MatchRequest)->(StatusCode,Json<Value>){
 /// Bound CPU-heavy matching before it enters Tokio's blocking thread pool.
 /// This preserves full candidate ranking while protecting the process against
 /// request bursts during metadata imports and index-generation changes.
-async fn run_match(state: AppState, req: MatchRequest, debug:bool)
+async fn run_match(state: AppState, req: MatchRequest, policy:MatchPolicy)
     -> Result<Result<Diagnostic,String>,String> {
     let permit=state.match_slots.clone().acquire_owned().await
         .map_err(|e|e.to_string())?;
     tokio::task::spawn_blocking(move ||{
         let _permit=permit;
-        diagnose_logged(&state,&req,debug)
+        diagnose_logged(&state,&req,policy)
     }).await.map_err(|e|e.to_string())
 }
 
-async fn match_response(state:AppState,req:MatchRequest,debug:bool)
+// The dashboard intentionally permits loose title-only diagnostics, but a
+// background service must be able to inspect the *same* production decision
+// as /match. A separate strict endpoint avoids changing dashboard behavior.
+fn request_policy(debug:bool,strict:bool)->MatchPolicy{
+    if debug && !strict{MatchPolicy::DashboardDiagnostic}
+    else{MatchPolicy::PublicApi}
+}
+
+async fn match_response(state:AppState,req:MatchRequest,debug:bool,strict:bool)
     -> (StatusCode,Json<Value>){
     if !matching_available(&state){return indexing_response();}
-    match run_match(state,req,debug).await{
+    match run_match(state,req,request_policy(debug,strict)).await{
         Ok(Ok(d))=>{
             let value=if debug{
                 serde_json::to_value(d).unwrap_or(Value::Null)
@@ -1636,18 +1692,34 @@ async fn match_response(state:AppState,req:MatchRequest,debug:bool)
 
 async fn match_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
     -> (StatusCode,Json<Value>){
-    match_response(state,req,false).await
+    match_response(state,req,false,false).await
 }
 
 /// GET /match?title=...&year=...
 async fn get_match_request(State(state):State<AppState>,Query(req):Query<MatchRequest>)
     -> (StatusCode,Json<Value>){
-    match_response(state,req,false).await
+    match_response(state,req,false,false).await
 }
 
+// Integration diagnostics and public /match MUST share the same identity
+// selection policy. The dashboard's intentionally permissive search has a
+// separate endpoint so it cannot corrupt StremThru crosswalk validation.
 async fn debug_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
     -> (StatusCode,Json<Value>){
-    match_response(state,req,true).await
+    match_response(state,req,true,true).await
+}
+
+async fn dashboard_diagnose_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
+    -> (StatusCode,Json<Value>){
+    match_response(state,req,true,false).await
+}
+
+/// The integration-safe debug endpoint uses exactly the same selection
+/// policy as /match, but returns the selected range segments as diagnostics.
+/// Do not use the permissive dashboard policy for cross-request verification.
+async fn strict_debug_request(State(state):State<AppState>,Json(req):Json<MatchRequest>)
+    -> (StatusCode,Json<Value>){
+    match_response(state,req,true,true).await
 }
 
 #[tokio::main]
@@ -1885,6 +1957,8 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         .route("/episode/resolve",get(episode_conversion::get_resolve).post(episode_conversion::post_resolve))
         .route("/parse",get(get_parse_request).post(parse_request))
         .route("/debug/match",post(debug_request))
+        .route("/debug/match/strict",post(strict_debug_request))
+        .route("/api/dashboard/diagnose",post(dashboard_diagnose_request))
         .with_state(AppState{db:Arc::new(PathBuf::from(db)),history:Arc::new(PathBuf::from(history_db)),
             match_slots:Arc::new(Semaphore::new(max_matches)),
             index_phase:index_state});
@@ -2756,20 +2830,34 @@ mod tests {
             let request=||MatchRequest{
                 title:title.into(),year:None,series:None};
             let (status,Json(debug))=match_response(
-                state.clone(),request(),true).await;
+                state.clone(),request(),true,false).await;
             assert_eq!(status,StatusCode::OK,"{title}");
             assert_eq!(debug["selected"]["imdb_id"],"tt0137523","{title}");
             let (status,Json(api))=match_response(
-                state.clone(),request(),false).await;
+                state.clone(),request(),false,false).await;
             assert_eq!(status,StatusCode::OK,"{title}");
             assert!(api["sid_start"].is_null(),
                 "public API must enforce production-year signal for {title}");
+            // Regression: /debug/match must apply exactly the same
+            // production eligibility filter as /match. The separate
+            // dashboard route above remains intentionally permissive.
+            let (debug_status,Json(integration_debug))=debug_request(
+                State(state.clone()),Json(request())).await;
+            assert_eq!(debug_status,StatusCode::OK,"{title}");
+            assert!(integration_debug["selected"].is_null(),
+                "debug published a candidate excluded by /match for {title}: {integration_debug}");
         }
-        let (status,Json(api))=match_response(state,
+        let (status,Json(api))=match_response(state.clone(),
             MatchRequest{title:"Fight.Club.1999.mkv".into(),
-                year:None,series:None},false).await;
+                year:None,series:None},false,false).await;
         assert_eq!(status,StatusCode::OK);
         assert_eq!(api["sid_start"],"tt0137523");
+        let (status,Json(debug))=debug_request(State(state),Json(MatchRequest{
+            title:"Fight.Club.1999.mkv".into(),year:None,series:None,
+        })).await;
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(debug["selected"]["imdb_id"],"tt0137523");
+        assert_eq!(api["sid_start"],debug["selected"]["imdb_id"]);
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
         std::fs::remove_file(&history).unwrap();
@@ -2801,7 +2889,7 @@ mod tests {
         assert_eq!(ready["status"],"indexing");
         let (status,Json(matched))=match_response(state,MatchRequest{
             title:"One Piece S21E03".into(),year:None,series:None
-        },false).await;
+        },false,false).await;
         assert_eq!(status,StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(matched["status"],"indexing");
         assert!(matched["error"].as_str().unwrap().contains("indexing"));
@@ -3397,6 +3485,41 @@ mod tests {
         assert_eq!(ordinary["sid_start"],"tt1234567:1:1");
         assert_eq!(ordinary["sid_end"],"tt1234567:1:12");
     }
+    #[test]
+    fn public_sid_endpoints_never_publish_reversed_or_mixed_shapes(){
+        let reversed=public_match_response(Some(json!({
+            "imdb_id":"tt1234567","category":"series","season":3,
+            "episode":8,"season_end":2,"episode_end":9,
+            "episode_range":{"complete":true,"segments":[]}
+        })));
+        assert_eq!(reversed["sid_start"],"tt1234567:3:8");
+        assert!(reversed["sid_end"].is_null());
+        assert!(reversed["asid_start"].is_null());
+        let mixed=public_match_response(Some(json!({
+            "imdb_id":"tt1234567","category":"series","season":2,
+            "episode":8,"season_end":3,"anime":{"asid":"2369:8"}
+        })));
+        assert_eq!(mixed["sid_start"],"tt1234567:2:8");
+        assert!(mixed["sid_end"].is_null());
+        assert!(mixed["asid_start"].is_null());
+        assert!(mixed["asid_end"].is_null());
+        let valid=public_match_response(Some(json!({
+            "imdb_id":"tt1234567","category":"series","season":2,
+            "episode":8,"season_end":3,"episode_end":2
+        })));
+        assert_eq!(valid["sid_start"],"tt1234567:2:8");
+        assert_eq!(valid["sid_end"],"tt1234567:3:2");
+    }
+
+    #[test]
+    fn stremthru_strict_debug_matches_production_policy(){
+        assert!(matches!(request_policy(false,false),MatchPolicy::PublicApi));
+        assert!(matches!(request_policy(true,true),MatchPolicy::PublicApi));
+        assert!(matches!(request_policy(true,false),MatchPolicy::DashboardDiagnostic));
+        // /debug/match calls with (debug=true,strict=true), while the
+        // dashboard's independent interactive route uses (true,false).
+    }
+
     #[test]
     fn match_response_has_only_four_fields() {
         let movie=public_match_response(Some(json!({"imdb_id":"tt1234567",
