@@ -70,7 +70,11 @@ fn pattern(flag:&Value,parsed:&Value,selected:&Value)->Option<(String,String)>{
         let (p,s)=(parsed["year"].as_i64()?,selected["year"].as_i64()?);
         if !(1880..=2100).contains(&p)||!(1880..=2100).contains(&s){return None;}
         format!("year_delta:{}",p-s)
-    }else if code.starts_with("field_missing_"){
+    }else if code.starts_with("field_missing_")
+        ||code.starts_with("field_overextracted_")
+        ||code.starts_with("field_underextracted_"){
+        // Stable, bounded anomaly kind only. Never store a private fragment
+        // of the original title as a rule label.
         flag["signal"].as_str().unwrap_or("unknown").to_owned()
     }else{
         let imdb=selected["imdb_id"].as_str()?;
@@ -144,9 +148,12 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
             continue;
         };
         let base=Value::Object(canonical);
-        // Every canonical parser field can train the shadow ranker;
-        // promotions remain governed by independent field validators.
-        model.observe_canonical_fields(&tx,&title,&base)?;
+        // Flag missing, over- and underextraction *before* treating
+        // canonical parser values as model training positives.
+        let flags=crate::field_audit::audit(
+            &title,&base,&details["selected"]);
+        let clean=crate::field_audit::canonical_for_training(&base,&flags);
+        model.observe_canonical_fields(&tx,&title,&clean)?;
         for (field,signal) in crate::tv_learning::observe(
             &tx,&title,&base,&mut tv_evidence)? {
             model.observe(&tx,&title,&field,&signal)?;
@@ -160,8 +167,6 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
         }
         crate::candidate_discovery::observe(&tx,&title,&base,
             &model,&mut discovery)?;
-        let flags=crate::field_audit::audit(
-            &title,&base,&details["selected"]);
         for flag in flags{
             let Some((code,group))=pattern(&flag,&base,&details["selected"])else{continue};
             if samples>=max_examples(){continue;}
