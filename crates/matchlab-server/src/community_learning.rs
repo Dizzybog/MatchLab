@@ -4,7 +4,8 @@ use axum::Json;
 use rusqlite::{params,Connection,OpenFlags,OptionalExtension};
 use serde_json::{json,Value};
 use sha2::{Digest,Sha256};
-use std::{env,fs,path::{Path,PathBuf},time::{Duration,SystemTime,UNIX_EPOCH}};
+use std::{env,fs,path::{Path,PathBuf},time::{Duration,SystemTime,UNIX_EPOCH},
+    sync::atomic::{AtomicU8,Ordering}};
 
 const REPO:&str="Dizzybog/MatchLab";
 const PROTOCOL:u32=3;
@@ -20,6 +21,38 @@ const MAX_RECEIPT_PAGES:usize=20;
 const MAX_SEEN:i64=50_000;
 const MAX_BODY:usize=16_384;
 const MARKER:&str="<!-- matchlab-community-batch-v3 -->";
+
+/// Startup authentication outcome is shared with the status endpoint. This
+/// never contains credentials or GitHub response bodies.
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+#[repr(u8)]
+enum TokenAuth {
+    NotChecked=0,
+    Authenticated=1,
+    Rejected=2,
+    RepositoryUnavailable=3,
+    NetworkUnavailable=4,
+}
+static TOKEN_AUTH:AtomicU8=AtomicU8::new(TokenAuth::NotChecked as u8);
+impl TokenAuth {
+    fn current()->Self{
+        match TOKEN_AUTH.load(Ordering::Acquire){
+            1=>Self::Authenticated,2=>Self::Rejected,
+            3=>Self::RepositoryUnavailable,4=>Self::NetworkUnavailable,
+            _=>Self::NotChecked,
+        }
+    }
+    fn label(self)->&'static str{
+        match self{
+            Self::NotChecked=>"not_checked",
+            Self::Authenticated=>"authenticated",
+            Self::Rejected=>"rejected",
+            Self::RepositoryUnavailable=>"repository_unavailable",
+            Self::NetworkUnavailable=>"network_unavailable",
+        }
+    }
+}
+
 
 fn now()->u64{
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
@@ -59,7 +92,9 @@ pub async fn status()->Json<Value>{
         local,OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
         .map(|db|crate::community_rule_archive::count(&db)).unwrap_or(0);
     Json(json!({"enabled":opted_in(),"local_learning_enabled":crate::local_learning::active(),
-        "ready":enabled(),
+        "ready":enabled() && TokenAuth::current()==TokenAuth::Authenticated,
+        "token_authentication":TokenAuth::current().label(),
+        "issue_comment_write_permission":"not_verified_until_first_successful_comment",
         "archived_regex_rules":archived,"pending_reports_and_rules":pending,
         "github_confirmed_deliveries":delivered,
         "global_deduplication":"trusted_github_intake_and_persistent_ledger",
@@ -349,6 +384,44 @@ fn request_json(response:reqwest::blocking::Response)->Result<Value,String>{
     let text=response.text().map_err(|e|e.to_string())?;
     serde_json::from_str(&text).map_err(|e|e.to_string())
 }
+/// Validate GitHub credentials without posting public test comments.
+///
+/// An authenticated GET /user verifies the token itself. Reading the real
+/// upstream repository verifies the configured target and Issues availability.
+/// GitHub has no side-effect-free endpoint that proves an arbitrary token can
+/// POST an Issue comment: that permission is confirmed by the first HTTP 201.
+fn classify_token_http(status:reqwest::StatusCode,repository:bool)->TokenAuth{
+    if status==reqwest::StatusCode::UNAUTHORIZED {TokenAuth::Rejected}
+    else if repository && matches!(status,
+        reqwest::StatusCode::FORBIDDEN|reqwest::StatusCode::NOT_FOUND){
+        TokenAuth::RepositoryUnavailable
+    }else{TokenAuth::NetworkUnavailable}
+}
+fn validate_github_token(client:&reqwest::blocking::Client,token:&str)->TokenAuth{
+    let result=client.get("https://api.github.com/user")
+        .bearer_auth(token)
+        .header("Accept","application/vnd.github+json").send();
+    let Ok(result)=result else{return TokenAuth::NetworkUnavailable;};
+    if !result.status().is_success(){
+        return classify_token_http(result.status(),false);
+    }
+    let Ok(user)=result.json::<Value>()else{return TokenAuth::NetworkUnavailable;};
+    if !user["login"].as_str().is_some_and(|name|!name.is_empty()){
+        return TokenAuth::NetworkUnavailable;
+    }
+    let result=client.get(format!("https://api.github.com/repos/{REPO}"))
+        .bearer_auth(token)
+        .header("Accept","application/vnd.github+json").send();
+    let Ok(result)=result else{return TokenAuth::NetworkUnavailable;};
+    if !result.status().is_success(){
+        return classify_token_http(result.status(),true);
+    }
+    let Ok(repo)=result.json::<Value>()else{return TokenAuth::NetworkUnavailable;};
+    if repo["full_name"].as_str()!=Some(REPO) || repo["has_issues"]!=true{
+        return TokenAuth::RepositoryUnavailable;
+    }
+    TokenAuth::Authenticated
+}
 // Older official source revisions are allowed: they may still expose bugs
 // not fixed in the latest parser. Eligibility does not mean correctness.
 // Intake independently replays each report using the current source.
@@ -568,7 +641,7 @@ fn cycle(history:&Path,metadata:&Path,storage:&Path,token:&str)->Result<(),Strin
 pub fn start(history:PathBuf,metadata:PathBuf){
     if !enabled(){
         if opted_in(){
-            tracing::warn!("community learning unavailable: requires local ML opt-in, GitHub token and official SHA-stamped build");
+            tracing::warn!("community sharing disabled: local ML, GitHub token and official SHA-stamped build are all required");
         }
         return;
     }
@@ -577,16 +650,44 @@ pub fn start(history:PathBuf,metadata:PathBuf){
     let storage=PathBuf::from(location);
     let Some(token)=github_token()else{return;};
     tokio::spawn(async move{
+        let mut previous=TokenAuth::NotChecked;
         loop{
-            let db=history.clone();
-            let metadata_path=metadata.clone();
-            let local=storage.clone();
+            // Perform a credential check on startup, before sharing attempts,
+            // and re-check periodically for revoked/rotated token or outages.
+            // Never echo token, request headers or GitHub response payloads.
             let key=token.clone();
-            match tokio::task::spawn_blocking(move||cycle(&db,&metadata_path,&local,&key)).await{
-                Ok(Ok(()))=>{},
-                Ok(Err(error))=>tracing::warn!(%error,
-                    "community sharing cycle deferred; pending receipt will be verified before retry"),
-                Err(error)=>tracing::warn!(%error,"community learning worker failed"),
+            let check=tokio::task::spawn_blocking(move||{
+                match github_client(){
+                    Ok(client)=>validate_github_token(&client,&key),
+                    Err(_)=>TokenAuth::NetworkUnavailable,
+                }
+            }).await.unwrap_or(TokenAuth::NetworkUnavailable);
+            TOKEN_AUTH.store(check as u8,Ordering::Release);
+            if check!=previous{
+                match check{
+                    TokenAuth::Authenticated=>tracing::info!(
+                        "community sharing GitHub token valid: authenticated and upstream Issues reachable; comment permission verified on first successful upload"),
+                    TokenAuth::Rejected=>tracing::warn!(
+                        "community sharing GitHub token invalid or revoked (HTTP 401); check MATCHLAB_COMMUNITY_GITHUB_TOKEN"),
+                    TokenAuth::RepositoryUnavailable=>tracing::warn!(
+                        "community sharing authenticated, but upstream repository or Issues unavailable; check repository access"),
+                    TokenAuth::NetworkUnavailable=>tracing::warn!(
+                        "community sharing GitHub token could not be verified; network/API unavailable; will retry"),
+                    TokenAuth::NotChecked=>{},
+                }
+                previous=check;
+            }
+            if check==TokenAuth::Authenticated {
+                let db=history.clone();
+                let metadata_path=metadata.clone();
+                let local=storage.clone();
+                let key=token.clone();
+                match tokio::task::spawn_blocking(move||cycle(&db,&metadata_path,&local,&key)).await{
+                    Ok(Ok(()))=>{},
+                    Ok(Err(error))=>tracing::warn!(%error,
+                        "community sharing cycle deferred; pending receipt will be verified before retry"),
+                    Err(error)=>tracing::warn!(%error,"community learning worker failed"),
+                }
             }
             tokio::time::sleep(Duration::from_secs(POLL_SECS)).await;
         }
@@ -595,6 +696,25 @@ pub fn start(history:PathBuf,metadata:PathBuf){
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn token_validation_classifies_authentication_and_repository_failures(){
+        use reqwest::StatusCode;
+        assert_eq!(classify_token_http(StatusCode::UNAUTHORIZED,false),
+            TokenAuth::Rejected);
+        assert_eq!(classify_token_http(StatusCode::UNAUTHORIZED,true),
+            TokenAuth::Rejected);
+        assert_eq!(classify_token_http(StatusCode::FORBIDDEN,true),
+            TokenAuth::RepositoryUnavailable);
+        assert_eq!(classify_token_http(StatusCode::NOT_FOUND,true),
+            TokenAuth::RepositoryUnavailable);
+        // A rate limit or GitHub outage is not a revoked credential.
+        assert_eq!(classify_token_http(StatusCode::TOO_MANY_REQUESTS,false),
+            TokenAuth::NetworkUnavailable);
+        assert_eq!(classify_token_http(StatusCode::SERVICE_UNAVAILABLE,true),
+            TokenAuth::NetworkUnavailable);
+        assert_eq!(TokenAuth::Authenticated.label(),"authenticated");
+        assert_eq!(TokenAuth::NotChecked.label(),"not_checked");
+    }
     #[test]
     fn community_upload_requires_two_distinct_opt_ins(){
         for (local,share,token,official,allowed) in [
