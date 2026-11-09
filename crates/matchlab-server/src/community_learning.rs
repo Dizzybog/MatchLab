@@ -48,8 +48,7 @@ pub async fn status()->Json<Value>{
         .unwrap_or_else(|_|"/data/community-learning.sqlite3".into());
     let archived=Connection::open_with_flags(
         local,OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
-        .and_then(|db|db.query_row(
-            "SELECT COUNT(*) FROM community_rule_archive",[],|r|r.get::<_,i64>(0)).ok())
+        .and_then(|db|crate::sharing_archive::stats(&db).ok())
         .unwrap_or(0);
     let sharing_db=Connection::open_with_flags(
         sharing,OpenFlags::SQLITE_OPEN_READ_ONLY).ok();
