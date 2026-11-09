@@ -28,6 +28,9 @@ pub enum ParseError {
 pub struct MatchInfo {
     pub raw_match: String,
     pub match_index: usize,
+    /// Stable position in the bundled generated parser catalogue.
+    /// Functions have no regex provenance.
+    pub source_index: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -120,6 +123,7 @@ enum RuntimeHandlerKind {
 #[derive(Debug, Clone)]
 struct RuntimeHandler {
     name: String,
+    source_index: usize,
     kind: RuntimeHandlerKind,
     transform: TransformSpec,
     options: HandlerOptions,
@@ -293,7 +297,7 @@ impl ParserEngine {
             serde_json::from_str(json_text).map_err(|e| ParseError::Data(e.to_string()))?;
         let mut handlers = Vec::with_capacity(table.handlers.len());
         let mut gate_specs = Vec::with_capacity(table.handlers.len());
-        for mut raw in table.handlers {
+        for (source_index,mut raw) in table.handlers.into_iter().enumerate() {
             // Keep the generated upstream snapshot intact; these are deliberate
             // parser corrections applied before compiling both regexes and gates.
             let guard = if raw.learned_tv_guard { MatchGuard::LearnedTv } else {
@@ -342,6 +346,7 @@ impl ParserEngine {
             };
             handlers.push(RuntimeHandler {
                 name: raw.name,
+                source_index,
                 kind,
                 transform,
                 options,
@@ -644,12 +649,12 @@ impl ParserEngine {
         matched
             .entry(handler.name.clone())
             .or_insert_with(|| MatchInfo {
-                raw_match: if matches!(handler.name.as_str(), "episodes" | "group") {
-                    raw_match.to_owned()
-                } else {
-                    String::new()
-                },
+                // Source marker is retained for the background
+                // all-field rule learner. Only the local SQLite worker
+                // receives it; this never changes parser response JSON.
+                raw_match: raw_match.to_owned(),
                 match_index: m0.start(),
+                source_index: Some(handler.source_index),
             });
         result.insert(handler.name.clone(), transformed);
         Ok(Some(HandlerMatch {
@@ -716,6 +721,7 @@ impl ParserEngine {
                         MatchInfo {
                             raw_match: m0.as_str().to_owned(),
                             match_index: start_index + m0.start(),
+                            source_index: None,
                         },
                     );
                     result.insert(
@@ -2902,6 +2908,19 @@ pub fn parse_title_canonical(
     CANONICAL_ONLY.with(|flag|{
         let previous=flag.replace(true);
         let result=parse_title(name,translate_languages);
+        flag.set(previous);
+        result
+    })
+}
+/// Canonical field provenance for the bounded offline ML worker.
+/// Exposes the source handler index and raw match for independently
+/// testing candidate regexes. API parsing remains unchanged.
+pub fn parse_title_canonical_context(
+    name:&str,translate_languages:bool
+)->Result<ParseContext,ParseError>{
+    CANONICAL_ONLY.with(|flag|{
+        let previous=flag.replace(true);
+        let result=engine_parse_context(name,translate_languages);
         flag.set(previous);
         result
     })
