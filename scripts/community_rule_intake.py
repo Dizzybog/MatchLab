@@ -96,6 +96,7 @@ TV_GRAMMARS={
 }
 FIELD_EPOCH=5
 TV_EPOCH=2
+CORRECTIVE_EPOCH=1
 DISCOVERY_EPOCH=2
 # Must match the restricted native Rust TV regex installed by tv_learning.rs.
 # GitHub receives the exact added patterns, not only the diagnostic grammar.
@@ -172,7 +173,7 @@ def valid_extended_rule(r,sha):
         if r["original_kind"] not in {
             "verified_regex_proposal","learned_field_regex",
             "learned_tv_regex","learned_source_regex_patch",
-            "learned_field_regex_review"
+            "learned_corrective_regex","learned_field_regex_review"
         }:return None
         source=r["source_build"]
         if not isinstance(source,str) or ":" not in source:return None
@@ -228,6 +229,59 @@ def valid_extended_rule(r,sha):
             return None
         if r["canonical_confirmations"]<2:return None
         expected_fp=digest("community-tv:"+family)
+    elif kind=="learned_corrective_regex":
+        # Review-only proposals must be reconstructed from the trusted
+        # native parser catalogue. No arbitrary user-supplied regex runs.
+        expected=common|{"handler_index","field","family","signal",
+            "regex","failure_classes","review_only"}
+        if set(r)!=expected or r["source_build"]!=sha+f":{CORRECTIVE_EPOCH}":
+            return None
+        family=r["family"]
+        if family not in TV_NATIVE_PATTERNS and family!="sxe_range":
+            return None
+        field=r["field"]
+        if field not in {"seasons","episodes"}:return None
+        if family=="sxe_range" and field!="episodes":return None
+        if r["signal"]!=f"corrective_{family}":return None
+        if not bounded_int(r["handler_index"],0,4096):return None
+        if not isinstance(r["failure_classes"],list) or not r["failure_classes"]:
+            return None
+        if (len(r["failure_classes"])>5 or
+            len(r["failure_classes"])!=len(set(r["failure_classes"])) or
+            not set(r["failure_classes"])<={
+                "missing","over","under","misassigned","incorrect"}):
+            return None
+        if r["failure_classes"]!=sorted(r["failure_classes"]):return None
+        if r["canonical_confirmations"]<2 or r["evidence_count"]<12:
+            return None
+        try:
+            source=json.loads(CATALOG.read_text())["handlers"][r["handler_index"]]
+        except (OSError,IndexError,KeyError,ValueError,TypeError):
+            return None
+        if source.get("name")!=field or source.get("kind")!="regex":
+            return None
+        if source.get("options",{}).get("remove") is not False:
+            return None
+        if source.get("options",{}).get("skipIfAlreadyFound") is not True:
+            return None
+        if family=="sxe_range":
+            correct=r"(?i)(?:^|[._ -])s[0-9]{1,3}[._ -]*e([0-9]{1,4}[._ -]*-[._ -]*(?:e(?:p)?)?[._ -]*[0-9]{1,4})(?:$|[._ -])"
+            if source.get("transform")!="range_func":return None
+            is_range="true"
+        else:
+            correct=TV_NATIVE_PATTERNS[family][field]
+            if source.get("transform")!="array(integer)":return None
+            is_range="false"
+        if r["regex"]!=correct:return None
+        if r["verification"] not in {
+            "independent_coordinates_and_regression_replay",
+            "review_only_requires_safe_replay"
+        }:return None
+        if (r["review_only"] is True)!=(
+            r["verification"]=="review_only_requires_safe_replay"):
+            return None
+        expected_fp=digest(f"corrective:{family}:{r['handler_index']}:{is_range}:{correct}")
+
     elif kind=="learned_source_regex_patch":
         expected=common|{"handler_index","field","signal",
             "original_regex","proposed_regex","transform"}
