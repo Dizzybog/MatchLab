@@ -2954,14 +2954,21 @@ fn effective_handler_additions(
         entry["index"].as_u64()==Some(index as u64));
     let corrected=corrections.iter().filter_map(|rule|{
         let source=by_index(rule.source_index)?;
-        Some((source["field"].as_str()?.to_owned(),rule.pattern.as_str()))
+        Some((source["field"].as_str()?.to_owned(),rule.pattern.as_str(),
+            source["transform"].as_str()?,
+            source["options"].to_string(),source["flags"].to_string()))
     }).collect::<HashSet<_>>();
     for addition in additions{
         let Some(source)=by_index(addition.source_index)else{continue;};
         let Some(field)=source["field"].as_str()else{continue;};
         let Some(transform)=source["transform"].as_str()else{continue;};
-        let key=(field.to_owned(),addition.pattern.clone(),transform.to_owned());
-        if corrected.contains(&(field.to_owned(),addition.pattern.as_str())){
+        // Regex equality alone is insufficient: different removal,
+        // skip/append options or flags can make identical source text
+        // semantically different handlers.
+        let key=(field.to_owned(),addition.pattern.clone(),transform.to_owned(),
+            source["options"].to_string(),source["flags"].to_string());
+        if corrected.contains(&(field.to_owned(),addition.pattern.as_str(),
+            transform,source["options"].to_string(),source["flags"].to_string())){
             continue;
         }
         // When an existing source regex is broadened, that same new marker
@@ -2970,13 +2977,17 @@ fn effective_handler_additions(
         if patches.iter().any(|patch|{
             let Some(native)=by_index(patch.index)else{return false;};
             native["field"]==field &&native["transform"]==transform
+                &&native["options"]==source["options"]
+                &&native["flags"]==source["flags"]
                 &&patch.replacement_pattern.ends_with(&extra)
         }){continue;}
         // A rule with the same field, regex and conversion already exists
         // in the canonical parser. Do not append an inert copy.
         if catalog.iter().any(|native|
             native["field"]==field &&native["pattern"]==addition.pattern
-            &&native["transform"]==transform){
+            &&native["transform"]==transform
+            &&native["options"]==source["options"]
+            &&native["flags"]==source["flags"]){
             continue;
         }
         if seen.insert(key){out.push(addition.clone());}
