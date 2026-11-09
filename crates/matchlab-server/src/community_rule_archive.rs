@@ -171,6 +171,23 @@ pub fn count(db:&Connection)->i64{
 mod tests {
     use super::*;
     #[test]
+    fn pre_upgrade_materialized_field_rule_is_archived_before_reconcile(){
+        let db=Connection::open_in_memory().unwrap();
+        crate::field_learning::init(&db).unwrap();
+        let old_build=format!("{}:5","a".repeat(40));
+        db.execute("INSERT INTO learned_field_rules VALUES(?1,?2,?3,?4,?5,?6)",
+            params!["resolution","1440p","\"1440p\"",old_build,15,6]).unwrap();
+        assert_eq!(snapshot_legacy(&db).unwrap(),1);
+        let rows=for_sharing(&db,None).unwrap();
+        assert_eq!(rows.len(),1);
+        assert_eq!(rows[0]["kind"],"historical_regex_review");
+        assert_eq!(rows[0]["original_kind"],"learned_field_regex");
+        assert_eq!(rows[0]["source_build"],old_build);
+        assert_eq!(rows[0]["review_only"],true);
+        assert_eq!(snapshot_legacy(&db).unwrap(),0);
+        assert_eq!(count(&db),1);
+    }
+    #[test]
     fn offline_history_survives_retirement_and_is_review_only(){
         let db=Connection::open_in_memory().unwrap();
         init(&db).unwrap();
