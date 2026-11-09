@@ -293,14 +293,24 @@ pub fn start(history:PathBuf,metadata:PathBuf){
             // Reuse the SQLite writer connection: repeated open/WAL setup
             // and schema creation every polling interval waste host CPU.
             let mut connection:Option<Connection>=None;
+            let mut legacy_captured=false;
             loop{
                 if connection.is_none(){
                     match connect(&state){
-                        Ok(db)=>connection=Some(db),
+                        Ok(db)=>{connection=Some(db);legacy_captured=false;},
                         Err(error)=>tracing::warn!(%error,"local learning database unavailable")
                     }
                 }
                 if let Some(ref mut db)=connection{
+                    // Preserve previously learned rules BEFORE current-build
+                    // reconciliation can replace their materialized tables.
+                    if !legacy_captured {
+                        match crate::community_rule_archive::snapshot_legacy(db){
+                            Ok(_)=>legacy_captured=true,
+                            Err(error)=>tracing::warn!(%error,
+                                "historical regex migration skipped"),
+                        }
+                    }
                     let refresh=maintained.elapsed()>=Duration::from_secs(300);
                     let result=(||->Result<(),String>{
                         if refresh{

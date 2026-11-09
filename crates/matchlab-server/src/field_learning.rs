@@ -517,6 +517,37 @@ fn select_rules(db: &Connection) -> Result<Vec<FieldRule>, String> {
     }
     Ok(active)
 }
+/// Migration helper: snapshot old, previously activated rules before a
+/// fresh parser-build reconcile overwrites the materialized active-rule table.
+/// Historical evidence is review-only; it cannot authorize hot activation.
+pub fn persisted_rule_archive(db:&Connection)->Result<Vec<Value>,String>{
+    init(db)?;
+    let mut stmt=db.prepare("SELECT field,signal,canonical,verified_build,
+        example_count,identity_count FROM learned_field_rules
+        ORDER BY field,signal").map_err(|e|e.to_string())?;
+    let rows=stmt.query_map([],|r|Ok((
+        r.get::<_,String>(0)?,r.get::<_,String>(1)?,
+        r.get::<_,String>(2)?,r.get::<_,String>(3)?,
+        r.get::<_,i64>(4)?,r.get::<_,i64>(5)?)))
+        .map_err(|e|e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e|e.to_string())?;
+    let mut out=Vec::new();
+    for (field,signal,canonical,source_build,examples,titles) in rows {
+        let Ok(value)=serde_json::from_str::<Value>(&canonical)else{continue;};
+        let Some(regex)=pattern_for(&field,&signal)else{continue;};
+        if !validated_value(&field,&signal,&value){continue;}
+        let key=format!("community-field:{field}:{signal}:{canonical}");
+        out.push(json!({"kind":"learned_field_regex",
+            "fingerprint":digest(&key),"source_build":source_build,
+            "field":field,"signal":signal,"regex":regex.as_str(),
+            "canonical":value,"evidence_count":examples,
+            "distinct_titles":titles,"canonical_confirmations":0,
+            "verification":"archive_active_rule_review_only"}));
+    }
+    Ok(out)
+}
+
 /// Public, opt-in community suggestions. Only reconstructed regex grammar,
 /// hashed evidence totals and bundled-handler patterns are exported:
 /// no private torrent names, IMDb identifiers or raw observations.

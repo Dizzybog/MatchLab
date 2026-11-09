@@ -69,6 +69,31 @@ fn archived_rules(db:&Connection)->Result<Vec<Value>,String>{
             .and_then(|s|serde_json::from_str(&s).map_err(|e|e.to_string())))
         .collect()
 }
+/// Called once per initial worker connection BEFORE old active tables are
+/// rebuilt for the current source revision. Older stored regex still become
+/// review-only when exported; they never skip current-source proof.
+pub fn snapshot_legacy(db:&Connection)->Result<usize,String>{
+    init(db)?;
+    let mut rules=crate::field_learning::persisted_rule_archive(db)?;
+    rules.extend(crate::tv_learning::persisted_rule_archive(db)?);
+    rules.extend(crate::learned_regex::archive_proposals(db)?);
+    let mut added=0;
+    for rule in rules {
+        let Some(fp)=rule["fingerprint"].as_str()else{continue;};
+        let Some(build)=rule["source_build"].as_str()else{continue;};
+        if fp.len()!=64 || !fp.bytes().all(|b|b.is_ascii_hexdigit())
+            ||build.len()>90 {continue;}
+        let payload=rule.to_string();
+        if payload.len()>MAX_PAYLOAD {continue;}
+        let changed=db.execute("INSERT OR IGNORE INTO ml_shared_rule_archive
+            (fingerprint,payload,source_build,first_seen,last_seen)
+            VALUES(?1,?2,?3,strftime('%s','now'),strftime('%s','now'))",
+            params![fp,payload,build]).map_err(|e|e.to_string())?;
+        added+=changed;
+    }
+    Ok(added)
+}
+
 /// Called by the offline learning worker even when sharing is disabled.
 /// Never remove historical entries when a rule is retired or a build changes.
 pub fn snapshot(db:&Connection,meta:Option<&Connection>)->Result<usize,String>{
