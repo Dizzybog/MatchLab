@@ -702,12 +702,35 @@ fn shareable_field(field:&str)->bool{
         |"network"|"bit_depth"|"seasons"|"episodes"|"date"
         |"upscaled"|"3d"|"region"|"release_types"|"extras")
 }
+// Public community proposals must not include a novel token copied from
+// someone's local torrent title. Only these already-public release labels
+// are safe to serialize. Other verified local patterns remain local.
+fn shareable_pattern(field:&str,pattern:&str)->bool{
+    if !shareable_field(field)||!bounded_generated_regex(pattern){return false;}
+    let Some(words)=pattern.strip_prefix("(?i)(?:^|[ ._-])(")
+        .and_then(|p|p.strip_suffix(")(?:$|[ ._-])"))else{return false;};
+    let label=words.replace("[ ._-]+"," ").to_ascii_lowercase();
+    let known:&[&str]=match field{
+        "edition"=>&["ultimate edition","anniversary edition",
+            "extended edition","collectors edition","directors cut"],
+        "quality"=>&["web dl","web rip","blu ray","bd rip",
+            "dvd rip","hd tv","tv rip","blu ray remux"],
+        "codec"=>&["h 264","h 265","x 264","x 265","av 1"],
+        "bit_depth"=>&["10 bit","12 bit","8 bit"],
+        "audio"=>&["dolby digital","dolby digital plus","true hd"],
+        "hdr"=>&["dolby vision","hdr 10","hdr 10 plus"],
+        "network"=>&["apple tv","adult swim","animal planet"],
+        "resolution"=>&["full hd","quad hd"],
+        _=>&[],
+    };
+    known.contains(&label.as_str())
+}
 pub fn community_proposals(db:&Connection)->Result<Vec<Value>,String>{
     init(db)?;
     let mut out=Vec::new();
     let verified=active().read().map(|x|x.clone()).unwrap_or_default();
     for r in verified {
-        if !shareable_field(&r.field){continue;}
+        if !shareable_pattern(&r.field,&r.pattern){continue;}
         let fp=hash(&format!("general:{}:{}:{}:{}",r.field,r.source_index,r.mode,r.pattern));
         out.push(json!({
             "kind":"learned_general_regex_review",
@@ -729,6 +752,39 @@ pub fn community_proposals(db:&Connection)->Result<Vec<Value>,String>{
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn untrusted_and_ambiguous_rules_never_become_executable(){
+        let native=catalogue().iter().find(|r|
+            r["field"]=="edition"
+            &&r["transform"]=="value('Ultimate Edition')"
+            &&r["options"]["skipIfAlreadyFound"]==true).unwrap();
+        let index=native["index"].as_u64().unwrap() as usize;
+        let pattern=family_pattern("Ultimate Edition").unwrap();
+        let good=Active{key:hash("good"),field:"edition".into(),
+            source_index:index,pattern:pattern.clone(),
+            mode:"add".into(),fixes:4,checked:8};
+        assert!(promotable(&good));
+        assert!(!promotable(&Active{mode:"correct".into(),..good.clone()}));
+        assert!(!promotable(&Active{field:"title".into(),..good.clone()}));
+        assert!(!promotable(&Active{pattern:"(?i).*".into(),..good.clone()}));
+        let db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        assert!(!active_safe(&db,&[good]).unwrap(),
+            "a rule without original evidence must be retired");
+    }
+    #[test]
+    fn community_regex_export_uses_only_public_metadata_vocabulary(){
+        assert!(shareable_pattern("edition",&family_pattern(
+            "Ultimate Edition").unwrap()));
+        assert!(shareable_pattern("quality",&family_pattern(
+            "WEB-DL").unwrap()));
+        assert!(!shareable_pattern("edition",&family_pattern(
+            "Private Movie").unwrap()));
+        assert!(!shareable_pattern("network",&family_pattern(
+            "Personal Server").unwrap()));
+        assert!(!shareable_pattern("group",&family_pattern(
+            "Private Group").unwrap()));
+    }
     #[test]
     fn community_never_exports_raw_title_or_release_group_regexes(){
         for field in ["title","group","site","country","torrent","adult"]{
