@@ -550,6 +550,10 @@ fn cycle(history:&Path,metadata:&Path,storage:&Path,token:&str)->Result<(),Strin
     ensure_version(&mut db,history,time)?;
     collect_rule_proposals(&db,metadata,time)?;
     scan(&db,history,metadata,time)?;
+    let client=github_client()?;
+    if !known_main_ancestor(&client)?{return Ok(());}
+    // Reconcile unconfirmed batches first. A timeout is NOT delivery.
+    if drive_delivery(&mut db,&client,token,time)?{return Ok(());}
     let started=setting(&db,"window_start")?
         .and_then(|v|v.parse::<u64>().ok()).unwrap_or(time);
     if time<started.saturating_add(DAY_SECS){return Ok(());}
@@ -557,22 +561,10 @@ fn cycle(history:&Path,metadata:&Path,storage:&Path,token:&str)->Result<(),Strin
         put(&db,"window_start",&time.to_string())?;
         return Ok(());
     };
-    // Older builds may report; GitHub Action replays their observations against
-    // the current parser and excludes resolved errors before review/training.
-    // Network eligibility is checked only once for the daily submission.
-    let client=github_client()?;
-    if !known_main_ancestor(&client)?{return Ok(());}
-    let Some(issue)=daily_thread(&client,time)?else{
-        // If GitHub Actions missed the daily thread, do not create issues.
-        return Ok(());
-    };
-    // Validate batch size *before* persistence, so a rejected oversized batch
-    // can be diagnosed instead of discarded.
-    if batch.to_string().len()+MARKER.len()+2>MAX_BODY{
-        return Err("community batch exceeds comment size bound".into());
-    }
-    mark_attempted(&mut db,time,&id,&fingerprints)?;
-    submit_comment(&client,token,issue,&batch)
+    let Some(issue)=daily_thread(&client,time)?else{return Ok(());};
+    stage_batch(&db,time,issue,&id,&batch,&fingerprints)?;
+    let _=drive_delivery(&mut db,&client,token,time)?;
+    Ok(())
 }
 pub fn start(history:PathBuf,metadata:PathBuf){
     if !enabled(){
@@ -644,7 +636,7 @@ mod tests{
         assert_eq!(db.query_row("SELECT COUNT(*) FROM pending",[],|r|r.get::<_,i64>(0)).unwrap(),1);
         // Tests cannot rely on an official build SHA; version-independent
         // persistence logic still guards repeated submission.
-        mark_attempted(&mut db,now(),"batch-1",&[key.clone()]).unwrap();
+        mark_delivered(&mut db,now(),"batch-1",&[key.clone()]).unwrap();
         assert_eq!(db.query_row("SELECT COUNT(*) FROM pending",[],|r|r.get::<_,i64>(0)).unwrap(),0);
         assert_eq!(db.query_row("SELECT COUNT(*) FROM reported WHERE fingerprint=?1",
             [&key],|r|r.get::<_,i64>(0)).unwrap(),1);
