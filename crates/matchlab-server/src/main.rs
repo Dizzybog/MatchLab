@@ -18,6 +18,7 @@ mod debug_feed;
 mod field_audit;
 mod field_learning;
 mod corrective_learning;
+mod general_learning;
 mod tv_learning;
 mod community_learning;
 mod community_rule_archive;
@@ -113,6 +114,7 @@ fn cache_generation_current(saved:u64,at:Instant,current:u64)->bool{
 fn parse_rules_revision()->u64{
     learned_regex::revision().rotate_left(1) ^ field_learning::revision().rotate_left(17)
         ^ tv_learning::revision().rotate_left(33)
+        ^ general_learning::revision().rotate_left(7)
         ^ matchlab_parser::handler_patch_revision().rotate_left(49)
 }
 fn parse_cached(title:&str)->Result<Value,String>{
@@ -1708,6 +1710,7 @@ async fn ml_status()->Json<Value>{
         object.insert("unknown_markers".into(),candidate_discovery::status());
         object.insert("regex_rules".into(),learning_rule_log::status());
         object.insert("corrective_regex".into(),corrective_learning::status());
+        object.insert("general_regex".into(),general_learning::status());
     }
     Json(report)
 }
