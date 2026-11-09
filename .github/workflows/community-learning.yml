@@ -87,6 +87,23 @@ jobs:
             --sha "$LATEST_SHA" \
             --out "$RUNNER_TEMP/community-rule-candidates.json" \
             --seen-out "$RUNNER_TEMP/fingerprints-final.txt"
+      - name: Continue an existing human-review PR rather than losing new rules
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          existing="$(gh pr list --repo "$GH_REPO" --state open \
+            --json headRefName,title --jq '.[] | select(.title=="feat(parser): review high-evidence community regex") | .headRefName' | head -n1)"
+          if [ -n "$existing" ]; then
+            if [[ ! "$existing" =~ ^bot/community-regex-[0-9]{8}$ ]]; then
+              echo "Invalid community review branch name" >&2
+              exit 1
+            fi
+            git fetch origin "refs/heads/${existing}:refs/remotes/origin/${existing}"
+            git checkout -B "$existing" "refs/remotes/origin/$existing"
+            echo "COMMUNITY_REVIEW_BRANCH=$existing" >> "$GITHUB_ENV"
+          fi
       - name: Screen at most one rule against latest trusted Rust parser
         run: |
           cp learning/community_rules.json "$RUNNER_TEMP/community-rules-before.json"
@@ -122,18 +139,21 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          branch="bot/community-regex-$(date -u +%Y%m%d)"
-          if gh pr list --repo "$GH_REPO" --state open \
-            --json headRefName --jq '.[] | .headRefName' | grep -Fxq "$branch"; then
-            echo "A daily community rule review PR already exists"
-            exit 0
-          fi
+          branch="${COMMUNITY_REVIEW_BRANCH:-bot/community-regex-$(date -u +%Y%m%d)}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$branch"
+          if [ -z "${COMMUNITY_REVIEW_BRANCH:-}" ]; then
+            git checkout -b "$branch"
+          fi
           git add learning/community_rules.json learning/community_regex_proposals.json
-          git commit -m "feat(parser): propose a verified community regex rule"
+          git commit -m "feat(parser): add validated community regex review candidates"
           git push origin "HEAD:refs/heads/$branch"
+          # Existing PRs receive a fast-forward push. Never drop new rules
+          # only because a review is already in progress.
+          if [ -n "${COMMUNITY_REVIEW_BRANCH:-}" ]; then
+            echo "COMMUNITY_PR_CREATED=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
           cat > "$RUNNER_TEMP/community-pr-body.md" <<'EOF'
           ## Automatically proposed regex rule — human review required
 
