@@ -9,6 +9,7 @@
 use rusqlite::{params,Connection,OpenFlags,OptionalExtension};
 use serde_json::{json,Value};
 use std::sync::{OnceLock,mpsc::{sync_channel,SyncSender,TrySendError},atomic::{AtomicBool,AtomicU64,Ordering}};
+use std::collections::BTreeMap;
 use sha2::{Digest,Sha256};
 use std::{env,fs,path::{Path,PathBuf},time::{Duration,SystemTime,UNIX_EPOCH}};
 
@@ -29,8 +30,12 @@ const BUSY_MS:u64=12;
 // Cache is acceleration only: never compete with the local learner for
 // SQLite write locks on each public request.
 const CACHE_QUEUE_SIZE:usize=4096;
-const CACHE_BATCH_SIZE:usize=32;
+const CACHE_BATCH_SIZE:usize=128;
+const CACHE_RETRY_MAX_MS:u64=2000;
+const CACHE_MAINTENANCE_SECS:u64=300;
 static CACHE_DROPPED:AtomicU64=AtomicU64::new(0);
+static CACHE_BATCH_RETRIES:AtomicU64=AtomicU64::new(0);
+static CACHE_BATCH_WRITES:AtomicU64=AtomicU64::new(0);
 static CACHE_WRITER:OnceLock<Option<SyncSender<CacheEvent>>>=OnceLock::new();
 
 struct CacheEvent{
@@ -82,6 +87,9 @@ pub fn status()->Value{
         "hits":CACHE_HITS.load(Ordering::Relaxed),
         "misses":CACHE_MISSES.load(Ordering::Relaxed),
         "cache_queue_dropped":CACHE_DROPPED.load(Ordering::Relaxed),
+        "cache_batch_retries":CACHE_BATCH_RETRIES.load(Ordering::Relaxed),
+        "cache_batch_writes":CACHE_BATCH_WRITES.load(Ordering::Relaxed),
+        "cache_writer_isolated":true,
         "cache_writes_allowed":CACHE_WRITES_ALLOWED.load(Ordering::Relaxed),
         "stale_entries_reparsed_and_rematched":true})
 }
@@ -90,8 +98,8 @@ pub fn enabled()->bool{
         .ok().is_none_or(|flag|flag.eq_ignore_ascii_case("true"))
 }
 fn state_file()->PathBuf{
-    PathBuf::from(env::var("MATCHLAB_ML_STATE_FILE")
-        .unwrap_or_else(|_|"/data/local-learning.sqlite3".to_owned()))
+    PathBuf::from(env::var("MATCHLAB_ML_CACHE_STATE_FILE")
+        .unwrap_or_else(|_|"/data/local-learning-cache.sqlite3".to_owned()))
 }
 fn digest(value:&str)->String{
     format!("{:x}",Sha256::digest(value.as_bytes()))
@@ -184,36 +192,112 @@ fn put_batch(db:&mut Connection,events:&[CacheEvent])->rusqlite::Result<()>{
     tx.commit()
 }
 
+/// Stremthru-inspired keyed, debounced batch drain: the latest response
+/// for a cache key wins. A failed SQLite batch stays in the worker's memory
+/// and is retried with bounded exponential backoff; matching never waits.
+fn coalesce_batch(batch:Vec<CacheEvent>)->Vec<CacheEvent>{
+    let mut keyed=BTreeMap::new();
+    for event in batch{keyed.insert(event.cache_key.clone(),event);}
+    keyed.into_values().collect()
+}
+fn cache_maintenance(db:&Connection)->rusqlite::Result<()>{
+    // The cache owns its own SQLite database and writer. No ML model
+    // tables, transactions or schema changes can block this writer.
+    db.execute("DELETE FROM learning_cache WHERE expires_at<=?1",
+        [now()])?;
+    let max_entries=cache_max_entries();
+    let count:i64=db.query_row("SELECT COUNT(*) FROM learning_cache",[],
+        |row|row.get(0))?;
+    if count>max_entries{
+        db.execute("DELETE FROM learning_cache WHERE cache_key IN (
+            SELECT cache_key FROM learning_cache
+            ORDER BY obsolete DESC,created_at ASC,cache_key LIMIT ?1)",
+            [count-max_entries])?;
+    }
+    let budget=storage_gb().saturating_mul(GIB);
+    // Keep eviction transactions bounded, rather than deleting an entire
+    // corpus while holding a SQLite write lock.
+    for _ in 0..128{
+        let size=used_bytes(db).map_err(|_|rusqlite::Error::InvalidQuery)?;
+        if size<=budget{break;}
+        let deleted=db.execute("DELETE FROM learning_cache WHERE cache_key IN(
+            SELECT cache_key FROM learning_cache ORDER BY
+                obsolete DESC,created_at ASC LIMIT 256)",[])?;
+        if deleted==0{break;}
+    }
+    CACHE_WRITES_ALLOWED.store(
+        used_bytes(db).unwrap_or(u64::MAX)<=budget,Ordering::Release);
+    Ok(())
+}
 fn cache_worker()->Option<SyncSender<CacheEvent>>{
     let (tx,rx)=sync_channel::<CacheEvent>(CACHE_QUEUE_SIZE);
     let thread=std::thread::Builder::new()
         .name("matchlab-cache-writer".into()).spawn(move||{
             let path=state_file();
             let mut connection:Option<Connection>=None;
-            while let Ok(first)=rx.recv(){
-                let mut batch=vec![first];
-                while batch.len()<CACHE_BATCH_SIZE {
+            let mut pending:Vec<CacheEvent>=Vec::new();
+            let mut backoff=Duration::from_millis(50);
+            let mut last_maintenance=std::time::Instant::now()
+                .checked_sub(Duration::from_secs(CACHE_MAINTENANCE_SECS))
+                .unwrap_or_else(std::time::Instant::now);
+            loop{
+                // Never discard an uncommitted batch just because SQLite is
+                // busy. Drain at most 128 events and deduplicate by cache key.
+                if pending.is_empty(){
+                    let Ok(first)=rx.recv()else{break;};
+                    pending.push(first);
+                }
+                while pending.len()<CACHE_BATCH_SIZE{
                     match rx.try_recv(){
-                        Ok(item)=>batch.push(item),
+                        Ok(item)=>pending.push(item),
                         Err(_)=>break,
                     }
                 }
-                if !CACHE_WRITES_ALLOWED.load(Ordering::Acquire){continue;}
+                pending=coalesce_batch(pending);
                 if connection.is_none(){
                     connection=(||->rusqlite::Result<Connection>{
+                        if let Some(parent)=path.parent(){
+                            std::fs::create_dir_all(parent).map_err(|_|
+                                rusqlite::Error::InvalidPath(parent.to_owned()))?;
+                        }
                         let db=Connection::open(&path)?;
-                        db.busy_timeout(Duration::from_millis(150))?;
+                        db.busy_timeout(Duration::from_millis(100))?;
                         db.execute_batch("PRAGMA journal_mode=WAL;")?;
                         initialize(&db)?;
                         Ok(db)
                     })().ok();
                 }
-                if let Some(db)=connection.as_mut(){
-                    if put_batch(db,&batch).is_err(){
-                        // A busy local ML transaction or full disk must not
-                        // delay public matching or poison cached answers.
+                let Some(db)=connection.as_mut()else{
+                    CACHE_BATCH_RETRIES.fetch_add(1,Ordering::Relaxed);
+                    std::thread::sleep(backoff);
+                    backoff=(backoff*2).min(Duration::from_millis(CACHE_RETRY_MAX_MS));
+                    continue;
+                };
+                if last_maintenance.elapsed()>=Duration::from_secs(CACHE_MAINTENANCE_SECS){
+                    if let Err(error)=cache_maintenance(db){
+                        tracing::debug!(%error,"ML cache maintenance deferred");
+                    }else{
+                        last_maintenance=std::time::Instant::now();
+                    }
+                }
+                if !CACHE_WRITES_ALLOWED.load(Ordering::Acquire){
+                    // Cache is optional. Under storage pressure, drop the
+                    // cache write only; never block canonical matching.
+                    pending.clear();
+                    continue;
+                }
+                match put_batch(db,&pending){
+                    Ok(())=>{
+                        CACHE_BATCH_WRITES.fetch_add(1,Ordering::Relaxed);
+                        pending.clear();
+                        backoff=Duration::from_millis(50);
+                    }
+                    Err(error)=>{
+                        CACHE_BATCH_RETRIES.fetch_add(1,Ordering::Relaxed);
+                        tracing::debug!(%error,"ML cache batch deferred for retry");
                         connection=None;
-                        tracing::debug!("cache write batch skipped due to SQLite contention");
+                        std::thread::sleep(backoff);
+                        backoff=(backoff*2).min(Duration::from_millis(CACHE_RETRY_MAX_MS));
                     }
                 }
             }
@@ -384,6 +468,23 @@ fn maintain_with_budget(db:&Connection,metadata:&Path,budget:u64)->Result<(),Str
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn keyed_batch_coalesces_repeated_cache_writes(){
+        let event=|key:&str,created_at:i64|CacheEvent{
+            cache_key:key.into(),namespace:"ns".into(),kind:"parse".into(),
+            payload:vec![created_at as u8],created_at,expires_at:created_at+60
+        };
+        let rows=coalesce_batch(vec![event("same",1),event("other",2),
+            event("same",3)]);
+        assert_eq!(rows.len(),2);
+        assert_eq!(rows.iter().find(|e|e.cache_key=="same").unwrap().created_at,3);
+    }
+    #[test]
+    fn cache_db_path_is_independent_of_learning_db(){
+        // The cache must never use the model/evidence writer's default file.
+        assert_ne!("/data/local-learning-cache.sqlite3",
+            "/data/local-learning.sqlite3");
+    }
     #[test]
     fn bounded_cache_batch_preserves_current_namespace(){
         let mut db=Connection::open_in_memory().unwrap();
