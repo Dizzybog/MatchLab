@@ -151,13 +151,20 @@ fn learned_tv_ambiguous(title:&str)->bool{
         r"(?i)(?:^|[ ._-])(?:s[0-9]{1,3}[ ._-]*e[0-9]{1,5}|[0-9]{1,3}x[0-9]{1,5}|season[ ._-]+[0-9]{1,3}[ ._-]+episode[ ._-]+[0-9]{1,5})(?:$|[ ._-])"
     ).expect("bounded learned TV multiple-marker guard"));
     if title.len()>240 || RANGES.is_match(title) {return true;}
-    let mut previous_end=0usize;
+    // Patterns include the separating character on both sides. Rescan
+    // the shared boundary so S02E07.S03E08 counts as two markers.
+    let mut tail=title;
     let mut markers=0usize;
-    for m in MARKERS.find_iter(title) {
-        if m.start()>0 && m.start()<previous_end { continue; }
+    for _ in 0..3 {
+        let Some(m)=MARKERS.find(tail)else{break;};
         markers+=1;
-        previous_end=m.end().saturating_sub(1);
         if markers>1 {return true;}
+        let mut advance=m.end();
+        if m.as_str().ends_with([' ','.','_','-']) {
+            advance=advance.saturating_sub(1);
+        }
+        if advance==0||advance>=tail.len(){break;}
+        tail=&tail[advance..];
     }
     false
 }
