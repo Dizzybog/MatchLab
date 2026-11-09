@@ -3812,6 +3812,10 @@ mod tests {
             title:"monster.the.jeffrey.dahmer.story.s01.e01".into(),
             year:None,series:None
         }).unwrap();
+        assert_eq!(imdb_matcher::clean_title(
+            result.parsed["title"].as_str().unwrap_or("")),
+            "monsterthejeffreydahmerstory",
+            "the parser must preserve the full title before IMDb/AniDB matching");
         assert!(result.selected.is_none(),
             "a short anime alias cannot hijack a different long TV title");
         let valid=diagnose(&path,&MatchRequest{
