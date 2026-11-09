@@ -129,6 +129,11 @@ pub fn initialize(path: &Path) -> Result<(), String> {
 /// minute-level statistics trigger runs for every row; raw-detail retention
 /// runs just once per batch instead of scanning the last 1,000 IDs per row.
 fn persist_batch(db:&mut Connection,items:&[HistoryEvent])->rusqlite::Result<()>{
+    persist_batch_with_learning(db,items,crate::local_learning::active())
+}
+fn persist_batch_with_learning(db:&mut Connection,items:&[HistoryEvent],
+    train:bool)->rusqlite::Result<()>
+{
     if items.is_empty(){return Ok(());}
     let tx=db.transaction()?;
     {
@@ -140,7 +145,6 @@ fn persist_batch(db:&mut Connection,items:&[HistoryEvent])->rusqlite::Result<()>
             "INSERT OR IGNORE INTO ml_training_queue(id,title,details)
              VALUES(?1,?2,?3)"
         )?;
-        let train=crate::local_learning::active();
         for item in items{
             let details=item.details.to_string();
             let id:i64=insert.query_row(params![
@@ -163,7 +167,7 @@ fn persist_batch(db:&mut Connection,items:&[HistoryEvent])->rusqlite::Result<()>
     // StremThru-style bounded persistence: retain jobs independently of
     // the dashboard history. Older overflow entries are dropped only from
     // ML evidence, never from actual parsing/matching.
-    if crate::local_learning::active(){
+    if train{
         tx.execute("DELETE FROM ml_training_queue WHERE id <= (
             SELECT COALESCE(MAX(id),0)-?1 FROM ml_training_queue
         )",[ml_queue_max_items()])?;
@@ -419,14 +423,47 @@ mod tests {
     fn persistent_ml_queue_survives_history_retention(){
         let path=path();
         initialize(&path).unwrap();
-        // Synchronous helpers used with ML disabled must not enqueue jobs.
-        record(&path,"Film.S01E01","matched",None,&json!({}),1);
+        let mut db=connect(&path).unwrap();
+        let events=(0..1200).map(|i|HistoryEvent{
+            path:path.clone(),title:format!("Series S01E{i:04}"),
+            status:"matched".into(),selected:None,
+            details:json!({"selected":{"imdb_id":"tt1234567"}}),
+            duration_ms:10
+        }).collect::<Vec<_>>();
+        for batch in events.chunks(HISTORY_BATCH_SIZE){
+            persist_batch_with_learning(&mut db,batch,true).unwrap();
+        }
+        let raw:i64=db.query_row("SELECT COUNT(*) FROM requests",[],
+            |r|r.get(0)).unwrap();
+        let jobs:i64=db.query_row("SELECT COUNT(*) FROM ml_training_queue",[],
+            |r|r.get(0)).unwrap();
+        assert_eq!(raw,1000,"dashboard must retain only most recent requests");
+        assert_eq!(jobs,1200,"training backlog must survive dashboard cap");
+        drop(db);
+        initialize(&path).unwrap(); // restart/migration is idempotent
         let db=connect(&path).unwrap();
-        let count:i64=db.query_row("SELECT COUNT(*) FROM ml_training_queue",[],
-            |row|row.get(0)).unwrap();
-        if !crate::local_learning::active(){assert_eq!(count,0);}
+        let jobs:i64=db.query_row("SELECT COUNT(*) FROM ml_training_queue",[],
+            |r|r.get(0)).unwrap();
+        assert_eq!(jobs,1200);
         drop(db);
         cleanup(&path);
+    }
+    #[test]
+    fn ml_queue_overflow_is_bounded_by_monotonic_request_ids(){
+        // Test the exact queue retention predicate independently of env vars.
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE ml_training_queue(
+            id INTEGER PRIMARY KEY,title TEXT NOT NULL,details TEXT NOT NULL);
+            INSERT INTO ml_training_queue VALUES(1,'old','{}');
+            INSERT INTO ml_training_queue VALUES(2,'old2','{}');
+            INSERT INTO ml_training_queue VALUES(3,'new','{}');").unwrap();
+        db.execute("DELETE FROM ml_training_queue WHERE id <= (
+            SELECT COALESCE(MAX(id),0)-?1 FROM ml_training_queue
+        )",[2]).unwrap();
+        assert_eq!(db.query_row("SELECT MIN(id) FROM ml_training_queue",[],
+            |r|r.get::<_,i64>(0)).unwrap(),2);
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM ml_training_queue",[],
+            |r|r.get::<_,i64>(0)).unwrap(),2);
     }
 
     #[test]
