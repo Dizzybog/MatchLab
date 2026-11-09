@@ -3044,7 +3044,7 @@ fn compile_learned_engine(
     if sorted.windows(2).any(|w|w[0].index==w[1].index){
         return Err(ParseError::Data("duplicate handler patch".into()));
     }
-    if sorted.len()>32||additions.len()>96||corrections.len()>16{
+    if sorted.len()>32||additions.len()>96||corrections.len()>64{
         return Err(ParseError::Data("too many live regex rules".into()));
     }
     let mut ordered_additions=additions.to_vec();
@@ -3085,13 +3085,21 @@ fn compile_learned_engine(
             ParseError::Data("unknown corrective source handler".into()))?;
         let field=raw["name"].as_str().unwrap_or_default().to_owned();
         let transform=raw["transform"].as_str().unwrap_or_default();
+        // High-priority correction is field-agnostic. It inherits
+        // the ORIGINAL native handler's field, transform, flags and
+        // removal policy. Field safety comes from independent replay,
+        // not a hardcoded list of field names.
+        let is_tv=matches!(field.as_str(),"seasons"|"episodes");
+        let tv_transform=transform=="array(integer)"
+            ||(field=="episodes"&&correction.is_range&&transform=="range_func");
+        let native_fixed=transform=="boolean"
+            ||transform.starts_with("value('")&&!transform.contains("$1")
+            ||transform.starts_with("uniq_concat(value('");
         if raw["kind"]!="regex"
-            ||!matches!(field.as_str(),"seasons"|"episodes")
-            ||!(transform=="array(integer)"
-                ||(field=="episodes"&&correction.is_range&&transform=="range_func"))
-            ||(correction.is_range&&transform!="range_func")
-            ||raw["options"]["remove"]==true
-            ||raw["options"]["skipIfAlreadyFound"]!=true {
+            ||(is_tv&&!tv_transform)
+            ||(!is_tv&&!native_fixed)
+            ||(correction.is_range
+                &&!(field=="episodes"&&transform=="range_func")) {
             return Err(ParseError::Data("unsafe corrective handler".into()));
         }
         verify_learned_regex(&correction.pattern)?;
@@ -3100,7 +3108,7 @@ fn compile_learned_engine(
         raw["pattern"]=Value::String(correction.pattern.clone());
         // Explicit single-coordinate rules need the same ambiguity guard
         // as native TV learning. A dedicated bounded range rule is separate.
-        raw["learned_tv_guard"]=Value::Bool(!correction.is_range);
+        raw["learned_tv_guard"]=Value::Bool(is_tv&&!correction.is_range);
         // Reposition an identical native handler instead of duplicating
         // its regex at higher priority. The replay gate validates the move.
         if let Some(index)=rows.iter().position(|handler|
@@ -3121,10 +3129,7 @@ fn compile_learned_engine(
         let mut raw=source_rows.get(addition.source_index).cloned().ok_or_else(||
             ParseError::Data("unknown addition source handler".into()))?;
         let field=raw["name"].as_str().unwrap_or("").to_owned();
-        if raw["kind"]!="regex" ||
-           !matches!(field.as_str(),"resolution"|"codec"|"quality"|"audio"|"bit_depth"|
-                "hdr"|"channels"|"languages"|"subbed"|"dubbed"|"extension"|
-                "seasons"|"episodes"){
+        if raw["kind"]!="regex" || field.is_empty(){
             return Err(ParseError::Data("unsafe addition source".into()));
         }
         verify_learned_regex(&addition.pattern)?;
