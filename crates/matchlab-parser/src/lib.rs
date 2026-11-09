@@ -3385,10 +3385,10 @@ mod live_handler_catalog_tests {
             &&r["options"]["skipIfAlreadyFound"]==true).unwrap();
         let addition=HandlerAddition{
             source_index:source["index"].as_u64().unwrap() as usize,
-            pattern:r"(?i)(?:^|[._ -])(S01E01)(?:$|[._ -])".into()
+            pattern:r"(?i)(?:^|[._ -])(Dune)(?:$|[._ -])".into()
         };
         assert!(verify_live_regression_corpus(&[],&[addition],&[]).is_err(),
-            "learning must not convert a legitimate episode token into codec metadata");
+            "learning must not convert a legitimate film-title token into codec metadata");
         assert!(verify_live_regression_corpus(&[],&[],&[]).is_ok());
     }
     #[test]
