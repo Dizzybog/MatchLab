@@ -294,6 +294,7 @@ pub fn start(history:PathBuf,metadata:PathBuf){
             // and schema creation every polling interval waste host CPU.
             let mut connection:Option<Connection>=None;
             let mut legacy_captured=false;
+            let mut rule_observer=crate::learning_rule_log::Observer::default();
             loop{
                 if connection.is_none(){
                     match connect(&state){
@@ -322,6 +323,7 @@ pub fn start(history:PathBuf,metadata:PathBuf){
                             let meta=Connection::open_with_flags(&metadata,OpenFlags::SQLITE_OPEN_READ_ONLY).ok();
                             crate::community_rule_archive::snapshot(db,meta.as_ref())?;
                         }
+                        crate::learning_rule_log::after_cycle(db,&mut rule_observer)?;
                         Ok(())
                     })();
                     if let Err(error)=result{
