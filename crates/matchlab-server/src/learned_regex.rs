@@ -444,17 +444,45 @@ fn reserve_space(db:&Connection,marker:&str,new_candidate:bool,
 /// 4 independent IMDb identities and 5 different episodes are required.
 /// Actual GitHub merge still requires independent main-branch validation.
 pub fn proposals(db:&Connection,metadata:&Connection)->Result<Vec<Value>,String>{
+    collect_proposals(db,metadata,false)
+}
+/// Revalidate active rules from older image revisions against CURRENT AniDB
+/// metadata and the original ML-free parser before sending for human review.
+pub fn historical_proposals(db:&Connection,metadata:&Connection)
+    ->Result<Vec<Value>,String>{
+    collect_proposals(db,metadata,true)
+}
+fn collect_proposals(db:&Connection,metadata:&Connection,historical:bool)
+    ->Result<Vec<Value>,String>{
     let revision=metadata_revision(metadata)?;
-    let mut stmt=db.prepare("SELECT a.marker FROM learned_regex_active a
-        JOIN learned_regex_candidates c ON c.marker=a.marker
-        WHERE a.verified_build=?1 AND a.verified_metadata=?2
-          AND c.obsolete=0 ORDER BY a.marker LIMIT 32")
-        .map_err(|e|e.to_string())?;
-    let markers=stmt.query_map(params![build(),revision],|r|r.get::<_,String>(0))
-        .map_err(|e|e.to_string())?
-        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;
+    let sql=if historical {
+        "SELECT a.marker,a.verified_build,a.verified_metadata
+         FROM learned_regex_active a
+         JOIN learned_regex_candidates c ON c.marker=a.marker
+         WHERE c.obsolete=0 ORDER BY a.marker LIMIT 128"
+    }else{
+        "SELECT a.marker,a.verified_build,a.verified_metadata
+         FROM learned_regex_active a
+         JOIN learned_regex_candidates c ON c.marker=a.marker
+         WHERE a.verified_build=?1 AND a.verified_metadata=?2
+           AND c.obsolete=0 ORDER BY a.marker LIMIT 32"
+    };
+    let mut stmt=db.prepare(sql).map_err(|e|e.to_string())?;
+    let mut cursor=if historical {
+        stmt.query([])
+    }else{
+        stmt.query(params![build(),revision])
+    }.map_err(|e|e.to_string())?;
+    let mut markers=Vec::new();
+    while let Some(row)=cursor.next().map_err(|e|e.to_string())?{
+        markers.push((row.get::<_,String>(0).map_err(|e|e.to_string())?,
+            row.get::<_,String>(1).map_err(|e|e.to_string())?,
+            row.get::<_,String>(2).map_err(|e|e.to_string())?));
+    }
+    drop(cursor);
+    drop(stmt);
     let mut out=Vec::new();
-    for marker in markers{
+    for (marker,source_build,source_metadata) in markers{
         let Some(pattern)=pattern_for(&marker)else{continue;};
         if !negative_probes(&marker,&regex_for(&marker).ok_or("invalid compiled pattern")?){
             continue;
@@ -505,8 +533,8 @@ pub fn proposals(db:&Connection,metadata:&Connection)->Result<Vec<Value>,String>
             "kind":"verified_regex_proposal",
             "fingerprint":hash(&format!("community-regex:{marker}")),
             "marker":marker,"regex":pattern,
-            "source_build":build(),
-            "source_metadata":revision,
+            "source_build":source_build,
+            "source_metadata":source_metadata,
             "evidence_count":n,
             "distinct_imdb":series,
             "distinct_episodes":episodes,
