@@ -6,9 +6,11 @@
 //! a new verified local regex overlay or a metadata snapshot change gives
 //! a different namespace. Stale entries are RETAINED as low-priority cache
 //! evidence and evicted first only when the configured quota is exceeded.
-use rusqlite::{params,Connection,OpenFlags,OptionalExtension};
+use rusqlite::{params,Connection};
+#[cfg(test)] use rusqlite::OptionalExtension;
 use serde_json::{json,Value};
-use std::sync::{OnceLock,mpsc::{sync_channel,SyncSender,TrySendError},atomic::{AtomicBool,AtomicU64,Ordering}};
+use std::collections::{HashMap,HashSet,VecDeque};
+use std::sync::{Mutex,OnceLock,RwLock,mpsc::{sync_channel,SyncSender,TrySendError,RecvTimeoutError},atomic::{AtomicBool,AtomicU64,Ordering}};
 use sha2::{Digest,Sha256};
 use std::{env,fs,path::{Path,PathBuf},time::{Duration,SystemTime,UNIX_EPOCH}};
 
@@ -25,13 +27,33 @@ static CACHE_HITS:AtomicU64=AtomicU64::new(0);
 static CACHE_MISSES:AtomicU64=AtomicU64::new(0);
 // Updated by background maintenance, never by individual request writes.
 static CACHE_WRITES_ALLOWED:AtomicBool=AtomicBool::new(true);
-const BUSY_MS:u64=12;
-// Cache is acceleration only: never compete with the local learner for
+ // Cache is acceleration only: never compete with the local learner for
 // SQLite write locks on each public request.
 const CACHE_QUEUE_SIZE:usize=4096;
 const CACHE_BATCH_SIZE:usize=32;
+// Keep disk reads and writes off the HTTP hot path. 32 MiB is the maximum
+// memory footprint of the hot result tier; cold entries are re-parsed.
+const HOT_MAX_ENTRIES:usize=2048;
+const HOT_MAX_BYTES:usize=32*1024*1024;
+const HOT_MAX_ENTRY_BYTES:usize=128*1024;
+static HOT_CACHE:OnceLock<RwLock<HotStore>>=OnceLock::new();
+static CACHE_MAINTENANCE_REQUESTED:AtomicBool=AtomicBool::new(false);
+static CACHE_MAINTENANCE_METADATA:OnceLock<PathBuf>=OnceLock::new();
+
 static CACHE_DROPPED:AtomicU64=AtomicU64::new(0);
 static CACHE_WRITER:OnceLock<Option<SyncSender<CacheEvent>>>=OnceLock::new();
+// Idempotent pending-key registry, inspired by StremThru's getKey queue.
+// A burst of duplicate requests should enqueue ONE disk write per cache key.
+static CACHE_PENDING:OnceLock<Mutex<HashSet<String>>>=OnceLock::new();
+fn queued_keys()->&'static Mutex<HashSet<String>>{
+    CACHE_PENDING.get_or_init(||Mutex::new(HashSet::new()))
+}
+fn release_queued(items:&[CacheEvent]){
+    if let Ok(mut keys)=queued_keys().lock(){
+        for item in items{keys.remove(&item.cache_key);}
+    }
+}
+
 
 struct CacheEvent{
     cache_key:String,
@@ -42,7 +64,82 @@ struct CacheEvent{
     expires_at:i64,
 }
 
-
+// Memory-only fast path. The persistent cache is written by one background
+// actor and optionally hydrated at startup, never opened by HTTP threads.
+struct HotEntry{
+    namespace:String,
+    value:Value,
+    expires_at:i64,
+    bytes:usize,
+    sequence:u64,
+}
+#[derive(Default)]
+struct HotStore{
+    rows:HashMap<String,HotEntry>,
+    fifo:VecDeque<(String,u64)>,
+    occupied:usize,
+    sequence:u64,
+}
+impl HotStore{
+    fn insert(&mut self,key:String,namespace:String,value:Value,
+        expires_at:i64,bytes:usize)
+    {
+        if bytes>HOT_MAX_ENTRY_BYTES || expires_at<=now(){return;}
+        if let Some(old)=self.rows.remove(&key){
+            self.occupied=self.occupied.saturating_sub(old.bytes);
+        }
+        self.sequence=self.sequence.wrapping_add(1);
+        let stamp=self.sequence;
+        self.rows.insert(key.clone(),HotEntry{
+            namespace,value,expires_at,bytes,sequence:stamp,
+        });
+        self.occupied=self.occupied.saturating_add(bytes);
+        self.fifo.push_back((key,stamp));
+        // A repeated key can leave obsolete FIFO markers. Ignore them, but
+        // also cap marker count so identical requests cannot leak memory.
+        while self.rows.len()>HOT_MAX_ENTRIES
+            ||self.occupied>HOT_MAX_BYTES
+            ||self.fifo.len()>HOT_MAX_ENTRIES*2
+        {
+            let Some((old_key,old_stamp))=self.fifo.pop_front()else{break;};
+            if self.rows.get(&old_key).is_some_and(|v|v.sequence==old_stamp){
+                if let Some(old)=self.rows.remove(&old_key){
+                    self.occupied=self.occupied.saturating_sub(old.bytes);
+                }
+            }
+        }
+    }
+}
+fn hot_cache()->&'static RwLock<HotStore>{
+    HOT_CACHE.get_or_init(||RwLock::new(HotStore::default()))
+}
+fn hot_insert(key:String,namespace:String,value:Value,expires_at:i64,bytes:usize){
+    if let Ok(mut cache)=hot_cache().try_write(){
+        cache.insert(key,namespace,value,expires_at,bytes);
+    }
+}
+/// Startup warmup must never overwrite a newer result already submitted by
+/// an API request while the cache actor was still opening SQLite.
+fn hot_restore(key:String,namespace:String,value:Value,expires_at:i64,bytes:usize){
+    if let Ok(mut cache)=hot_cache().try_write(){
+        if !cache.rows.contains_key(&key){
+            cache.insert(key,namespace,value,expires_at,bytes);
+        }
+    }
+}
+fn hot_lookup(key:&str,ns:&str,time:i64)->Option<Value>{
+    let cache=hot_cache().try_read().ok()?;
+    let entry=cache.rows.get(key)?;
+    (entry.namespace==ns && entry.expires_at>time).then(||entry.value.clone())
+}
+/// Cache now has its own database and quota. Sharing a writer with training
+/// caused repeated SQLITE_BUSY, stalled local learning and saturated writes.
+fn cache_storage_gb()->u64{
+    env::var("MATCHLAB_ML_CACHE_MAX_STORAGE_GB")
+        .ok().and_then(|raw|raw.parse::<u64>().ok())
+        .filter(|value|(1..=MAX_GB).contains(value))
+        .unwrap_or(DEFAULT_GB)
+}
 pub fn storage_gb()->u64 {
     env::var("MATCHLAB_ML_MAX_STORAGE_GB")
         .ok().and_then(|value|value.parse::<u64>().ok())
@@ -74,7 +171,12 @@ fn miss_ttl_secs()->i64{
         .ok().as_deref(),30,1,24*60)*60
 }
 pub fn status()->Value{
-    json!({"enabled":enabled(),"shared_storage_limit_gb":storage_gb(),
+    json!({"enabled":enabled(),"learning_storage_limit_gb":storage_gb(),
+        "cache_storage_limit_gb":cache_storage_gb(),
+        "cache_isolated_sqlite":true,
+        "cache_lookup":"nonblocking_in_memory",
+        "hot_cache_entries":HOT_CACHE.get().and_then(|cache|cache.try_read().ok())
+            .map(|cache|cache.rows.len()).unwrap_or(0),
         "training_max_examples":training_max_examples(),
         "cache_max_entries":cache_max_entries(),
         "matched_cache_ttl_hours":cache_ttl_secs()/3600,
@@ -82,6 +184,9 @@ pub fn status()->Value{
         "hits":CACHE_HITS.load(Ordering::Relaxed),
         "misses":CACHE_MISSES.load(Ordering::Relaxed),
         "cache_queue_dropped":CACHE_DROPPED.load(Ordering::Relaxed),
+        "cache_queued_keys":CACHE_PENDING.get()
+            .and_then(|s|s.try_lock().ok()).map(|keys|keys.len())
+            .unwrap_or(0),
         "cache_writes_allowed":CACHE_WRITES_ALLOWED.load(Ordering::Relaxed),
         "stale_entries_reparsed_and_rematched":true})
 }
@@ -90,8 +195,8 @@ pub fn enabled()->bool{
         .ok().is_none_or(|flag|flag.eq_ignore_ascii_case("true"))
 }
 fn state_file()->PathBuf{
-    PathBuf::from(env::var("MATCHLAB_ML_STATE_FILE")
-        .unwrap_or_else(|_|"/data/local-learning.sqlite3".to_owned()))
+    PathBuf::from(env::var("MATCHLAB_ML_CACHE_STATE_FILE")
+        .unwrap_or_else(|_|"/data/ml-result-cache.sqlite3".to_owned()))
 }
 fn digest(value:&str)->String{
     format!("{:x}",Sha256::digest(value.as_bytes()))
@@ -138,29 +243,53 @@ fn key(namespace:&str,title:&str,year:Option<i32>,series:Option<bool>)->String{
 /// serve a request: both must be parsed/matched again, then cached with
 /// current provenance. Recheck the namespace after reading to close the race
 /// against a concurrent local-rule or metadata refresh.
-fn read_current(db:&Connection,cache_key:&str,ns:&str,time:i64)->Option<Value>{
-    let raw:Option<Vec<u8>>=db.query_row(
-        "SELECT payload FROM learning_cache
-         WHERE cache_key=?1 AND namespace=?2 AND obsolete=0
-           AND expires_at>?3",
-        params![cache_key,ns,time],|r|r.get(0)
-    ).optional().ok()?;
-    serde_json::from_slice(raw?.as_slice()).ok()
+/// Never open SQLite on a live /parse or /match request. Cold entries are
+/// recomputed once, then stored in the hot tier and a background disk queue.
+/// The cache is only acceleration; stale generations are never reused.
+fn read_in_generation(title:&str,year:Option<i32>,series:Option<bool>,
+    ns:&str)->Option<Value>{
+    if !enabled(){return None;}
+    // Only the bounded hot tier is read here; persistent cache hydration
+    // and all database access belong to the independent background actor.
+    let _=CACHE_WRITER.get_or_init(cache_worker);
+    let value=hot_lookup(&key(ns,title,year,series),ns,now());
+    if value.is_some(){CACHE_HITS.fetch_add(1,Ordering::Relaxed);}
+    else{CACHE_MISSES.fetch_add(1,Ordering::Relaxed);}
+    value
 }
 fn read(kind:&str,title:&str,year:Option<i32>,series:Option<bool>,
     metadata:Option<&Path>)->Option<Value>{
+    // ML off: zero cache hashing, allocations, SQLite or disk checks.
     if !enabled(){return None;}
     let ns=namespace(kind,metadata)?;
-    let db=Connection::open_with_flags(state_file(),OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
-    db.busy_timeout(Duration::from_millis(BUSY_MS)).ok()?;
-    let value=read_current(&db,&key(&ns,title,year,series),&ns,now());
-    let valid=if namespace(kind,metadata).as_deref()==Some(ns.as_str()){
-        value
-    }else{None};
-    if valid.is_some(){CACHE_HITS.fetch_add(1,Ordering::Relaxed);}
-    else{CACHE_MISSES.fetch_add(1,Ordering::Relaxed);}
-    valid
+    let result=read_in_generation(title,year,series,&ns);
+    // The default parser cache still checks its own generation. Strict
+    // matching passes an already captured generation and validates it at
+    // the end of the match, to avoid repeated metadata filesystem calls.
+    (namespace(kind,metadata).as_deref()==Some(ns.as_str())).then_some(result).flatten()
 }
+fn hydrate_hot_cache(db:&Connection)->rusqlite::Result<()>{
+    let time=now();
+    let mut stmt=db.prepare(
+        "SELECT cache_key,namespace,payload,expires_at,bytes
+         FROM learning_cache WHERE obsolete=0 AND expires_at>?1
+           AND bytes<=?2
+         ORDER BY created_at DESC LIMIT 256")?;
+    let rows=stmt.query_map(params![time,HOT_MAX_ENTRY_BYTES as i64],|row|Ok((
+        row.get::<_,String>(0)?,row.get::<_,String>(1)?,
+        row.get::<_,Vec<u8>>(2)?,row.get::<_,i64>(3)?,
+        row.get::<_,i64>(4)?
+    )))?;
+    for row in rows{
+        let (key,ns,raw,expires,bytes)=row?;
+        if bytes<0 || bytes as usize>HOT_MAX_ENTRY_BYTES{continue;}
+        if let Ok(value)=serde_json::from_slice::<Value>(&raw){
+            hot_restore(key,ns,value,expires,raw.len());
+        }
+    }
+    Ok(())
+}
+
 fn put_batch(db:&mut Connection,events:&[CacheEvent])->rusqlite::Result<()>{
     if events.is_empty(){return Ok(());}
     let tx=db.transaction()?;
@@ -184,36 +313,87 @@ fn put_batch(db:&mut Connection,events:&[CacheEvent])->rusqlite::Result<()>{
     tx.commit()
 }
 
+/// One StremThru-style bounded background worker owns the cache DB.
+/// Work is keyed/idempotent via cache_key, batched, and never makes the
+/// parsing/matching worker wait for a SQLite writer or checkpoint.
 fn cache_worker()->Option<SyncSender<CacheEvent>>{
     let (tx,rx)=sync_channel::<CacheEvent>(CACHE_QUEUE_SIZE);
     let thread=std::thread::Builder::new()
         .name("matchlab-cache-writer".into()).spawn(move||{
             let path=state_file();
             let mut connection:Option<Connection>=None;
-            while let Ok(first)=rx.recv(){
-                let mut batch=vec![first];
-                while batch.len()<CACHE_BATCH_SIZE {
-                    match rx.try_recv(){
-                        Ok(item)=>batch.push(item),
-                        Err(_)=>break,
+            let mut hydrated=false;
+            loop{
+                let first=match rx.recv_timeout(Duration::from_secs(5)){
+                    Ok(item)=>Some(item),
+                    Err(RecvTimeoutError::Timeout)=>None,
+                    Err(RecvTimeoutError::Disconnected)=>break,
+                };
+                let mut batch=Vec::with_capacity(CACHE_BATCH_SIZE);
+                if let Some(item)=first{
+                    batch.push(item);
+                    while batch.len()<CACHE_BATCH_SIZE{
+                        match rx.try_recv(){
+                            Ok(next)=>batch.push(next),
+                            Err(_)=>break,
+                        }
                     }
                 }
-                if !CACHE_WRITES_ALLOWED.load(Ordering::Acquire){continue;}
+                let maintenance=CACHE_MAINTENANCE_REQUESTED
+                    .swap(false,Ordering::AcqRel);
+                if batch.is_empty()&&!maintenance{continue;}
                 if connection.is_none(){
                     connection=(||->rusqlite::Result<Connection>{
+                        if let Some(parent)=path.parent(){
+                            std::fs::create_dir_all(parent).map_err(|_|{
+                                rusqlite::Error::InvalidPath(parent.to_path_buf())
+                            })?;
+                        }
                         let db=Connection::open(&path)?;
                         db.busy_timeout(Duration::from_millis(150))?;
                         db.execute_batch("PRAGMA journal_mode=WAL;")?;
                         initialize(&db)?;
                         Ok(db)
                     })().ok();
+                    hydrated=false;
                 }
-                if let Some(db)=connection.as_mut(){
-                    if put_batch(db,&batch).is_err(){
-                        // A busy local ML transaction or full disk must not
-                        // delay public matching or poison cached answers.
+                let Some(db)=connection.as_mut()else{
+                    release_queued(&batch);
+                    if maintenance{
+                        CACHE_MAINTENANCE_REQUESTED.store(true,Ordering::Release);
+                    }
+                    continue;
+                };
+                if !hydrated{
+                    if let Err(error)=hydrate_hot_cache(db){
+                        tracing::debug!(%error,"ML disk cache warmup deferred");
+                    }
+                    hydrated=true;
+                }
+                if !batch.is_empty() && CACHE_WRITES_ALLOWED.load(Ordering::Acquire){
+                    if let Err(error)=put_batch(db,&batch){
+                        tracing::debug!(%error,
+                            "ML cache batch deferred; cache acceleration only");
                         connection=None;
-                        tracing::debug!("cache write batch skipped due to SQLite contention");
+                    }
+                }
+                // Release keys after a committed (or dropped) batch. A later
+                // observation can then retry a previously failed disk write.
+                release_queued(&batch);
+                if maintenance{
+                    if let Some(metadata)=CACHE_MAINTENANCE_METADATA.get(){
+                        if let Some(db)=connection.as_ref(){
+                            if let Err(error)=maintain_with_budget(
+                                db,metadata,cache_storage_gb()*GIB){
+                                tracing::debug!(%error,
+                                    "ML cache maintenance will retry");
+                                CACHE_MAINTENANCE_REQUESTED
+                                    .store(true,Ordering::Release);
+                            }
+                        }else{
+                            CACHE_MAINTENANCE_REQUESTED
+                                .store(true,Ordering::Release);
+                        }
                     }
                 }
             }
@@ -223,10 +403,9 @@ fn cache_worker()->Option<SyncSender<CacheEvent>>{
         None
     }else{Some(tx)}
 }
-fn write(kind:&str,title:&str,year:Option<i32>,series:Option<bool>,
-    metadata:Option<&Path>,value:&Value){
+fn write_in_generation(kind:&str,title:&str,year:Option<i32>,
+    series:Option<bool>,ns:String,value:&Value){
     if !enabled() || !CACHE_WRITES_ALLOWED.load(Ordering::Acquire){return;}
-    let Some(ns)=namespace(kind,metadata)else{return;};
     let Ok(raw)=serde_json::to_vec(value)else{return;};
     if raw.len()>MAX_ENTRY_BYTES{return;}
     let time=now();
@@ -237,10 +416,22 @@ fn write(kind:&str,title:&str,year:Option<i32>,series:Option<bool>,
             miss_ttl_secs()
         }else{cache_ttl_secs()}
     };
-    // All request threads enqueue only; a single reused SQLite writer
-    // commits bounded batches. Saturation drops caching, never results.
-    let Some(tx)=CACHE_WRITER.get_or_init(cache_worker).as_ref()else{return;};
+    // A small in-memory hot tier prevents every repeated request from
+    // reopening SQLite. The disk queue is best-effort and never blocks matching.
+    hot_insert(event.cache_key.clone(),event.namespace.clone(),value.clone(),
+        event.expires_at,event.payload.len());
+    let identity=event.cache_key.clone();
+    {
+        // Never wait for queue bookkeeping from a parser/match thread.
+        let Ok(mut keys)=queued_keys().try_lock()else{return;};
+        if !keys.insert(identity.clone()){return;}
+    }
+    let Some(tx)=CACHE_WRITER.get_or_init(cache_worker).as_ref()else{
+        if let Ok(mut keys)=queued_keys().lock(){keys.remove(&identity);}
+        return;
+    };
     if let Err(e)=tx.try_send(event){
+        if let Ok(mut keys)=queued_keys().lock(){keys.remove(&identity);}
         let n=CACHE_DROPPED.fetch_add(1,Ordering::Relaxed)+1;
         if n==1||n%4096==0 {
             tracing::warn!(dropped=n,disconnected=matches!(e,TrySendError::Disconnected(_)),
@@ -252,15 +443,20 @@ pub fn get_parser(title:&str)->Option<Value>{
     read("parse",title,None,None,None)
 }
 pub fn put_parser(title:&str,value:&Value){
-    write("parse",title,None,None,None,value);
+    if !enabled(){return;}
+    if let Some(ns)=namespace("parse",None){
+        write_in_generation("parse",title,None,None,ns,value);
+    }
 }
+/// The caller must verify the same generation again before returning a
+/// cached match. diagnose_logged always performs that metadata/rules check.
 pub fn get_match(title:&str,year:Option<i32>,series:Option<bool>,
-    metadata:&Path)->Option<Value>{
-    read("match",title,year,series,Some(metadata))
+    generation:&str)->Option<Value>{
+    read_in_generation(title,year,series,generation)
 }
 pub fn put_match(title:&str,year:Option<i32>,series:Option<bool>,
-    metadata:&Path,value:&Value){
-    write("match",title,year,series,Some(metadata),value);
+    generation:&str,value:&Value){
+    write_in_generation("match",title,year,series,generation.to_owned(),value);
 }
 fn initialize(db:&Connection)->rusqlite::Result<()>{
     db.execute_batch(
@@ -289,12 +485,46 @@ fn used_bytes(db:&Connection)->Result<u64,String>{
         .map_err(|e|e.to_string())?;
     Ok(pages.saturating_sub(reusable)*size)
 }
-/// Called off the hot path. Version/expiry changes mark old cache rows as
-/// obsolete, never delete them immediately. Under the configured quota,
-/// they remain available for historical analysis (but not live cache hits).
-pub fn maintain(db:&Connection,metadata:&Path)->Result<(),String>{
+/// The separate ML evidence database still needs its own quota maintenance.
+/// Only the single learning worker calls this (never API/cache threads), and
+/// only after all shareable historical rules have been archived. Active
+/// rules are protected: evict obsolete candidates, then oldest samples.
+pub fn maintain_learning(db:&Connection)->Result<(),String>{
+    let budget=storage_gb()*GIB;
+    let mut occupied=used_bytes(db)?;
+    if occupied<=budget{return Ok(());}
+    for _ in 0..16{
+        let regex_removed=crate::learned_regex::evict_obsolete(db,32)?;
+        let fields_removed=crate::field_learning::evict_obsolete(db,512)?;
+        if regex_removed+fields_removed==0{break;}
+        occupied=used_bytes(db)?;
+        if occupied<=budget{return Ok(());}
+    }
+    for _ in 0..16{
+        let removed=db.execute(
+            "DELETE FROM samples WHERE key IN (
+                SELECT key FROM samples ORDER BY observed_at ASC LIMIT 256
+            )",[]).map_err(|e|e.to_string())?;
+        if removed==0{break;}
+        occupied=used_bytes(db)?;
+        if occupied<=budget{return Ok(());}
+    }
+    // A persistent archive or active regex must never be discarded to
+    // force the disk below quota. Keep the model running but report pressure.
+    tracing::warn!(occupied_bytes=occupied,budget_bytes=budget,
+        "ML learning evidence remains over quota; active rules and history preserved");
+    Ok(())
+}
+
+/// Called off the hot path. Cache maintenance never touches training evidence.
+/// Request cache maintenance without touching SQLite in the ML learner.
+/// The cache's sole writer performs maintenance between bounded write batches.
+pub fn maintain(_db:&Connection,metadata:&Path)->Result<(),String>{
     if !enabled(){return Ok(());}
-    maintain_with_budget(db,metadata,storage_gb()*GIB)
+    let _=CACHE_MAINTENANCE_METADATA.set(metadata.to_path_buf());
+    CACHE_MAINTENANCE_REQUESTED.store(true,Ordering::Release);
+    let _=CACHE_WRITER.get_or_init(cache_worker);
+    Ok(())
 }
 fn maintain_with_budget(db:&Connection,metadata:&Path,budget:u64)->Result<(),String>{
     initialize(db).map_err(|e|e.to_string())?;
@@ -307,22 +537,9 @@ fn maintain_with_budget(db:&Connection,metadata:&Path,budget:u64)->Result<(),Str
             OR (kind='match' AND namespace<>COALESCE(?3,'')))",
         params![now(),current_parse,current_match]
     ).map_err(|e|e.to_string())?;
-    // One shared quota for both learning evidence and cached responses.
-    // Never evict merely because one class of data reached an arbitrary
-    // sub-budget: eviction starts only when actual DB usage is over the cap.
+    // This SQLite database only contains cached responses. Rule evidence and
+    // the offline sharing archive remain untouched in local-learning.sqlite3.
     let mut occupied=used_bytes(db)?;
-    // Only when the WHOLE learning DB exceeds its cap may obsolete learned
-    // regex patterns and their old evidence be reclaimed. Foreign keys
-    // enforce atomic deletion of the rule's supporting evidence.
-    if occupied>budget{
-        for _ in 0..64 {
-            if occupied<=budget{break;}
-            let regex_deleted=crate::learned_regex::evict_obsolete(db,32)?;
-            let fields_deleted=crate::field_learning::evict_obsolete(db,512)?;
-            if regex_deleted+fields_deleted==0{break;}
-            occupied=used_bytes(db)?;
-        }
-    }
     // Prefer obsolete cache data. Only after all obsolete entries are
     // exhausted may we evict the oldest still-valid cache responses.
     for _ in 0..1024 {
@@ -341,19 +558,6 @@ fn maintain_with_budget(db:&Connection,metadata:&Path,budget:u64)->Result<(),Str
         }
         if removed==0{break;}
         occupied=used_bytes(db)?;
-    }
-    if occupied>budget {
-        // Samples hold hashes only and are less important than current
-        // validated regex evidence. Delete old unreferenced observations
-        // last, never remove active learned rules to satisfy cache quotas.
-        for _ in 0..256 {
-            if occupied<=budget{break;}
-            let removed=db.execute("DELETE FROM samples WHERE key IN (
-                SELECT key FROM samples ORDER BY observed_at ASC LIMIT 256)",[])
-                .unwrap_or(0);
-            if removed==0{break;}
-            occupied=used_bytes(db)?;
-        }
     }
     // Bound the number of repeat-query entries separately from the corpus
     // size. This runs off-path, pruning stale records first, never training
@@ -381,6 +585,17 @@ fn maintain_with_budget(db:&Connection,metadata:&Path,budget:u64)->Result<(),Str
     }
     Ok(())
 }
+/// Disk-only regression helper; production never calls this from requests.
+#[cfg(test)]
+fn read_current(db:&Connection,cache_key:&str,ns:&str,time:i64)->Option<Value>{
+    let raw:Option<Vec<u8>>=db.query_row(
+        "SELECT payload FROM learning_cache
+         WHERE cache_key=?1 AND namespace=?2 AND obsolete=0
+           AND expires_at>?3",
+        params![cache_key,ns,time],|r|r.get(0)
+    ).optional().ok()?;
+    serde_json::from_slice(raw?.as_slice()).ok()
+}
 #[cfg(test)]
 mod tests{
     use super::*;
@@ -396,6 +611,32 @@ mod tests{
         assert!(read_current(&db,"key","old",2).is_none());
     }
 
+    #[test]
+    fn hot_cache_ignores_old_versions_and_stays_bounded(){
+        let mut cache=HotStore::default();
+        let expires=now()+300;
+        cache.insert("episode".into(),"v1".into(),json!({"episodes":[1]}),
+            expires,40);
+        assert_eq!(cache.rows["episode"].namespace,"v1");
+        for index in 0..(HOT_MAX_ENTRIES+100){
+            cache.insert(format!("key-{index}"),"v2".into(),json!(index),
+                expires,40);
+        }
+        assert!(cache.rows.len()<=HOT_MAX_ENTRIES);
+        assert!(cache.occupied<=HOT_MAX_BYTES);
+        assert!(!cache.rows.contains_key("episode"));
+        assert!(cache.fifo.len()<=HOT_MAX_ENTRIES*2);
+    }
+    #[test]
+    fn hot_cache_rewrites_keep_fifo_memory_bounded(){
+        let mut cache=HotStore::default();
+        for i in 0..(HOT_MAX_ENTRIES*5){
+            cache.insert("same".into(),"stable".into(),json!(i),
+                now()+60,40);
+        }
+        assert_eq!(cache.rows.len(),1);
+        assert!(cache.fifo.len()<=HOT_MAX_ENTRIES*2);
+    }
     #[test]
     fn configurable_corpus_size_and_cache_limits_reject_invalid_values(){
         assert_eq!(bounded_count(Some("250000"),12_000,100,2_000_000),250_000);

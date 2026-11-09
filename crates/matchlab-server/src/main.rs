@@ -1483,8 +1483,8 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result
         learning_cache::match_namespace(&state.db)
     }else{None};
     let mut result=if cacheable{
-        if let Some(snapshot)=learning_cache::get_match(
-            &req.title,req.year,req.series,&state.db){
+        if let Some(snapshot)=generation.as_deref().and_then(|ns|
+            learning_cache::get_match(&req.title,req.year,req.series,ns)){
             match serde_json::from_value::<Diagnostic>(snapshot){
                 Ok(diagnostic)=>Ok(diagnostic),
                 Err(_)=>diagnose(&state.db,req),
@@ -1505,8 +1505,10 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result
     if cacheable
         && let Ok(ref diagnostic)=result
         && let Ok(snapshot)=serde_json::to_value(diagnostic){
-        learning_cache::put_match(
-            &req.title,req.year,req.series,&state.db,&snapshot);
+        if let Some(ref ns)=generation{
+            learning_cache::put_match(
+                &req.title,req.year,req.series,ns,&snapshot);
+        }
     }
     let elapsed=start.elapsed().as_millis() as u64;
     match &result{
@@ -1526,6 +1528,7 @@ async fn ml_status()->Json<Value>{
     let mut report=field_learning::status();
     if let Some(object)=report.as_object_mut(){
         object.insert("training_and_cache".into(),learning_cache::status());
+        object.insert("training_queue".into(),local_learning::queue_status());
         object.insert("online_model".into(),online_model::OnlineModel::status());
         object.insert("unknown_markers".into(),candidate_discovery::status());
         object.insert("regex_rules".into(),learning_rule_log::status());

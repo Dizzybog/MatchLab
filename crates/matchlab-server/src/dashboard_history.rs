@@ -1,6 +1,7 @@
 //! Persistent, bounded request history and independent 14-day statistics.
 //! The metadata database is separate and is never modified here.
 use rusqlite::{params, Connection};
+use sha2::{Digest,Sha256};
 use serde_json::{json, Value};
 use std::{
     path::{Path,PathBuf},
@@ -12,6 +13,18 @@ use std::{
 const MAX_HISTORY: i64 = 1_000;
 const PRUNE_BATCH: i64 = 1_000;
 const HISTORY_BATCH_SIZE:usize = 64;
+// Dedicated, bounded SQLite job spool (separate from the 1,000-row dashboard
+// retention window). Producers never synchronously touch this DB from API.
+const MAX_ML_QUEUE_ITEMS:i64 = 20_000;
+static ML_QUEUE_EVICTED:AtomicUsize=AtomicUsize::new(0);
+pub fn ml_queue_evicted()->usize{ML_QUEUE_EVICTED.load(Ordering::Relaxed)}
+pub fn history_telemetry_dropped()->usize{HISTORY_DROPPED.load(Ordering::Relaxed)}
+fn ml_queue_max_items()->i64{
+    std::env::var("MATCHLAB_ML_QUEUE_MAX_ITEMS").ok()
+        .and_then(|v|v.parse::<i64>().ok())
+        .filter(|n|(1_000..=100_000).contains(n))
+        .unwrap_or(MAX_ML_QUEUE_ITEMS)
+}
 
 fn connect(path: &Path) -> rusqlite::Result<Connection> {
     if let Some(parent) = path.parent() {
@@ -59,6 +72,15 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS history_migrations(
             name TEXT PRIMARY KEY NOT NULL
         ) WITHOUT ROWID;
+        -- Durable ML observation queue: the learning cursor lives in its
+        -- own SQLite DB and commits atomically with trained weights. Each
+        -- request ID is an idempotency key for safe restart/replay.
+        CREATE TABLE IF NOT EXISTS ml_training_queue(
+            id INTEGER PRIMARY KEY NOT NULL,
+            title_hash TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            details TEXT NOT NULL
+        );
 
         -- Backfill exactly once for existing installations. Other connections
         -- cannot write while this transaction is active.
@@ -112,21 +134,48 @@ pub fn initialize(path: &Path) -> Result<(), String> {
 /// minute-level statistics trigger runs for every row; raw-detail retention
 /// runs just once per batch instead of scanning the last 1,000 IDs per row.
 fn persist_batch(db:&mut Connection,items:&[HistoryEvent])->rusqlite::Result<()>{
+    persist_batch_with_learning(db,items,crate::local_learning::active())
+}
+fn persist_batch_with_learning(db:&mut Connection,items:&[HistoryEvent],
+    train:bool)->rusqlite::Result<()>
+{
     if items.is_empty(){return Ok(());}
     let tx=db.transaction()?;
     {
         let mut insert=tx.prepare_cached(
             "INSERT INTO requests(title,status,imdb_id,match_source,duration_ms,details)
-             VALUES(?1,?2,?3,?4,?5,?6)"
+             VALUES(?1,?2,?3,?4,?5,?6) RETURNING id"
+        )?;
+        let mut enqueue=tx.prepare_cached(
+            "INSERT INTO ml_training_queue(id,title_hash,title,details)
+             VALUES(?1,?2,?3,?4)
+             ON CONFLICT(title_hash) DO UPDATE SET
+               id=excluded.id,title=excluded.title,details=excluded.details"
         )?;
         for item in items{
-            insert.execute(params![
+            let details=item.details.to_string();
+            let id:i64=insert.query_row(params![
                 item.title,item.status,
                 item.selected.as_ref().and_then(|v|v["imdb_id"].as_str()),
                 item.selected.as_ref().and_then(|v|v["match_source"].as_str()),
                 i64::try_from(item.duration_ms).unwrap_or(i64::MAX),
-                item.details.to_string()
-            ])?;
+                details
+            ],|r|r.get(0))?;
+            if train && item.status!="error"{
+                // Key by the exact release title: identical pending requests
+                // coalesce to the newest observation before training. The
+                // request's increasing ID keeps the durable cursor correct.
+                let identity=format!("{:x}",Sha256::digest(item.title.as_bytes()));
+                // The learner reparses the source title with the ML-free
+                // canonical parser. It only needs the selected identity and
+                // original parsed diagnostics, not ranked candidates/traces.
+                // Keep the durable queue small and independent of UI history.
+                let training=json!({
+                    "selected":item.details["selected"],
+                    "parsed":item.details["parsed"],
+                });
+                enqueue.execute(params![id,identity,item.title,training.to_string()])?;
+            }
         }
     }
     // Exact cap even when rows have gaps. The transaction commits both the
@@ -134,7 +183,29 @@ fn persist_batch(db:&mut Connection,items:&[HistoryEvent])->rusqlite::Result<()>
     tx.execute("DELETE FROM requests WHERE id < (
         SELECT id FROM requests ORDER BY id DESC LIMIT 1 OFFSET ?1
     )",[MAX_HISTORY-1])?;
-    tx.commit()
+    // StremThru-style bounded persistence: retain jobs independently of
+    // the dashboard history. Older overflow entries are dropped only from
+    // ML evidence, never from actual parsing/matching.
+    // Queue IDs are request sequence numbers, NOT queue row numbers.
+    // Deduplication removes rows and leaves large gaps. Subtracting the
+    // configured cap from MAX(id) would silently evict valid observations
+    // even when the queue contains far fewer than its permitted row count.
+    // Keep the newest N *actual rows*, deleting only older entries.
+    let evicted=if train{
+        tx.execute("DELETE FROM ml_training_queue WHERE id < COALESCE((
+            SELECT id FROM ml_training_queue
+            ORDER BY id DESC LIMIT 1 OFFSET ?1
+        ),0)",[ml_queue_max_items()-1])?
+    }else{0};
+    tx.commit()?; 
+    if evicted>0{
+        let total=ML_QUEUE_EVICTED.fetch_add(evicted,Ordering::Relaxed)+evicted;
+        if total==evicted||total%4096<evicted{
+            tracing::warn!(evicted_total=total,
+                "ML queue retention limit evicted older observations; matching unaffected");
+        }
+    }
+    Ok(())
 }
 
 /// Synchronous single-event writer, also used in tests and fallback paths.
@@ -379,6 +450,96 @@ mod tests {
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
+    fn persistent_ml_queue_survives_history_retention(){
+        let path=path();
+        initialize(&path).unwrap();
+        let mut db=connect(&path).unwrap();
+        let events=(0..1200).map(|i|HistoryEvent{
+            path:path.clone(),title:format!("Series S01E{i:04}"),
+            status:"matched".into(),selected:None,
+            details:json!({"selected":{"imdb_id":"tt1234567"}}),
+            duration_ms:10
+        }).collect::<Vec<_>>();
+        for batch in events.chunks(HISTORY_BATCH_SIZE){
+            persist_batch_with_learning(&mut db,batch,true).unwrap();
+        }
+        let raw:i64=db.query_row("SELECT COUNT(*) FROM requests",[],
+            |r|r.get(0)).unwrap();
+        let jobs:i64=db.query_row("SELECT COUNT(*) FROM ml_training_queue",[],
+            |r|r.get(0)).unwrap();
+        assert_eq!(raw,1000,"dashboard must retain only most recent requests");
+        assert_eq!(jobs,1200,"training backlog must survive dashboard cap");
+        drop(db);
+        initialize(&path).unwrap(); // restart/migration is idempotent
+        let db=connect(&path).unwrap();
+        let jobs:i64=db.query_row("SELECT COUNT(*) FROM ml_training_queue",[],
+            |r|r.get(0)).unwrap();
+        assert_eq!(jobs,1200);
+        drop(db);
+        cleanup(&path);
+    }
+    #[test]
+    fn repeated_title_coalesces_to_newest_pending_training_job(){
+        let path=path();
+        initialize(&path).unwrap();
+        let mut db=connect(&path).unwrap();
+        let events=[HistoryEvent{
+            path:path.clone(),title:"Bleach.EPIS326".into(),
+            status:"matched".into(),selected:None,
+            details:json!({"selected":{"imdb_id":"tt0000001"}}),
+            duration_ms:1
+        },HistoryEvent{
+            path:path.clone(),title:"Bleach.EPIS326".into(),
+            status:"matched".into(),selected:None,
+            details:json!({"selected":{"imdb_id":"tt0000002"}}),
+            duration_ms:1
+        }];
+        persist_batch_with_learning(&mut db,&events,true).unwrap();
+        let (count,id,details):(i64,i64,String)=db.query_row(
+            "SELECT COUNT(*),MAX(id),MAX(details) FROM ml_training_queue",
+            [],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!(count,1);
+        assert_eq!(id,2);
+        assert_eq!(serde_json::from_str::<Value>(&details).unwrap()
+            ["selected"]["imdb_id"],"tt0000002");
+        drop(db);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn ml_queue_retention_counts_rows_not_gapped_request_ids(){
+        // Simulate a large request-ID gap caused by repeated-title
+        // coalescing; the oldest pending work must survive below capacity.
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE ml_training_queue(
+            id INTEGER PRIMARY KEY,title TEXT NOT NULL,details TEXT NOT NULL);
+            INSERT INTO ml_training_queue VALUES(1,'old','{}');
+            INSERT INTO ml_training_queue VALUES(10001,'old2','{}');
+            INSERT INTO ml_training_queue VALUES(40000,'new','{}');").unwrap();
+        let retention=|cap:i64|{
+            db.execute("DELETE FROM ml_training_queue WHERE id < COALESCE((
+                SELECT id FROM ml_training_queue ORDER BY id DESC
+                LIMIT 1 OFFSET ?1
+            ),0)",[cap-1]).unwrap();
+        };
+        retention(3);
+        let ids=db.prepare("SELECT id FROM ml_training_queue ORDER BY id").unwrap()
+            .query_map([],|row|row.get::<_,i64>(0)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(ids,vec![1,10001,40000],
+            "gaps from duplicate titles cannot cause premature eviction");
+        retention(2);
+        let ids=db.prepare("SELECT id FROM ml_training_queue ORDER BY id").unwrap()
+            .query_map([],|row|row.get::<_,i64>(0)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(ids,vec![10001,40000]);
+        retention(5);
+        let count:i64=db.query_row("SELECT COUNT(*) FROM ml_training_queue",[],
+            |row|row.get(0)).unwrap();
+        assert_eq!(count,2);
     }
 
     #[test]
