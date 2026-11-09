@@ -8,6 +8,8 @@ use sha2::{Digest,Sha256};
 use std::{env,path::{Path,PathBuf},time::Duration};
 
 const POLL_SECONDS:u64=15;
+const LEARNING_BATCH_SIZE:usize=256;
+const MAX_DRAIN_BATCHES:usize=4;
 const MAX_PATTERNS:i64=2_000;
 const MIN_EXAMPLES:i64=5;
 fn max_examples()->i64{
@@ -89,7 +91,7 @@ fn pattern(flag:&Value,parsed:&Value,selected:&Value)->Option<(String,String)>{
     Some((code.to_owned(),digest(&format!("{code}:{feature}"))))
 }
 fn scan(history:&Path,metadata:&Path,local:&mut Connection,
-    revalidate:bool)->Result<(),String>{
+    revalidate:bool)->Result<bool,String>{
     // Revalidation is necessary at startup and during scheduled maintenance,
     // not every 15 seconds when nothing in history changed.
     if revalidate||crate::field_learning::revision()==0{
@@ -104,10 +106,10 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
     let Some(cursor)=setting(local,"after_id")?else{
         // Do not silently train on requests made before the opt-in.
         put(local,"after_id",&newest.to_string())?;
-        return Ok(());
+        return Ok(false);
     };
     let mut after=cursor.parse::<i64>().unwrap_or(newest);
-    if newest<after{put(local,"after_id",&newest.to_string())?;return Ok(());}
+    if newest<after{put(local,"after_id",&newest.to_string())?;return Ok(false);}
     if newest==after{
         if revalidate {
             if let Ok(meta)=Connection::open_with_flags(
@@ -115,10 +117,10 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
                 crate::learned_regex::reconcile(local,&meta)?;
             }
         }
-        return Ok(());
+        return Ok(false);
     }
     let mut stmt=history_db.prepare("SELECT id,title,details FROM requests
-        WHERE id>?1 ORDER BY id ASC LIMIT 1000").map_err(|e|e.to_string())?;
+        WHERE id>?1 ORDER BY id ASC LIMIT 256").map_err(|e|e.to_string())?;
     let rows=stmt.query_map([after],|r|Ok((r.get::<_,i64>(0)?,
         r.get::<_,String>(1)?,r.get::<_,String>(2)?)))
         .map_err(|e|e.to_string())?
@@ -138,6 +140,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
     let mut samples=count(&tx,"samples")?;
     let mut patterns=count(&tx,"patterns")?;
     let now=chrono::Utc::now().timestamp();
+    let processed=rows.len();
     for (id,title,raw) in rows{
         after=id;
         let Ok(details)=serde_json::from_str::<Value>(&raw)else{continue};
@@ -218,7 +221,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
     }
     crate::field_learning::reconcile(local)?;
         crate::tv_learning::reconcile(local)?;
-    Ok(())
+    Ok(processed==LEARNING_BATCH_SIZE)
 }
 pub fn verify_native_model()->Result<(),String>{
     let db=Connection::open_in_memory().map_err(|e|e.to_string())?;
@@ -295,6 +298,7 @@ pub fn start(history:PathBuf,metadata:PathBuf){
             let mut connection:Option<Connection>=None;
             let mut legacy_captured=false;
             let mut rule_observer=crate::learning_rule_log::Observer::default();
+            let mut busy_retries=0u32;
             loop{
                 if connection.is_none(){
                     match connect(&state){
@@ -302,9 +306,11 @@ pub fn start(history:PathBuf,metadata:PathBuf){
                         Err(error)=>tracing::warn!(%error,"local learning database unavailable")
                     }
                 }
+                let mut caught_up=true;
                 if let Some(ref mut db)=connection{
-                    // Preserve previously learned rules BEFORE current-build
-                    // reconciliation can replace their materialized tables.
+                    // Snapshot migration and reconciliation are not
+                    // request-time operations. The durable history cursor
+                    // is the queue acknowledgement, committed with evidence.
                     if !legacy_captured {
                         match crate::community_rule_archive::snapshot_legacy(db){
                             Ok(_)=>legacy_captured=true,
@@ -314,26 +320,47 @@ pub fn start(history:PathBuf,metadata:PathBuf){
                     }
                     let refresh=maintained.elapsed()>=Duration::from_secs(300);
                     let result=(||->Result<(),String>{
-                        if refresh{
-                            crate::learning_cache::maintain(db,&metadata)?;
-                            maintained=std::time::Instant::now();
+                        // Do not run cache maintenance against the learning
+                        // SQLite file. Cache has its own writer and database.
+                        for batch in 0..MAX_DRAIN_BATCHES{
+                            let has_more=scan(&history,&metadata,db,refresh&&batch==0)?;
+                            if !has_more{break;}
+                            caught_up=false;
                         }
-                        scan(&history,&metadata,db,refresh)?;
-                        if refresh {
-                            let meta=Connection::open_with_flags(&metadata,OpenFlags::SQLITE_OPEN_READ_ONLY).ok();
+                        if refresh{
+                            let meta=Connection::open_with_flags(
+                                &metadata,OpenFlags::SQLITE_OPEN_READ_ONLY).ok();
                             crate::community_rule_archive::snapshot(db,meta.as_ref())?;
+                            maintained=std::time::Instant::now();
                         }
                         crate::learning_rule_log::after_cycle(db,&mut rule_observer)?;
                         Ok(())
                     })();
                     if let Err(error)=result{
-                        tracing::warn!(%error,"local learning cycle skipped");
-                        // A failed transaction is rolled back and reloaded
-                        // from the last committed cursor on the next pass.
-                        connection=None;
+                        let locked=error.contains("database is locked")
+                            ||error.contains("database table is locked");
+                        if locked{
+                            // Stremthru-style delayed job: the cursor is
+                            // uncommitted and remains queued for retry.
+                            busy_retries=busy_retries.saturating_add(1).min(6);
+                            tracing::debug!(attempt=busy_retries,
+                                "ML learning SQLite busy; durable batch deferred");
+                        }else{
+                            tracing::warn!(%error,"local learning cycle skipped");
+                            connection=None;
+                        }
+                    }else{
+                        busy_retries=0;
                     }
                 }
-                std::thread::sleep(Duration::from_secs(POLL_SECONDS));
+                let pause=if busy_retries>0{
+                    Duration::from_millis((100u64<<busy_retries).min(5000))
+                }else if caught_up{
+                    Duration::from_secs(POLL_SECONDS)
+                }else{
+                    Duration::from_millis(250)
+                };
+                std::thread::sleep(pause);
             }
         });
     if let Err(error)=worker{tracing::warn!(%error,"failed to start local learning");}
