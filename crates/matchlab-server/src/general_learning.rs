@@ -19,6 +19,7 @@ fn capacity()->i64{
     MAX_EXAMPLES.min(crate::learning_cache::training_max_examples())
 }
 const MAX_CANDIDATES:usize=4;
+const REVALIDATE_BATCH:i64=128;
 const MAX_TESTS:usize=128;
 const NEGATIVES:&[&str]=&[
     "The.Danish.Girl.2015.1080p",
@@ -316,7 +317,7 @@ fn migrate(db:&Connection)->Result<(),String>{
     let mut stmt=db.prepare("SELECT rule_key,example_hash,source_release
         FROM ml_general_examples WHERE source_build<>?1
         ORDER BY observed_at DESC LIMIT ?2").map_err(|e|e.to_string())?;
-    let old=stmt.query_map(params![build(),MAX_EXAMPLES],|row|Ok((
+    let old=stmt.query_map(params![build(),REVALIDATE_BATCH],|row|Ok((
         row.get::<_,String>(0)?,row.get::<_,String>(1)?,
         row.get::<_,String>(2)?)))
         .map_err(|e|e.to_string())?
@@ -621,11 +622,21 @@ pub fn status()->Value{
         "model":"bounded online field-general regex induction; FTRL supplies advisory scores",
         "revision":format!("{:016x}",revision())})
 }
+/// Reject anything that could put a private work title, release group,
+/// torrent site, or user-specific marker into a public GitHub rule.
+fn shareable_field(field:&str)->bool{
+    matches!(field,
+        "resolution"|"codec"|"quality"|"audio"|"hdr"|"channels"
+        |"languages"|"subbed"|"dubbed"|"extension"|"edition"
+        |"network"|"bit_depth"|"seasons"|"episodes"|"date"
+        |"upscaled"|"3d"|"region"|"release_types"|"extras")
+}
 pub fn community_proposals(db:&Connection)->Result<Vec<Value>,String>{
     init(db)?;
     let mut out=Vec::new();
     let verified=active().read().map(|x|x.clone()).unwrap_or_default();
     for r in verified {
+        if !shareable_field(&r.field){continue;}
         let fp=hash(&format!("general:{}:{}:{}:{}",r.field,r.source_index,r.mode,r.pattern));
         out.push(json!({
             "kind":"learned_general_regex_review",
@@ -647,6 +658,15 @@ pub fn community_proposals(db:&Connection)->Result<Vec<Value>,String>{
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn community_never_exports_raw_title_or_release_group_regexes(){
+        for field in ["title","group","site","country","torrent","adult"]{
+            assert!(!shareable_field(field));
+        }
+        for field in ["resolution","audio","hdr","network","languages"]{
+            assert!(shareable_field(field));
+        }
+    }
     #[test]
     fn dynamic_catalogue_covers_every_original_regex_field(){
         assert!(catalogue().len()>400);
