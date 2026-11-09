@@ -145,7 +145,12 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
     let mut after=cursor.as_deref().and_then(|v|v.parse::<i64>().ok())
         .unwrap_or_else(||earliest.saturating_sub(1));
     if cursor.is_none(){put(local,"after_id",&after.to_string())?;}
-    JOBS_AVAILABLE.store(newest.saturating_sub(after) as u64,Ordering::Relaxed);
+    // Exact queued row count, not an ID difference (IDs have gaps when
+    // duplicate release names are coalesced or jobs are acknowledged).
+    let queued:i64=history_db.query_row(
+        "SELECT COUNT(*) FROM ml_training_queue WHERE id>?1",
+        [after],|r|r.get(0)).map_err(|e|e.to_string())?;
+    JOBS_AVAILABLE.store(queued.max(0) as u64,Ordering::Relaxed);
     if newest<after{put(local,"after_id",&newest.to_string())?;return Ok(0);}
     if newest==after{
         if revalidate {
@@ -252,7 +257,8 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
     put(&tx,"after_id",&after.to_string())?;
     tx.commit().map_err(|e|e.to_string())?;
     JOBS_PROCESSED.fetch_add(processed as u64,Ordering::Relaxed);
-    JOBS_AVAILABLE.store(newest.saturating_sub(after) as u64,Ordering::Relaxed);
+    JOBS_AVAILABLE.store(queued.saturating_sub(processed as i64).max(0) as u64,
+        Ordering::Relaxed);
     model.publish_status();
     crate::candidate_discovery::publish(local)?;
     if let Some(ref metadata)=meta{
