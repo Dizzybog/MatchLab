@@ -20,6 +20,7 @@ mod field_learning;
 mod tv_learning;
 mod community_learning;
 mod community_rule_archive;
+mod learning_rule_log;
 mod local_learning;
 mod online_model;
 mod candidate_discovery;
