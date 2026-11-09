@@ -112,6 +112,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
         if revalidate {
             if let Ok(meta)=Connection::open_with_flags(
                 metadata,OpenFlags::SQLITE_OPEN_READ_ONLY){
+                crate::sharing_archive::migrate_existing(local,metadata)?;
                 crate::learned_regex::reconcile(local,&meta)?;
             }
         }
@@ -126,6 +127,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
         .map_err(|e|e.to_string())?;
     let meta=Connection::open_with_flags(metadata,OpenFlags::SQLITE_OPEN_READ_ONLY).ok();
     if let Some(ref metadata)=meta{
+        crate::sharing_archive::migrate_existing(local,metadata)?;
         crate::learned_regex::reconcile(local,metadata)?;
     }
     // Load a committed snapshot every batch. If a batch fails, all evidence,
@@ -214,6 +216,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
     model.publish_status();
     crate::candidate_discovery::publish(local)?;
     if let Some(ref metadata)=meta{
+        crate::sharing_archive::migrate_existing(local,metadata)?;
         crate::learned_regex::reconcile(local,metadata)?;
     }
     crate::field_learning::reconcile(local)?;
@@ -296,7 +299,15 @@ pub fn start(history:PathBuf,metadata:PathBuf){
             loop{
                 if connection.is_none(){
                     match connect(&state){
-                        Ok(db)=>connection=Some(db),
+                        Ok(db)=>{
+                            // Capture older-build evidence before the new
+                            // regex registry may drop inactive source SHAs.
+                            if let Err(error)=crate::sharing_archive::migrate_existing(
+                                &db,&metadata){
+                                tracing::warn!(%error,"legacy regex history import skipped");
+                            }
+                            connection=Some(db);
+                        },
                         Err(error)=>tracing::warn!(%error,"local learning database unavailable")
                     }
                 }
