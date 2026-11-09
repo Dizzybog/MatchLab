@@ -81,8 +81,10 @@ fn ml_regex_inventory_is_conditional_and_uses_live_status(){
     assert!(DASHBOARD.contains("if(state.enabled!==true){section.hidden=true;return;}"));
     assert!(DASHBOARD.contains("inventory?.ready===true"));
     assert!(DASHBOARD.contains("Number(inventory?.active)"));
-    assert!(DASHBOARD.contains("Number(inventory?.archived)"));
-    assert!(DASHBOARD.contains("const total=ready&&valid(archived)?archived.toLocaleString():'—';"));
-    assert!(DASHBOARD.contains("'Active patterns: '+"));
+    assert!(DASHBOARD.contains("Number(inventory?.total)"));
+    assert!(DASHBOARD.contains("Number(inventory?.compiled_patterns)"));
+    assert!(DASHBOARD.contains("const consistent=ready&&valid(total)&&valid(active)&&active<=total;"));
+    assert!(DASHBOARD.contains("'Active rules: '+"));
+    assert!(DASHBOARD.contains("' · Compiled patterns: '+"));
     assert!(DASHBOARD.contains("mlRegexStats();setInterval("));
 }
