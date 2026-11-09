@@ -230,11 +230,15 @@ fn review_candidate(db:&Connection,family:&str,
         let old=match matchlab_parser::parse_title_canonical(name,false){
             Ok(value)=>value,Err(_)=>return Ok(false)
         };
-        if old.get("title")!=new.get("title"){return Ok(false);}
-        if old.iter().any(|(field,value)|
-            !matches!(field.as_str(),"seasons"|"episodes") && new.get(field)!=Some(value)){
-            return Ok(false);
+        // Changes outside the two independently validated fields must
+        // fail closed, including newly introduced output keys.
+        let mut previous=old.clone();
+        let mut candidate=new.clone();
+        for field in ["seasons","episodes"]{
+            previous.remove(field);
+            candidate.remove(field);
         }
+        if previous!=candidate{return Ok(false);}
         if let Some(reference)=expected(name)
             &&reference.family==family {
             if category(&reference,&Value::Object(new.clone()))!="aligned"{
