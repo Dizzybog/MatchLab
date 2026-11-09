@@ -155,17 +155,17 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
         let clean=crate::field_audit::canonical_for_training(&base,&flags);
         model.observe_canonical_fields(&tx,&title,&clean)?;
         for (field,signal) in crate::tv_learning::observe(
-            &tx,&title,&base,&mut tv_evidence)? {
+            &tx,&title,&clean,&mut tv_evidence)? {
             model.observe(&tx,&title,&field,&signal)?;
         }
         if let Some(ref metadata)=meta{
             crate::learned_regex::observe(&tx,metadata,&title,&details,&base)?;
         }
         for (field,signal) in crate::field_learning::observe_with_budget(
-            &tx,&title,&details,&base,&mut evidence)?{
+            &tx,&title,&details,&clean,&mut evidence)?{
             model.observe(&tx,&title,&field,&signal)?;
         }
-        crate::candidate_discovery::observe(&tx,&title,&base,
+        crate::candidate_discovery::observe(&tx,&title,&clean,
             &model,&mut discovery)?;
         for flag in flags{
             let Some((code,group))=pattern(&flag,&base,&details["selected"])else{continue};
@@ -336,6 +336,22 @@ mod tests{
         let e=json!({"selected":{"imdb_id":"tt7654321"}});
         assert_ne!(pattern(&a,&d["parsed"],&d["selected"]).unwrap().1,
             pattern(&a,&e["parsed"],&e["selected"]).unwrap().1);
+    }
+    #[test]
+    fn extraction_review_patterns_do_not_require_a_matched_imdb(){
+        let unmatched=Value::Null;
+        let parsed=json!({"title":"Show S02E07","episodes":[7]});
+        for (code,signal) in [
+            ("field_overextracted_title","release_marker_in_title"),
+            ("field_underextracted_title","unparsed_title_prefix"),
+            ("field_underextracted_episodes","explicit_episode_range_incomplete"),
+            ("field_overextracted_episodes","single_episode_multiple_values"),
+        ] {
+            let diagnostic=json!({"code":code,"signal":signal,"field":"title"});
+            let found=pattern(&diagnostic,&parsed,&unmatched).unwrap();
+            assert_eq!(found.0,code);
+            assert_eq!(found.1.len(),64);
+        }
     }
     #[test]
     fn native_inference_is_finite_and_requires_training(){
