@@ -2845,31 +2845,61 @@ pub fn parse_title_canonical(
         result
     })
 }
-fn stable_patch_hash(patches:&[HandlerPatch])->u64{
+/// A learned pattern reuses a trusted parser handler's field,
+/// transform, options and priority semantics. The learner supplies only regex.
+#[derive(Clone,Debug)]
+pub struct HandlerAddition {
+    pub source_index: usize,
+    pub pattern: String,
+}
+
+fn stable_patch_hash(patches:&[HandlerPatch],additions:&[HandlerAddition])->u64{
     let mut value=0xcbf29ce484222325u64;
-    for rule in patches{
-        for b in format!("{}:{}:{}\n",rule.index,
-            rule.original_pattern,rule.replacement_pattern).bytes(){
-            value^=u64::from(b);
+    let mut lines=patches.iter().map(|rule|
+        format!("patch:{}:{}:{}\n",rule.index,
+            rule.original_pattern,rule.replacement_pattern)).collect::<Vec<_>>();
+    lines.extend(additions.iter().map(|rule|
+        format!("add:{}:{}\n",rule.source_index,rule.pattern)));
+    lines.sort();
+    for line in lines {
+        for byte in line.bytes() {
+            value^=u64::from(byte);
             value=value.wrapping_mul(0x100000001b3);
         }
     }
     value.max(1)
 }
-/// Atomic live replacement of an exact existing generated handler.
-/// Only the background learner invokes this after evidence screening:
-/// no model-generated PCRE, source mismatch or regex compile work on HTTP.
+
+/// Backwards-compatible parser source-replacement entry point.
 pub fn install_handler_patches(patches:&[HandlerPatch])->Result<(),ParseError>{
+    install_learned_handler_regex(patches,&[])
+}
+
+/// Compile additions and replacements on the learning worker and publish
+/// one immutable engine. MatchLab, not the learner, extracts all field values.
+pub fn install_learned_handler_regex(
+    patches:&[HandlerPatch],additions:&[HandlerAddition]
+)->Result<(),ParseError>{
     let mut sorted=patches.to_vec();
     sorted.sort_by_key(|p|p.index);
     if sorted.windows(2).any(|w|w[0].index==w[1].index){
         return Err(ParseError::Data("duplicate handler patch".into()));
     }
-    if sorted.len()>32{
-        return Err(ParseError::Data("too many live handler patches".into()));
+    if sorted.len()>32||additions.len()>96{
+        return Err(ParseError::Data("too many live regex rules".into()));
     }
-    let fingerprint=stable_patch_hash(&sorted);
-    if patches.is_empty(){
+    let mut ordered_additions=additions.to_vec();
+    ordered_additions.sort_by(|a,b|(&a.source_index,&a.pattern)
+        .cmp(&(&b.source_index,&b.pattern)));
+    if ordered_additions.windows(2).any(|w|
+        w[0].source_index==w[1].source_index && w[0].pattern==w[1].pattern){
+        return Err(ParseError::Data("duplicate handler addition".into()));
+    }
+    let fingerprint=stable_patch_hash(&sorted,&ordered_additions);
+    if LIVE_REVISION.load(std::sync::atomic::Ordering::Acquire)==fingerprint {
+        return Ok(());
+    }
+    if patches.is_empty()&&additions.is_empty(){
         let mut lock=LIVE_ENGINE.write().map_err(|_|ParseError::Data(
             "live handler lock unavailable".into()))?;
         *lock=None;
@@ -2886,26 +2916,45 @@ pub fn install_handler_patches(patches:&[HandlerPatch])->Result<(),ParseError>{
         if raw["kind"]!="regex" || raw["pattern"].as_str()!=Some(&patch.original_pattern){
             return Err(ParseError::Data("original handler changed".into()));
         }
-        // The Rust regex engine rejects backtracking PCRE extensions and
-        // enforces a bounded automaton. The compiled PCRE2 handler is built
-        // only after this validation, off the request thread.
-        if patch.replacement_pattern.len()>512 ||
-            patch.replacement_pattern.len()<4 {
-            return Err(ParseError::Data("invalid handler length".into()));
-        }
-        let safe=regex::RegexBuilder::new(&patch.replacement_pattern)
-            .size_limit(256*1024)
-            .build().map_err(|e|ParseError::Regex(e.to_string()))?;
-        if safe.is_match("") {
-            return Err(ParseError::Data("zero-width handler prohibited".into()));
-        }
+        verify_learned_regex(&patch.replacement_pattern)?;
         raw["pattern"]=Value::String(patch.replacement_pattern.clone());
+    }
+    // Additions are appended so normal bundled handlers have precedence.
+    // Their original field, options and transform are preserved exactly.
+    // The learner cannot inject arbitrary field values, scripts or transforms.
+    for addition in &ordered_additions{
+        let mut raw=rows.get(addition.source_index).cloned().ok_or_else(||
+            ParseError::Data("unknown addition source handler".into()))?;
+        let field=raw["name"].as_str().unwrap_or("");
+        if raw["kind"]!="regex" ||
+           !matches!(field,"resolution"|"codec"|"quality"|"audio"|"bit_depth"|
+                "hdr"|"channels"|"languages"|"subbed"|"dubbed"|"extension"|
+                "seasons"|"episodes"){
+            return Err(ParseError::Data("unsafe addition source".into()));
+        }
+        verify_learned_regex(&addition.pattern)?;
+        raw["pattern"]=Value::String(addition.pattern.clone());
+        rows.push(raw);
     }
     let candidate=ParserEngine::from_json(&document.to_string())?;
     let mut lock=LIVE_ENGINE.write().map_err(|_|
         ParseError::Data("live handler lock unavailable".into()))?;
     *lock=Some(Arc::new(candidate));
     LIVE_REVISION.store(fingerprint,std::sync::atomic::Ordering::Release);
+    Ok(())
+}
+fn verify_learned_regex(pattern:&str)->Result<(),ParseError>{
+    if !(4..=512).contains(&pattern.len()){
+        return Err(ParseError::Data("invalid learned regex length".into()));
+    }
+    // Require the Rust linear-time regex subset even though trusted
+    // legacy MatchLab handlers may use PCRE2-specific constructs.
+    let safe=regex::RegexBuilder::new(pattern)
+        .size_limit(256*1024).build()
+        .map_err(|e|ParseError::Regex(e.to_string()))?;
+    if safe.is_match("") {
+        return Err(ParseError::Data("zero-width learned regex prohibited".into()));
+    }
     Ok(())
 }
 
