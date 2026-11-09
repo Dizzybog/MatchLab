@@ -894,8 +894,10 @@ mod tests {
             let inferred=independent_marker_value("codec",marker);
             assert_eq!(inferred,Some(json!(expected)),"wrong codec for {marker}");
             assert!(consistent("codec",marker,&json!(expected)));
-            assert!(!consistent("codec",marker,&json!(marker.to_uppercase()))
-                || marker==expected,"raw alias must not replace canonical values");
+            if marker != expected {
+                assert!(!consistent("codec",marker,&json!(marker)),
+                    "raw alias must not replace canonical values");
+            }
             if let Some(value)=original.get("codec") {
                 assert_eq!(value.as_str(),Some(expected),
                     "canonical parser disagrees for {marker}");
