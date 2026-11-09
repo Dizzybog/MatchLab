@@ -186,10 +186,16 @@ fn persist_batch_with_learning(db:&mut Connection,items:&[HistoryEvent],
     // StremThru-style bounded persistence: retain jobs independently of
     // the dashboard history. Older overflow entries are dropped only from
     // ML evidence, never from actual parsing/matching.
+    // Queue IDs are request sequence numbers, NOT queue row numbers.
+    // Deduplication removes rows and leaves large gaps. Subtracting the
+    // configured cap from MAX(id) would silently evict valid observations
+    // even when the queue contains far fewer than its permitted row count.
+    // Keep the newest N *actual rows*, deleting only older entries.
     let evicted=if train{
-        tx.execute("DELETE FROM ml_training_queue WHERE id <= (
-            SELECT COALESCE(MAX(id),0)-?1 FROM ml_training_queue
-        )",[ml_queue_max_items()])?
+        tx.execute("DELETE FROM ml_training_queue WHERE id < COALESCE((
+            SELECT id FROM ml_training_queue
+            ORDER BY id DESC LIMIT 1 OFFSET ?1
+        ),0)",[ml_queue_max_items()-1])?
     }else{0};
     tx.commit()?; 
     if evicted>0{
@@ -504,21 +510,36 @@ mod tests {
     }
 
     #[test]
-    fn ml_queue_overflow_is_bounded_by_monotonic_request_ids(){
-        // Test the exact queue retention predicate independently of env vars.
+    fn ml_queue_retention_counts_rows_not_gapped_request_ids(){
+        // Simulate a large request-ID gap caused by repeated-title
+        // coalescing; the oldest pending work must survive below capacity.
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE ml_training_queue(
             id INTEGER PRIMARY KEY,title TEXT NOT NULL,details TEXT NOT NULL);
             INSERT INTO ml_training_queue VALUES(1,'old','{}');
-            INSERT INTO ml_training_queue VALUES(2,'old2','{}');
-            INSERT INTO ml_training_queue VALUES(3,'new','{}');").unwrap();
-        db.execute("DELETE FROM ml_training_queue WHERE id <= (
-            SELECT COALESCE(MAX(id),0)-?1 FROM ml_training_queue
-        )",[2]).unwrap();
-        assert_eq!(db.query_row("SELECT MIN(id) FROM ml_training_queue",[],
-            |r|r.get::<_,i64>(0)).unwrap(),2);
-        assert_eq!(db.query_row("SELECT COUNT(*) FROM ml_training_queue",[],
-            |r|r.get::<_,i64>(0)).unwrap(),2);
+            INSERT INTO ml_training_queue VALUES(10001,'old2','{}');
+            INSERT INTO ml_training_queue VALUES(40000,'new','{}');").unwrap();
+        let retention=|cap:i64|{
+            db.execute("DELETE FROM ml_training_queue WHERE id < COALESCE((
+                SELECT id FROM ml_training_queue ORDER BY id DESC
+                LIMIT 1 OFFSET ?1
+            ),0)",[cap-1]).unwrap();
+        };
+        retention(3);
+        let ids=db.prepare("SELECT id FROM ml_training_queue ORDER BY id").unwrap()
+            .query_map([],|row|row.get::<_,i64>(0)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(ids,vec![1,10001,40000],
+            "gaps from duplicate titles cannot cause premature eviction");
+        retention(2);
+        let ids=db.prepare("SELECT id FROM ml_training_queue ORDER BY id").unwrap()
+            .query_map([],|row|row.get::<_,i64>(0)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(ids,vec![10001,40000]);
+        retention(5);
+        let count:i64=db.query_row("SELECT COUNT(*) FROM ml_training_queue",[],
+            |row|row.get(0)).unwrap();
+        assert_eq!(count,2);
     }
 
     #[test]
