@@ -477,6 +477,12 @@ pub fn evict_obsolete(db: &Connection, limit: i64) -> Result<i64, String> {
     Ok(obsolete+original)
 }
 fn select_rules(db: &Connection) -> Result<Vec<FieldRule>, String> {
+    select_gap_rules(db,true)
+}
+/// Shared review proposals can describe a verified missing-field marker
+/// even when no safe live Rust handler exists. Only live rules affect
+/// compiled patterns, revision hashes and user-facing active counts.
+fn select_gap_rules(db:&Connection,live_only:bool)->Result<Vec<FieldRule>,String>{
     let source_build = build();
     let mut stmt = db.prepare(
         "SELECT field,signal,canonical,count(*) AS examples,
@@ -524,7 +530,8 @@ fn select_rules(db: &Connection) -> Result<Vec<FieldRule>, String> {
         // Only count rules that can actually be attached to a native
         // parser handler. Extension, language and subtitle markers still
         // contribute training evidence, but must not inflate "active".
-        if source_handler_additions(std::slice::from_ref(&rule)).is_empty(){
+        if live_only
+            && source_handler_additions(std::slice::from_ref(&rule)).is_empty(){
             evidence_only+=1;
             continue;
         }
@@ -549,7 +556,9 @@ fn select_rules(db: &Connection) -> Result<Vec<FieldRule>, String> {
         active.push(rule);
         if active.len() == MAX_RULES { break; }
     }
-    EVIDENCE_ONLY_CANDIDATES.store(evidence_only,Ordering::Relaxed);
+    if live_only{
+        EVIDENCE_ONLY_CANDIDATES.store(evidence_only,Ordering::Relaxed);
+    }
     Ok(active)
 }
 /// Migration helper: snapshot old, previously activated rules before a
@@ -593,7 +602,7 @@ pub fn archive_proposals(db:&Connection)->Result<Vec<Value>,String>{
     proposals(db,true)
 }
 fn proposals(db:&Connection,archive:bool)->Result<Vec<Value>,String>{
-    let rules=select_rules(db)?;
+    let rules=select_gap_rules(db,false)?;
     let mut out=Vec::new();
     for rule in &rules {
         if !archive && (rule.examples<12 ||rule.titles<4){continue;}
@@ -609,7 +618,12 @@ fn proposals(db:&Connection,archive:bool)->Result<Vec<Value>,String>{
             "distinct_titles":rule.titles,
             "canonical_confirmations":rule.canonical_examples,
             "source_build":build(),
-            "verification":"local_canonical_and_explicit_release_marker",
+            "verification":if source_handler_additions(
+                std::slice::from_ref(rule)).is_empty(){
+                "review_only_no_native_handler"
+            }else{
+                "local_canonical_and_explicit_release_marker"
+            },
         }));
     }
     // Read the original source-handler catalog in the background only.
@@ -1023,6 +1037,25 @@ mod tests {
         }
         assert!(select_rules(&db).unwrap().is_empty(),
             "a marker with no native handler addition is review-only");
+    }
+    #[test]
+    fn unsupported_field_gaps_still_reach_human_review_proposals(){
+        let db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        for n in 0..16{
+            db.execute("INSERT INTO learned_field_gap_evidence(
+                field,signal,example_hash,identity_hash,canonical,source_build,first_seen)
+                VALUES('extension','mkv',?1,?2,'\"mkv\"',?3,1)",
+                params![format!("gap{n}"),format!("title{n}"),build()]
+            ).unwrap();
+        }
+        assert!(select_rules(&db).unwrap().is_empty());
+        let proposals=community_proposals(&db).unwrap();
+        assert!(proposals.iter().any(|p|
+            p["field"]=="extension"
+                &&p["signal"]=="mkv"
+                &&p["verification"]=="review_only_no_native_handler"),
+            "unsupported field improvements must remain shareable for human review");
     }
     #[test]
     fn a_single_missing_observation_is_not_a_validated_improvement(){
