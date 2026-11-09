@@ -23,6 +23,7 @@ CODES={"season","episode","series","part","year","movie","sample",
 MAX_BODY=16384
 MAX_RULES=2
 MAX_SAMPLES=12
+MAX_CATCHUP_PROPOSALS=4096
 
 def canonical(marker):
     if not isinstance(marker,str) or not re.fullmatch("[a-z]{3,9}",marker):
@@ -319,7 +320,7 @@ def collect(all_comments,sha,seen,now=None,ancestor=git_ancestor):
                 if rule["fingerprint"] in seen or rule["fingerprint"] in pending:continue
                 pending.add(rule["fingerprint"])
                 output.append(rule)
-                if len(output)>=24:return output,seen
+                if len(output)>=MAX_CATCHUP_PROPOSALS:return output,seen
     # Do NOT poison the permanent ledger with only self-reported evidence.
     # A fingerprint becomes permanent only after trusted screening, regression
     # tests and successful creation of the human-review PR.
