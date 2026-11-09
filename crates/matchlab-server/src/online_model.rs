@@ -308,13 +308,16 @@ impl OnlineModel{
                 examples.push((field.as_str(),signal));
             }
         }
-        // Rotate the deterministic cohort by title hash: otherwise sorted
-        // field names would starve e.g. year/quality/episode from training.
+        // Train every nonempty canonical parser field; earlier versions
+        // sampled only six fields per title and could systematically miss
+        // rarer fields (group, edition, region, site, etc.). The parser
+        // produces a finite schema; this cap bounds work from malformed
+        // or future oversized payloads without favoring alphabetic keys.
         if examples.is_empty(){return Ok(0);}
         let rotation=hash(title)%examples.len();
         examples.rotate_left(rotation);
         let mut seen=0;
-        for (field,signal) in examples.into_iter().take(6){
+        for (field,signal) in examples.into_iter().take(64){
             if self.observe(db,title,field,&signal)?{seen+=1;}
         }
         Ok(seen)
@@ -381,13 +384,13 @@ mod tests{
             "subbed":true,"group":"EXAMPLE"});
         let n=learner.observe_canonical_fields(
             &db,"Example.Work.S02E07.2024.1080p.WEB-DL",&parsed).unwrap();
-        assert_eq!(n,6,"per-release background updates must be bounded");
+        assert_eq!(n,11,"all canonical fields should train instead of sampling six");
         let again=learner.observe_canonical_fields(
             &db,"Example.Work.S02E07.2024.1080p.WEB-DL",&parsed).unwrap();
         assert_eq!(again,0,"repeated queries must not retrain the same title");
         let stored:i64=db.query_row("SELECT COUNT(*) FROM online_model_seen",[],
             |r|r.get(0)).unwrap();
-        assert_eq!(stored,6);
+        assert_eq!(stored,11);
     }
     #[test]
     fn learns_real_examples_and_rejects_counterfactual_fields(){
