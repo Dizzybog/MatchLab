@@ -3162,6 +3162,39 @@ mod live_handler_catalog_tests {
         }
     }
     #[test]
+    fn learned_additions_are_deduplicated_by_field_and_effective_regex(){
+        let catalogue=existing_regex_rules();
+        let source=catalogue.iter().find(|row|
+            row["field"]=="episodes" &&row["transform"]=="array(integer)"
+            &&row["options"]["remove"]==false
+        ).expect("native episode handler");
+        let source_index=source["index"].as_u64().unwrap() as usize;
+        let pattern=r"(?i)(?:^|[._ -])s[0-9]{1,3}[._ -]*e([0-9]{1,5})(?:$|[._ -])";
+        let addition=HandlerAddition{source_index,pattern:pattern.to_owned()};
+        assert_eq!(effective_handler_additions(
+            &[addition.clone(),addition.clone()],&[]).len(),1);
+        let correction=HandlerCorrection{
+            source_index,pattern:pattern.to_owned(),is_range:false};
+        assert!(effective_handler_additions(&[addition.clone()],&[correction])
+            .is_empty(),"a corrective rule must not also be appended");
+        let native=HandlerAddition{
+            source_index,pattern:source["pattern"].as_str().unwrap().to_owned()};
+        assert!(effective_handler_additions(&[native],&[])
+            .is_empty(),"the source parser already owns this exact regex");
+    }
+    #[test]
+    fn a_noop_learned_addition_has_the_same_effective_revision(){
+        let source=existing_regex_rules().into_iter().find(|entry|
+            entry["field"]=="codec" &&entry["pattern"]==r"\bavc\b"
+        ).expect("existing codec handler");
+        let inert=HandlerAddition{source_index:source["index"].as_u64()
+            .unwrap() as usize,pattern:source["pattern"].as_str().unwrap().to_owned()};
+        let normalized=effective_handler_additions(&[inert],&[]);
+        assert!(normalized.is_empty());
+        assert_eq!(stable_patch_hash(&[],&normalized,&[]),
+            stable_patch_hash(&[],&[],&[]));
+    }
+    #[test]
     fn learned_regex_addition_uses_native_matchlab_field_transform(){
         let sources=existing_regex_rules();
         let original=sources.iter().find(|entry|
