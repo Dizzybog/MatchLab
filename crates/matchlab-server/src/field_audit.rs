@@ -218,6 +218,11 @@ fn extraction_review(raw:&str,parsed:&Value)->Vec<Value>{
             &&!episodes.is_empty()
             &&(!episodes.iter().any(|v|v.as_i64()==Some(start))
                 ||!episodes.iter().any(|v|v.as_i64()==Some(end)))
+            // The native parser may represent a full release interval by
+            // episode_start/end and retain only its first episode in the
+            // episodes array. That is NOT an underextraction.
+            &&!(parsed["episode_start"].as_i64()==Some(start)
+                &&parsed["episode_end"].as_i64()==Some(end))
         {
             issues.push(json!({
                 "code":"field_underextracted_episodes","field":"episodes",
@@ -595,6 +600,11 @@ mod tests{
         let complete=codes("Show.S02E07-E08.1080p",
             json!({"title":"Show","episodes":[7,8]}),Value::Null);
         assert!(!complete.contains(
+            &"field_underextracted_episodes".to_owned()));
+        let native_interval=codes("Show.S02E07-E08.1080p",
+            json!({"title":"Show","seasons":[2],"episodes":[7],
+                "episode_start":7,"episode_end":8,"episode_count":2}),Value::Null);
+        assert!(!native_interval.contains(
             &"field_underextracted_episodes".to_owned()));
         let excessive=codes("Show.S02E07.1080p",
             json!({"title":"Show","episodes":[7,8]}),Value::Null);

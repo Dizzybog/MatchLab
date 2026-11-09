@@ -125,18 +125,49 @@ fn canonical_codec(signal: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+// These labels are independently readable, bounded release markers. They
+// are never inferred from previously learned parser output.
+fn canonical_audio(signal:&str)->Option<&'static str>{
+    match signal {
+        "aac"=>Some("AAC"),"ac3"=>Some("Dolby Digital"),
+        "eac3"|"ddp"=>Some("Dolby Digital Plus"),
+        "dts"=>Some("DTS Lossy"),"flac"=>Some("FLAC"),
+        "truehd"=>Some("TrueHD"),"opus"=>Some("OPUS"),
+        _=>None,
+    }
+}
+fn canonical_hdr(signal:&str)->Option<&'static str>{
+    match signal {
+        "dovi"|"dolbyvision"=>Some("DV"),
+        "hdr10"=>Some("HDR10"),"hdr10plus"=>Some("HDR10+"),
+        _=>None
+    }
+}
+fn independently_verified_array(field:&str,signal:&str)->Option<Value>{
+    let result=match field{
+        "audio"=>canonical_audio(signal)?,
+        "hdr"=>canonical_hdr(signal)?,
+        "channels"=>match signal{
+            "5.1"=>"5.1","7.1"=>"7.1","2.0"=>"2.0",_=>return None
+        },
+        "languages"=>language_code(signal)?,
+        _=>return None
+    };
+    Some(json!([result]))
+}
 fn consistent(field: &str, signal: &str, value: &Value) -> bool {
     match field {
         "codec" => canonical_codec(signal).is_some_and(|canonical|
             value.as_str().is_some_and(|s|s.eq_ignore_ascii_case(canonical))),
-        "languages" => {
-            let Some(code) = language_code(signal) else { return false; };
-            value.as_array().is_some_and(|values|
-                values.len() == 1 && values.iter().any(|value| {
-                    value.as_str().is_some_and(|v|
-                        v.eq_ignore_ascii_case(code)
-                        || (code == "no" && matches!(v, "nb" | "nn")))
-                }))
+        "audio"|"hdr"|"channels"|"languages"=>{
+            let Some(expected)=independently_verified_array(field,signal)
+                else{return false;};
+            let Some(values)=value.as_array()else{return false;};
+            let Some(label)=expected[0].as_str()else{return false;};
+            values.len()==1 &&values[0].as_str().is_some_and(|found|
+                found.eq_ignore_ascii_case(label)
+                || (field=="languages"&&label=="no"
+                    &&matches!(found,"nb"|"nn")))
         }
         "dubbed" | "subbed" => value.as_bool() == Some(true),
         "bit_depth" => {
@@ -162,9 +193,11 @@ fn validated_value(field: &str, signal: &str, value: &Value) -> bool {
                 || matches!(c, '.' | '-' | '_' | ' ' | '+')),
         Value::Number(n) => n.as_i64().is_some_and(|v| (0..=9999).contains(&v)),
         Value::Bool(v) => *v,
-        Value::Array(a) => field == "languages" && a.len() <= 8
-            && a.iter().all(|v| v.as_str().is_some_and(|s|
-                s.len() <= 5 && s.bytes().all(|b| b.is_ascii_alphabetic()))),
+        Value::Array(a) => matches!(field,"languages"|"audio"|"hdr"|"channels")
+            &&a.len()==1 &&a.iter().all(|v|v.as_str().is_some_and(|s|
+                !s.is_empty()&&s.len()<=32&&s.bytes().all(|b|
+                    b.is_ascii_alphanumeric()
+                    ||matches!(b,b' '|b'-'|b'+'|b'.')))),
         _ => false,
     }
 }
@@ -173,6 +206,8 @@ fn validated_value(field: &str, signal: &str, value: &Value) -> bool {
 // result, supply IMDb coordinates, or learn an unknown label by repetition.
 fn independent_marker_value(field:&str,signal:&str)->Option<Value>{
     let value=match (field,signal){
+        ("audio"|"hdr"|"channels"|"languages",_) =>
+            independently_verified_array(field,signal)?,
         ("resolution",value) if crate::field_audit::supported_pixel_height(value)=>json!(value),
         ("codec","x264"|"x265"|"h264"|"h265"|"avc"|"hevc"|"av1")=>
             json!(canonical_codec(signal)?),
@@ -180,9 +215,7 @@ fn independent_marker_value(field:&str,signal:&str)->Option<Value>{
         ("quality","webrip")=>json!("WEBRip"),
         ("quality","bluray")=>json!("BluRay"),
         ("quality","hdtv")=>json!("HDTV"),
-        ("audio","aac"|"ac3"|"eac3"|"ddp"|"dts"|"flac"|"truehd"|"opus")=>json!(signal),
         ("bit_depth","8bit"|"10bit"|"12bit")=>json!(signal),
-        ("channels","5.1"|"7.1"|"2.0")=>json!(signal),
         ("extension","mkv"|"mp4"|"avi"|"m4v"|"webm"|"m2ts")=>json!(signal),
         ("subbed","subbed"|"hardsubbed")|("dubbed","dubbed")=>json!(true),
         _=>return None,
@@ -291,6 +324,17 @@ fn context_valid_with_re(raw:&str,field:&str,re:&Regex)->bool{
         // is not a release-language tag merely because 1080p follows.
         if !release_context.iter().any(|item|
             lower.find(item).is_some_and(|index|index < matched.start())) {
+            return false;
+        }
+    }
+    if matches!(field,"audio"|"hdr"|"subbed"|"dubbed") {
+        // A word such as "Dubbed", "Atmos" or "HDR" in an ordinary title
+        // is not independent release metadata. Require technical context
+        // before treating it as a trustworthy ML training reference.
+        let lower=title.to_ascii_lowercase();
+        if !["1080p","2160p","720p","480p","web-dl","webdl",
+            "webrip","bluray","bdrip","x264","x265","h264","h265"]
+            .iter().any(|marker|lower.contains(marker)){
             return false;
         }
     }
@@ -757,13 +801,20 @@ fn source_handler_additions(active:&[FieldRule])
     for rule in active {
         // Context-sensitive tags need additional native parser guards before
         // automation. They can still be shared as human-review proposals.
-        if !matches!(rule.field.as_str(),
-            "resolution"|"codec"|"quality"|"bit_depth"){
-            continue;
-        }
-        let transform=match &rule.value {
-            Value::String(value)=>format!("value('{value}')"),
-            Value::Bool(true)=>"boolean".to_owned(),
+        // All independently validated technical fields are eligible for
+        // ADD; the installed parser alone performs the native transformation.
+        // Other fields still enter training/review but cannot promote without
+        // an independent reference validator.
+        if !technical_field(&rule.field){continue;}
+        let transform=match (rule.field.as_str(),&rule.value) {
+            ("extension",Value::String(_))=>"lowercase".to_owned(),
+            (_,Value::String(value))=>format!("value('{value}')"),
+            (_,Value::Array(labels)) if labels.len()==1 =>
+                match labels[0].as_str(){
+                    Some(label)=>format!("uniq_concat(value('{label}'))"),
+                    None=>continue
+                },
+            (_,Value::Bool(true))=>"boolean".to_owned(),
             _=>continue,
         };
         let template=catalog.iter().find(|row|
@@ -782,14 +833,45 @@ fn source_handler_additions(active:&[FieldRule])
 }
 
 /// Publish only regex into MatchLab's parser. No ML field postprocessor.
-pub fn publish_parser_rules_with_tv(
+/// Read the same source patches and additions the live engine would
+/// install. Background replay must include them to catch cross-rule
+/// conflicts and redundant/ineffective corrective regexes.
+pub(crate) fn source_rules_without_general(
     tv_additions:Vec<matchlab_parser::HandlerAddition>
-)->Result<(),String>{
+)->Result<(Vec<matchlab_parser::HandlerPatch>,
+    Vec<matchlab_parser::HandlerAddition>),String>{
     let fields=registry().read().map_err(|e|e.to_string())?.rules.clone();
     let patches=source_handler_patches(&fields);
     let mut additions=source_handler_additions(&fields);
     additions.extend(tv_additions);
-    matchlab_parser::install_learned_handler_regex(&patches,&additions)
+    Ok((patches,additions))
+}
+pub(crate) fn current_source_rules(
+    tv_additions:Vec<matchlab_parser::HandlerAddition>
+)->Result<(Vec<matchlab_parser::HandlerPatch>,
+    Vec<matchlab_parser::HandlerAddition>),String>{
+    let (patches,mut additions)=source_rules_without_general(tv_additions)?;
+    additions.extend(crate::general_learning::handler_additions());
+    Ok((patches,additions))
+}
+pub fn publish_parser_rules_with_tv(
+    tv_additions:Vec<matchlab_parser::HandlerAddition>
+)->Result<(),String>{
+    publish_parser_rules_with_tv_and_corrections(
+        tv_additions,crate::corrective_learning::handler_corrections())
+}
+pub fn publish_parser_rules_with_tv_and_corrections(
+    tv_additions:Vec<matchlab_parser::HandlerAddition>,
+    corrections:Vec<matchlab_parser::HandlerCorrection>
+)->Result<(),String>{
+    let (patches,additions)=current_source_rules(tv_additions)?;
+    let mut corrections=corrections;
+    corrections.extend(crate::general_learning::handler_corrections());
+    matchlab_parser::verify_live_regression_corpus(
+        &patches,&additions,&corrections)
+        .map_err(|e|format!("learned regex regression rejected: {e}"))?;
+    matchlab_parser::install_learned_handler_regex_with_corrections(
+        &patches,&additions,&corrections)
         .map_err(|e|format!("learned parser regex rejected: {e}"))
 }
 
@@ -809,6 +891,17 @@ pub fn reconcile(db: &Connection) -> Result<(), String> {
         old == by_rule
     });
     if already_installed && revision()!=0 { return Ok(()); }
+    // Validate the fully assembled candidate BEFORE marking rules as
+    // verified in persistent SQLite state.
+    let patches=source_handler_patches(&active);
+    let mut additions=source_handler_additions(&active);
+    additions.extend(crate::tv_learning::handler_additions());
+    additions.extend(crate::general_learning::handler_additions());
+    let mut corrections=crate::corrective_learning::handler_corrections();
+    corrections.extend(crate::general_learning::handler_corrections());
+    matchlab_parser::verify_live_regression_corpus(
+        &patches,&additions,&corrections)
+        .map_err(|e|format!("learned regex regression rejected: {e}"))?;
     let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
     tx.execute("DELETE FROM learned_field_rules",[])
         .map_err(|e| e.to_string())?;
@@ -822,10 +915,8 @@ pub fn reconcile(db: &Connection) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())?;
-    let patches=source_handler_patches(&active);
-    let mut additions=source_handler_additions(&active);
-    additions.extend(crate::tv_learning::handler_additions());
-    matchlab_parser::install_learned_handler_regex(&patches,&additions)
+    matchlab_parser::install_learned_handler_regex_with_corrections(
+        &patches,&additions,&corrections)
         .map_err(|e|format!("learned parser regex rejected: {e}"))?;
     install(active);
     Ok(())
@@ -890,17 +981,54 @@ mod tests {
         assert_eq!(strong[0].pattern,weak[0].pattern);
     }
     #[test]
-    fn context_sensitive_tags_stay_review_only() {
-        for (field,signal,value) in [
-            ("languages","german",json!(["de"])),
-            ("channels","5.1",json!("5.1")),
-            ("audio","aac",json!("AAC")),
-            ("subbed","subbed",json!(true)),
-            ("dubbed","dubbed",json!(true)),
-        ] {
-            assert!(source_handler_additions(&[
-                rule(field,signal,value,40,10)]).is_empty());
+    fn context_sensitive_markers_require_raw_release_evidence(){
+        assert!(!independent_context_valid(
+            "The.Danish.Girl.2015.1080p","languages","danish"));
+        assert!(!independent_context_valid(
+            "Show.Name.5.1.1080p","channels","5.1"));
+        assert!(independent_context_valid(
+            "Example.Show.1080p.AAC.5.1","channels","5.1"));
+        assert!(!independent_context_valid(
+            "The.Dubbed.Movie.2024","dubbed","dubbed"));
+        assert!(!independent_context_valid(
+            "HDR.Explained.2024","hdr","hdr10"));
+        assert!(!independent_context_valid(
+            "AAC.Anthology.2024","audio","aac"));
+        assert!(independent_context_valid(
+            "Example.Show.1080p.AAC","audio","aac"));
+    }
+    #[test]
+    fn independently_verified_array_fields_can_generate_native_regex_rules(){
+        for (field,signal,expected) in [
+            ("audio","aac",json!(["AAC"])),
+            ("audio","eac3",json!(["Dolby Digital Plus"])),
+            ("hdr","dovi",json!(["DV"])),
+            ("channels","5.1",json!(["5.1"])),
+            ("languages","norsk",json!(["no"])),
+        ]{
+            assert_eq!(independent_marker_value(field,signal),Some(expected.clone()),
+                "{field}/{signal} lacks independent canonical evidence");
+            let item=rule(field,signal,expected,24,8);
+            let additions=source_handler_additions(&[item]);
+            assert!(!additions.is_empty(),
+                "{field}/{signal} should reuse a native Rust handler");
         }
+        // Native HDR10 has a pattern-dependent transform; a generic
+        // cloned handler cannot guarantee the same semantics. It remains
+        // evidence-only until a safe field validator/transform is available.
+        assert_eq!(independent_marker_value("hdr","hdr10"),
+            Some(json!(["HDR10"])));
+        assert!(source_handler_additions(&[rule(
+            "hdr","hdr10",json!(["HDR10"]),24,8)]).is_empty());
+        let subs=rule("subbed","subbed",json!(true),24,8);
+        assert!(!source_handler_additions(&[subs]).is_empty());
+        let file=rule("extension","mkv",json!("mkv"),24,8);
+        assert!(!source_handler_additions(&[file]).is_empty());
+        // No discovered marker may install a rule without an independently
+        // validated label with a native parser transform.
+        assert!(independent_marker_value("audio","mystery_audio").is_none());
+        assert!(pattern_for("title","show").is_none(),
+            "unverified title labels must never become live regex");
     }
     #[test]
     fn conservative_language_and_number_validation() {
@@ -908,9 +1036,11 @@ mod tests {
         assert!(!consistent("languages","norwegian",&json!(["en"])));
         assert!(consistent("bit_depth","10bit",&json!(10)));
         assert!(!validated_value("title","bleach",&json!("Other")));
-        assert!(source_handler_additions(&[
+        assert_eq!(source_handler_additions(&[
             rule("languages","german",json!(["de"]),32,10)
-        ]).is_empty());
+        ]).len(),1);
+        assert!(!independent_context_valid(
+            "The.German.Connection.2005.1080p","languages","german"));
     }
     #[test]
     fn learned_codec_values_follow_the_original_parser_api() {
@@ -1031,12 +1161,12 @@ mod tests {
         for n in 0..16 {
             db.execute("INSERT INTO learned_field_gap_evidence(
                 field,signal,example_hash,identity_hash,canonical,source_build,first_seen)
-                VALUES('extension','mkv',?1,?2,'\"mkv\"',?3,1)",
+                VALUES('hdr','hdr10',?1,?2,'[\"HDR10\"]',?3,1)",
                 params![format!("sample{n}"),format!("series{n}"),build()]
             ).unwrap();
         }
         assert!(select_rules(&db).unwrap().is_empty(),
-            "a marker with no native handler addition is review-only");
+            "a pattern-dependent native transform remains review-only");
     }
     #[test]
     fn unsupported_field_gaps_still_reach_human_review_proposals(){
@@ -1045,15 +1175,15 @@ mod tests {
         for n in 0..16{
             db.execute("INSERT INTO learned_field_gap_evidence(
                 field,signal,example_hash,identity_hash,canonical,source_build,first_seen)
-                VALUES('extension','mkv',?1,?2,'\"mkv\"',?3,1)",
+                VALUES('hdr','hdr10',?1,?2,'[\"HDR10\"]',?3,1)",
                 params![format!("gap{n}"),format!("title{n}"),build()]
             ).unwrap();
         }
         assert!(select_rules(&db).unwrap().is_empty());
         let proposals=community_proposals(&db).unwrap();
         assert!(proposals.iter().any(|p|
-            p["field"]=="extension"
-                &&p["signal"]=="mkv"
+            p["field"]=="hdr"
+                &&p["signal"]=="hdr10"
                 &&p["verification"]=="review_only_no_native_handler"),
             "unsupported field improvements must remain shareable for human review");
     }

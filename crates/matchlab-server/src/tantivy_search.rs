@@ -1,6 +1,6 @@
 //! MatchLab's persistent Tantivy search engine for IMDb and AniDB titles.
 //! Exact/prefix/suffix lookups share immutable metadata index generations.
-use std::{collections::{HashMap,BTreeSet},fs::File,path::{Path,PathBuf},sync::{Mutex,OnceLock},time::{Duration,SystemTime,UNIX_EPOCH}};
+use std::{collections::{HashMap,BTreeSet},fs::File,path::{Path,PathBuf},sync::{Mutex,OnceLock,atomic::{AtomicU64,Ordering}},time::{Duration,SystemTime,UNIX_EPOCH}};
 use crate::query_cache::QueryCache;
 use rusqlite::{Connection,OptionalExtension};
 use tantivy::{collector::DocSetCollector,doc,query::{RegexQuery,TermQuery,TermSetQuery},schema::{Schema,STORED,STRING,Value,IndexRecordOption},Index,IndexReader,ReloadPolicy,Term};
@@ -38,6 +38,7 @@ pub struct TitleAlias {
 }
 
 static CACHE:OnceLock<Mutex<HashMap<String,SearchIndex>>>=OnceLock::new();
+static MEMORY_INDEX_NONCE:AtomicU64=AtomicU64::new(0);
 
 // Reuse identical immutable Tantivy lookups across files belonging to the
 // same torrent (and across unrelated torrents with the same title). Never
@@ -96,10 +97,14 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
     if !marker.exists(){
         let parent=dir.parent().ok_or("index directory has no parent")?;
         std::fs::create_dir_all(parent).map_err(|e|e.to_string())?;
-        let stage=parent.join(format!(".tantivy-stage-{}-{}",
+        // Two in-memory Tantivy builds may start within one clock tick.
+        // A process-wide nonce prevents them sharing a staging directory
+        // (and colliding on its Tantivy writer lock or meta.json).
+        let stage=parent.join(format!(".tantivy-stage-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-                .map_err(|e|e.to_string())?.as_nanos()));
+                .map_err(|e|e.to_string())?.as_nanos(),
+            MEMORY_INDEX_NONCE.fetch_add(1,Ordering::Relaxed)));
         let result=(|| -> Result<(),String>{
             std::fs::create_dir_all(&stage).map_err(|e|e.to_string())?;
             let staging_index=Index::create_in_dir(&stage,schema).map_err(|e|e.to_string())?;
@@ -348,9 +353,10 @@ fn open_search(db:&Connection)->Result<(SearchIndex,Option<PathBuf>),String>{
     let source=db.path().filter(|p|!p.is_empty()&&*p!=":memory:").unwrap_or(":memory:");
     let temporary=source==":memory:";
     let memory_dir=if temporary {
-        Some(std::env::temp_dir().join(format!("matchlab-tantivy-memory-{}-{}",
+        Some(std::env::temp_dir().join(format!("matchlab-tantivy-memory-{}-{}-{}",
             std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH)
-                .map_err(|e|e.to_string())?.as_nanos())))
+                .map_err(|e|e.to_string())?.as_nanos(),
+            MEMORY_INDEX_NONCE.fetch_add(1,Ordering::Relaxed))))
     }else{None};
     let generation_id=generation(db)?;
     let path=format!("{source}:{generation_id}");

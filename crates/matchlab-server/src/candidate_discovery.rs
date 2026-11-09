@@ -179,9 +179,14 @@ pub fn observe(db:&Connection,title:&str,parsed:&Value,
     }
     Ok(())
 }
-/// Build-scoped proposals for any original parser field. Unknown-marker
-/// classifications are untrusted and must never auto-activate; a maintainer
-/// needs an independently verified canonical label and field-specific probes.
+/// Local review proposals for any original parser field. Unknown-marker
+/// classifications are untrusted; they must never auto-activate OR be
+/// uploaded by the GitHub sharing actor because even a short unknown token
+/// can reveal part of a private release name. A maintainer can independently
+/// recreate and validate the pattern before publishing.
+// This helper is deliberately only compiled for local regression tests.
+// Unknown tokens remain in the local SQLite review table, not export feeds.
+#[cfg(test)]
 pub fn community_proposals(db:&Connection)->Result<Vec<Value>,String>{
     init(db)?;
     let source=build();
@@ -239,7 +244,8 @@ pub fn publish(db:&Connection)->Result<(),String>{
         "candidate_rule_activation":false,
         "original_parser_fields_considered":parser_fields().len(),
         "raw_markers_never_in_status":true,
-        "opted_in_community_review_may_share_marker_tokens":true});
+        "unknown_release_tokens_are_local_only":true,
+        "opted_in_community_review_may_share_marker_tokens":false});
     let slot=STATUS.get_or_init(||RwLock::new(Value::Null));
     if let Ok(mut guard)=slot.write(){*guard=report;}
     Ok(())
@@ -326,6 +332,7 @@ mod tests{
         assert_eq!(status()["candidate_rule_activation"],false);
         assert!(status().get("marker").is_none());
         assert_eq!(status()["raw_markers_never_in_status"],true);
-        assert_eq!(status()["opted_in_community_review_may_share_marker_tokens"],true);
+        assert_eq!(status()["opted_in_community_review_may_share_marker_tokens"],false);
+        assert_eq!(status()["unknown_release_tokens_are_local_only"],true);
     }
 }

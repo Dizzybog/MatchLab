@@ -91,6 +91,17 @@ The learning process is:
 3. Test proposed regex rules against known values, conflicting patterns and negative examples.
 4. Activate eligible rules in memory without restarting. More uncertain changes are kept for review.
 
+The generated parser contains **458 ordered handlers across 48 field families**
+(449 regex handlers and nine Rust functions). The new *field-general*
+learner can derive safe regex candidates from existing native handler
+provenance and meaning-preserving release-tag variants. It must prove
+**incremental improvement**, preserve complete parser results, reject
+duplicate/no-op rules and revalidate stored evidence after upgrades.
+More ambiguous changes remain review-only until independent references
+establish a reliable result. See the [complete parser and ML regex audit](docs/ML_REGEX_ENGINE.md)
+for field families, transform safety, title-removal interactions, rule
+lifecycle and remaining limitations.
+
 **ML learns from every field that MatchLab parses**, including titles, years, seasons, episodes, languages, video and audio details, release groups, and other metadata. It looks for recurring naming patterns and can propose **new regex rules or improvements to existing ones** for any field. A rule is activated in the live parser **without restarting** only when sufficient independent evidence and field-specific safety checks support it; otherwise it remains inactive for further validation or review. Anime episode patterns still require verified metadata mappings. **ML changes regex only: MatchLab performs all field extraction and IMDb/AniDB matching.** With community sharing enabled, the exact regex additions and replacements can be proposed on GitHub. An ML score alone never activates a rule.
 
 Enable learning in the Compose environment:
@@ -105,6 +116,12 @@ environment:
   MATCHLAB_ML_QUEUE_MAX_ITEMS: "20000"
   MATCHLAB_ML_TRAINING_BATCH_SIZE: "64"
 ```
+
+**Safe observation mode:** set `MATCHLAB_ML_LIVE_REGEX_ENABLED: "false"` to keep
+collecting/training locally while preventing learned regex rules from changing
+the live parser. This is an emergency opt-out for native regex publication,
+not a switch to disable the canonical parser. Re-enable only after examining
+`GET /api/ml/status` and the local regression report.
 
 Only `MATCHLAB_ML_ENABLED` is required; the other settings are optional limits. The training limit counts retained observations, **not RAM usage**. A separate bounded SQLite ML job queue stores observations after matching, and the trainer processes 64 jobs at a time with retry and backoff. Cache hits use a small in-memory tier: HTTP parsing/matching never opens the cache SQLite file. Cache writes run in their own background worker and separate database, avoiding lock contention with training. After parser, rule or metadata changes, old cached answers are ignored and requests are parsed/matched again. Learning evidence is never treated as a completed match.
 
@@ -194,6 +211,7 @@ See [Machine Learning and Community Learning](docs/COMMUNITY_LEARNING.md) for su
 | `MATCHLAB_METADATA_REFRESH_HOURS` | `168` | Metadata refresh interval |
 | `MATCHLAB_MAX_CONCURRENT_MATCHES` | `4` | Maximum concurrent matches (example uses 2) |
 | `MATCHLAB_ML_ENABLED` | `false` | Enable local background learning |
+| `MATCHLAB_ML_LIVE_REGEX_ENABLED` | `true` | Explicitly set `false` to keep training but serve only canonical native regexes |
 | `MATCHLAB_ML_TRAINING_MAX_EXAMPLES` | `12000` | Maximum retained training observations |
 | `MATCHLAB_ML_MAX_STORAGE_GB` | `1` | Local learning evidence budget (separate from cache) |
 | `MATCHLAB_ML_QUEUE_MAX_ITEMS` | `20000` | Bounded durable ML observation queue; oldest observations are dropped only if overwhelmed |

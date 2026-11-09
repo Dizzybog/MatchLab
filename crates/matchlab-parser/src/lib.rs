@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::cell::Cell;
+use std::cell::{Cell,RefCell};
 use std::sync::{Arc,RwLock};
 use std::collections::{HashMap, HashSet};
 
@@ -28,6 +28,9 @@ pub enum ParseError {
 pub struct MatchInfo {
     pub raw_match: String,
     pub match_index: usize,
+    /// Stable position in the bundled generated parser catalogue.
+    /// Functions have no regex provenance.
+    pub source_index: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -120,6 +123,7 @@ enum RuntimeHandlerKind {
 #[derive(Debug, Clone)]
 struct RuntimeHandler {
     name: String,
+    source_index: usize,
     kind: RuntimeHandlerKind,
     transform: TransformSpec,
     options: HandlerOptions,
@@ -293,7 +297,7 @@ impl ParserEngine {
             serde_json::from_str(json_text).map_err(|e| ParseError::Data(e.to_string()))?;
         let mut handlers = Vec::with_capacity(table.handlers.len());
         let mut gate_specs = Vec::with_capacity(table.handlers.len());
-        for mut raw in table.handlers {
+        for (source_index,mut raw) in table.handlers.into_iter().enumerate() {
             // Keep the generated upstream snapshot intact; these are deliberate
             // parser corrections applied before compiling both regexes and gates.
             let guard = if raw.learned_tv_guard { MatchGuard::LearnedTv } else {
@@ -342,6 +346,7 @@ impl ParserEngine {
             };
             handlers.push(RuntimeHandler {
                 name: raw.name,
+                source_index,
                 kind,
                 transform,
                 options,
@@ -644,12 +649,12 @@ impl ParserEngine {
         matched
             .entry(handler.name.clone())
             .or_insert_with(|| MatchInfo {
-                raw_match: if matches!(handler.name.as_str(), "episodes" | "group") {
+                raw_match: if matches!(handler.name.as_str(),"episodes"|"group")
+                    ||CAPTURE_ALL_MATCHES.with(Cell::get){
                     raw_match.to_owned()
-                } else {
-                    String::new()
-                },
+                }else{String::new()},
                 match_index: m0.start(),
+                source_index: Some(handler.source_index),
             });
         result.insert(handler.name.clone(), transformed);
         Ok(Some(HandlerMatch {
@@ -716,6 +721,7 @@ impl ParserEngine {
                         MatchInfo {
                             raw_match: m0.as_str().to_owned(),
                             match_index: start_index + m0.start(),
+                            source_index: None,
                         },
                     );
                     result.insert(
@@ -2829,6 +2835,11 @@ static HANDLERS_JSON: &str = include_str!("generated/handlers.json");
 thread_local! {
     // Training labels and regression checks must bypass live learned rules.
     static CANONICAL_ONLY: Cell<bool> = const { Cell::new(false) };
+    // Background-only candidate replay; never published to public requests.
+    static REPLAY_ENGINE: RefCell<Option<Arc<ParserEngine>>> = const { RefCell::new(None) };
+    // Retain non-episode raw matches only in the offline learning worker;
+    // ordinary API parsing keeps its original low-allocation behavior.
+    static CAPTURE_ALL_MATCHES: Cell<bool> = const { Cell::new(false) };
 }
 static LIVE_ENGINE: Lazy<RwLock<Option<Arc<ParserEngine>>>> =
     Lazy::new(|| RwLock::new(None));
@@ -2840,6 +2851,16 @@ pub struct HandlerPatch {
     pub index: usize,
     pub original_pattern: String,
     pub replacement_pattern: String,
+}
+
+/// A high-priority, native-handler regex correction. The learned pattern
+/// cannot choose its output field or transform: both are copied from a
+/// bundled Rust-parser handler. Only bounded TV coordinate grammars qualify.
+#[derive(Clone,Debug,PartialEq,Eq)]
+pub struct HandlerCorrection {
+    pub source_index: usize,
+    pub pattern: String,
+    pub is_range: bool,
 }
 
 /// All original generated parser handlers, including years, seasons,
@@ -2863,6 +2884,9 @@ pub fn handler_patch_revision() -> u64 {
 }
 fn parse_engine_active() -> Option<Arc<ParserEngine>> {
     if CANONICAL_ONLY.with(Cell::get) { return None; }
+    if let Some(candidate)=REPLAY_ENGINE.with(|slot|slot.borrow().clone()){
+        return Some(candidate);
+    }
     LIVE_ENGINE.read().ok().and_then(|guard|guard.clone())
 }
 fn engine_parse(raw:&str,translate:bool)->Result<Map<String,Value>,ParseError>{
@@ -2891,6 +2915,23 @@ pub fn parse_title_canonical(
         result
     })
 }
+/// Canonical field provenance for the bounded offline ML worker.
+/// Exposes the source handler index and raw match for independently
+/// testing candidate regexes. API parsing remains unchanged.
+pub fn parse_title_canonical_context(
+    name:&str,translate_languages:bool
+)->Result<ParseContext,ParseError>{
+    CANONICAL_ONLY.with(|flag|{
+        CAPTURE_ALL_MATCHES.with(|capture|{
+            let old_flag=flag.replace(true);
+            let old_capture=capture.replace(true);
+            let result=engine_parse_context(name,translate_languages);
+            capture.set(old_capture);
+            flag.set(old_flag);
+            result
+        })
+    })
+}
 /// A learned pattern reuses a trusted parser handler's field,
 /// transform, options and priority semantics. The learner supplies only regex.
 #[derive(Clone,Debug)]
@@ -2899,13 +2940,70 @@ pub struct HandlerAddition {
     pub pattern: String,
 }
 
-fn stable_patch_hash(patches:&[HandlerPatch],additions:&[HandlerAddition])->u64{
+/// Deduplicate by parser semantics, not by handler index. The same regex
+/// can originate from several native templates or from both a TV addition
+/// and a correction; compiling those copies only increases parsing work.
+fn effective_handler_additions(
+    patches:&[HandlerPatch],additions:&[HandlerAddition],
+    corrections:&[HandlerCorrection]
+)->Vec<HandlerAddition>{
+    let catalog=existing_regex_rules();
+    let mut seen=HashSet::new();
+    let mut out=Vec::new();
+    let by_index=|index:usize|catalog.iter().find(|entry|
+        entry["index"].as_u64()==Some(index as u64));
+    let corrected=corrections.iter().filter_map(|rule|{
+        let source=by_index(rule.source_index)?;
+        Some((source["field"].as_str()?.to_owned(),rule.pattern.as_str(),
+            source["transform"].as_str()?,
+            source["options"].to_string(),source["flags"].to_string()))
+    }).collect::<HashSet<_>>();
+    for addition in additions{
+        let Some(source)=by_index(addition.source_index)else{continue;};
+        let Some(field)=source["field"].as_str()else{continue;};
+        let Some(transform)=source["transform"].as_str()else{continue;};
+        // Regex equality alone is insufficient: different removal,
+        // skip/append options or flags can make identical source text
+        // semantically different handlers.
+        let key=(field.to_owned(),addition.pattern.clone(),transform.to_owned(),
+            source["options"].to_string(),source["flags"].to_string());
+        if corrected.contains(&(field.to_owned(),addition.pattern.as_str(),
+            transform,source["options"].to_string(),source["flags"].to_string())){
+            continue;
+        }
+        // When an existing source regex is broadened, that same new marker
+        // must not also be appended as a separate native handler.
+        let extra=format!("(?:{})",addition.pattern);
+        if patches.iter().any(|patch|{
+            let Some(native)=by_index(patch.index)else{return false;};
+            native["field"]==field &&native["transform"]==transform
+                &&native["options"]==source["options"]
+                &&native["flags"]==source["flags"]
+                &&patch.replacement_pattern.ends_with(&extra)
+        }){continue;}
+        // A rule with the same field, regex and conversion already exists
+        // in the canonical parser. Do not append an inert copy.
+        if catalog.iter().any(|native|
+            native["field"]==field &&native["pattern"]==addition.pattern
+            &&native["transform"]==transform
+            &&native["options"]==source["options"]
+            &&native["flags"]==source["flags"]){
+            continue;
+        }
+        if seen.insert(key){out.push(addition.clone());}
+    }
+    out
+}
+fn stable_patch_hash(patches:&[HandlerPatch],additions:&[HandlerAddition],
+    corrections:&[HandlerCorrection])->u64{
     let mut value=0xcbf29ce484222325u64;
     let mut lines=patches.iter().map(|rule|
         format!("patch:{}:{}:{}\n",rule.index,
             rule.original_pattern,rule.replacement_pattern)).collect::<Vec<_>>();
     lines.extend(additions.iter().map(|rule|
         format!("add:{}:{}\n",rule.source_index,rule.pattern)));
+    lines.extend(corrections.iter().map(|rule|
+        format!("correct:{}:{}:{}\n",rule.source_index,rule.is_range,rule.pattern)));
     lines.sort();
     for line in lines {
         for byte in line.bytes() {
@@ -2926,31 +3024,73 @@ pub fn install_handler_patches(patches:&[HandlerPatch])->Result<(),ParseError>{
 pub fn install_learned_handler_regex(
     patches:&[HandlerPatch],additions:&[HandlerAddition]
 )->Result<(),ParseError>{
+    install_learned_handler_regex_with_corrections(patches,additions,&[])
+}
+
+/// Emergency safety switch: keep local training and replay active while
+/// serving the unchanged native parser. Read only when the background
+/// learning worker attempts to publish a generation.
+fn live_regex_allowed(value:Option<&str>)->bool{
+    !value.is_some_and(|v|matches!(v.to_ascii_lowercase().as_str(),
+        "false"|"0"|"off"|"no"))
+}
+pub fn learned_regex_publication_enabled()->bool{
+    live_regex_allowed(std::env::var("MATCHLAB_ML_LIVE_REGEX_ENABLED")
+        .ok().as_deref())
+}
+pub fn install_learned_handler_regex_with_corrections(
+    patches:&[HandlerPatch],additions:&[HandlerAddition],
+    corrections:&[HandlerCorrection]
+)->Result<(),ParseError>{
+    if !learned_regex_publication_enabled(){
+        // A saved rule can never bypass the operator's explicit disable.
+        let mut lock=LIVE_ENGINE.write().map_err(|_|ParseError::Data(
+            "live handler lock unavailable".into()))?;
+        *lock=None;
+        LIVE_REVISION.store(stable_patch_hash(&[],&[],&[]),
+            std::sync::atomic::Ordering::Release);
+        return Ok(());
+    }
+    let additions=effective_handler_additions(patches,additions,corrections);
+    let fingerprint=stable_patch_hash(patches,&additions,corrections);
+    if LIVE_REVISION.load(std::sync::atomic::Ordering::Acquire)==fingerprint {
+        return Ok(());
+    }
+    if patches.is_empty()&&additions.is_empty()&&corrections.is_empty(){
+        let mut lock=LIVE_ENGINE.write().map_err(|_|ParseError::Data(
+            "live handler lock unavailable".into()))?;
+        *lock=None;
+        LIVE_REVISION.store(fingerprint,std::sync::atomic::Ordering::Release);
+        return Ok(());
+    }
+    let candidate=compile_learned_engine(patches,&additions,corrections)?;
+    let mut lock=LIVE_ENGINE.write().map_err(|_|
+        ParseError::Data("live handler lock unavailable".into()))?;
+    *lock=Some(Arc::new(candidate));
+    LIVE_REVISION.store(fingerprint,std::sync::atomic::Ordering::Release);
+    Ok(())
+}
+
+/// Compile a full candidate parser without publishing it. Every source
+/// change retains its original handler identity, conversion and options.
+fn compile_learned_engine(
+    patches:&[HandlerPatch],additions:&[HandlerAddition],
+    corrections:&[HandlerCorrection]
+)->Result<ParserEngine,ParseError>{
     let mut sorted=patches.to_vec();
     sorted.sort_by_key(|p|p.index);
     if sorted.windows(2).any(|w|w[0].index==w[1].index){
         return Err(ParseError::Data("duplicate handler patch".into()));
     }
-    if sorted.len()>32||additions.len()>96{
+    if sorted.len()>32||additions.len()>96||corrections.len()>64{
         return Err(ParseError::Data("too many live regex rules".into()));
     }
     let mut ordered_additions=additions.to_vec();
     ordered_additions.sort_by(|a,b|(&a.source_index,&a.pattern)
         .cmp(&(&b.source_index,&b.pattern)));
     if ordered_additions.windows(2).any(|w|
-        w[0].source_index==w[1].source_index && w[0].pattern==w[1].pattern){
+        w[0].source_index==w[1].source_index&&w[0].pattern==w[1].pattern){
         return Err(ParseError::Data("duplicate handler addition".into()));
-    }
-    let fingerprint=stable_patch_hash(&sorted,&ordered_additions);
-    if LIVE_REVISION.load(std::sync::atomic::Ordering::Acquire)==fingerprint {
-        return Ok(());
-    }
-    if patches.is_empty()&&additions.is_empty(){
-        let mut lock=LIVE_ENGINE.write().map_err(|_|ParseError::Data(
-            "live handler lock unavailable".into()))?;
-        *lock=None;
-        LIVE_REVISION.store(fingerprint,std::sync::atomic::Ordering::Release);
-        return Ok(());
     }
     let mut document:Value=serde_json::from_str(HANDLERS_JSON)
         .map_err(|e|ParseError::Data(e.to_string()))?;
@@ -2965,17 +3105,67 @@ pub fn install_learned_handler_regex(
         verify_learned_regex(&patch.replacement_pattern)?;
         raw["pattern"]=Value::String(patch.replacement_pattern.clone());
     }
-    // Additions are appended so normal bundled handlers have precedence.
-    // Their original field, options and transform are preserved exactly.
-    // The learner cannot inject arbitrary field values, scripts or transforms.
+    // Source indexes always refer to the immutable generated catalogue,
+    // not to positions shifted by previously inserted corrections.
+    let source_rows=rows.clone();
+    // Corrections are inserted before original handlers for the SAME
+    // target field. This is required to fix a nonempty but incorrect value:
+    // appending a regex after a skipIfAlreadyFound handler cannot repair it.
+    // The source must be a safe array/range transform with no removal.
+    let mut ordered_corrections=corrections.to_vec();
+    ordered_corrections.sort_by(|a,b|(&a.source_index,&a.pattern)
+        .cmp(&(&b.source_index,&b.pattern)));
+    ordered_corrections.dedup_by(|a,b|a.source_index==b.source_index
+        &&a.pattern==b.pattern&&a.is_range==b.is_range);
+    let mut seen_corrections=HashSet::new();
+    for correction in &ordered_corrections{
+        let mut raw=source_rows.get(correction.source_index).cloned().ok_or_else(||
+            ParseError::Data("unknown corrective source handler".into()))?;
+        let field=raw["name"].as_str().unwrap_or_default().to_owned();
+        let transform=raw["transform"].as_str().unwrap_or_default();
+        // A high-priority rule can replace an already populated field.
+        // Only ordinary TV coordinates have a separate independent numeric
+        // oracle today. The general learner must never obtain replacement
+        // authority just from its own canonical parse history.
+        let is_tv=matches!(field.as_str(),"seasons"|"episodes");
+        let tv_transform=transform=="array(integer)"
+            ||(field=="episodes"&&correction.is_range&&transform=="range_func");
+        if raw["kind"]!="regex"
+            ||!is_tv||!tv_transform
+            ||raw["options"]["remove"]==true
+            ||raw["options"]["skipIfAlreadyFound"]!=true
+            ||(correction.is_range
+                &&!(field=="episodes"&&transform=="range_func")) {
+            return Err(ParseError::Data("unsafe corrective handler".into()));
+        }
+        verify_learned_regex(&correction.pattern)?;
+        let key=(field.clone(),correction.pattern.clone(),transform.to_owned());
+        if !seen_corrections.insert(key){continue;}
+        raw["pattern"]=Value::String(correction.pattern.clone());
+        // Explicit single-coordinate rules need the same ambiguity guard
+        // as native TV learning. A dedicated bounded range rule is separate.
+        raw["learned_tv_guard"]=Value::Bool(is_tv&&!correction.is_range);
+        // Reposition an identical native handler instead of duplicating
+        // its regex at higher priority. The replay gate validates the move.
+        if let Some(index)=rows.iter().position(|handler|
+            handler["kind"]=="regex" &&handler["name"]==raw["name"]
+            &&handler["pattern"]==raw["pattern"]
+            &&handler["transform"]==raw["transform"]
+            &&handler["flags"]==raw["flags"]
+            &&handler["options"]==raw["options"]){
+            rows.remove(index);
+        }
+        let insert=rows.iter().position(|handler|handler["name"]==field)
+            .ok_or_else(||ParseError::Data("missing corrective field".into()))?;
+        rows.insert(insert,raw);
+    }
+    // Ordinary learned additions remain low-priority and cannot overwrite
+    // a valid value emitted by the original parser.
     for addition in &ordered_additions{
-        let mut raw=rows.get(addition.source_index).cloned().ok_or_else(||
+        let mut raw=source_rows.get(addition.source_index).cloned().ok_or_else(||
             ParseError::Data("unknown addition source handler".into()))?;
         let field=raw["name"].as_str().unwrap_or("").to_owned();
-        if raw["kind"]!="regex" ||
-           !matches!(field.as_str(),"resolution"|"codec"|"quality"|"audio"|"bit_depth"|
-                "hdr"|"channels"|"languages"|"subbed"|"dubbed"|"extension"|
-                "seasons"|"episodes"){
+        if raw["kind"]!="regex" || field.is_empty(){
             return Err(ParseError::Data("unsafe addition source".into()));
         }
         verify_learned_regex(&addition.pattern)?;
@@ -2985,12 +3175,90 @@ pub fn install_learned_handler_regex(
         }
         rows.push(raw);
     }
-    let candidate=ParserEngine::from_json(&document.to_string())?;
-    let mut lock=LIVE_ENGINE.write().map_err(|_|
-        ParseError::Data("live handler lock unavailable".into()))?;
-    *lock=Some(Arc::new(candidate));
-    LIVE_REVISION.store(fingerprint,std::sync::atomic::Ordering::Release);
+    ParserEngine::from_json(&document.to_string())
+}
+
+/// Test the COMPLETE candidate parser, including existing technical and
+/// TV overlays, before changing a live rule. New corrections must improve
+/// the actual installed parser combination, not merely a bare regex sample.
+pub fn replay_handler_rules(
+    patches:&[HandlerPatch],additions:&[HandlerAddition],
+    corrections:&[HandlerCorrection],titles:&[String]
+)->Result<Vec<Map<String,Value>>,ParseError>{
+    if titles.len()>128{return Err(ParseError::Data(
+        "corrective replay corpus too large".into()));}
+    let additions=effective_handler_additions(patches,additions,corrections);
+    let candidate=Arc::new(compile_learned_engine(patches,&additions,corrections)?);
+    struct RestoreReplay;
+    impl Drop for RestoreReplay{
+        fn drop(&mut self){
+            REPLAY_ENGINE.with(|slot|{*slot.borrow_mut()=None;});
+        }
+    }
+    REPLAY_ENGINE.with(|slot|{
+        if slot.borrow().is_some(){return Err(ParseError::Data(
+            "nested corrective replay".into()));}
+        *slot.borrow_mut()=Some(candidate);
+        Ok(())
+    })?;
+    let _restore=RestoreReplay;
+    titles.iter().map(|title|parse_title(title,false)).collect()
+}
+/// Universal fail-closed pre-publication guard for *every* learned
+/// regex publisher (technical, TV, generic, source replacement). Unlike an
+/// isolated pattern check, this compares complete public parser outputs
+/// against the currently installed parser on known-correct representative
+/// releases, including titles, years, multi-episode ranges and metadata.
+pub fn verify_live_regression_corpus(
+    patches:&[HandlerPatch],additions:&[HandlerAddition],
+    corrections:&[HandlerCorrection]
+)->Result<(),ParseError>{
+    // Shadow-training mode must never block queue progression or publish
+    // anything. Candidate replay still performs its own evidence checks.
+    if !learned_regex_publication_enabled(){return Ok(());}
+    const PROTECTED:&[&str]=&[
+        "Dune.2021.1080p.BluRay.x265",
+        "Dune.1984.1080p.BluRay",
+        "Breaking.Bad.S01E01.1080p.BluRay",
+        "The.Voice.US.S03E02.1080p.WEB-DL",
+        "The.Office.US.S02E03.1080p.WEB-DL",
+        "The.Simpsons.S10E05.1080p.WEB-DL",
+        "Bobs.Burgers.S10E05.720p.WEB.x264",
+        "90.Day.Fiance.S12E15.1080p.WEB",
+        "Frieren.Beyond.Journeys.End.S01E02.1080p",
+        "Bleach.Episode.1067.1080p",
+        "One.Piece.Episode.1067.1080p",
+        "Food.Wars.The.Third.Plate.S03E11.1080p",
+        "The.Danish.Girl.2015.1080p",
+        "The.German.Connection.2005.1080p",
+        "The100.2014.S01E01.1080p",
+        "Example.S01E01.S02E02.1080p",
+        // Do not freeze S01E01-E04 as a known-correct parse: repairing
+        // underextracted explicit ranges is an intended TV improvement.
+        "Example.2025.1080p.DDP5.1.HDR",
+        "Film.1917.2019.2160p.BluRay",
+        "The.Ultimate.Edition.2025.1080p",
+        "Movie.2005.1080p.WEB-DL",
+        "S01E01.1999.Movie.Title.1080p",
+        "Example.Movie.2025.Ultimate Edition.1080p.WEB-DL",
+    ];
+    let titles=PROTECTED.iter().map(|s|(*s).to_owned())
+        .collect::<Vec<_>>();
+    let baseline=titles.iter().map(|s|parse_title(s,false))
+        .collect::<Result<Vec<_>,_>>()?;
+    let proposed=replay_handler_rules(patches,additions,corrections,&titles)?;
+    if proposed!=baseline{
+        return Err(ParseError::Data(
+            "learned regex changed a protected, previously correct parser result"
+                .into()));
+    }
     Ok(())
+}
+/// Compatibility helper for isolated parser-regression tests.
+pub fn replay_corrective_regex(
+    corrections:&[HandlerCorrection],titles:&[String]
+)->Result<Vec<Map<String,Value>>,ParseError>{
+    replay_handler_rules(&[],&[],corrections,titles)
 }
 fn verify_learned_regex(pattern:&str)->Result<(),ParseError>{
     if !(4..=512).contains(&pattern.len()){
@@ -3024,6 +3292,53 @@ mod live_handler_catalog_tests {
         }
     }
     #[test]
+    fn learned_additions_are_deduplicated_by_field_and_effective_regex(){
+        let catalogue=existing_regex_rules();
+        let source=catalogue.iter().find(|row|
+            row["field"]=="episodes" &&row["transform"]=="array(integer)"
+            &&row["options"]["remove"]==false
+        ).expect("native episode handler");
+        let source_index=source["index"].as_u64().unwrap() as usize;
+        let pattern=r"(?i)(?:^|[._ -])s[0-9]{1,3}[._ -]*e([0-9]{1,5})(?:$|[._ -])";
+        let addition=HandlerAddition{source_index,pattern:pattern.to_owned()};
+        assert_eq!(effective_handler_additions(
+            &[],&[addition.clone(),addition.clone()],&[]).len(),1);
+        let correction=HandlerCorrection{
+            source_index,pattern:pattern.to_owned(),is_range:false};
+        assert!(effective_handler_additions(&[],&[addition.clone()],&[correction])
+            .is_empty(),"a corrective rule must not also be appended");
+        let native=HandlerAddition{
+            source_index,pattern:source["pattern"].as_str().unwrap().to_owned()};
+        assert!(effective_handler_additions(&[],&[native],&[])
+            .is_empty(),"the source parser already owns this exact regex");
+    }
+    #[test]
+    fn a_source_replacement_cannot_duplicate_its_alternative_as_an_addition(){
+        let source=existing_regex_rules().into_iter().find(|row|
+            row["field"]=="codec" &&row["transform"]=="value('hevc')"
+            &&row["pattern"].is_string()
+        ).unwrap();
+        let index=source["index"].as_u64().unwrap() as usize;
+        let original=source["pattern"].as_str().unwrap().to_owned();
+        let extra=r"(?i)(?:^|[._ -])FUTUREHEVC(?:$|[._ -])";
+        let patch=HandlerPatch{index,original_pattern:original.clone(),
+            replacement_pattern:format!("(?:{original})|(?:{extra})")};
+        let add=HandlerAddition{source_index:index,pattern:extra.into()};
+        assert!(effective_handler_additions(&[patch],&[add],&[]).is_empty());
+    }
+    #[test]
+    fn a_noop_learned_addition_has_the_same_effective_revision(){
+        let source=existing_regex_rules().into_iter().find(|entry|
+            entry["field"]=="codec" &&entry["pattern"]==r"\bavc\b"
+        ).expect("existing codec handler");
+        let inert=HandlerAddition{source_index:source["index"].as_u64()
+            .unwrap() as usize,pattern:source["pattern"].as_str().unwrap().to_owned()};
+        let normalized=effective_handler_additions(&[],&[inert],&[]);
+        assert!(normalized.is_empty());
+        assert_eq!(stable_patch_hash(&[],&normalized,&[]),
+            stable_patch_hash(&[],&[],&[]));
+    }
+    #[test]
     fn learned_regex_addition_uses_native_matchlab_field_transform(){
         let sources=existing_regex_rules();
         let original=sources.iter().find(|entry|
@@ -3049,6 +3364,40 @@ mod live_handler_catalog_tests {
         assert!(learned_tv_ambiguous("Series.S02E07-E08.1080p"));
         assert!(learned_tv_ambiguous("Series.02x07-08.1080p"));
         assert!(learned_tv_ambiguous("Series.Season.2.Episode.7-8.1080p"));
+    }
+    #[test]
+    fn unverified_non_tv_regex_cannot_override_nonempty_values(){
+        let source=existing_regex_rules().into_iter().find(|r|
+            r["field"]=="edition" &&r["transform"]=="value('Ultimate Edition')")
+            .expect("trusted native edition rule");
+        let correction=HandlerCorrection{
+            source_index:source["index"].as_u64().unwrap() as usize,
+            pattern:r"(?i)(?:^|[ ._-])(Ultimate[ ._-]+Edition)(?:$|[ ._-])".into(),
+            is_range:false
+        };
+        assert!(compile_learned_engine(&[],&[],&[correction]).is_err(),
+            "an arbitrary scalar field must not accept a high-priority rewrite");
+    }
+    #[test]
+    fn universal_regression_guard_rejects_cross_field_false_positives(){
+        let source=existing_regex_rules().into_iter().find(|r|
+            r["field"]=="codec"&&r["transform"]=="value('hevc')"
+            &&r["options"]["skipIfAlreadyFound"]==true).unwrap();
+        let addition=HandlerAddition{
+            source_index:source["index"].as_u64().unwrap() as usize,
+            pattern:r"(?i)(?:^|[._ -])(Dune)(?:$|[._ -])".into()
+        };
+        assert!(verify_live_regression_corpus(&[],&[addition],&[]).is_err(),
+            "learning must not convert a legitimate film-title token into codec metadata");
+        assert!(verify_live_regression_corpus(&[],&[],&[]).is_ok());
+    }
+    #[test]
+    fn live_regex_kill_switch_requires_explicit_opt_out(){
+        assert!(live_regex_allowed(None));
+        assert!(live_regex_allowed(Some("true")));
+        for value in ["false","FALSE","off","0","no"]{
+            assert!(!live_regex_allowed(Some(value)));
+        }
     }
     #[test]
     fn unsafe_replacement_is_rejected_before_live_publication(){

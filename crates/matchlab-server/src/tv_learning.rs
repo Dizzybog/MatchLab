@@ -95,6 +95,10 @@ pub(crate) fn explicit_coordinates(name:&str)->Option<(i64,i64)>{
     detected(name).map(|(_,coordinates)|(
         coordinates.season,coordinates.episode))
 }
+pub(crate) fn recognized_family(name:&str)->Option<(&'static str,i64,i64)>{
+    detected(name).map(|(family,coordinates)|(
+        family,coordinates.season,coordinates.episode))
+}
 fn identity(parsed:&Value)->Option<String>{
     let raw=parsed["title"].as_str()?;
     let normalized=crate::imdb_matcher::clean_title(raw);
@@ -233,7 +237,7 @@ pub fn persisted_rule_archive(db:&Connection)->Result<Vec<Value>,String>{
 
 // Each promoted pattern is only a regex. The source handler supplies
 // MatchLab's existing array(integer) transform and target field.
-fn capture_pattern(family:&str,field:&str)->Option<&'static str>{
+pub(crate) fn capture_pattern(family:&str,field:&str)->Option<&'static str>{
     match (family,field){
         ("sxe","seasons")=>Some(r"(?i)(?:^|[._ -])s([0-9]{1,3})[._ -]*e[0-9]{1,5}(?:$|[._ -])"),
         ("sxe","episodes")=>Some(r"(?i)(?:^|[._ -])s[0-9]{1,3}[._ -]*e([0-9]{1,5})(?:$|[._ -])"),
