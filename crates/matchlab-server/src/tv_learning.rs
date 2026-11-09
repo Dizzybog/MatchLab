@@ -9,7 +9,7 @@ use serde_json::{json,Value};
 use sha2::{Digest,Sha256};
 use std::sync::{OnceLock,RwLock,atomic::{AtomicU64,Ordering}};
 
-const EPOCH:u32=1;
+const EPOCH:u32=2;
 const MIN_EXAMPLES:i64=8;
 const MIN_IDENTITIES:i64=4;
 const OVERRIDE_EXAMPLES:i64=16;
