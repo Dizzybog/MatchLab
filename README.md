@@ -90,7 +90,7 @@ The learning process is:
 3. Test proposed regex rules against known values, conflicting patterns and negative examples.
 4. Activate eligible rules in memory without restarting. More uncertain changes are kept for review.
 
-Today, eligible technical and explicit TV regex can be installed in MatchLab's parser **live, without restarting**. After independent crosswalk verification, learned anime episode-marker regex can be used by MatchLab's matcher. Proposed changes to existing source regex are checked before live activation. Other fields can be observed, but uncertain patterns remain review-only. **All output fields are produced by MatchLab, never by the learner.** A high model score alone never approves a rule.
+**ML learns from every field that MatchLab parses**, including titles, years, seasons, episodes, languages, video and audio details, release groups, and other metadata. It looks for recurring naming patterns and can propose **new regex rules or improvements to existing ones** for any field. A rule is activated in the live parser **without restarting** only when sufficient independent evidence and field-specific safety checks support it; otherwise it remains inactive for further validation or review. Anime episode patterns still require verified metadata mappings. **ML changes regex only: MatchLab performs all field extraction and IMDb/AniDB matching.** With community sharing enabled, the exact regex additions and replacements can be proposed on GitHub. An ML score alone never activates a rule.
 
 Enable learning in the Compose environment:
 
