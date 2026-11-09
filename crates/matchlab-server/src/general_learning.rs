@@ -349,9 +349,15 @@ fn candidates(db:&Connection)->Result<Vec<Active>,String>{
 }
 fn read_examples(db:&Connection,key:&str,limit:usize)->Result<Vec<Evidence>,String>{
     let mut stmt=db.prepare("SELECT field,source_index,pattern,mode,
-       identity_hash,source_release,variant_release,expected
-       FROM ml_general_examples WHERE source_build=?1 AND rule_key=?2
-       ORDER BY identity_hash,example_hash LIMIT ?3")
+       identity_hash,source_release,variant_release,expected FROM (
+         SELECT field,source_index,pattern,mode,identity_hash,
+                source_release,variant_release,expected,
+                ROW_NUMBER() OVER (
+                    PARTITION BY identity_hash ORDER BY example_hash
+                ) AS identity_rank
+         FROM ml_general_examples WHERE source_build=?1 AND rule_key=?2
+       ) WHERE identity_rank<=2
+       ORDER BY identity_rank,identity_hash LIMIT ?3")
         .map_err(|e|e.to_string())?;
     let rows=stmt.query_map(params![build(),key,limit as i64],
         |row|{
