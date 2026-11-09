@@ -696,11 +696,13 @@ fn source_handler_additions(active:&[FieldRule])
 }
 
 /// Publish only regex into MatchLab's parser. No ML field postprocessor.
-pub fn publish_parser_rules()->Result<(),String>{
+pub fn publish_parser_rules_with_tv(
+    tv_additions:Vec<matchlab_parser::HandlerAddition>
+)->Result<(),String>{
     let fields=registry().read().map_err(|e|e.to_string())?.rules.clone();
     let patches=source_handler_patches(&fields);
     let mut additions=source_handler_additions(&fields);
-    additions.extend(crate::tv_learning::handler_additions());
+    additions.extend(tv_additions);
     matchlab_parser::install_learned_handler_regex(&patches,&additions)
         .map_err(|e|format!("learned parser regex rejected: {e}"))
 }
