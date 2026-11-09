@@ -119,6 +119,28 @@ class TestAllRegexSharing(unittest.TestCase):
         second,changed=review.screen(accepted,first)
         self.assertTrue(changed)
         self.assertEqual(len(second),2)
+    def test_offline_rule_from_older_image_requires_git_ancestry(self):
+        old="b"*40
+        archived=technical()
+        archived["source_build"]=old+":"+str(intake.FIELD_EPOCH)
+        self.assertIsNone(intake.valid_extended_rule(archived,SHA),
+            "old image cannot be trusted without a Git ancestor check")
+        self.assertIsNotNone(intake.valid_extended_rule(
+            archived,SHA,lambda source,target: source==old and target==SHA))
+        self.assertEqual(len(intake.parse_batch(
+            batch([archived]),SHA,lambda source,target:True)),1)
+        self.assertIsNone(intake.parse_batch(
+            batch([archived]),SHA,lambda source,target:False))
+    def test_full_twelve_regex_history_batch_survives_github_intake(self):
+        archive=[review_discovery(field="network",marker=f"archived{i:03d}")
+                 for i in range(12)]
+        accepted=intake.parse_batch(batch(archive),SHA,lambda *_:True)
+        self.assertEqual(len(accepted),12)
+        self.assertEqual(len({r["fingerprint"] for r in accepted}),12)
+        self.assertIsNone(intake.parse_batch(
+            batch(archive+[review_discovery(marker="extraarchive")]),
+            SHA,lambda *_:True),
+            "server and trusted GitHub intake must enforce the same limit")
     def test_no_untrusted_extra_fields_or_title_samples(self):
         row=technical()
         row["samples"]=["Private.Movie.2024"]
