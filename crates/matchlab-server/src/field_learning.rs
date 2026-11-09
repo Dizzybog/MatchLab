@@ -51,6 +51,13 @@ fn registry()->&'static RwLock<ActiveRules>{
 pub fn revision() -> u64 {
     REVISION.load(Ordering::Acquire)
 }
+/// Log only locally active regex syntax, never raw release names.
+pub(crate) fn regexes_for_log()->Vec<(String,String,String)>{
+    registry().read().ok().map(|g|g.rules.iter().map(|r|
+        (r.field.clone(),r.signal.clone(),r.regex.as_str().to_owned()))
+        .collect()).unwrap_or_default()
+}
+
 fn digest(raw: &str) -> String {
     format!("{:x}", Sha256::digest(raw.as_bytes()))
 }
