@@ -166,7 +166,15 @@ fn persist_batch_with_learning(db:&mut Connection,items:&[HistoryEvent],
                 // coalesce to the newest observation before training. The
                 // request's increasing ID keeps the durable cursor correct.
                 let identity=format!("{:x}",Sha256::digest(item.title.as_bytes()));
-                enqueue.execute(params![id,identity,item.title,details])?;
+                // The learner reparses the source title with the ML-free
+                // canonical parser. It only needs the selected identity and
+                // original parsed diagnostics, not ranked candidates/traces.
+                // Keep the durable queue small and independent of UI history.
+                let training=json!({
+                    "selected":item.details["selected"],
+                    "parsed":item.details["parsed"],
+                });
+                enqueue.execute(params![id,identity,item.title,training.to_string()])?;
             }
         }
     }
