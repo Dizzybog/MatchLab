@@ -184,6 +184,9 @@ pub fn observe(db:&Connection,title:&str,parsed:&Value,
 /// uploaded by the GitHub sharing actor because even a short unknown token
 /// can reveal part of a private release name. A maintainer can independently
 /// recreate and validate the pattern before publishing.
+// This helper is deliberately only compiled for local regression tests.
+// Unknown tokens remain in the local SQLite review table, not export feeds.
+#[cfg(test)]
 pub fn community_proposals(db:&Connection)->Result<Vec<Value>,String>{
     init(db)?;
     let source=build();
