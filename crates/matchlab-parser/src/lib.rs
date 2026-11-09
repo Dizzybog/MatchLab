@@ -3004,6 +3004,9 @@ fn compile_learned_engine(
         verify_learned_regex(&patch.replacement_pattern)?;
         raw["pattern"]=Value::String(patch.replacement_pattern.clone());
     }
+    // Source indexes always refer to the immutable generated catalogue,
+    // not to positions shifted by previously inserted corrections.
+    let source_rows=rows.clone();
     // Corrections are inserted before original handlers for the SAME
     // target field. This is required to fix a nonempty but incorrect value:
     // appending a regex after a skipIfAlreadyFound handler cannot repair it.
@@ -3014,7 +3017,7 @@ fn compile_learned_engine(
     ordered_corrections.dedup_by(|a,b|a.source_index==b.source_index
         &&a.pattern==b.pattern&&a.is_range==b.is_range);
     for correction in &ordered_corrections{
-        let mut raw=rows.get(correction.source_index).cloned().ok_or_else(||
+        let mut raw=source_rows.get(correction.source_index).cloned().ok_or_else(||
             ParseError::Data("unknown corrective source handler".into()))?;
         let field=raw["name"].as_str().unwrap_or_default().to_owned();
         let transform=raw["transform"].as_str().unwrap_or_default();
@@ -3039,7 +3042,7 @@ fn compile_learned_engine(
     // Ordinary learned additions remain low-priority and cannot overwrite
     // a valid value emitted by the original parser.
     for addition in &ordered_additions{
-        let mut raw=rows.get(addition.source_index).cloned().ok_or_else(||
+        let mut raw=source_rows.get(addition.source_index).cloned().ok_or_else(||
             ParseError::Data("unknown addition source handler".into()))?;
         let field=raw["name"].as_str().unwrap_or("").to_owned();
         if raw["kind"]!="regex" ||
