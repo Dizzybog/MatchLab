@@ -3230,7 +3230,8 @@ pub fn verify_live_regression_corpus(
         "The.German.Connection.2005.1080p",
         "The100.2014.S01E01.1080p",
         "Example.S01E01.S02E02.1080p",
-        "Example.S01E01-E04.1080p",
+        // Do not freeze S01E01-E04 as a known-correct parse: repairing
+        // underextracted explicit ranges is an intended TV improvement.
         "Example.2025.1080p.DDP5.1.HDR",
         "Film.1917.2019.2160p.BluRay",
         "The.Ultimate.Edition.2025.1080p",
