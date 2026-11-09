@@ -19,11 +19,19 @@ const MIN_CONFIRMATIONS:i64=2;
 static ACTIVE:OnceLock<RwLock<Vec<ActiveRule>>>=OnceLock::new();
 static REVISION:AtomicU64=AtomicU64::new(0);
 static REVIEWED:AtomicU64=AtomicU64::new(0);
+static OBSERVED_REVISION:AtomicU64=AtomicU64::new(0);
 
+#[derive(Clone,Debug,PartialEq,Eq,Default)]
+struct ReplayMetrics {
+    checked:usize,
+    repaired:usize,
+    unchanged:usize,
+}
 #[derive(Clone,Debug,PartialEq,Eq)]
 struct ActiveRule {
     family:String,
     corrections:Vec<matchlab_parser::HandlerCorrection>,
+    metrics:ReplayMetrics,
 }
 fn registry()->&'static RwLock<Vec<ActiveRule>>{
     ACTIVE.get_or_init(||RwLock::new(Vec::new()))
@@ -114,7 +122,15 @@ pub fn init(db:&Connection)->Result<(),String>{
         source_build TEXT NOT NULL,
         observed_at INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS ml_corrective_family_idx
-            ON ml_corrective_observations(source_build,family,identity_hash);")
+            ON ml_corrective_observations(source_build,family,identity_hash);
+        CREATE TABLE IF NOT EXISTS ml_corrective_rules(
+            family TEXT PRIMARY KEY,
+            source_build TEXT NOT NULL,
+            regexes TEXT NOT NULL,
+            repaired_examples INTEGER NOT NULL,
+            unchanged_examples INTEGER NOT NULL,
+            checked_examples INTEGER NOT NULL,
+            verified_at INTEGER NOT NULL);")
         .map_err(|e|e.to_string())
 }
 pub fn observe(db:&Connection,name:&str,parsed:&Value,
@@ -122,9 +138,14 @@ pub fn observe(db:&Connection,name:&str,parsed:&Value,
     let Some(reference)=expected(name)else{return Ok(());};
     let Some(identity)=independent_identity(parsed)else{return Ok(());};
     if *budget>=MAX_OBSERVATIONS{
+        // Protect the replay evidence behind active, previously validated
+        // regexes: retaining the rule without proof after a restart would
+        // be unsafe, while evicting its proof would silently disable it.
         let old=db.execute("DELETE FROM ml_corrective_observations WHERE
             example_hash IN (SELECT example_hash FROM ml_corrective_observations
-                WHERE source_build=?1 ORDER BY observed_at,example_hash LIMIT 32)",
+                WHERE source_build=?1
+                  AND family NOT IN (SELECT family FROM ml_corrective_rules)
+                ORDER BY observed_at,example_hash LIMIT 32)",
             [build()]).map_err(|e|e.to_string())? as i64;
         *budget=budget.saturating_sub(old);
         if *budget>=MAX_OBSERVATIONS{return Ok(());}
@@ -151,6 +172,63 @@ pub fn count(db:&Connection)->Result<i64,String>{
     init(db)?;
     db.query_row("SELECT COUNT(*) FROM ml_corrective_observations
         WHERE source_build=?1",[build()],|r|r.get(0)).map_err(|e|e.to_string())
+}
+/// Keep saved rules and their independent proof useful across parser
+/// updates. Re-parse every historical observation against the NEW canonical
+/// parser, recompute error labels and move only valid examples into the
+/// current build. Never copy old labels or executable regexes as authority.
+fn revalidate_previous_build(db:&Connection)->Result<usize,String>{
+    let mut stmt=db.prepare("SELECT example_hash,release_name
+        FROM ml_corrective_observations WHERE source_build<>?1
+        ORDER BY observed_at DESC,example_hash LIMIT ?2")
+        .map_err(|e|e.to_string())?;
+    let old=stmt.query_map(params![build(),MAX_OBSERVATIONS],
+        |row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))
+        .map_err(|e|e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;
+    let mut kept=0;
+    for (fingerprint,name) in &old{
+        let reference=expected(name);
+        let parsed=matchlab_parser::parse_title_canonical(name,false).ok();
+        let parsed=parsed.map(Value::Object);
+        let identity=parsed.as_ref().and_then(independent_identity);
+        if let (Some(reference),Some(parsed),Some(identity))=
+            (reference,parsed,identity){
+            db.execute("UPDATE ml_corrective_observations
+                SET source_build=?1,identity_hash=?2,error_class=?3
+                WHERE example_hash=?4",
+                params![build(),identity,category(&reference,&parsed),fingerprint])
+                .map_err(|e|e.to_string())?;
+            kept+=1;
+        }else{
+            db.execute("DELETE FROM ml_corrective_observations
+                WHERE example_hash=?1",[fingerprint]).map_err(|e|e.to_string())?;
+        }
+    }
+    Ok(kept)
+}
+/// Exact content fingerprint, rather than sample count alone: reclassifying
+/// an existing torrent is a material event even without a new row.
+fn evidence_revision(db:&Connection)->Result<u64,String>{
+    let mut stmt=db.prepare("SELECT example_hash,identity_hash,family,error_class
+        FROM ml_corrective_observations WHERE source_build=?1
+        ORDER BY example_hash").map_err(|e|e.to_string())?;
+    let entries=stmt.query_map([build()],|row|Ok((
+        row.get::<_,String>(0)?,row.get::<_,String>(1)?,
+        row.get::<_,String>(2)?,row.get::<_,String>(3)?)))
+        .map_err(|e|e.to_string())?;
+    let mut sha=Sha256::new();
+    for row in entries {
+        let (sample,id,family,kind)=row.map_err(|e|e.to_string())?;
+        for value in [sample,id,family,kind]{
+            use sha2::Digest as _;
+            sha.update((value.len() as u32).to_le_bytes());
+            sha.update(value.as_bytes());
+        }
+    }
+    let digest=sha.finalize();
+    let mut bytes=[0u8;8];bytes.copy_from_slice(&digest[..8]);
+    Ok(u64::from_le_bytes(bytes).max(1))
 }
 fn source(field:&str,transform:&str)->Option<usize>{
     matchlab_parser::existing_regex_rules().into_iter().find(|v|
@@ -214,7 +292,8 @@ fn eligible(db:&Connection)->Result<Vec<(String,Counts)>,String>{
     ).collect())
 }
 fn review_candidate(db:&Connection,family:&str,
-    corrections:&[matchlab_parser::HandlerCorrection])->Result<bool,String>{
+    corrections:&[matchlab_parser::HandlerCorrection])
+    ->Result<Option<ReplayMetrics>,String>{
     let mut stmt=db.prepare("SELECT release_name FROM ml_corrective_observations
         WHERE family=?1 AND source_build=?2
         ORDER BY observed_at DESC,example_hash LIMIT 100")
@@ -229,12 +308,13 @@ fn review_candidate(db:&Connection,family:&str,
         "Episode.300.Explained.2025.1080p","The.Danish.Girl.2015.1080p",
         "Movie.1917.2019.1080p","Example.2005.2160p.WEB-DL"]
         .iter().map(|s|(*s).to_owned()));
-    if names.len()>128{return Ok(false);}
+    if names.len()>128{return Ok(None);}
     let replay=match matchlab_parser::replay_corrective_regex(corrections,&names){
-        Ok(values)=>values,Err(_)=>return Ok(false)
+        Ok(values)=>values,Err(_)=>return Ok(None)
     };
-    let mut repaired=0usize;
+    let mut metrics=ReplayMetrics::default();
     for (name,new) in names.iter().zip(replay){
+        metrics.checked+=1;
         let old=match matchlab_parser::parse_title_canonical(name,false){
             Ok(value)=>value,Err(_)=>return Ok(false)
         };
@@ -246,21 +326,30 @@ fn review_candidate(db:&Connection,family:&str,
             previous.remove(field);
             candidate.remove(field);
         }
-        if previous!=candidate{return Ok(false);}
+        if previous!=candidate{return Ok(None);}
         if let Some(reference)=expected(name)
             &&reference.family==family {
+            let was_aligned=category(&reference,&Value::Object(old.clone()))=="aligned";
             if category(&reference,&Value::Object(new.clone()))!="aligned"{
-                return Ok(false);
+                return Ok(None);
             }
-            if category(&reference,&Value::Object(old))!="aligned"{
-                repaired+=1;
+            if was_aligned {
+                // A candidate that changes already-correct values is not
+                // an improvement, even if the labels still appear valid.
+                if old!=new{return Ok(None);}
+                metrics.unchanged+=1;
+            }else{
+                if old==new{return Ok(None);}
+                metrics.repaired+=1;
             }
-        }else if old.get("seasons")!=new.get("seasons")
-            ||old.get("episodes")!=new.get("episodes"){
-            return Ok(false);
+        }else {
+            // Other TV families and negative controls must be byte-for-byte
+            // semantically identical, including series coordinates.
+            if old!=new{return Ok(None);}
+            metrics.unchanged+=1;
         }
     }
-    Ok(repaired>=MIN_ERRORS as usize)
+    Ok((metrics.repaired>=MIN_ERRORS as usize).then_some(metrics))
 }
 pub fn handler_corrections()->Vec<matchlab_parser::HandlerCorrection>{
     registry().read().map(|rules|rules.iter()
@@ -268,35 +357,68 @@ pub fn handler_corrections()->Vec<matchlab_parser::HandlerCorrection>{
         .unwrap_or_default()
 }
 pub fn reconcile(db:&Connection)->Result<(),String>{
+    init(db)?;
+    revalidate_previous_build(db)?;
+    let observed=evidence_revision(db)?;
+    if observed==OBSERVED_REVISION.load(Ordering::Acquire)
+        &&revision()!=0{return Ok(());}
     let candidates=eligible(db)?;
     let mut ready=Vec::new();
     let mut pending=0u64;
     for (family,_evidence) in candidates {
         let Some(corrections)=candidate(&family)else{continue;};
-        if review_candidate(db,&family,&corrections)?{
-            ready.push(ActiveRule{family,corrections});
+        if let Some(metrics)=review_candidate(db,&family,&corrections)?{
+            ready.push(ActiveRule{family,corrections,metrics});
         }else{pending+=1;}
     }
     REVIEWED.store(pending,Ordering::Relaxed);
-    if registry().read().ok().is_some_and(|r|*r==ready)
-        && revision()!=0 {return Ok(());}
-    let next=ready.iter().flat_map(|r|r.corrections.iter().cloned())
-        .collect::<Vec<_>>();
-    crate::field_learning::publish_parser_rules_with_tv_and_corrections(
-        crate::tv_learning::handler_additions(),next)?;
-    let fingerprint=ready.iter().map(|r|r.family.as_str())
-        .collect::<Vec<_>>().join("|");
-    let digest=Sha256::digest(fingerprint.as_bytes());
-    let mut bytes=[0u8;8];bytes.copy_from_slice(&digest[..8]);
-    *registry().write().map_err(|e|e.to_string())?=ready;
-    REVISION.store(u64::from_le_bytes(bytes).max(1),Ordering::Release);
+    let changed=!registry().read().ok().is_some_and(|r|*r==ready)
+        ||revision()==0;
+    if changed {
+        let next=ready.iter().flat_map(|r|r.corrections.iter().cloned())
+            .collect::<Vec<_>>();
+        // Build and atomically publish only after independent replay proves
+        // actual repairs without any observed regression.
+        crate::field_learning::publish_parser_rules_with_tv_and_corrections(
+            crate::tv_learning::handler_additions(),next)?;
+        let fingerprint=ready.iter().flat_map(|r|
+            r.corrections.iter().map(|c|
+                format!("{}:{}:{}",r.family,c.source_index,c.pattern)))
+            .collect::<Vec<_>>().join("|");
+        let digest=Sha256::digest(fingerprint.as_bytes());
+        let mut bytes=[0u8;8];bytes.copy_from_slice(&digest[..8]);
+        let tx=db.unchecked_transaction().map_err(|e|e.to_string())?;
+        tx.execute("DELETE FROM ml_corrective_rules",[])
+            .map_err(|e|e.to_string())?;
+        for rule in &ready{
+            let patterns=rule.corrections.iter().map(|c|json!({
+                "source_index":c.source_index,"pattern":c.pattern,
+                "is_range":c.is_range})).collect::<Vec<_>>();
+            tx.execute("INSERT INTO ml_corrective_rules
+                (family,source_build,regexes,repaired_examples,
+                 unchanged_examples,checked_examples,verified_at)
+                VALUES(?1,?2,?3,?4,?5,?6,strftime('%s','now'))",
+                params![rule.family,build(),json!(patterns).to_string(),
+                    rule.metrics.repaired as i64,rule.metrics.unchanged as i64,
+                    rule.metrics.checked as i64])
+                .map_err(|e|e.to_string())?;
+        }
+        tx.commit().map_err(|e|e.to_string())?;
+        *registry().write().map_err(|e|e.to_string())?=ready;
+        REVISION.store(u64::from_le_bytes(bytes).max(1),Ordering::Release);
+    }
+    OBSERVED_REVISION.store(observed,Ordering::Release);
     Ok(())
 }
 pub fn status()->Value{
     let families=registry().read().map(|r|
         r.iter().map(|v|v.family.clone()).collect::<Vec<_>>()).unwrap_or_default();
+    let repaired=registry().read().map(|rules|
+        rules.iter().map(|r|r.metrics.repaired).sum::<usize>()).unwrap_or(0);
     json!({"active_correction_families":families,
         "correction_count":handler_corrections().len(),
+        "measured_repaired_examples":repaired,
+        "persistence":"local SQLite evidence plus materialized verified rules; revalidated after code updates",
         "eligible_but_replay_rejected":REVIEWED.load(Ordering::Relaxed),
         "requires":"8 observations / 4 distinct titles / 4 errors in 2 titles / 2 positive confirmations / successful replay",
         "model_role":"advisory; only native-handler regex rules are published",
