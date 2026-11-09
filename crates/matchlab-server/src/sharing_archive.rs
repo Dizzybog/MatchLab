@@ -2,7 +2,8 @@
 //! It is independent of GitHub sharing and does not treat learned parse output
 //! as ground truth; inactive rules remain in the archive for human review.
 use rusqlite::{params,Connection,OpenFlags,OptionalExtension};
-use serde_json::Value;
+use serde_json::{json,Value};
+use sha2::{Digest,Sha256};
 use std::path::Path;
 
 const MAX_PROPOSAL_BYTES:usize=12_000;
@@ -75,8 +76,52 @@ pub fn snapshot(db:&Connection,metadata:&Path)->Result<usize,String>{
     proposals.extend(crate::candidate_discovery::community_proposals(db)?);
     if let Ok(meta)=Connection::open_with_flags(
         metadata,OpenFlags::SQLITE_OPEN_READ_ONLY){
-        proposals.extend(crate::learned_regex::proposals(db,&meta)?);
+        proposals.extend(crate::learned_regex::proposals(db,&meta)
+            .unwrap_or_default());
     }
+    ingest(db,&proposals)
+}
+/// Backfill volumes created before the history-journal feature existed.
+/// Capture existing validated field rules BEFORE the new parser build can
+/// replace the previous active-rule table. Only deterministic, allowlisted
+/// source grammars are reconstructed, and old evidence remains review-only.
+pub fn migrate_existing(db:&Connection,metadata:&Path)->Result<usize,String>{
+    init(db)?;
+    let mut proposals=Vec::new();
+    if let Ok(mut stmt)=db.prepare("SELECT field,signal,canonical,verified_build,
+         example_count,identity_count FROM learned_field_rules
+         WHERE example_count>=12 AND identity_count>=4 ORDER BY field,signal"){
+        let rows=stmt.query_map([],|r|Ok((
+            r.get::<_,String>(0)?,r.get::<_,String>(1)?,
+            r.get::<_,String>(2)?,r.get::<_,String>(3)?,
+            r.get::<_,i64>(4)?,r.get::<_,i64>(5)?)))
+            .map_err(|e|e.to_string())?;
+        for row in rows{
+            let (field,signal,canonical,source,examples,titles)=
+                row.map_err(|e|e.to_string())?;
+            let Ok(value)=serde_json::from_str::<Value>(&canonical)else{continue;};
+            let Some(regex)=crate::field_learning::pattern_for(&field,&signal)
+                else{continue;};
+            let encoded=serde_json::to_string(&value).map_err(|e|e.to_string())?;
+            let fp=format!("{:x}",Sha256::digest(format!(
+                "community-field:{field}:{signal}:{encoded}").as_bytes()));
+            proposals.push(json!({
+                "kind":"learned_field_regex","fingerprint":fp,
+                "field":field,"signal":signal,"regex":regex.as_str(),
+                "canonical":value,"evidence_count":examples,
+                "distinct_titles":titles,"canonical_confirmations":0,
+                "source_build":source,
+                "verification":"local_canonical_and_explicit_release_marker",
+            }));
+        }
+    }
+    if let Ok(meta)=Connection::open_with_flags(
+        metadata,OpenFlags::SQLITE_OPEN_READ_ONLY){
+        proposals.extend(crate::learned_regex::historical_proposals(db,&meta)
+            .unwrap_or_default());
+    }
+    proposals.extend(crate::tv_learning::historical_proposals(db)
+        .unwrap_or_default());
     ingest(db,&proposals)
 }
 /// Oldest snapshots first, even if they are no longer active locally.
