@@ -1382,7 +1382,26 @@ fn diagnose_with_policy(
                         || anime_title::has_specific_alias(&db,&imdb_id,anime_resolve_title)
                             .map_err(|e|e.to_string())?;
                     let range=if linked {
-                        mapped_season_episode_range(&db,&imdb_id,anime_resolve_title,season,start,end,false)?
+                        let mapped=mapped_season_episode_range(
+                            &db,&imdb_id,anime_resolve_title,season,start,end,false)?;
+                        // A partial AniDB mapping is not evidence that the
+                        // explicitly labelled IMDb SxxEyy interval is wrong.
+                        // Retain IMDb endpoints when the canonical IMDb
+                        // series and imported episode bounds independently
+                        // confirm them. Do not fabricate missing ASIDs.
+                        let exact_canonical=imdb_matcher::clean_title(
+                            winner["title"].as_str().unwrap_or(""))==key
+                            && anime_subfolder_title.is_none();
+                        let imdb_end=season_episode_end(&db,&imdb_id,season)?;
+                        if mapped["complete"]!=true && exact_canonical
+                            && imdb_end.is_some_and(|max|max>=end)
+                        {
+                            winner["anime_range_diagnostics"]=mapped;
+                            json!({"start_season":season,"start_episode":start,
+                                "end_season":season,"end_episode":end,
+                                "complete":true,"segments":[],
+                                "source":"verified_imdb_range_without_complete_anidb"})
+                        }else{mapped}
                     }else {
                         let known_end=season_episode_end(&db,&imdb_id,season)?;
                         let valid=known_end.is_some_and(|last|last>=end);
@@ -3086,7 +3105,7 @@ mod tests {
                 'series','',1,0,'tvSeries');
             INSERT INTO seasons VALUES('tt1234567',1);
             INSERT INTO seasons VALUES('tt7654321',1);
-            INSERT INTO season_episodes VALUES('tt1234567',1,7,7);
+            INSERT INTO season_episodes VALUES('tt1234567',1,10,10);
             INSERT INTO season_episodes VALUES('tt7654321',1,12,12);
             INSERT INTO anime_series_map VALUES('tt1234567','123','456',0);
             INSERT INTO anime_ids VALUES('tt1234567','anidb','123');
@@ -3140,6 +3159,20 @@ mod tests {
         assert_eq!(public["sid_end"],"tt1234567:1:7");
         assert_eq!(public["asid_start"],"123:1");
         assert_eq!(public["asid_end"],"123:7");
+
+        // IMDb season metadata covers 1..9 even though AniDB's anime
+        // crosswalk covers only 1..7. Publish valid IMDb endpoints
+        // without manufacturing full-range ASID endpoints.
+        let partial_anime=diagnose(&path,&MatchRequest{
+            title:"Spy x Family S01E01-E09".into(),year:None,series:None}).unwrap();
+        let winner=partial_anime.selected.expect("known IMDb series");
+        assert_eq!(winner["episode_range"]["source"],
+            "verified_imdb_range_without_complete_anidb");
+        let response=public_match_response(Some(winner));
+        assert_eq!(response["sid_start"],"tt1234567:1:1");
+        assert_eq!(response["sid_end"],"tt1234567:1:9");
+        assert!(response["asid_start"].is_null());
+        assert!(response["asid_end"].is_null());
 
         let forced_movie=diagnose(&path,&MatchRequest{
             title:"Spy x Family 01-07".into(),year:None,series:Some(false)}).unwrap();
