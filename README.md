@@ -85,7 +85,7 @@ The public `/match` endpoint has stricter matching requirements than the dashboa
 
 The learning process is:
 
-1. Examine new release names and detect missing fields, suspiciously broad or incomplete extraction, and disagreements with independently verified metadata. These are learning signals, not automatic corrections.
+1. Examine new release names for **four error types**: missing values, excessive extraction, incomplete extraction, and values assigned to the wrong fields (for example, swapped seasons and episodes). These are learning signals, not automatic corrections.
 2. Group recurring patterns and train a small **FTRL-Proximal** model.
 3. Test proposed regex rules against known values, conflicting patterns and negative examples.
 4. Activate eligible rules in memory without restarting. More uncertain changes are kept for review.
