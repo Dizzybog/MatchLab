@@ -2923,12 +2923,14 @@ fn effective_handler_additions(
     let catalog=existing_regex_rules();
     let mut seen=HashSet::new();
     let mut out=Vec::new();
+    let by_index=|index:usize|catalog.iter().find(|entry|
+        entry["index"].as_u64()==Some(index as u64));
     let corrected=corrections.iter().filter_map(|rule|{
-        let source=catalog.get(rule.source_index)?;
+        let source=by_index(rule.source_index)?;
         Some((source["field"].as_str()?.to_owned(),rule.pattern.as_str()))
     }).collect::<HashSet<_>>();
     for addition in additions{
-        let Some(source)=catalog.get(addition.source_index)else{continue;};
+        let Some(source)=by_index(addition.source_index)else{continue;};
         let Some(field)=source["field"].as_str()else{continue;};
         let Some(transform)=source["transform"].as_str()else{continue;};
         let key=(field.to_owned(),addition.pattern.clone(),transform.to_owned());
