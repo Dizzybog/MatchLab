@@ -105,7 +105,18 @@ environment:
 
 Store the token in a private `.env` file or secret store, **never in a committed Compose file**.
 
-A participating installation sends at most **one batch comment every 24 hours**. The shared daily GitHub Issue collects bounded reports and regex proposals. The source-regex proposal includes the old and new regex, its handler metadata, and aggregate evidence.
+A participating installation sends at most **one batch comment every 24 hours**. A batch holds up to **12 regex proposals** and 16 records total, within GitHub's 16 KiB comment limit. Source-regex proposals include the old and replacement regex, handler metadata and aggregate evidence.
+
+### Offline archive and historical backfill
+
+- The background learner saves every *sharing-eligible* regex proposal to `community_rule_archive` in `/data/local-learning.sqlite3`, even when GitHub sharing is disabled. An inactive rule is retained for review; the archive is not a cache of live parser answers.
+- Upgrading an existing installation imports reconstructable previously verified field, TV and independently reverified anime rules before overwriting build-scoped active state. Missing or unverifiable historical evidence cannot be reconstructed.
+- Turning sharing on drains the oldest undelivered archived rules first. Older source-build SHAs remain attached to their rules; GitHub requires a valid ancestor and checks incoming regex as untrusted data. A historical report never activates a rule on another server.
+- The separate persistent `/data/community-learning.sqlite3` maintains pending items, in-flight batches and confirmed fingerprints. HTTP errors do not mark an item delivered. Before retrying, the worker checks GitHub for the original exact batch, then posts only if no receipt exists.
+- The GitHub workflow deduplicates against a persistent global fingerprint ledger and existing review entries. It appends subsequent submissions to a currently open bot review PR instead of discarding them.
+- Learning and rule retirement consult `parse_title_canonical`, the *original* parser with ML overlays excluded. If a learned regex corrects `Bleach 326` to episode 326, that success cannot by itself retire the rule. A real source-parser fix or conflicting independently validated metadata is required.
+
+Only eligible verified rules and explicitly marked review-only discovery proposals are shared; arbitrary model-generated strings are never executed. Retain the Docker `/data` volume across restarts to preserve the archive and receipt journal.
 
 The trusted GitHub Action:
 
