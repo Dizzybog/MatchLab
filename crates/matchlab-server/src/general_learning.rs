@@ -741,6 +741,34 @@ mod tests{
         }
     }
     #[test]
+    fn observed_distinct_editions_can_propose_a_real_generic_regex(){
+        let db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        let mut total=0;
+        for work in ["Copper","Silver","Bronze","Golden","Platinum","Titanium"] {
+            let name=format!("{work}.Movie.2025.Ultimate Edition.1080p.WEB-DL.x265");
+            let mut ctx=matchlab_parser::parse_title_canonical_context(&name,false)
+                .unwrap();
+            assert_eq!(ctx.result["edition"],"Ultimate Edition");
+            ctx.matched.retain(|field,_|field=="edition");
+            let evidence=derive(&name,&ctx);
+            assert!(!evidence.is_empty(),"{work} failed to produce evidence");
+            for example in evidence {
+                if example.field=="edition"&&example.mode=="add"{
+                    total+=usize::from(insert(&db,&example).unwrap());
+                }
+            }
+        }
+        assert!(total>=MIN_FIXES);
+        let candidate=candidates(&db).unwrap().into_iter()
+            .find(|r|r.field=="edition"&&r.mode=="add")
+            .expect("an independently confirmed native edition candidate");
+        let measured=replay(&db,&[],&[candidate.clone()],&candidate.key)
+            .unwrap().expect("must repair full parser result");
+        assert!(measured.1>=MIN_FIXES);
+        assert!(measured.0>=MIN_FIXES);
+    }
+    #[test]
     fn unverified_absent_labels_never_spawn_mutation_rules(){
         let mut ctx=matchlab_parser::parse_title_canonical_context(
             "Movie.2015.1080p.WEB-DL",false).unwrap();
