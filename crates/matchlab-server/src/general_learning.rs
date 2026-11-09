@@ -171,6 +171,13 @@ fn variants(source:&str,marker:&str)->Vec<String>{
     }
     let Some(offset)=boundary else{return Vec::new();};
     let mut candidates=Vec::new();
+    if punct {
+        // Repeated separators are semantically identical release tags but
+        // often escape older one-delimiter native regexes.
+        let mut name=source.to_owned();
+        name.insert(start+offset,bytes[offset] as char);
+        if name!=source{candidates.push(name);}
+    }
     for sep in [b'_',b'-',b'.',b' ']{
         if punct&&bytes[offset]==sep{continue;}
         let mut name=source.to_owned();
@@ -688,7 +695,7 @@ mod tests{
     fn separator_mutation_synthesizes_bounded_generic_regex(){
         let original="Example.Show.2025.1080p.WEB-DL.x264";
         let alternate=variants(original,"WEB-DL")[0].clone();
-        assert_eq!(alternate,"Example.Show.2025.1080p.WEB_DL.x264");
+        assert_eq!(alternate,"Example.Show.2025.1080p.WEB--DL.x264");
         let pattern=family_pattern("WEB-DL").unwrap();
         let re=regex::Regex::new(&pattern).unwrap();
         assert!(re.is_match(&alternate));
@@ -715,6 +722,23 @@ mod tests{
         assert!(candidates(&db).unwrap().is_empty());
         assert!(replay(&db,&[],&[],"").unwrap().is_some());
         assert!(handler_additions().is_empty());
+    }
+    #[test]
+    fn generic_induction_exercises_real_non_tv_native_edition_handler(){
+        let name="Example.Movie.2025.Ultimate Edition.1080p.WEB-DL.x265";
+        let mut ctx=matchlab_parser::parse_title_canonical_context(name,false).unwrap();
+        assert_eq!(ctx.result.get("edition"),Some(&json!("Ultimate Edition")));
+        ctx.matched.retain(|field,_|field=="edition");
+        let examples=derive(name,&ctx);
+        assert!(!examples.is_empty(),
+            "a repeated separator should expose a new native edition regex gap");
+        for example in &examples{
+            assert_eq!(example.field,"edition");
+            assert_eq!(example.mode,"add");
+            assert!(example.variant_release.contains("Ultimate  Edition"));
+            let re=regex::Regex::new(&example.pattern).unwrap();
+            assert!(re.is_match(&example.variant_release));
+        }
     }
     #[test]
     fn unverified_absent_labels_never_spawn_mutation_rules(){
