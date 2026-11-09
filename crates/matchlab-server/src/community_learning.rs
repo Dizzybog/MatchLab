@@ -438,9 +438,11 @@ fn build_batch(db:&Connection,time:u64)->Result<Option<(String,Value,Vec<String>
         "reports":reports,"rules":rules});
     Ok(Some((batch_id,batch,fingerprints)))
 }
-fn mark_attempted(
-    db:&mut Connection,time:u64,batch_id:&str,fingerprints:&[String],
-)->Result<(),String>{
+/// A fingerprint becomes "reported" only after confirmed receipt. If the
+/// process dies between posting and recording, the next cycle searches the
+/// original Issue for the exact batch before deciding whether to retry.
+fn mark_delivered(db:&mut Connection,time:u64,batch_id:&str,
+    fingerprints:&[String])->Result<(),String>{
     let tx=db.transaction().map_err(|e|e.to_string())?;
     for fingerprint in fingerprints{
         tx.execute("INSERT OR IGNORE INTO reported(fingerprint,first_reported_at)
@@ -449,10 +451,82 @@ fn mark_attempted(
         tx.execute("DELETE FROM pending WHERE fingerprint=?1",[fingerprint])
             .map_err(|e|e.to_string())?;
     }
+    tx.execute("DELETE FROM inflight WHERE batch_id=?1",[batch_id])
+        .map_err(|e|e.to_string())?;
     tx.execute("INSERT OR IGNORE INTO batches(batch_id,attempted_at) VALUES(?1,?2)",
         params![batch_id,time as i64]).map_err(|e|e.to_string())?;
     put(&tx,"window_start",&time.to_string())?;
     tx.commit().map_err(|e|e.to_string())
+}
+fn stage_batch(db:&Connection,time:u64,issue:u64,batch_id:&str,
+    batch:&Value,fingerprints:&[String])->Result<(),String>{
+    let keys=serde_json::to_string(fingerprints).map_err(|e|e.to_string())?;
+    db.execute("INSERT OR IGNORE INTO inflight(
+        batch_id,issue,payload,fingerprints,created_at)
+        VALUES(?1,?2,?3,?4,?5)",
+        params![batch_id,issue as i64,batch.to_string(),keys,time as i64])
+        .map_err(|e|e.to_string())?;
+    Ok(())
+}
+/// Read the entire relevant issue history before concluding that an
+/// ambiguous HTTP POST did not arrive. On paging overflow, fail closed.
+fn remote_has_batch(client:&reqwest::blocking::Client,
+    issue:u64,batch_id:&str,payload:&str)->Result<bool,String>{
+    let expected=format!("{MARKER}\n{payload}\n");
+    for page in 1..=MAX_RECEIPT_PAGES{
+        let number=page.to_string();
+        let data=request_json(client.get(format!(
+            "https://api.github.com/repos/{REPO}/issues/{issue}/comments"))
+            .query(&[("per_page","100"),("page",number.as_str())])
+            .header("Accept","application/vnd.github+json")
+            .send().map_err(|e|e.to_string())?)?;
+        let comments=data.as_array().ok_or("invalid GitHub comments response")?;
+        if comments.iter().any(|item|
+            item["body"].as_str()==Some(expected.as_str())
+            && item["body"].as_str().is_some_and(|body|body.contains(batch_id))){
+            return Ok(true);
+        }
+        if comments.len()<100{return Ok(false);}
+    }
+    Err("GitHub receipt search exceeded page limit; refusing duplicate upload".into())
+}
+/// A retry verifies the old daily Issue first. If it is no longer the
+/// ingestion target, repost only after proving absence there and in today's
+/// Issue. This avoids losing reports when a daily Action already ran.
+fn drive_delivery(db:&mut Connection,client:&reqwest::blocking::Client,
+    token:&str,time:u64)->Result<bool,String>{
+    let pending:Option<(String,u64,String,String,i64)>=db.query_row(
+        "SELECT batch_id,issue,payload,fingerprints,last_attempt
+         FROM inflight ORDER BY created_at LIMIT 1",[],
+        |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))
+    ).optional().map_err(|e|e.to_string())?;
+    let Some((batch_id,old_issue,payload,keys,last_attempt))=pending else{
+        return Ok(false);
+    };
+    if time<(last_attempt.max(0) as u64).saturating_add(RECEIPT_RETRY_SECS){
+        return Ok(true);
+    }
+    let fingerprints:Vec<String>=serde_json::from_str(&keys).map_err(|e|e.to_string())?;
+    if remote_has_batch(client,old_issue,&batch_id,&payload)? {
+        mark_delivered(db,time,&batch_id,&fingerprints)?;
+        return Ok(true);
+    }
+    let Some(today_issue)=daily_thread(client,time)?else{return Ok(true);};
+    if today_issue!=old_issue
+        && remote_has_batch(client,today_issue,&batch_id,&payload)?{
+        mark_delivered(db,time,&batch_id,&fingerprints)?;
+        return Ok(true);
+    }
+    // Persist the target and attempt timestamp BEFORE sending. If GitHub
+    // returns an ambiguous error, the same batch is checked for a receipt.
+    db.execute("UPDATE inflight SET issue=?2,last_attempt=?3,
+        attempts=attempts+1 WHERE batch_id=?1",
+        params![batch_id,today_issue as i64,time as i64])
+        .map_err(|e|e.to_string())?;
+    let batch:Value=serde_json::from_str(&payload).map_err(|e|e.to_string())?;
+    submit_comment(client,token,today_issue,&batch)?;
+    mark_delivered(db,time,&batch_id,&fingerprints)?;
+    Ok(true)
 }
 fn submit_comment(client:&reqwest::blocking::Client,token:&str,
     issue:u64,batch:&Value)->Result<(),String>{
