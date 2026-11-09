@@ -125,18 +125,49 @@ fn canonical_codec(signal: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+// These labels are independently readable, bounded release markers. They
+// are never inferred from previously learned parser output.
+fn canonical_audio(signal:&str)->Option<&'static str>{
+    match signal {
+        "aac"=>Some("AAC"),"ac3"=>Some("Dolby Digital"),
+        "eac3"|"ddp"=>Some("Dolby Digital Plus"),
+        "dts"=>Some("DTS Lossy"),"flac"=>Some("FLAC"),
+        "truehd"=>Some("TrueHD"),"opus"=>Some("OPUS"),
+        _=>None,
+    }
+}
+fn canonical_hdr(signal:&str)->Option<&'static str>{
+    match signal {
+        "dovi"|"dolbyvision"=>Some("DV"),
+        "hdr10"=>Some("HDR"),"hdr10plus"=>Some("HDR10+"),
+        _=>None
+    }
+}
+fn independently_verified_array(field:&str,signal:&str)->Option<Value>{
+    let result=match field{
+        "audio"=>canonical_audio(signal)?,
+        "hdr"=>canonical_hdr(signal)?,
+        "channels"=>match signal{
+            "5.1"=>"5.1","7.1"=>"7.1","2.0"=>"2.0",_=>return None
+        },
+        "languages"=>language_code(signal)?,
+        _=>return None
+    };
+    Some(json!([result]))
+}
 fn consistent(field: &str, signal: &str, value: &Value) -> bool {
     match field {
         "codec" => canonical_codec(signal).is_some_and(|canonical|
             value.as_str().is_some_and(|s|s.eq_ignore_ascii_case(canonical))),
-        "languages" => {
-            let Some(code) = language_code(signal) else { return false; };
-            value.as_array().is_some_and(|values|
-                values.len() == 1 && values.iter().any(|value| {
-                    value.as_str().is_some_and(|v|
-                        v.eq_ignore_ascii_case(code)
-                        || (code == "no" && matches!(v, "nb" | "nn")))
-                }))
+        "audio"|"hdr"|"channels"|"languages"=>{
+            let Some(expected)=independently_verified_array(field,signal)
+                else{return false;};
+            let Some(values)=value.as_array()else{return false;};
+            let Some(label)=expected[0].as_str()else{return false;};
+            values.len()==1 &&values[0].as_str().is_some_and(|found|
+                found.eq_ignore_ascii_case(label)
+                || (field=="languages"&&label=="no"
+                    &&matches!(found,"nb"|"nn")))
         }
         "dubbed" | "subbed" => value.as_bool() == Some(true),
         "bit_depth" => {
@@ -162,9 +193,11 @@ fn validated_value(field: &str, signal: &str, value: &Value) -> bool {
                 || matches!(c, '.' | '-' | '_' | ' ' | '+')),
         Value::Number(n) => n.as_i64().is_some_and(|v| (0..=9999).contains(&v)),
         Value::Bool(v) => *v,
-        Value::Array(a) => field == "languages" && a.len() <= 8
-            && a.iter().all(|v| v.as_str().is_some_and(|s|
-                s.len() <= 5 && s.bytes().all(|b| b.is_ascii_alphabetic()))),
+        Value::Array(a) => matches!(field,"languages"|"audio"|"hdr"|"channels")
+            &&a.len()==1 &&a.iter().all(|v|v.as_str().is_some_and(|s|
+                !s.is_empty()&&s.len()<=32&&s.bytes().all(|b|
+                    b.is_ascii_alphanumeric()
+                    ||matches!(b,b' '|b'-'|b'+'|b'.')))),
         _ => false,
     }
 }
@@ -173,6 +206,8 @@ fn validated_value(field: &str, signal: &str, value: &Value) -> bool {
 // result, supply IMDb coordinates, or learn an unknown label by repetition.
 fn independent_marker_value(field:&str,signal:&str)->Option<Value>{
     let value=match (field,signal){
+        ("audio"|"hdr"|"channels"|"languages",_) =>
+            independently_verified_array(field,signal)?,
         ("resolution",value) if crate::field_audit::supported_pixel_height(value)=>json!(value),
         ("codec","x264"|"x265"|"h264"|"h265"|"avc"|"hevc"|"av1")=>
             json!(canonical_codec(signal)?),
@@ -180,9 +215,7 @@ fn independent_marker_value(field:&str,signal:&str)->Option<Value>{
         ("quality","webrip")=>json!("WEBRip"),
         ("quality","bluray")=>json!("BluRay"),
         ("quality","hdtv")=>json!("HDTV"),
-        ("audio","aac"|"ac3"|"eac3"|"ddp"|"dts"|"flac"|"truehd"|"opus")=>json!(signal),
         ("bit_depth","8bit"|"10bit"|"12bit")=>json!(signal),
-        ("channels","5.1"|"7.1"|"2.0")=>json!(signal),
         ("extension","mkv"|"mp4"|"avi"|"m4v"|"webm"|"m2ts")=>json!(signal),
         ("subbed","subbed"|"hardsubbed")|("dubbed","dubbed")=>json!(true),
         _=>return None,
@@ -757,13 +790,20 @@ fn source_handler_additions(active:&[FieldRule])
     for rule in active {
         // Context-sensitive tags need additional native parser guards before
         // automation. They can still be shared as human-review proposals.
-        if !matches!(rule.field.as_str(),
-            "resolution"|"codec"|"quality"|"bit_depth"){
-            continue;
-        }
-        let transform=match &rule.value {
-            Value::String(value)=>format!("value('{value}')"),
-            Value::Bool(true)=>"boolean".to_owned(),
+        // All independently validated technical fields are eligible for
+        // ADD; the installed parser alone performs the native transformation.
+        // Other fields still enter training/review but cannot promote without
+        // an independent reference validator.
+        if !technical_field(&rule.field){continue;}
+        let transform=match (&rule.field,&rule.value) {
+            ("extension",Value::String(_))=>"lowercase".to_owned(),
+            (_,Value::String(value))=>format!("value('{value}')"),
+            (_,Value::Array(labels)) if labels.len()==1 =>
+                match labels[0].as_str(){
+                    Some(label)=>format!("uniq_concat(value('{label}'))"),
+                    None=>continue
+                },
+            (_,Value::Bool(true))=>"boolean".to_owned(),
             _=>continue,
         };
         let template=catalog.iter().find(|row|
