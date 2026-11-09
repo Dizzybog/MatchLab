@@ -166,7 +166,7 @@ def valid_extended_rule(r,sha):
         # inherit activation rights from a retired parser/metadata build.
         expected={"kind","original_kind","fingerprint","source_build",
             "field","signal","regex","evidence_count","distinct_titles",
-            "canonical_confirmations","review_only","verification"
+            "canonical_confirmations","review_only","verification"}
         if set(r)!=expected:return None
         if r["original_kind"] not in {
             "verified_regex_proposal","learned_field_regex",
