@@ -28,14 +28,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Test intake and historical-version validation
         run: python3 -m unittest discover -s scripts/tests -v
-      - name: Create or reuse ONE daily GitHub Issue; collect yesterday's comments
+      - name: Create or reuse ONE daily GitHub Issue; recover recent issue comments
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           TODAY="$(date -u +%F)"
-          YESTERDAY="$(date -u -d 'yesterday' +%F)"
           gh api "/repos/${GH_REPO}/issues?state=all&sort=created&direction=desc&per_page=100" > "$RUNNER_TEMP/recent-issues.json"
           today_number="$(jq -r --arg title "[community-learning] $TODAY" '.[] | select(.title==$title and .user.login=="github-actions[bot]") | .number' "$RUNNER_TEMP/recent-issues.json" | head -n1)"
           if [ -z "$today_number" ]; then
@@ -43,13 +42,17 @@ jobs:
               --title "[community-learning] $TODAY" \
               --body "One shared daily thread for opt-in MatchLab reports. Candidate batches are not ground truth."
           fi
-          yesterday_number="$(jq -r --arg title "[community-learning] $YESTERDAY" '.[] | select(.title==$title and .user.login=="github-actions[bot]") | .number' "$RUNNER_TEMP/recent-issues.json" | head -n1)"
-          if [ -z "$yesterday_number" ]; then
-            echo '[]' > "$RUNNER_TEMP/community-comments.json"
-          else
-            gh api --paginate --slurp "/repos/${GH_REPO}/issues/$yesterday_number/comments?per_page=100" \
-              > "$RUNNER_TEMP/community-comments.json"
-          fi
+          # Recover comments from recent official issues after a missed daily run.
+          echo '[]' > "$RUNNER_TEMP/community-comments.json"
+          for offset in $(seq 1 14); do
+            date="$(date -u -d "$offset days ago" +%F)"
+            issue="$(jq -r --arg title "[community-learning] $date" '.[] | select(.title==$title and .user.login=="github-actions[bot]") | .number' "$RUNNER_TEMP/recent-issues.json" | head -n1)"
+            if [ -n "$issue" ]; then
+              gh api --paginate --slurp "/repos/${GH_REPO}/issues/$issue/comments?per_page=100" > "$RUNNER_TEMP/day-comments.json"
+              jq -s 'add' "$RUNNER_TEMP/community-comments.json" "$RUNNER_TEMP/day-comments.json" > "$RUNNER_TEMP/all-comments.json"
+              mv "$RUNNER_TEMP/all-comments.json" "$RUNNER_TEMP/community-comments.json"
+            fi
+          done
       - name: Load persistent fingerprint ledger (GitHub Release asset)
         env:
           GH_TOKEN: ${{ github.token }}
