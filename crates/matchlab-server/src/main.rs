@@ -3778,6 +3778,51 @@ mod tests {
     }
 
     #[test]
+    fn monster_dahmer_s01e01_does_not_select_2004_anime(){
+        let stamp=std::time::SystemTime::now().duration_since(
+            std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-monster-dahmer-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,
+                clean_title TEXT,year INTEGER,category TEXT,region TEXT,
+                original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,start INTEGER,
+                end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,
+                clean_title TEXT,title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES('tt0434706','Monster','monster',2004,
+                'series','JP',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt0434706',1);
+            INSERT INTO season_episodes VALUES('tt0434706',1,74,74);
+            INSERT INTO anime_series_map VALUES('tt0434706','100','100',0);
+            INSERT INTO anidb_titles VALUES('100','Monster','monster','main','en');
+            INSERT INTO episode_map VALUES('100','100',1,1,1,74,0,'');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        let result=diagnose(&path,&MatchRequest{
+            title:"monster.the.jeffrey.dahmer.story.s01.e01".into(),
+            year:None,series:None
+        }).unwrap();
+        assert!(result.selected.is_none(),
+            "a short anime alias cannot hijack a different long TV title");
+        let valid=diagnose(&path,&MatchRequest{
+            title:"monster.s01.e01".into(),year:None,series:None
+        }).unwrap();
+        assert_eq!(valid.selected.unwrap()["imdb_id"],"tt0434706",
+            "exact Monster episodes must still be matched normally");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+    #[test]
     fn exact_supernatural_series_beats_unrelated_anime_alias() {
         let path=std::env::temp_dir().join(format!(
             "matchlab_supernatural_{}.sqlite3",std::process::id()));
