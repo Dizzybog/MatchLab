@@ -238,7 +238,8 @@ pub fn publish(db:&Connection)->Result<(),String>{
         "review_candidates_by_field":by_field,
         "candidate_rule_activation":false,
         "original_parser_fields_considered":parser_fields().len(),
-        "raw_markers_never_in_status_or_community_export":true});
+        "raw_markers_never_in_status":true,
+        "opted_in_community_review_may_share_marker_tokens":true});
     let slot=STATUS.get_or_init(||RwLock::new(Value::Null));
     if let Ok(mut guard)=slot.write(){*guard=report;}
     Ok(())
@@ -324,5 +325,7 @@ mod tests{
         publish(&db).unwrap();
         assert_eq!(status()["candidate_rule_activation"],false);
         assert!(status().get("marker").is_none());
+        assert_eq!(status()["raw_markers_never_in_status"],true);
+        assert_eq!(status()["opted_in_community_review_may_share_marker_tokens"],true);
     }
 }
