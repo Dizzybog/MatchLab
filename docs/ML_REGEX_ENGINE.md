@@ -45,9 +45,9 @@ the real ordered native engine.
 
 | Transform family | Examples | ML-safe candidate |
 |---|---|---|
-| Fixed `value(...)` | codec, resolution, network, edition, quality | Native ADD or candidate-prioritized CORRECT, with full replay |
-| Boolean | dubbed, subbed, scene, 3D, flags | Native ADD or CORRECT; ambiguous release/title words must be rejected |
-| Array `uniq_concat(value(...))` | language, audio, HDR, channels, extras | ADD can preserve original append semantics; must replay interactions with all other list rules |
+| Fixed `value(...)` | codec, resolution, network, edition, quality | Native ADD for independently recognized markers; general high-priority CORRECT is disabled without a separate validator |
+| Boolean | dubbed, subbed, scene, 3D, flags | ADD only when the complete context and an approved marker establish a safe value; unknown strings are review-only |
+| Array `uniq_concat(value(...))` | language, audio, HDR, channels, extras | Dedicated independently validated marker learner may ADD; general self-supervised promotion is blocked for additive array transforms |
 | `lowercase`, `uppercase`, `none` | extension, site, region, group | ADD only when the transformed capture is independently verified; never assume a changed spelling is equivalent |
 | `integer`, `first_integer`, `array(integer)`, `range_func` | year, seasons, episodes, volumes | Must preserve numeric captures, limits, ordering and episode ranges |
 | Dates and resolution-specific transformation | date, resolution | Candidate-only until full converted value is proved; unsafe fallbacks remain inactive |
@@ -70,18 +70,26 @@ provide independently readable reference values. New source handlers are
 replayed at higher priority to determine whether previously nonempty bad
 values can be repaired, including complete episode ranges.
 
-**General native-handler learner (PR #87):** Uses the *same algorithm across
-all 48 field families*. The canonical parser identifies a successful
-original handler, its exact source index and matched raw marker. A small,
-bounded offline worker generates meaning-preserving release-tag variants,
-such as punctuation or an alphabetic/numeric boundary. These are
-**counterfactual test cases**, not arbitrary model guesses. A new regex
-is derived from the original marker, compiled with the original handler's
-transform and options and tested against the full engine. A candidate
-must repair at least four examples from two distinct title identities,
-must preserve the original sources and known negatives exactly, and must
-provide **incremental improvements over already accepted ML rules**.
-Equivalent results produce no new active rule.
+**General native-handler learner (PR #87):** Observes source provenance
+and errors in **all 48 field families**. The canonical parser identifies
+its original handler, immutable native field/transform/options, and raw
+match. The offline worker generates conservative delimiter and alphanumeric
+boundary variations. These are *hypotheses*, not independent truths.
+**Automatic activation is narrower**: only an ADD to a native fixed-value
+or boolean handler with `skipIfAlreadyFound=true`, in an approved metadata
+field, and with a marker in a **static known-public release vocabulary**.
+It must repair at least four examples from two distinct title identities,
+preserve the original sources and the full negative/real-release regression
+corpus exactly, and demonstrate **incremental improvement** over already
+accepted ML rules. The rest remains observational/review-only; self-generated
+variants never authorize rewriting nonempty fields.
+
+Changing an already populated **season or episode** remains possible
+through the *separate* independently parsed TV-coordinate validator.
+There is deliberately **no automatic high-priority general correction**
+for title, year, release group, quality, codecs, subtitles or other fields
+without an independent oracle. The native parser compiler rejects
+non-TV high-priority rules even if one is supplied by a modified local DB.
 
 The FTRL-Proximal statistical model remains a small advisory model
 trained on all canonical fields; it cannot authorize a regex by
@@ -101,6 +109,13 @@ and strictly bounded grammar synthesis rather than LLM freeform output.
   syntax even if native trusted source handlers themselves use PCRE2.
 - Inheriting `remove`, `skipIfAlreadyFound`, `skipFromTitle`, and
   other native options is mandatory; the learner cannot set them itself.
+- The general ADD path is restricted to trusted fixed-value and boolean
+  native handlers that skip already populated fields; it cannot silently
+  replace a nonempty value. Lists, dates, free-text and arbitrary numeric
+  transforms use other verified paths or remain review-only.
+- Unknown words appearing inside film titles, metadata aliases, release
+  groups and private strings must not be promoted based on the parser's
+  own answer. The public vocabulary is a **second acceptance gate**.
 - The validation corpus is bounded, so regression checks can reduce
   risk but **cannot mathematically guarantee no future regression**.
   The activation threshold and independent local history protect against
@@ -119,25 +134,30 @@ data did not demonstrate a safe, measurable improvement.
 3. Generate a constrained regex for an existing native transform.
 4. Compare the old parser, existing learned rules and the proposed
    *complete* replacement/addition engine on positive, negative,
-   cross-field and counterfactual examples.
+   cross-field, bundled real-release smoke cases and counterfactual examples.
+   Persisted rule syntax and source identity must pass independent validation
+   at every reconciliation; missing or invalid evidence retires active rules.
 5. Promote only when the candidate adds real repairs with no observed
    regressions. Reject syntactic/semantic duplicates and no-ops.
-6. Compile and publish the entire immutable parser generation atomically;
-   incoming API requests never run an ML model or compile regex.
+6. Compile the proposed generation **before** modifying persisted rules.
+   Publish only after the local materialization succeeds, using a single
+   immutable parser generation swap. A storage or compilation failure must
+   not introduce an unrecorded live regex.
 7. Persist accepted rules and their measured repairs locally.
 8. After parser upgrades, reparse original local evidence against the
    new canonical engine before restoring a learned rule. Retire rules
    that became unnecessary or conflict with updated native behavior.
 9. Optionally export *review-only*, strict-grammar regex proposals and
-   aggregate evidence via the GitHub community workflow. Raw release
-   names and full parsed identities are never part of a proposal.
+   aggregate evidence via the GitHub community workflow. Only a fixed,
+   audited public marker vocabulary is exportable from the general learner.
+   Raw release names and full parsed identities are never part of a proposal.
 
 ## Performance and operations
 
 - Rust only; no Ollama, external model server, GPU or Python runtime.
 - No additional per-request regex parsing/provenance: the full raw match
   is captured only when background training explicitly requests it.
-- For each training title, consider at most two original source handlers
+- For each training title, consider at most **one** original source handler
   and three bounded punctuation/number variants per handler.
 - Store no more than 16,384 general counterfactual examples, further
   restricted by `MATCHLAB_ML_TRAINING_MAX_EXAMPLES`; prefer evicting
@@ -146,6 +166,25 @@ data did not demonstrate a safe, measurable improvement.
   changes invalidate parser cache automatically.
 - `GET /api/ml/status` includes `general_regex`, with native field
   inventory, active rules, evidence volume and replay rejection counts.
+
+## Threat model and practical correctness guarantee
+
+Training is influenced by raw release names, which are **untrusted input**.
+Distinct-title hashes limit ordinary repetition but cannot prove that
+several fabricated titles came from independent publishers. Attackers can
+attempt data poisoning, regex collisions and false release metadata labels.
+Mitigations: limited regex grammar, a fixed safe vocabulary, immutable
+native source transforms, bounded worker/replay resource usage, held-out
+regressions, local-only raw data, and a fail-closed compiler for unverified
+higher-priority corrections.
+
+No finite corpus can guarantee that a newly installed ADD will never
+match an unseen ordinary title by accident. We therefore claim
+**zero observed regressions against the validated corpus**, NOT
+mathematical zero regression against every possible future release.
+Operators requiring strict zero change can disable learning with
+`MATCHLAB_ML_ENABLED=false`. The ordinary canonical parser and matcher
+remain functional without ML.
 
 ## Remaining work before declaring universal correctness
 
