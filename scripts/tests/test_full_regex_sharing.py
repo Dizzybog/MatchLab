@@ -15,16 +15,17 @@ def common(kind,epoch):
         "canonical_confirmations":8,"source_build":SHA+":"+str(epoch)}
 def technical():
     field,signal,value="resolution","1440p","1440p"
-    return {**common("learned_field_regex",3),
+    return {**common("learned_field_regex",intake.FIELD_EPOCH),
         "verification":"local_canonical_and_explicit_release_marker",
         "field":field,"signal":signal,
         "regex":intake.technical_pattern(field,signal),"canonical":value,
         "fingerprint":sha(f"community-field:{field}:{signal}:{json.dumps(value)}")}
 def tv():
-    return {**common("learned_tv_regex",1),
+    return {**common("learned_tv_regex",intake.TV_EPOCH),
         "verification":"explicit_tv_marker_and_canonical_confirmations",
         "family":"sxe","fields":["seasons","episodes"],
         "regex":intake.TV_GRAMMARS["sxe"],
+        "native_patterns":intake.TV_NATIVE_PATTERNS["sxe"],
         "fingerprint":sha("community-tv:sxe")}
 def patch():
     catalog=json.loads(intake.CATALOG.read_text())["handlers"]
@@ -32,7 +33,7 @@ def patch():
     source=catalog[index]
     extra=intake.technical_pattern(source["name"],"1440p")
     value="(?:"+source["pattern"]+")|(?:"+extra+")"
-    return {**common("learned_source_regex_patch",3),
+    return {**common("learned_source_regex_patch",intake.FIELD_EPOCH),
         "verification":"source_catalog_and_canonical_release_markers",
         "handler_index":index,"field":source["name"],"signal":"1440p",
         "original_regex":source["pattern"],"proposed_regex":value,
@@ -70,6 +71,12 @@ class TestAllRegexSharing(unittest.TestCase):
         self.assertIsNone(intake.valid_extended_rule(p,SHA))
         p=tv()
         p["regex"]=r"(?s)(.*)+"
+        self.assertIsNone(intake.valid_extended_rule(p,SHA))
+        p=tv()
+        p["native_patterns"]={**p["native_patterns"],"episodes":r"(?s)(.*)+"}
+        self.assertIsNone(intake.valid_extended_rule(p,SHA))
+        p=tv()
+        p["source_build"]=SHA+":1"
         self.assertIsNone(intake.valid_extended_rule(p,SHA))
     def test_two_rules_are_allowed_one_pr_review_at_a_time(self):
         rows=[technical(),tv()]
