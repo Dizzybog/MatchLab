@@ -5,7 +5,8 @@
 use rusqlite::{params,Connection,OpenFlags,OptionalExtension};
 use serde_json::Value;
 use sha2::{Digest,Sha256};
-use std::{env,path::{Path,PathBuf},time::Duration};
+use std::{env,path::{Path,PathBuf},time::Duration,
+    sync::atomic::{AtomicU64,Ordering}};
 
 const POLL_SECONDS:u64=15;
 const ACTIVE_BURST_PAUSE_MS:u64=200;
@@ -27,6 +28,21 @@ fn retry_delay(failures:u32)->Duration{
 }
 
 const MAX_PATTERNS:i64=2_000;
+static JOBS_PROCESSED:AtomicU64=AtomicU64::new(0);
+static SQLITE_BUSY_RETRIES:AtomicU64=AtomicU64::new(0);
+static JOBS_AVAILABLE:AtomicU64=AtomicU64::new(0);
+pub fn queue_status()->Value{
+    serde_json::json!({
+        "mode":"persistent_sqlite_queue",
+        "batch_size":batch_size(),
+        "processed_since_start":JOBS_PROCESSED.load(Ordering::Relaxed),
+        "available_at_last_scan":JOBS_AVAILABLE.load(Ordering::Relaxed),
+        "sqlite_busy_retries":SQLITE_BUSY_RETRIES.load(Ordering::Relaxed),
+        "retry_policy":"exponential_backoff_at_least_once",
+        "hot_path_blocking":false,
+    })
+}
+
 const MIN_EXAMPLES:i64=5;
 fn max_examples()->i64{
     (crate::learning_cache::storage_gb() as i64*20_000)
@@ -117,14 +133,19 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
     let history_db=Connection::open_with_flags(history,OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e|e.to_string())?;
     history_db.busy_timeout(Duration::from_secs(2)).map_err(|e|e.to_string())?;
-    let newest:i64=history_db.query_row("SELECT COALESCE(MAX(id),0) FROM requests",
-        [],|r|r.get(0)).map_err(|e|e.to_string())?;
-    let Some(cursor)=setting(local,"after_id")?else{
-        // Do not silently train on requests made before the opt-in.
-        put(local,"after_id",&newest.to_string())?;
-        return Ok(0);
-    };
-    let mut after=cursor.parse::<i64>().unwrap_or(newest);
+    let newest:i64=history_db.query_row("SELECT COALESCE(MAX(id),0)
+        FROM ml_training_queue",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let cursor=setting(local,"after_id")?;
+    // ml_training_queue only contains requests after ML opt-in. Unlike
+    // dashboard history, these are deliberately queued training jobs, so
+    // no first-run event may silently vanish while the worker initializes.
+    let earliest:i64=history_db.query_row(
+        "SELECT COALESCE(MIN(id),0) FROM ml_training_queue",[],
+        |r|r.get(0)).map_err(|e|e.to_string())?;
+    let mut after=cursor.as_deref().and_then(|v|v.parse::<i64>().ok())
+        .unwrap_or_else(||earliest.saturating_sub(1));
+    if cursor.is_none(){put(local,"after_id",&after.to_string())?;}
+    JOBS_AVAILABLE.store(newest.saturating_sub(after) as u64,Ordering::Relaxed);
     if newest<after{put(local,"after_id",&newest.to_string())?;return Ok(0);}
     if newest==after{
         if revalidate {
@@ -135,7 +156,8 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
         }
         return Ok(0);
     }
-    let mut stmt=history_db.prepare("SELECT id,title,details FROM requests
+    let mut stmt=history_db.prepare("SELECT id,title,details
+        FROM ml_training_queue
         WHERE id>?1 ORDER BY id ASC LIMIT ?2").map_err(|e|e.to_string())?;
     let rows=stmt.query_map(params![after,batch_size()],|r|Ok((r.get::<_,i64>(0)?,
         r.get::<_,String>(1)?,r.get::<_,String>(2)?)))
@@ -229,6 +251,8 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
     // The cursor and learned model are committed in the same transaction.
     put(&tx,"after_id",&after.to_string())?;
     tx.commit().map_err(|e|e.to_string())?;
+    JOBS_PROCESSED.fetch_add(processed as u64,Ordering::Relaxed);
+    JOBS_AVAILABLE.store(newest.saturating_sub(after) as u64,Ordering::Relaxed);
     model.publish_status();
     crate::candidate_discovery::publish(local)?;
     if let Some(ref metadata)=meta{
@@ -237,6 +261,21 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
     crate::field_learning::reconcile(local)?;
     crate::tv_learning::reconcile(local)?;
     Ok(processed)
+}
+/// Acknowledgment is the model's committed cursor; deleting durable
+/// jobs is only disk cleanup. If this DELETE is busy or interrupted, jobs
+/// remain on disk but cannot be applied twice to the trained model.
+fn cleanup_committed_jobs(history:&Path,local:&Connection)->Result<usize,String>{
+    let Some(cursor)=setting(local,"after_id")?else{return Ok(0);};
+    let after=cursor.parse::<i64>().unwrap_or(0);
+    if after<=0{return Ok(0);}
+    let db=Connection::open(history).map_err(|e|e.to_string())?;
+    db.busy_timeout(Duration::from_millis(50))
+        .map_err(|e|e.to_string())?;
+    db.execute("DELETE FROM ml_training_queue WHERE id IN (
+        SELECT id FROM ml_training_queue
+        WHERE id<=?1 ORDER BY id ASC LIMIT 512
+    )",params![after]).map_err(|e|e.to_string())
 }
 pub fn verify_native_model()->Result<(),String>{
     let db=Connection::open_in_memory().map_err(|e|e.to_string())?;
@@ -314,12 +353,16 @@ pub fn start(history:PathBuf,metadata:PathBuf){
             let mut legacy_captured=false;
             let mut rule_observer=crate::learning_rule_log::Observer::default();
             let mut consecutive_busy=0u32;
+            let mut last_queue_cleanup=std::time::Instant::now()
+                .checked_sub(Duration::from_secs(15))
+                .unwrap_or_else(std::time::Instant::now);
             loop{
                 if connection.is_none(){
                     match connect(&state){
                         Ok(db)=>{connection=Some(db);legacy_captured=false;},
                         Err(error)=>{
                             if error.contains("database is locked"){
+                                SQLITE_BUSY_RETRIES.fetch_add(1,Ordering::Relaxed);
                                 consecutive_busy=consecutive_busy.saturating_add(1);
                                 if consecutive_busy==1||consecutive_busy%8==0{
                                     tracing::warn!(failures=consecutive_busy,
@@ -366,6 +409,7 @@ pub fn start(history:PathBuf,metadata:PathBuf){
                             consecutive_busy=0;
                         },
                         Err(error) if error.contains("database is locked")=>{
+                            SQLITE_BUSY_RETRIES.fetch_add(1,Ordering::Relaxed);
                             consecutive_busy=consecutive_busy.saturating_add(1);
                             if consecutive_busy==1||consecutive_busy%8==0{
                                 tracing::warn!(failures=consecutive_busy,
@@ -383,6 +427,14 @@ pub fn start(history:PathBuf,metadata:PathBuf){
                             continue;
                         }
                     }
+                }
+                if last_queue_cleanup.elapsed()>=Duration::from_secs(10){
+                    if let Some(db)=connection.as_ref(){
+                        // The history writer is independent. Never delay a
+                        // parser request (or fail the learner) on cleanup.
+                        let _=cleanup_committed_jobs(&history,db);
+                    }
+                    last_queue_cleanup=std::time::Instant::now();
                 }
                 // Short bursts when the persistent queue has more work;
                 // otherwise idle until the next normal polling interval.
