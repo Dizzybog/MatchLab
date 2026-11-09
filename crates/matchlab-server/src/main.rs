@@ -1526,6 +1526,7 @@ async fn ml_status()->Json<Value>{
     let mut report=field_learning::status();
     if let Some(object)=report.as_object_mut(){
         object.insert("training_and_cache".into(),learning_cache::status());
+        object.insert("training_queue".into(),local_learning::queue_status());
         object.insert("online_model".into(),online_model::OnlineModel::status());
         object.insert("unknown_markers".into(),candidate_discovery::status());
         object.insert("regex_rules".into(),learning_rule_log::status());
