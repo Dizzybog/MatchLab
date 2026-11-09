@@ -547,7 +547,7 @@ pub fn archive_proposals(db:&Connection)->Result<Vec<Value>,String>{
         let regex=pattern_for(&marker)?;
         Some(json!({"kind":"verified_regex_proposal",
             "fingerprint":hash(&format!("community-regex:{marker}")),
-            "marker":marker,"regex":regex,"source_build":format!("{build}:{EPOCH}"),
+            "marker":marker,"regex":regex,"source_build":build,
             "verification":"archive_active_rule_review_only",
             "evidence_count":0,"distinct_imdb":0}))
     }).collect())

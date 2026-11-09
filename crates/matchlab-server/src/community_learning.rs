@@ -39,8 +39,27 @@ fn eligible(local:bool,share:bool,has_token:bool,official_build:bool)->bool{
 fn enabled()->bool{eligible(crate::local_learning::active(),opted_in(),
     github_token().is_some(),valid_sha(build_sha()))}
 pub async fn status()->Json<Value>{
+    let state=env::var("MATCHLAB_COMMUNITY_STATE_FILE")
+        .unwrap_or_else(|_|"/data/community-learning.sqlite3".into());
+    let (pending,delivered)=Connection::open_with_flags(
+        state,OpenFlags::SQLITE_OPEN_READ_ONLY).ok().map(|db|{
+            let total=|table:&str|->i64{
+                let sql=match table{"pending"=>"SELECT count(*) FROM pending",
+                    _=>"SELECT count(*) FROM reported"};
+                db.query_row(sql,[],|r|r.get(0)).unwrap_or(0)
+            };
+            (total("pending"),total("reported"))
+        }).unwrap_or((0,0));
+    let local=env::var("MATCHLAB_ML_STATE_FILE")
+        .unwrap_or_else(|_|"/data/local-learning.sqlite3".into());
+    let archived=Connection::open_with_flags(
+        local,OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
+        .map(|db|crate::community_rule_archive::count(&db)).unwrap_or(0);
     Json(json!({"enabled":opted_in(),"local_learning_enabled":crate::local_learning::active(),
         "ready":enabled(),
+        "archived_regex_rules":archived,"pending_reports_and_rules":pending,
+        "github_confirmed_deliveries":delivered,
+        "global_deduplication":"trusted_github_intake_and_persistent_ledger",
         "protocol":PROTOCOL,"learning_epoch":EPOCH,
         "build_sha":valid_sha(build_sha()).then_some(build_sha()),
         "upload":"one_daily_github_issue_with_opt_in_batch_comments",
@@ -209,10 +228,16 @@ fn ensure_version(db:&mut Connection,history:&Path,time:u64)->Result<(),String>{
     if setting(db,"version")?.as_deref()==Some(version.as_str()){return Ok(());}
     let latest=latest_id(history)?;
     let tx=db.transaction().map_err(|e|e.to_string())?;
+    // Old-build rules are still in the offline archive; remove only stale
+    // pending payloads, then reconstruct them under the current protocol.
+    // Keep confirmed fingerprints AND the last successful upload timestamp.
     tx.execute("DELETE FROM pending",[]).map_err(|e|e.to_string())?;
     put(&tx,"version",&version)?;
     put(&tx,"after_id",&latest.to_string())?;
-    put(&tx,"window_start",&time.to_string())?;
+    if setting(&tx,"window_start")?.is_none(){
+        // Initial activation can start draining offline history immediately.
+        put(&tx,"window_start",&time.saturating_sub(DAY_SECS).to_string())?;
+    }
     tx.commit().map_err(|e|e.to_string())
 }
 fn scan(db:&Connection,history:&Path,metadata:&Path,time:u64)->Result<(),String>{
@@ -276,16 +301,10 @@ fn collect_rule_proposals(db:&Connection,metadata:&Path,time:u64)->Result<(),Str
     let Ok(meta)=Connection::open_with_flags(
         metadata,OpenFlags::SQLITE_OPEN_READ_ONLY
     )else{return Ok(());};
-    let mut rules=crate::learned_regex::proposals(&local,&meta)
-        .unwrap_or_default();
-    rules.extend(crate::field_learning::community_proposals(&local)
-        .unwrap_or_default());
-    rules.extend(crate::tv_learning::community_proposals(&local)
-        .unwrap_or_default());
-    // Include high-frequency unknown-marker proposals for every original
-    // parser field. These can only enter GitHub's human-review queue.
-    rules.extend(crate::candidate_discovery::community_proposals(&local)
-        .unwrap_or_default());
+    // Archive is written by the offline ML worker even before community
+    // sharing is enabled. Re-check current rules against current metadata;
+    // stale/retired historical rules are exported ONLY as human-review data.
+    let mut rules=crate::community_rule_archive::for_sharing(&local,Some(&meta))?;
     // Distinct fingerprints avoid repeats between source patch proposals
     // and newly added technical/TV regex families.
     rules.sort_by(|a,b|a["fingerprint"].as_str().cmp(&b["fingerprint"].as_str()));
@@ -358,6 +377,51 @@ fn daily_thread(client:&reqwest::blocking::Client,time:u64)->Result<Option<u64>,
         .and_then(|v|v["number"].as_u64()))
 }
 
+/// Look for an exact previously accepted batch in official bot-created
+/// community threads. Check recent days because a crash may cross UTC midnight.
+fn remote_batch_confirmed(client:&reqwest::blocking::Client,time:u64,
+    batch_id:&str)->Result<bool,String>{
+    let data=request_json(client.get(format!(
+        "https://api.github.com/repos/{REPO}/issues"))
+        .query(&[("state","all"),("sort","created"),("direction","desc"),
+            ("per_page","100")])
+        .header("Accept","application/vnd.github+json")
+        .send().map_err(|e|e.to_string())?)?;
+    let items=data.as_array().ok_or("invalid GitHub issue list")?;
+    for day in 0..=3u64 {
+        let stamp=time.saturating_sub(day*DAY_SECS);
+        let day=chrono::DateTime::from_timestamp(stamp as i64,0)
+            .ok_or("invalid issue date")?.format("%Y-%m-%d").to_string();
+        let expected=format!("[community-learning] {day}");
+        let Some(issue)=items.iter().find(|v|
+            v["title"]==expected
+            &&v["user"]["login"]=="github-actions[bot]"
+            &&v.get("pull_request").is_none())
+            .and_then(|v|v["number"].as_u64())else{continue;};
+        for page in 1..=10 {
+            let comments=request_json(client.get(format!(
+                "https://api.github.com/repos/{REPO}/issues/{issue}/comments"))
+                .query(&[("per_page","100"),("page",&page.to_string())])
+                .header("Accept","application/vnd.github+json")
+                .send().map_err(|e|e.to_string())?)?;
+            let rows=comments.as_array().ok_or("invalid GitHub comment page")?;
+            for item in rows {
+                let Some(body)=item["body"].as_str()else{continue;};
+                let Some(raw)=body.strip_prefix(MARKER).and_then(|s|s.trim_start().strip_prefix('{'))else{continue;};
+                // Reattach the first JSON brace; malformed or unrelated
+                // comments can never acknowledge a local pending batch.
+                if let Ok(data)=serde_json::from_str::<Value>(&format!("{{{raw}"))
+                    &&data["batch_id"]==batch_id
+                    &&data["source"]=="matchlab-community-batch" {
+                    return Ok(true);
+                }
+            }
+            if rows.len()<100 {break;}
+        }
+    }
+    Ok(false)
+}
+
 fn build_batch(db:&Connection,time:u64)->Result<Option<(String,Value,Vec<String>)>,String>{
     let mut stmt=db.prepare(
         "SELECT fingerprint,payload FROM pending ORDER BY fingerprint LIMIT ?1"
@@ -389,9 +453,10 @@ fn build_batch(db:&Connection,time:u64)->Result<Option<(String,Value,Vec<String>
         "reports":reports,"rules":rules});
     Ok(Some((batch_id,batch,fingerprints)))
 }
-// Commit report digests BEFORE a network write. On a timeout/crash we may
-// lose one batch, but never spam GitHub by retrying an ambiguous POST.
-fn mark_attempted(
+// A fingerprint is durable-delivered ONLY after GitHub confirms the comment
+// (201), or we find the identical batch ID in an earlier official issue.
+// An ambiguous network failure leaves the exact pending batch retryable.
+fn mark_confirmed(
     db:&mut Connection,time:u64,batch_id:&str,fingerprints:&[String],
 )->Result<(),String>{
     let tx=db.transaction().map_err(|e|e.to_string())?;
@@ -450,8 +515,14 @@ fn cycle(history:&Path,metadata:&Path,storage:&Path,token:&str)->Result<(),Strin
     if batch.to_string().len()+MARKER.len()+2>MAX_BODY{
         return Err("community batch exceeds comment size bound".into());
     }
-    mark_attempted(&mut db,time,&id,&fingerprints)?;
-    submit_comment(&client,token,issue,&batch)
+    // A previous POST may have succeeded even if the process crashed or
+    // its response was lost. Check the authoritative GitHub thread before
+    // retrying to avoid duplicate comments where possible.
+    if remote_batch_confirmed(&client,time,&id)? {
+        return mark_confirmed(&mut db,time,&id,&fingerprints);
+    }
+    submit_comment(&client,token,issue,&batch)?;
+    mark_confirmed(&mut db,time,&id,&fingerprints)
 }
 pub fn start(history:PathBuf,metadata:PathBuf){
     if !enabled(){
@@ -523,7 +594,7 @@ mod tests{
         assert_eq!(db.query_row("SELECT COUNT(*) FROM pending",[],|r|r.get::<_,i64>(0)).unwrap(),1);
         // Tests cannot rely on an official build SHA; version-independent
         // persistence logic still guards repeated submission.
-        mark_attempted(&mut db,now(),"batch-1",&[key.clone()]).unwrap();
+        mark_confirmed(&mut db,now(),"batch-1",&[key.clone()]).unwrap();
         assert_eq!(db.query_row("SELECT COUNT(*) FROM pending",[],|r|r.get::<_,i64>(0)).unwrap(),0);
         assert_eq!(db.query_row("SELECT COUNT(*) FROM reported WHERE fingerprint=?1",
             [&key],|r|r.get::<_,i64>(0)).unwrap(),1);
