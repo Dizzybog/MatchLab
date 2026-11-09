@@ -138,6 +138,10 @@ fn bounded_generated_regex(pattern:&str)->bool{
 }
 fn promotable(rule:&Active)->bool{
     rule.mode=="add"&&bounded_generated_regex(&rule.pattern)
+        // A canonical parse is only self-supervision. Never promote an
+        // arbitrary matched substring from a title as a new global rule.
+        // The phrase must also belong to a fixed, known release vocabulary.
+        &&shareable_pattern(&rule.field,&rule.pattern)
         &&source(rule.source_index).is_some_and(|s|
             s["field"]==rule.field &&approved_addition_source(s))
 }
@@ -783,6 +787,9 @@ mod tests{
         assert!(!promotable(&Active{mode:"correct".into(),..good.clone()}));
         assert!(!promotable(&Active{field:"title".into(),..good.clone()}));
         assert!(!promotable(&Active{pattern:"(?i).*".into(),..good.clone()}));
+        assert!(!promotable(&Active{
+            pattern:family_pattern("Private Movie").unwrap(),..good.clone()
+        }),"a title-derived unknown marker is not independently validated");
         let db=Connection::open_in_memory().unwrap();
         init(&db).unwrap();
         assert!(!active_safe(&db,&[good]).unwrap(),
