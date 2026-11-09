@@ -57,7 +57,7 @@ fn expected(name:&str)->Option<Expected>{
         let e1=caps.get(2)?.as_str().parse::<i64>().ok()?;
         let e2=caps.get(3)?.as_str().parse::<i64>().ok()?;
         let prefix=&name[..caps.get(0)?.start()];
-        if prefix.chars().filter(char::is_alphabetic).count()<4
+        if prefix.chars().filter(|c|c.is_alphabetic()).count()<4
             ||!(1..=120).contains(&s)||e1<=0||e2<=e1||e2-e1>32 {
             return None;
         }
