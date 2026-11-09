@@ -9,9 +9,11 @@ use serde_json::{json,Value};
 use sha2::{Digest,Sha256};
 use std::sync::{OnceLock,RwLock,atomic::{AtomicU64,Ordering}};
 
-const EPOCH:u32=2;
+const EPOCH:u32=3; // -1 means an independently observed canonical missing-field gap
 const MIN_EXAMPLES:i64=8;
 const MIN_IDENTITIES:i64=4;
+const MIN_MISSING_EXAMPLES:i64=3;
+const MIN_MISSING_IDENTITIES:i64=2;
 const OVERRIDE_EXAMPLES:i64=16;
 const OVERRIDE_IDENTITIES:i64=6;
 static TEMPLATES:OnceLock<Vec<(&'static str,Regex)>>=OnceLock::new();
@@ -98,11 +100,22 @@ fn identity(parsed:&Value)->Option<String>{
     let normalized=crate::imdb_matcher::clean_title(raw);
     (4..=140).contains(&normalized.len()).then(||hash(&normalized))
 }
-fn aligned(parsed:&Value,c:&Coordinates)->bool{
-    parsed["seasons"].as_array().is_some_and(|a|
-        a.len()==1 && a[0].as_i64()==Some(c.season))
-    && parsed["episodes"].as_array().is_some_and(|a|
-        a.len()==1 && a[0].as_i64()==Some(c.episode))
+/// 1 = native parser agrees, 0 = conflicting/ambiguous coordinates,
+/// -1 = explicit raw TV coordinates missing from the original parser.
+/// Disagreement is never treated as authority to overwrite another result.
+fn alignment(parsed:&Value,c:&Coordinates)->i64{
+    let season=&parsed["seasons"];
+    let episode=&parsed["episodes"];
+    let matches=|value:&Value,number:i64|value.as_array().is_some_and(|a|
+        a.len()==1 && a[0].as_i64()==Some(number));
+    let missing=|value:&Value|value.is_null()
+        ||value.as_array().is_some_and(Vec::is_empty);
+    if matches(season,c.season)&&matches(episode,c.episode){return 1;}
+    if (missing(season)&&(missing(episode)||matches(episode,c.episode)))
+        ||(missing(episode)&&matches(season,c.season)){
+        return -1;
+    }
+    0
 }
 pub fn init(db:&Connection)->Result<(),String>{
     db.execute_batch(
@@ -150,7 +163,7 @@ pub fn observe(db:&Connection,name:&str,parsed:&Value,count:&mut i64)
         family=excluded.family,identity_hash=excluded.identity_hash,
         canonical_aligned=excluded.canonical_aligned,source_build=excluded.source_build,
         observed_at=excluded.observed_at",
-        params![example,family,identity,i64::from(aligned(parsed,&coords)),epoch])
+        params![example,family,identity,alignment(parsed,&coords),epoch])
         .map_err(|e|e.to_string())?;
     *count+=1;
     Ok(vec![
@@ -162,13 +175,18 @@ fn select(db:&Connection)->Result<Vec<Active>,String>{
     init(db)?;
     let mut stmt=db.prepare(
         "SELECT family,count(*) AS n,count(DISTINCT identity_hash) AS titles,
-                sum(canonical_aligned) AS confirmations
+                sum(canonical_aligned=1) AS confirmations,
+                sum(canonical_aligned=-1) AS missing,
+                count(DISTINCT CASE WHEN canonical_aligned=-1
+                    THEN identity_hash END) AS missing_titles
          FROM learned_tv_regex_evidence WHERE source_build=?1
          GROUP BY family
          HAVING n>=?2 AND titles>=?3 AND confirmations>=2
+             AND missing>=?4 AND missing_titles>=?5
          ORDER BY family"
     ).map_err(|e|e.to_string())?;
-    let rows=stmt.query_map(params![build(),MIN_EXAMPLES,MIN_IDENTITIES],|r|{
+    let rows=stmt.query_map(params![build(),MIN_EXAMPLES,MIN_IDENTITIES,
+        MIN_MISSING_EXAMPLES,MIN_MISSING_IDENTITIES],|r|{
         let family:String=r.get(0)?;
         let examples:i64=r.get(1)?;
         let identities:i64=r.get(2)?;
@@ -184,7 +202,7 @@ pub fn persisted_rule_archive(db:&Connection)->Result<Vec<Value>,String>{
     init(db)?;
     let mut stmt=db.prepare("SELECT family,source_build,count(*) AS n,
         count(DISTINCT identity_hash) AS titles,
-        sum(canonical_aligned) AS confirmations
+        sum(canonical_aligned=1) AS confirmations
         FROM learned_tv_regex_evidence
         GROUP BY family,source_build
         HAVING n>=?1 AND titles>=?2 AND confirmations>=2
@@ -284,7 +302,7 @@ fn proposals(db:&Connection,archive:bool)->Result<Vec<Value>,String>{
             .find(|(name,_)|*name==rule.family)else{continue;};
         let (count,identities,confirmed):(i64,i64,i64)=db.query_row(
             "SELECT COUNT(*),COUNT(DISTINCT identity_hash),
-                SUM(canonical_aligned)
+                SUM(canonical_aligned=1)
              FROM learned_tv_regex_evidence
              WHERE family=?1 AND source_build=?2",
             params![rule.family,build()],
@@ -315,6 +333,7 @@ fn proposals(db:&Connection,archive:bool)->Result<Vec<Value>,String>{
 pub fn status()->Value{
     let rules=registry().read().ok().map(|r|r.clone()).unwrap_or_default();
     json!({"active_rule_count":rules.len(),
+        "activation_policy":"requires_missing_native_tv_coordinates_and_confirmed_replay",
         "high_evidence_families":rules.iter().filter(|r|r.may_override).count(),
         "families":rules.iter().map(|r|r.family.clone()).collect::<Vec<_>>(),
         "scope":"ordinary TV SxxExx, NxM and Season N Episode M"})
@@ -347,38 +366,60 @@ mod tests{
         assert!(compiled.iter().all(|r|r.is_match("Show.S02E07.1080p")));
     }
     #[test]
-    fn promotion_needs_diverse_titles_and_canonical_replay(){
+    fn repeated_native_successes_do_not_activate_redundant_tv_regex(){
         let db=Connection::open_in_memory().unwrap();
         init(&db).unwrap();
         let mut count=0;
-        for n in 0..7 {
-            let name=format!("Series{n}.S02E07.1080p");
-            let parsed=json!({"title":format!("Series{n}"),
-                "seasons":[2],"episodes":[7]});
-            observe(&db,&name,&parsed,&mut count).unwrap();
+        for n in 0..24{
+            let title=format!("Series{n}.S02E07.1080p");
+            observe(&db,&title,&json!({"title":format!("Series{n}"),
+                "seasons":[2],"episodes":[7]}),&mut count).unwrap();
+        }
+        assert!(select(&db).unwrap().is_empty(),
+            "ordinary SxxExx already parsed correctly is not a new ML rule");
+    }
+    #[test]
+    fn only_independent_gaps_with_canonical_confirmations_promote_tv_regex(){
+        let db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        let mut count=0;
+        for n in 0..8{
+            let title=format!("Series{n}.S02E07.1080p");
+            observe(&db,&title,&json!({"title":format!("Series{n}"),
+                "seasons":[2],"episodes":[7]}),&mut count).unwrap();
         }
         assert!(select(&db).unwrap().is_empty());
-        observe(&db,"Series7.S02E07.1080p",
-            &json!({"title":"Series7","seasons":[2],"episodes":[7]}),
-            &mut count).unwrap();
+        for n in 8..11{
+            let title=format!("Series{n}.S02E07.1080p");
+            observe(&db,&title,&json!({"title":format!("Series{n}"),
+                "seasons":[],"episodes":[]}),&mut count).unwrap();
+        }
         let rules=select(&db).unwrap();
         assert_eq!(rules.len(),1);
         assert!(!rules[0].may_override);
-        for n in 8..16 {
-            let name=format!("Series{n}.S02E07.1080p");
-            let parsed=json!({"title":format!("Series{n}"),
-                "seasons":[2],"episodes":[7]});
-            observe(&db,&name,&parsed,&mut count).unwrap();
+        for n in 11..18{
+            let title=format!("Series{n}.S02E07.1080p");
+            observe(&db,&title,&json!({"title":format!("Series{n}"),
+                "seasons":[2],"episodes":[7]}),&mut count).unwrap();
         }
         assert!(select(&db).unwrap()[0].may_override);
         let proposals=community_proposals(&db).unwrap();
         assert_eq!(proposals.len(),1);
-        assert_eq!(
-            proposals[0]["native_patterns"]["episodes"],
+        assert_eq!(proposals[0]["native_patterns"]["episodes"],
             capture_pattern("sxe","episodes").unwrap());
-        assert_eq!(
-            proposals[0]["native_patterns"]["seasons"],
-            capture_pattern("sxe","seasons").unwrap());
+    }
+    #[test]
+    fn conflicting_coordinates_are_not_counted_as_parser_gaps(){
+        assert_eq!(alignment(&json!({"seasons":[17],"episodes":[1]}),
+            &Coordinates{season:17,episode:1}),1);
+        assert_eq!(alignment(&json!({"seasons":[17],"episodes":[]}),
+            &Coordinates{season:17,episode:1}),-1);
+        assert_eq!(alignment(&json!({"seasons":[18],"episodes":[1]}),
+            &Coordinates{season:17,episode:1}),0);
+        assert_eq!(alignment(&json!({"seasons":[17],"episodes":[2]}),
+            &Coordinates{season:17,episode:1}),0);
+        assert_eq!(alignment(&json!({"seasons":[17,18],"episodes":[1]}),
+            &Coordinates{season:17,episode:1}),0);
     }
     #[test]
     fn training_never_uses_previous_overlay_as_canonical(){
