@@ -448,8 +448,11 @@ fn reconcile_series_coordinates(
         .filter(|e|*e>0 && valid_sid_coordinate(1,*e));
     let mut season=winner["season"].as_i64();
     let mut episode=winner["episode"].as_i64();
+    // An ASID alone can be independently verified without proving the
+    // matching IMDb season/episode. Only an established pair is final.
     let verified_crosswalk=winner.pointer("/anime/asid")
-        .and_then(Value::as_str).is_some();
+        .and_then(Value::as_str).is_some()
+        && season.is_some() && episode.is_some();
     if !verified_crosswalk {
         if season.is_none(){season=parsed_season;}
         if episode.is_none(){episode=parsed_episode;}
@@ -3805,6 +3808,92 @@ mod tests {
         }
     }
 
+    #[test]
+    fn series_coordinate_contract_preserves_single_episode_and_season(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE season_episodes(
+            imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
+            INSERT INTO season_episodes VALUES('tt1234567',1,24,24);").unwrap();
+        let input=|season:Value,episode:Value|json!({
+            "imdb_id":"tt1234567","category":"series","season":season,"episode":episode,
+            "sid":"tt1234567","anime_ids":{}
+        });
+        let parse=|season:Value,episode:Value|{
+            let v=json!({"seasons":season,"episodes":episode});
+            v.as_object().unwrap().clone()
+        };
+        let mut explicit=input(Value::Null,Value::Null);
+        reconcile_series_coordinates(&db,&mut explicit,
+            &parse(json!([17]),json!([1]))).unwrap();
+        assert_eq!(explicit["season"],17);
+        assert_eq!(explicit["episode"],1);
+        assert_eq!(explicit["sid"],"tt1234567:17:1");
+        let mut only_episode=input(Value::Null,Value::Null);
+        reconcile_series_coordinates(&db,&mut only_episode,
+            &parse(json!([]),json!([4]))).unwrap();
+        assert_eq!(only_episode["season"],1);
+        assert_eq!(only_episode["episode"],4);
+        assert_eq!(only_episode["coordinate_fallback"],"season_one_from_episode");
+        assert_eq!(public_match_response(Some(only_episode))["sid_start"],"tt1234567:1:4");
+        let mut season_only=input(Value::Null,Value::Null);
+        reconcile_series_coordinates(&db,&mut season_only,
+            &parse(json!([5]),json!([]))).unwrap();
+        assert_eq!(season_only["season"],5);
+        assert!(season_only["episode"].is_null());
+        assert_eq!(public_match_response(Some(season_only)),json!({
+            "sid_start":"tt1234567","sid_end":"tt1234567",
+            "asid_start":null,"asid_end":null
+        }));
+        let mut neither=input(Value::Null,Value::Null);
+        reconcile_series_coordinates(&db,&mut neither,
+            &parse(json!([]),json!([]))).unwrap();
+        assert!(neither["season"].is_null());
+        assert!(neither["episode"].is_null());
+    }
+    #[test]
+    fn series_fallback_keeps_verified_anime_mapping_and_anidb_only_results(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE season_episodes(
+            imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
+            INSERT INTO season_episodes VALUES('tt1234567',1,26,26);").unwrap();
+        let parsed=json!({"seasons":[1],"episodes":[320]});
+        let mut verified=json!({"imdb_id":"tt1234567","category":"series",
+            "season":15,"episode":4,
+            "anime":{"asid":"42:320"},"anime_ids":{"anidb":"42"}});
+        reconcile_series_coordinates(&db,&mut verified,parsed.as_object().unwrap()).unwrap();
+        assert_eq!(verified["season"],15);
+        assert_eq!(verified["episode"],4);
+        let no_season=json!({"seasons":[],"episodes":[320]});
+        let mut unsafe_absolute=json!({"imdb_id":"tt1234567","category":"series",
+            "season":null,"episode":null,"anime_ids":{"anidb":"42"}});
+        reconcile_series_coordinates(&db,&mut unsafe_absolute,
+            no_season.as_object().unwrap()).unwrap();
+        assert!(unsafe_absolute["season"].is_null());
+        assert!(unsafe_absolute["episode"].is_null());
+        assert_eq!(unsafe_absolute["coordinate_fallback_blocked"],
+            "unknown_absolute_episode_season");
+        let mut anidb_only=json!({"imdb_id":null,"category":"series",
+            "season":null,"episode":null,"anime":{"asid":"42:4"},
+            "anidb_independent_verified":true});
+        reconcile_series_coordinates(&db,&mut anidb_only,parsed.as_object().unwrap()).unwrap();
+        assert_eq!(anidb_only["imdb_id"],Value::Null);
+        assert!(anidb_only["season"].is_null());
+        assert!(anidb_only["episode"].is_null());
+        let ids=public_match_response(Some(anidb_only));
+        assert!(ids["sid_start"].is_null());
+        assert_eq!(ids["asid_start"],"42:4");
+    }
+    #[test]
+    fn unresolved_season_range_retains_identity_without_fake_episode(){
+        let selected=json!({"imdb_id":"tt1234567","category":"series",
+            "season":2,"episode":null,"season_end":2,"episode_end":null,
+            "episode_range":{"complete":false,"segments":[],
+                "start_season":2,"end_season":2}});
+        assert_eq!(public_match_response(Some(selected)),json!({
+            "sid_start":"tt1234567","sid_end":"tt1234567",
+            "asid_start":null,"asid_end":null
+        }));
+    }
     #[test]
     fn requested_episode_must_exist_within_known_season_bounds() {
         let db=Connection::open_in_memory().unwrap();
