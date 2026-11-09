@@ -305,15 +305,20 @@ pub fn status()->Value{
 }
 pub fn community_proposals(db:&Connection)->Result<Vec<Value>,String>{
     let mut out=Vec::new();
+    let catalogue=matchlab_parser::existing_regex_rules();
     for (family,counts) in eligible(db)? {
         let Some(corrections)=candidate(&family)else{continue;};
         let active=handler_corrections();
         for correction in corrections{
+            let Some(source)=catalogue.iter().find(|item|
+                item["index"].as_u64()==Some(correction.source_index as u64))
+                else{continue;};
+            let Some(field)=source["field"].as_str()else{continue;};
             let fingerprint=hash(&format!("corrective:{family}:{}:{}:{}",
                 correction.source_index,correction.is_range,correction.pattern));
             out.push(json!({"kind":"learned_corrective_regex",
                 "fingerprint":fingerprint,"family":family,
-                "field":if correction.is_range{"episodes"}else{"seasons_or_episodes"},
+                "field":field,
                 "signal":format!("corrective_{family}"),
                 "regex":correction.pattern,
                 "handler_index":correction.source_index,
