@@ -304,6 +304,58 @@ fn explicit_marker_disagreements(raw:&str,parsed:&Value)->Vec<Value>{
     }
     out
 }
+/// Cross-field attribution is a fourth kind of parser mistake. The
+/// same unambiguous SxxExx / NxM / Season N Episode M grammar used by the TV
+/// learner identifies *possible* swapped coordinates independently of the
+/// canonical parser output. It never decides a new value.
+fn misassigned_coordinates(raw:&str,parsed:&Value)->Vec<Value>{
+    let Some((season,episode))=crate::tv_learning::explicit_coordinates(raw)
+        else{return Vec::new();};
+    // Packs, ranges and ambiguous multiple markers were rejected by the
+    // source grammar. A single present value in both fields is necessary to
+    // attribute the error to a field rather than to missing extraction.
+    let (Some(seasons),Some(episodes))=(
+        parsed["seasons"].as_array(),parsed["episodes"].as_array())
+        else{return Vec::new();};
+    if seasons.len()!=1||episodes.len()!=1||season==episode{
+        return Vec::new();
+    }
+    let (Some(got_season),Some(got_episode))=(
+        seasons[0].as_i64(),episodes[0].as_i64())
+        else{return Vec::new();};
+    let swapped=got_season==episode && got_episode==season;
+    let season_from_episode=got_season==episode && got_season!=season;
+    let episode_from_season=got_episode==season && got_episode!=episode;
+    if swapped{
+        return vec![json!({
+            "code":"field_misassigned_season_episode",
+            "field":"seasons","affected_fields":["seasons","episodes"],
+            "confidence":"review","signal":"explicit_season_episode_swapped",
+            "severity":"review",
+            "message":"Parser may have swapped season and episode fields"
+        })];
+    }
+    let mut out=Vec::new();
+    if season_from_episode {
+        out.push(json!({
+            "code":"field_misassigned_season",
+            "field":"seasons","affected_fields":["seasons"],
+            "confidence":"review","signal":"episode_marker_used_as_season",
+            "severity":"review",
+            "message":"The episode marker may have been assigned to seasons"
+        }));
+    }
+    if episode_from_season {
+        out.push(json!({
+            "code":"field_misassigned_episode",
+            "field":"episodes","affected_fields":["episodes"],
+            "confidence":"review","signal":"season_marker_used_as_episode",
+            "severity":"review",
+            "message":"The season marker may have been assigned to episodes"
+        }));
+    }
+    out
+}
 /// Skip suspicious canonical outputs when training the advisory online model.
 /// Review evidence is retained independently; a misparse must not become
 /// a positive training label simply because the parser emitted it.
@@ -314,7 +366,13 @@ pub fn canonical_for_training(parsed:&Value,flags:&[Value])->Value{
         let code=flag["code"].as_str().unwrap_or("");
         if !(code.starts_with("field_overextracted_")
             ||code.starts_with("field_underextracted_")
-            ||code.starts_with("field_mismatch_")){continue;}
+            ||code.starts_with("field_mismatch_")
+            ||code.starts_with("field_misassigned_")){continue;}
+        if code=="field_misassigned_season_episode" {
+            map.remove("seasons");
+            map.remove("episodes");
+            continue;
+        }
         if let Some(field)=flag["field"].as_str(){
             if field=="season"{map.remove("seasons");}
             else if field=="episode"{map.remove("episodes");}
@@ -415,6 +473,7 @@ pub fn audit(raw:&str,parsed:&Value,selected:&Value)->Vec<Value>{
     }
     out.extend(extraction_review(name,parsed));
     out.extend(explicit_marker_disagreements(name,parsed));
+    out.extend(misassigned_coordinates(name,parsed));
     out.extend(compare_parsed_to_selected(parsed,selected));
     out
 }
@@ -538,6 +597,42 @@ mod tests{
                 "codec":"mpeg"}),Value::Null);
         assert!(!ambiguous.iter().any(|v|v=="field_mismatch_resolution"
             ||v=="field_mismatch_codec"));
+    }
+    #[test]
+    fn detects_swapped_season_episode_without_writing_parser_output(){
+        for raw in ["Series.S02E07.1080p",
+            "Series.02x07.1080p",
+            "Series.Season.2.Episode.7.1080p"]{
+            let parsed=json!({"title":"Series","seasons":[7],
+                "episodes":[2]});
+            let original=parsed.clone();
+            let evidence=audit(raw,&parsed,&Value::Null);
+            assert!(evidence.iter().any(|f|
+                f["code"]=="field_misassigned_season_episode"),"{raw}");
+            assert_eq!(parsed,original,"auditing never changes fields");
+            let sanitized=canonical_for_training(&parsed,&evidence);
+            assert!(sanitized.get("seasons").is_none());
+            assert!(sanitized.get("episodes").is_none());
+        }
+    }
+    #[test]
+    fn detects_partial_cross_field_assignment_but_rejects_ambiguous_packs(){
+        let bad_season=codes("Series.S02E07.1080p",
+            json!({"seasons":[7],"episodes":[7]}),Value::Null);
+        assert!(bad_season.contains(&"field_misassigned_season".into()));
+        let bad_episode=codes("Series.S02E07.1080p",
+            json!({"seasons":[2],"episodes":[2]}),Value::Null);
+        assert!(bad_episode.contains(&"field_misassigned_episode".into()));
+        let correct=codes("Series.S02E07.1080p",
+            json!({"seasons":[2],"episodes":[7]}),Value::Null);
+        assert!(!correct.iter().any(|s|s.starts_with("field_misassigned_")));
+        for raw in ["Series.S02E07-E08.1080p",
+            "Series.S02E07.S03E08.1080p",
+            "Series.02x07-08.1080p"]{
+            let issues=codes(raw,json!({"seasons":[7],"episodes":[2]}),Value::Null);
+            assert!(!issues.iter().any(|s|s.starts_with("field_misassigned_")),
+                "ambiguous ranges/packs cannot prove cross-field assignment");
+        }
     }
     #[test]
     fn does_not_use_suspicious_field_values_as_training_truth(){
