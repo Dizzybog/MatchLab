@@ -13,6 +13,8 @@ use std::sync::{OnceLock,RwLock,atomic::{AtomicU64,Ordering}};
 const EPOCH:u32=1;
 const MIN_FIXES:usize=4;
 const MIN_IDENTITIES:usize=2;
+const MIN_CORRECTION_FIXES:usize=8;
+const MIN_CORRECTION_IDENTITIES:usize=4;
 const MAX_ACTIVE:usize=16;
 const MAX_EXAMPLES:i64=16_384;
 fn capacity()->i64{
@@ -337,10 +339,12 @@ fn candidates(db:&Connection)->Result<Vec<Active>,String>{
         count(*) AS n,count(DISTINCT identity_hash) AS titles
         FROM ml_general_examples WHERE source_build=?1
         GROUP BY rule_key,field,source_index,pattern,mode
-        HAVING n>=?2 AND titles>=?3
+        HAVING (mode='add' AND n>=?2 AND titles>=?3)
+            OR (mode='correct' AND n>=?4 AND titles>=?5)
         ORDER BY n DESC,rule_key").map_err(|e|e.to_string())?;
     let rows=stmt.query_map(params![build(),MIN_FIXES as i64,
-        MIN_IDENTITIES as i64],|row|Ok(Active{
+        MIN_IDENTITIES as i64,MIN_CORRECTION_FIXES as i64,
+        MIN_CORRECTION_IDENTITIES as i64],|row|Ok(Active{
         key:row.get(0)?,field:row.get(1)?,
         source_index:row.get::<_,i64>(2)? as usize,
         pattern:row.get(3)?,mode:row.get(4)?,
@@ -471,7 +475,10 @@ fn replay(db:&Connection,previous:&[Active],all:&[Active],
     let incremental=fixed.get(newest).copied().unwrap_or(0);
     // A syntactically different regex that gives the same result as
     // previous accepted rules is NOT a new improvement.
-    Ok((incremental>=MIN_FIXES).then_some((covered,incremental)))
+    let required=all.iter().find(|rule|rule.key==newest)
+        .map(|rule|if rule.mode=="correct"{MIN_CORRECTION_FIXES}else{MIN_FIXES})
+        .unwrap_or(MIN_FIXES);
+    Ok((incremental>=required).then_some((covered,incremental)))
 }
 /// Re-check persisted active rules as one composed parser generation.
 /// A new observation or native source update can invalidate an old regex:
@@ -557,7 +564,8 @@ pub fn reconcile(db:&Connection)->Result<(),String>{
             let mut candidate=ready.clone();
         candidate.push(rule.clone());
         match replay(db,&ready,&candidate,&rule.key)?{
-            Some((checked,fixed)) if fixed>=MIN_FIXES=>{
+            Some((checked,fixed)) if fixed>=
+                (if rule.mode=="correct"{MIN_CORRECTION_FIXES}else{MIN_FIXES})=>{
                 let Some(last)=candidate.last_mut()else{continue;};
                 last.fixes=fixed;last.checked=checked;
                 ready=candidate;
@@ -618,7 +626,7 @@ pub fn status()->Value{
         "observations":OBSERVED.load(Ordering::Relaxed),
         "replay_rejected":REJECTED.load(Ordering::Relaxed),
         "scope":"all fields with meaning-preserving independently verified native-handler transformations",
-        "improvement_policy":"entire-parser replay must repair 4 independent examples with zero regressions",
+        "improvement_policy":"ADD >=4 repairs/2 identities; CORRECT >=8 repairs/4 identities; zero full-parser regressions",
         "model":"bounded online field-general regex induction; FTRL supplies advisory scores",
         "revision":format!("{:016x}",revision())})
 }
