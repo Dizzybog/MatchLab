@@ -6,7 +6,7 @@ matching. Regex is the only executable output of the learner.
 
 ## Complete parser inventory (generated source)
 
-The checked-in \`crates/matchlab-parser/src/generated/handlers.json\` contains:
+The checked-in `crates/matchlab-parser/src/generated/handlers.json` contains:
 
 | Mechanism | Count | Why it matters |
 |---|---:|---|
@@ -29,8 +29,8 @@ is updated; the ML status endpoint derives counts from the current source.
 2. Run native handlers **in order**, using compiled PCRE2 regex or native
    Rust functions. A handler can choose a capture group, apply a transform,
    skip an already-populated field, or append into a result array.
-3. Handlers with \`remove=true\` **mutate the working title**, which is then
-   rescanned. \`skipFromTitle\` and \`skipIfFirst\` can alter title boundaries
+3. Handlers with `remove=true` **mutate the working title**, which is then
+   rescanned. `skipFromTitle` and `skipIfFirst` can alter title boundaries
    even when the field's value looks correct.
 4. Run postprocessing: numeric ranges, inferred episode metadata,
    language conversions, and other semantic constraints.
@@ -45,11 +45,11 @@ the real ordered native engine.
 
 | Transform family | Examples | ML-safe candidate |
 |---|---|---|
-| Fixed \`value(...)\` | codec, resolution, network, edition, quality | Native ADD or candidate-prioritized CORRECT, with full replay |
+| Fixed `value(...)` | codec, resolution, network, edition, quality | Native ADD or candidate-prioritized CORRECT, with full replay |
 | Boolean | dubbed, subbed, scene, 3D, flags | Native ADD or CORRECT; ambiguous release/title words must be rejected |
-| Array \`uniq_concat(value(...))\` | language, audio, HDR, channels, extras | ADD can preserve original append semantics; must replay interactions with all other list rules |
-| \`lowercase\`, \`uppercase\`, \`none\` | extension, site, region, group | ADD only when the transformed capture is independently verified; never assume a changed spelling is equivalent |
-| \`integer\`, \`first_integer\`, \`array(integer)\`, \`range_func\` | year, seasons, episodes, volumes | Must preserve numeric captures, limits, ordering and episode ranges |
+| Array `uniq_concat(value(...))` | language, audio, HDR, channels, extras | ADD can preserve original append semantics; must replay interactions with all other list rules |
+| `lowercase`, `uppercase`, `none` | extension, site, region, group | ADD only when the transformed capture is independently verified; never assume a changed spelling is equivalent |
+| `integer`, `first_integer`, `array(integer)`, `range_func` | year, seasons, episodes, volumes | Must preserve numeric captures, limits, ordering and episode ranges |
 | Dates and resolution-specific transformation | date, resolution | Candidate-only until full converted value is proved; unsafe fallbacks remain inactive |
 | Native Rust function | adult, group, episode postprocessing, language inference | Observe downstream effects, but do **not** manufacture a regex to replace function logic |
 
@@ -99,7 +99,7 @@ and strictly bounded grammar synthesis rather than LLM freeform output.
 - Some regexes use PCRE2-specific lookaheads or capture conventions. A
   generated regex is restricted to linear-time Rust-regex-compatible
   syntax even if native trusted source handlers themselves use PCRE2.
-- Inheriting \`remove\`, \`skipIfAlreadyFound\`, \`skipFromTitle\`, and
+- Inheriting `remove`, `skipIfAlreadyFound`, `skipFromTitle`, and
   other native options is mandatory; the learner cannot set them itself.
 - The validation corpus is bounded, so regression checks can reduce
   risk but **cannot mathematically guarantee no future regression**.
@@ -140,11 +140,11 @@ data did not demonstrate a safe, measurable improvement.
 - For each training title, consider at most two original source handlers
   and three bounded punctuation/number variants per handler.
 - Store no more than 16,384 general counterfactual examples, further
-  restricted by \`MATCHLAB_ML_TRAINING_MAX_EXAMPLES\`; prefer evicting
+  restricted by `MATCHLAB_ML_TRAINING_MAX_EXAMPLES`; prefer evicting
   unpromoted evidence over evidence behind verified rules.
 - Compile candidate rule sets only in the background. Rule revision
   changes invalidate parser cache automatically.
-- \`GET /api/ml/status\` includes \`general_regex\`, with native field
+- `GET /api/ml/status` includes `general_regex`, with native field
   inventory, active rules, evidence volume and replay rejection counts.
 
 ## Remaining work before declaring universal correctness
