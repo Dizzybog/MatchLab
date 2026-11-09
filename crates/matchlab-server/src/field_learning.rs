@@ -1121,6 +1121,8 @@ mod tests {
             "conflicting observations must quarantine a learned rule");
         db.execute("DELETE FROM learned_field_evidence WHERE canonical=?1",
             [r#""avc""#]).unwrap();
-        assert_eq!(select_rules(&db).unwrap().len(),1);
+        // All remaining examples are successful original-parser parses;
+        // they remain evidence but must never become an active new rule.
+        assert!(select_rules(&db).unwrap().is_empty());
     }
 }
