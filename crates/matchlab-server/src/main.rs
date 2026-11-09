@@ -328,6 +328,48 @@ fn mapped_absolute_range(db:&Connection,imdb:&str,start:i64,end:i64)->Result<Val
         "complete":missing==0}))
 }
 
+/// An EP01-24 pack has explicit endpoints, but no explicit season.
+/// Never guess an IMDb season from absolute anime numbering when its
+/// AniDB crosswalk is incomplete. For an ordinary, unambiguously matched
+/// single-season TV series, imported IMDb episode bounds can independently
+/// confirm that EP01-24 really means IMDb S01E01-E24.
+/// A missing or stale IMDb season snapshot is not permission to invent one.
+fn verified_ordinary_imdb_episode_range(
+    db:&Connection,imdb:&str,release_key:&str,matched_title:&str,
+    start:i64,end:i64,
+)->Result<Option<Value>,String>{
+    if start<=0 || end<start || end-start>=1_000
+        || !valid_sid_coordinate(1,start) || !valid_sid_coordinate(1,end)
+        || imdb_matcher::clean_title(matched_title)!=release_key {
+        return Ok(None);
+    }
+    let max_season:Option<i64>=db.query_row(
+        "SELECT max_season FROM seasons WHERE imdb_id=?1",
+        [imdb],|row|row.get(0)
+    ).optional().map_err(|e|e.to_string())?;
+    if max_season!=Some(1)
+        || !season_episode_end(db,imdb,1)?.is_some_and(|limit|limit>=end) {
+        return Ok(None);
+    }
+    // A linked AniDB identity indicates a potentially absolute episode
+    // numbering system. Preserve the crosswalk's authority, even if its
+    // mapping is incomplete or temporarily missing.
+    let anime_link:i64=db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM anime_series_map WHERE imdb_id=?1)
+            OR EXISTS(SELECT 1 FROM anime_ids
+                WHERE group_id=?1 AND type='anidb')",
+        [imdb],|row|row.get(0)
+    ).map_err(|e|e.to_string())?;
+    if anime_link!=0{return Ok(None);}
+    Ok(Some(json!({
+        "start_season":1,"start_episode":start,
+        "end_season":1,"end_episode":end,
+        "requested_episode_start":start,"requested_episode_end":end,
+        "complete":true,"segments":[],"unmapped_count":0,
+        "source":"verified_imdb_single_season_episode_range"
+    })))
+}
+
 /// Validate each episode in a season-labeled anime batch against the
 /// AniDB/TVDB crosswalk. A partial mapping never produces guessed endpoints.
 fn mapped_season_episode_range(
@@ -1305,10 +1347,34 @@ fn diagnose_with_policy(
                 }
             }else if verified_anime_range_imdb.as_ref()
                 .is_none_or(|verified|verified==&imdb_id) {
-                let range=mapped_absolute_range(&db,&imdb_id,start,end)?;
-                // Preserve the requested absolute endpoints even when some
-                // crosswalk entries are missing, but never invent IMDb or
-                // AniDB episode coordinates.
+                let mut range=mapped_absolute_range(&db,&imdb_id,start,end)?;
+                // Only after the authoritative AniDB mapping has no
+                // endpoints may imported IMDb metadata resolve a clearly
+                // marked EP01-24 range for a single-season non-anime show.
+                // For ambiguous title matches, partial anime mappings or
+                // an explicit multi-season release, fail closed.
+                let single_exact_imdb=imdb.iter()
+                    .filter(|candidate|imdb_matcher::clean_title(
+                        &candidate.matched_title)==key)
+                    .map(|candidate|candidate.imdb_id.as_str())
+                    .collect::<std::collections::BTreeSet<_>>().len()==1;
+                if range["unmapped_count"].as_i64()==Some(end-start+1)
+                    && range["segments"].as_array().is_some_and(Vec::is_empty)
+                    && seasons.is_empty()
+                    && single_exact_imdb
+                    && verified_anidb_range.is_none()
+                    && verified_anime_range_imdb.is_none()
+                    && parsed.get("anime_episode_range_candidate").is_none()
+                    && let Some(fallback)=verified_ordinary_imdb_episode_range(
+                        &db,&imdb_id,&key,
+                        winner["matched_title"].as_str().unwrap_or(""),
+                        start,end)?
+                {
+                    range=fallback;
+                }
+                // Preserve requested endpoints even when the AniDB
+                // crosswalk is incomplete. Never extrapolate a partly
+                // verified anime mapping into a fabricated season.
                 winner["episode_range"]=range.clone();
                 winner["season"]=range["start_season"].clone();
                 winner["episode"]=range["start_episode"].clone();
@@ -1318,6 +1384,8 @@ fn diagnose_with_policy(
                     range["start_season"].as_i64(),range["start_episode"].as_i64()){
                     json!(format!("{imdb_id}:{se}:{ep}"))
                 }else{json!(imdb_id)};
+                // These are the release's explicitly marked range
+                // endpoints, not proof that the work is anime.
                 winner["anime_episode_start"]=json!(start);
                 winner["anime_episode_end"]=json!(end);
                 winner["anime"]=Value::Null;
