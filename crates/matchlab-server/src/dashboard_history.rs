@@ -12,6 +12,15 @@ use std::{
 const MAX_HISTORY: i64 = 1_000;
 const PRUNE_BATCH: i64 = 1_000;
 const HISTORY_BATCH_SIZE:usize = 64;
+// Dedicated, bounded SQLite job spool (separate from the 1,000-row dashboard
+// retention window). Producers never synchronously touch this DB from API.
+const MAX_ML_QUEUE_ITEMS:i64 = 20_000;
+fn ml_queue_max_items()->i64{
+    std::env::var("MATCHLAB_ML_QUEUE_MAX_ITEMS").ok()
+        .and_then(|v|v.parse::<i64>().ok())
+        .filter(|n|(1_000..=100_000).contains(n))
+        .unwrap_or(MAX_ML_QUEUE_ITEMS)
+}
 
 fn connect(path: &Path) -> rusqlite::Result<Connection> {
     if let Some(parent) = path.parent() {
@@ -59,6 +68,14 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS history_migrations(
             name TEXT PRIMARY KEY NOT NULL
         ) WITHOUT ROWID;
+        -- Durable ML observation queue: the learning cursor lives in its
+        -- own SQLite DB and commits atomically with trained weights. Each
+        -- request ID is an idempotency key for safe restart/replay.
+        CREATE TABLE IF NOT EXISTS ml_training_queue(
+            id INTEGER PRIMARY KEY NOT NULL,
+            title TEXT NOT NULL,
+            details TEXT NOT NULL
+        );
 
         -- Backfill exactly once for existing installations. Other connections
         -- cannot write while this transaction is active.
@@ -117,16 +134,25 @@ fn persist_batch(db:&mut Connection,items:&[HistoryEvent])->rusqlite::Result<()>
     {
         let mut insert=tx.prepare_cached(
             "INSERT INTO requests(title,status,imdb_id,match_source,duration_ms,details)
-             VALUES(?1,?2,?3,?4,?5,?6)"
+             VALUES(?1,?2,?3,?4,?5,?6) RETURNING id"
         )?;
+        let mut enqueue=tx.prepare_cached(
+            "INSERT OR IGNORE INTO ml_training_queue(id,title,details)
+             VALUES(?1,?2,?3)"
+        )?;
+        let train=crate::local_learning::active();
         for item in items{
-            insert.execute(params![
+            let details=item.details.to_string();
+            let id:i64=insert.query_row(params![
                 item.title,item.status,
                 item.selected.as_ref().and_then(|v|v["imdb_id"].as_str()),
                 item.selected.as_ref().and_then(|v|v["match_source"].as_str()),
                 i64::try_from(item.duration_ms).unwrap_or(i64::MAX),
-                item.details.to_string()
-            ])?;
+                details
+            ],|r|r.get(0))?;
+            if train && item.status!="error"{
+                enqueue.execute(params![id,item.title,details])?;
+            }
         }
     }
     // Exact cap even when rows have gaps. The transaction commits both the
@@ -134,6 +160,14 @@ fn persist_batch(db:&mut Connection,items:&[HistoryEvent])->rusqlite::Result<()>
     tx.execute("DELETE FROM requests WHERE id < (
         SELECT id FROM requests ORDER BY id DESC LIMIT 1 OFFSET ?1
     )",[MAX_HISTORY-1])?;
+    // StremThru-style bounded persistence: retain jobs independently of
+    // the dashboard history. Older overflow entries are dropped only from
+    // ML evidence, never from actual parsing/matching.
+    if crate::local_learning::active(){
+        tx.execute("DELETE FROM ml_training_queue WHERE id <= (
+            SELECT COALESCE(MAX(id),0)-?1 FROM ml_training_queue
+        )",[ml_queue_max_items()])?;
+    }
     tx.commit()
 }
 
@@ -379,6 +413,20 @@ mod tests {
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
+    fn persistent_ml_queue_survives_history_retention(){
+        let path=path();
+        initialize(&path).unwrap();
+        // Synchronous helpers used with ML disabled must not enqueue jobs.
+        record(&path,"Film.S01E01","matched",None,&json!({}),1);
+        let db=connect(&path).unwrap();
+        let count:i64=db.query_row("SELECT COUNT(*) FROM ml_training_queue",[],
+            |row|row.get(0)).unwrap();
+        if !crate::local_learning::active(){assert_eq!(count,0);}
+        drop(db);
+        cleanup(&path);
     }
 
     #[test]
