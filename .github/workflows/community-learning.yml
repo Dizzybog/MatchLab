@@ -87,13 +87,50 @@ jobs:
             --sha "$LATEST_SHA" \
             --out "$RUNNER_TEMP/community-rule-candidates.json" \
             --seen-out "$RUNNER_TEMP/fingerprints-final.txt"
+      - name: Recover durable community proposal backlog
+        env:
+          GH_TOKEN: ${ { github.token } }
+          GH_REPO: ${ { github.repository } }
+        run: |
+          set -euo pipefail
+          if gh release view community-learning-backlog --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release download community-learning-backlog --repo "$GH_REPO" \
+              --pattern backlog.json --dir "$RUNNER_TEMP"
+          else
+            printf '{"pending":[]}\n' > "$RUNNER_TEMP/backlog.json"
+          fi
+      - name: Merge yesterday's proposals with unprocessed historical backlog
+        run: |
+          python3 scripts/community_backlog.py prepare \
+            --state "$RUNNER_TEMP/backlog.json" \
+            --candidate-file "$RUNNER_TEMP/community-rule-candidates.json" \
+            --seen "$RUNNER_TEMP/fingerprints-final.txt" \
+            --curated learning/community_rules.json \
+            --extended learning/community_regex_proposals.json \
+            --out "$RUNNER_TEMP/backlog-prepared.json" \
+            --daily "$RUNNER_TEMP/community-daily-review.json"
+      - name: Persist backlog before screening, so failed PRs cannot lose reports
+        env:
+          GH_TOKEN: ${ { github.token } }
+          GH_REPO: ${ { github.repository } }
+        run: |
+          set -euo pipefail
+          cp "$RUNNER_TEMP/backlog-prepared.json" "$RUNNER_TEMP/backlog.json"
+          if ! gh release view community-learning-backlog --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release create community-learning-backlog --repo "$GH_REPO" \
+              --title "Community learning pending review backlog" \
+              --notes "Machine-maintained, untrusted review data; not active rules." \
+              --latest=false
+          fi
+          gh release upload community-learning-backlog "$RUNNER_TEMP/backlog.json" \
+            --repo "$GH_REPO" --clobber
       - name: Screen at most one rule against latest trusted Rust parser
         run: |
           cp learning/community_rules.json "$RUNNER_TEMP/community-rules-before.json"
           cp learning/community_regex_proposals.json "$RUNNER_TEMP/community-extended-before.json"
           cargo run --release --locked -p matchlab-parser \
             --example screen_community_rules -- \
-            "$RUNNER_TEMP/community-rule-candidates.json" \
+            "$RUNNER_TEMP/community-daily-review.json" \
             learning/community_rules.json \
             "$RUNNER_TEMP/curated-rules-next.json"
           cp "$RUNNER_TEMP/curated-rules-next.json" learning/community_rules.json
@@ -101,7 +138,7 @@ jobs:
           # Never execute an Issue-supplied regex or update handlers.json
           # without independent verification by a maintainer.
           python3 scripts/review_community_regex.py \
-            "$RUNNER_TEMP/community-rule-candidates.json" \
+            "$RUNNER_TEMP/community-daily-review.json" \
             learning/community_regex_proposals.json \
             "$RUNNER_TEMP/community-regex-next.json"
           cp "$RUNNER_TEMP/community-regex-next.json" learning/community_regex_proposals.json
@@ -184,6 +221,38 @@ jobs:
                   seen.add(proposal["fingerprint"])
           ledger.write_text("\n".join(sorted(seen)) + ("\n" if seen else ""))
           PY
+      - name: Finalize acknowledged review backlog
+        env:
+          GH_TOKEN: ${ { github.token } }
+          GH_REPO: ${ { github.repository } }
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          temp=Path(os.environ["RUNNER_TEMP"])
+          accepted=[]
+          if os.environ.get("COMMUNITY_PR_CREATED")=="true":
+              before=json.loads((temp/"community-rules-before.json").read_text())
+              after=json.loads(Path("learning/community_rules.json").read_text())
+              old={row["marker"] for row in before}
+              for row in after:
+                  if row["marker"] not in old:
+                      accepted.append(hashlib.sha256(("community-regex:"+row["marker"]).encode()).hexdigest())
+              before=json.loads((temp/"community-extended-before.json").read_text())
+              after=json.loads(Path("learning/community_regex_proposals.json").read_text())
+              old={row["fingerprint"] for row in before}
+              accepted.extend(row["fingerprint"] for row in after if row["fingerprint"] not in old)
+          (temp/"community-backlog-accepted.json").write_text(json.dumps(accepted))
+          PY
+          python3 scripts/community_backlog.py finalize \
+            --state "$RUNNER_TEMP/backlog-prepared.json" \
+            --daily "$RUNNER_TEMP/community-daily-review.json" \
+            --accepted "$RUNNER_TEMP/community-backlog-accepted.json" \
+            --out "$RUNNER_TEMP/backlog-next.json"
+          cp "$RUNNER_TEMP/backlog-next.json" "$RUNNER_TEMP/backlog.json"
+          gh release upload community-learning-backlog "$RUNNER_TEMP/backlog.json" \
+            --repo "$GH_REPO" --clobber
       - name: Persist global dedup ledger (no changes to main or production)
         env:
           GH_TOKEN: ${{ github.token }}

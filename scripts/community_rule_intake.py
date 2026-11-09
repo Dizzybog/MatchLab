@@ -159,6 +159,41 @@ def valid_extended_rule(r,sha):
         pattern=r"(?i)(?:^|[ ._-])"+signal+r"(?:$|[ ._-])"
         if r["regex"]!=pattern:return None
         expected_fp=digest(f"community-review:{field}:{signal}:{pattern}")
+    elif kind=="historical_regex_review":
+        # Old local rules remain useful review evidence, but they cannot
+        # inherit activation rights from a retired parser/metadata build.
+        expected={"kind","original_kind","fingerprint","source_build",
+            "field","signal","regex","evidence_count","distinct_titles",
+            "review_only","verification"}
+        if set(r)!=expected:return None
+        if r["original_kind"] not in {
+            "verified_regex_proposal","learned_field_regex",
+            "learned_tv_regex","learned_source_regex_patch",
+            "learned_field_regex_review"
+        }:return None
+        source=r["source_build"]
+        if not isinstance(source,str) or ":" not in source:return None
+        old_sha,epoch=source.rsplit(":",1)
+        if not valid_sha(old_sha) or not epoch.isdecimal() or not 1<=int(epoch)<=20:
+            return None
+        if not git_ancestor(old_sha,sha):return None
+        if r["review_only"] is not True or r["verification"]!=(
+            "historical_archive_requires_independent_review"
+        ):return None
+        if not isinstance(r["field"],str) or not re.fullmatch(
+            "[a-z_]{2,40}",r["field"]
+        ):return None
+        if not isinstance(r["signal"],str) or not re.fullmatch(
+            "[a-z0-9_.]{0,24}",r["signal"]
+        ):return None
+        if not isinstance(r["regex"],str) or not 1<=len(r["regex"])<=1024:
+            return None
+        if any(ord(c)<32 or ord(c)>126 for c in r["regex"]):return None
+        if not re.fullmatch("[0-9a-f]{64}",r["fingerprint"]):return None
+        if not bounded_int(r["evidence_count"],0) or not bounded_int(
+            r["distinct_titles"],0
+        ):return None
+        expected_fp=r["fingerprint"]  # opaque identity, review-only forever
     elif kind=="learned_field_regex":
         expected=common|{"field","signal","regex","canonical"}
         if set(r)!=expected or r["source_build"]!=sha+f":{FIELD_EPOCH}":return None
