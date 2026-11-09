@@ -21,8 +21,9 @@ CODES={"season","episode","series","part","year","movie","sample",
        "x264","x265","h264","h265","hevc","hdr10","dovi",
        "ep","eps","new","the","eng","sub","dub"}
 MAX_BODY=16384
-MAX_RULES=2
+MAX_RULES=12
 MAX_SAMPLES=12
+MAX_CATCHUP_PROPOSALS=4096
 
 def canonical(marker):
     if not isinstance(marker,str) or not re.fullmatch("[a-z]{3,9}",marker):
@@ -129,8 +130,10 @@ def valid_extended_rule(r,sha):
     kind=r.get("kind")
     common={"kind","fingerprint","evidence_count","distinct_titles",
         "canonical_confirmations","source_build","verification"}
+    min_evidence=0 if kind=="historical_regex_review" else 12
+    min_titles=0 if kind=="historical_regex_review" else 4
     if not all(bounded_int(r.get(k),v) for k,v in
-        (("evidence_count",12),("distinct_titles",4),
+        (("evidence_count",min_evidence),("distinct_titles",min_titles),
          ("canonical_confirmations",0))):return None
     if r["canonical_confirmations"]>r["evidence_count"]:return None
     if not isinstance(r.get("fingerprint"),str):return None
@@ -159,6 +162,42 @@ def valid_extended_rule(r,sha):
         pattern=r"(?i)(?:^|[ ._-])"+signal+r"(?:$|[ ._-])"
         if r["regex"]!=pattern:return None
         expected_fp=digest(f"community-review:{field}:{signal}:{pattern}")
+    elif kind=="historical_regex_review":
+        # Old local rules remain useful review evidence, but they cannot
+        # inherit activation rights from a retired parser/metadata build.
+        expected={"kind","original_kind","fingerprint","source_build",
+            "field","signal","regex","evidence_count","distinct_titles",
+            "canonical_confirmations","review_only","verification"}
+        if set(r)!=expected:return None
+        if r["original_kind"] not in {
+            "verified_regex_proposal","learned_field_regex",
+            "learned_tv_regex","learned_source_regex_patch",
+            "learned_field_regex_review"
+        }:return None
+        source=r["source_build"]
+        if not isinstance(source,str) or ":" not in source:return None
+        old_sha,epoch=source.rsplit(":",1)
+        if not valid_sha(old_sha) or not epoch.isdecimal() or not 1<=int(epoch)<=20:
+            return None
+        if not git_ancestor(old_sha,sha):return None
+        if r["review_only"] is not True or r["verification"]!=(
+            "historical_archive_requires_independent_review"
+        ):return None
+        if not isinstance(r["field"],str) or not re.fullmatch(
+            "[a-z_]{2,40}",r["field"]
+        ):return None
+        if not isinstance(r["signal"],str) or not re.fullmatch(
+            "[a-z0-9_.]{0,24}",r["signal"]
+        ):return None
+        if not isinstance(r["regex"],str) or not 1<=len(r["regex"])<=1024:
+            return None
+        if any(ord(c)<32 or ord(c)>126 for c in r["regex"]):return None
+        if not re.fullmatch("[0-9a-f]{64}",r["fingerprint"]):return None
+        if r["canonical_confirmations"] != 0:return None
+        if not bounded_int(r["evidence_count"],0) or not bounded_int(
+            r["distinct_titles"],0
+        ):return None
+        expected_fp=r["fingerprint"]  # opaque identity, review-only forever
     elif kind=="learned_field_regex":
         expected=common|{"field","signal","regex","canonical"}
         if set(r)!=expected or r["source_build"]!=sha+f":{FIELD_EPOCH}":return None
@@ -262,7 +301,7 @@ def parse_batch(comment,current_sha,ancestor=git_ancestor):
 
 def collect(all_comments,sha,seen,now=None,ancestor=git_ancestor):
     if now is None:now=datetime.now(timezone.utc)
-    cutoff=now-timedelta(days=2)
+    cutoff=now-timedelta(days=15)
     output=[]
     seen=set(seen)
     pending=set()
@@ -281,7 +320,7 @@ def collect(all_comments,sha,seen,now=None,ancestor=git_ancestor):
                 if rule["fingerprint"] in seen or rule["fingerprint"] in pending:continue
                 pending.add(rule["fingerprint"])
                 output.append(rule)
-                if len(output)>=24:return output,seen
+                if len(output)>=MAX_CATCHUP_PROPOSALS:return output,seen
     # Do NOT poison the permanent ledger with only self-reported evidence.
     # A fingerprint becomes permanent only after trusted screening, regression
     # tests and successful creation of the human-review PR.

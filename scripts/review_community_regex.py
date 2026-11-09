@@ -11,8 +11,8 @@ from pathlib import Path
 from community_rule_intake import valid_extended_rule
 
 ALLOWED={"learned_field_regex","learned_tv_regex","learned_source_regex_patch",
-    "learned_field_regex_review"}
-MAX_QUEUE=128
+    "learned_field_regex_review","historical_regex_review"}
+MAX_QUEUE=4096
 
 def screen(incoming,old):
     if not isinstance(incoming,list) or not isinstance(old,list) or len(old)>MAX_QUEUE:

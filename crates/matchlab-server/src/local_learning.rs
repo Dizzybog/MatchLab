@@ -293,21 +293,38 @@ pub fn start(history:PathBuf,metadata:PathBuf){
             // Reuse the SQLite writer connection: repeated open/WAL setup
             // and schema creation every polling interval waste host CPU.
             let mut connection:Option<Connection>=None;
+            let mut legacy_captured=false;
+            let mut rule_observer=crate::learning_rule_log::Observer::default();
             loop{
                 if connection.is_none(){
                     match connect(&state){
-                        Ok(db)=>connection=Some(db),
+                        Ok(db)=>{connection=Some(db);legacy_captured=false;},
                         Err(error)=>tracing::warn!(%error,"local learning database unavailable")
                     }
                 }
                 if let Some(ref mut db)=connection{
+                    // Preserve previously learned rules BEFORE current-build
+                    // reconciliation can replace their materialized tables.
+                    if !legacy_captured {
+                        match crate::community_rule_archive::snapshot_legacy(db){
+                            Ok(_)=>legacy_captured=true,
+                            Err(error)=>tracing::warn!(%error,
+                                "historical regex migration skipped"),
+                        }
+                    }
                     let refresh=maintained.elapsed()>=Duration::from_secs(300);
                     let result=(||->Result<(),String>{
                         if refresh{
                             crate::learning_cache::maintain(db,&metadata)?;
                             maintained=std::time::Instant::now();
                         }
-                        scan(&history,&metadata,db,refresh)
+                        scan(&history,&metadata,db,refresh)?;
+                        if refresh {
+                            let meta=Connection::open_with_flags(&metadata,OpenFlags::SQLITE_OPEN_READ_ONLY).ok();
+                            crate::community_rule_archive::snapshot(db,meta.as_ref())?;
+                        }
+                        crate::learning_rule_log::after_cycle(db,&mut rule_observer)?;
+                        Ok(())
                     })();
                     if let Err(error)=result{
                         tracing::warn!(%error,"local learning cycle skipped");

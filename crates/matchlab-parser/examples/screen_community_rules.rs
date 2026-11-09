@@ -39,7 +39,9 @@ fn episode(re:&regex::Regex,title:&str)->Option<i64>{
     group.as_str().parse::<i64>().ok().filter(|n|(1..=99_999).contains(n))
 }
 fn already_parsed(title:&str,n:i64)->bool{
-    let Ok(parsed)=matchlab_parser::parse_title(title,false)else{return false;};
+    // An ML-generated regex must not retire itself merely because it now
+    // produces the correct episode. Compare the bundled original parser.
+    let Ok(parsed)=matchlab_parser::parse_title_canonical(title,false)else{return false;};
     let val=Value::Object(parsed);
     val["episodes"].as_array().is_some_and(|es|
         es.len()==1&&es[0].as_i64()==Some(n))

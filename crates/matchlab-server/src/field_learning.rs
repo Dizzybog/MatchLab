@@ -51,6 +51,13 @@ fn registry()->&'static RwLock<ActiveRules>{
 pub fn revision() -> u64 {
     REVISION.load(Ordering::Acquire)
 }
+/// Log only locally active regex syntax, never raw release names.
+pub(crate) fn regexes_for_log()->Vec<(String,String,String)>{
+    registry().read().ok().map(|g|g.rules.iter().map(|r|
+        (r.field.clone(),r.signal.clone(),r.regex.as_str().to_owned()))
+        .collect()).unwrap_or_default()
+}
+
 fn digest(raw: &str) -> String {
     format!("{:x}", Sha256::digest(raw.as_bytes()))
 }
@@ -517,14 +524,51 @@ fn select_rules(db: &Connection) -> Result<Vec<FieldRule>, String> {
     }
     Ok(active)
 }
+/// Migration helper: snapshot old, previously activated rules before a
+/// fresh parser-build reconcile overwrites the materialized active-rule table.
+/// Historical evidence is review-only; it cannot authorize hot activation.
+pub fn persisted_rule_archive(db:&Connection)->Result<Vec<Value>,String>{
+    init(db)?;
+    let mut stmt=db.prepare("SELECT field,signal,canonical,verified_build,
+        example_count,identity_count FROM learned_field_rules
+        ORDER BY field,signal").map_err(|e|e.to_string())?;
+    let rows=stmt.query_map([],|r|Ok((
+        r.get::<_,String>(0)?,r.get::<_,String>(1)?,
+        r.get::<_,String>(2)?,r.get::<_,String>(3)?,
+        r.get::<_,i64>(4)?,r.get::<_,i64>(5)?)))
+        .map_err(|e|e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e|e.to_string())?;
+    let mut out=Vec::new();
+    for (field,signal,canonical,source_build,examples,titles) in rows {
+        let Ok(value)=serde_json::from_str::<Value>(&canonical)else{continue;};
+        let Some(regex)=pattern_for(&field,&signal)else{continue;};
+        if !validated_value(&field,&signal,&value){continue;}
+        let key=format!("community-field:{field}:{signal}:{canonical}");
+        out.push(json!({"kind":"learned_field_regex",
+            "fingerprint":digest(&key),"source_build":source_build,
+            "field":field,"signal":signal,"regex":regex.as_str(),
+            "canonical":value,"evidence_count":examples,
+            "distinct_titles":titles,"canonical_confirmations":0,
+            "verification":"archive_active_rule_review_only"}));
+    }
+    Ok(out)
+}
+
 /// Public, opt-in community suggestions. Only reconstructed regex grammar,
 /// hashed evidence totals and bundled-handler patterns are exported:
 /// no private torrent names, IMDb identifiers or raw observations.
 pub fn community_proposals(db:&Connection)->Result<Vec<Value>,String>{
+    proposals(db,false)
+}
+pub fn archive_proposals(db:&Connection)->Result<Vec<Value>,String>{
+    proposals(db,true)
+}
+fn proposals(db:&Connection,archive:bool)->Result<Vec<Value>,String>{
     let rules=select_rules(db)?;
     let mut out=Vec::new();
     for rule in &rules {
-        if rule.examples<12 ||rule.titles<4{continue;}
+        if !archive && (rule.examples<12 ||rule.titles<4){continue;}
         let canonical=serde_json::to_string(&rule.value).map_err(|e|e.to_string())?;
         let key=format!("community-field:{}:{}:{canonical}",rule.field,rule.signal);
         out.push(json!({

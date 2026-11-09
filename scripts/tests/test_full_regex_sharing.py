@@ -119,6 +119,29 @@ class TestAllRegexSharing(unittest.TestCase):
         second,changed=review.screen(accepted,first)
         self.assertTrue(changed)
         self.assertEqual(len(second),2)
+    def test_offline_historical_backfill_is_review_only(self):
+        from unittest.mock import patch
+        old={"kind":"historical_regex_review","original_kind":"learned_field_regex",
+            "fingerprint":sha("historical-codec-x266"),
+            "source_build":"b"*40+":5","field":"codec","signal":"x266",
+            "regex":r"(?i)(?:^|[ ._-])x266(?:$|[ ._-])",
+            "evidence_count":8,"distinct_titles":4,
+            "canonical_confirmations":0,"review_only":True,
+            "verification":"historical_archive_requires_independent_review"}
+        with patch.object(intake,"git_ancestor",return_value=True):
+            self.assertIsNotNone(intake.valid_extended_rule(old,SHA))
+            self.assertEqual(len(intake.parse_batch(batch([old]),SHA,
+                lambda *_:True)),1)
+            proposal,changed=review.screen([old],[])
+            self.assertTrue(changed)
+            self.assertFalse(proposal[0]["automatic_activation"])
+            _,again=review.screen([old],proposal)
+            self.assertFalse(again)
+        with patch.object(intake,"git_ancestor",return_value=False):
+            self.assertIsNone(intake.valid_extended_rule(old,SHA))
+        with patch.object(intake,"git_ancestor",return_value=True):
+            self.assertIsNone(intake.valid_extended_rule(
+                {**old,"verification":"untrusted"},SHA))
     def test_no_untrusted_extra_fields_or_title_samples(self):
         row=technical()
         row["samples"]=["Private.Movie.2024"]

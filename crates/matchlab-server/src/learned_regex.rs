@@ -33,6 +33,13 @@ struct ActiveRule {marker:String,pattern:Regex}
 fn rules()->&'static RwLock<Vec<ActiveRule>> {
     ACTIVE.get_or_init(||RwLock::new(Vec::new()))
 }
+/// Logged regex are already validated/active. Never log raw observations.
+pub(crate) fn regexes_for_log()->Vec<(String,String)>{
+    rules().read().ok().map(|r|r.iter().map(|v|
+        (v.marker.clone(),v.pattern.as_str().to_owned())).collect())
+        .unwrap_or_default()
+}
+
 fn hash(s:&str)->String{format!("{:x}",Sha256::digest(s.as_bytes()))}
 fn build()->String{
     // The official Docker image bakes the source SHA in at compile time.
@@ -265,6 +272,12 @@ fn check_verified(metadata:&Connection,imdb:&str,absolute:i64,
     found.imdb_id==imdb && found.season==season && found.episode==episode
         && found.anidb_id==anidb && found.anidb_episode==anidb_ep
 }
+/// Returns true ONLY for results of the ML-free canonical parser.
+fn core_parser_already_solves(core:&Value,absolute:i64)->bool{
+    core["anime_episode_candidate"]["episode"].as_i64()==Some(absolute)
+        ||core["episodes"].as_array().is_some_and(|a|
+            a.len()==1 && a[0].as_i64()==Some(absolute))
+}
 fn validate_examples(db:&Connection,metadata:&Connection,marker:&str)->Result<bool,String>{
     let Some(regex)=regex_for(marker)else{return Ok(false);};
     let mut stmt=db.prepare("SELECT imdb_id,absolute_episode,season,episode,
@@ -290,12 +303,12 @@ fn validate_examples(db:&Connection,metadata:&Connection,marker:&str)->Result<bo
         if !check_verified(metadata,&imdb,abs,season,episode,&anidb,anidb_ep){
             return Ok(false);
         }
+        // ML is explicitly disabled here. The learned regex must never be
+        // retired just because its own output corrected this same example.
         let Ok(parsed)=matchlab_parser::parse_title_canonical(&title,false)else{return Ok(false);};
         let ordinary=Value::Object(parsed);
-        if ordinary["anime_episode_candidate"]["episode"].as_i64()==Some(abs)
-            ||ordinary["episodes"].as_array().is_some_and(|list|
-               list.len()==1 && list[0].as_i64()==Some(abs)){
-            return Ok(false); // already solved by the current core parser
+        if core_parser_already_solves(&ordinary,abs){
+            return Ok(false); // now solved independently by the core parser
         }
         valid+=1;
     }
@@ -533,6 +546,26 @@ fn reload(db:&Connection,build:&str,revision:&str)->Result<(),String>{
     install(active);
     Ok(())
 }
+/// Keep all locally activated anime regex identities in the offline archive,
+/// including those below the stricter community-sharing threshold.
+pub fn archive_proposals(db:&Connection)->Result<Vec<Value>,String>{
+    init(db)?;
+    let mut stmt=db.prepare("SELECT marker,verified_build FROM learned_regex_active
+        ORDER BY marker").map_err(|e|e.to_string())?;
+    let rows=stmt.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))
+        .map_err(|e|e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e|e.to_string())?;
+    Ok(rows.into_iter().filter_map(|(marker,build)|{
+        let regex=pattern_for(&marker)?;
+        Some(json!({"kind":"verified_regex_proposal",
+            "fingerprint":hash(&format!("community-regex:{marker}")),
+            "marker":marker,"regex":regex,"source_build":build,
+            "verification":"archive_active_rule_review_only",
+            "evidence_count":0,"distinct_imdb":0}))
+    }).collect())
+}
+
 /// A single independently verified anime mapping is *one observation*, not
 /// permission to patch the parser. At least 8 diverse examples are required.
 pub fn observe(db:&Connection,metadata:&Connection,title:&str,
@@ -628,6 +661,15 @@ pub fn observe(db:&Connection,metadata:&Connection,title:&str,
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn own_ml_output_must_not_retire_active_rule_bleach_326(){
+        let core=json!({"title":"Bleach","episodes":[]});
+        let ml_overlay=json!({"title":"Bleach","episodes":[326]});
+        assert!(!core_parser_already_solves(&core,326));
+        assert!(core_parser_already_solves(&ml_overlay,326));
+        // It is the CORE snapshot, never the enhanced response, that is
+        // used by validate_examples during startup and periodic refresh.
+    }
     #[test]
     fn bounded_regex_markers_only(){
         assert!(pattern_for("epis").unwrap().contains("epis"));

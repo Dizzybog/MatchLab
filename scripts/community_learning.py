@@ -273,7 +273,7 @@ def intake(comments, current_sha, now, seen, parser_bin,
     output = []
     added = set()
     seen_all = set(seen)
-    cutoff = now - timedelta(days=2)
+    cutoff = now - timedelta(days=15)
     for comment in flatten_comments(comments):
         created = comment.get("created_at")
         try:

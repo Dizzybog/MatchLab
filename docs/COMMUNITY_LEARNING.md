@@ -84,6 +84,12 @@ The model, evidence, active rules and optional result cache persist in `/data/lo
 
 `GET /api/ml/status` provides counts, model diagnostics and active rule summaries, without publishing original release names.
 
+### Regex logging and SQLite contention
+
+When local learning is active, MatchLab logs each currently active custom regex on startup and logs each new, modified or retired regex during operation. The `custom ML regex inventory` event includes `active_custom_rules`, `field_rules_in_database`, `anime_rules_in_database`, `tv_rule_families`, `compiled_regex_patterns`, and `archived_custom_rules_in_database`. Only rule identifiers and regex patterns are logged, never original torrent filenames or the private training dataset. Set `RUST_LOG=matchlab_server=info` to display these events.
+
+The history writer reuses one SQLite connection and commits up to 64 history events together while keeping 14-day minute statistics and 1,000 raw history records. Optional cached results use a separate bounded, asynchronous SQLite writer rather than a write connection per public request; cache saturation skips cache storage but does not drop the matching result. Check `/api/ml/status` for the number of cache events skipped. A temporarily busy learning database cannot be allowed to interrupt public matching.
+
 ### Cache and upgrades
 
 The optional cache stores exact-key results in SQLite; it does **not** perform IMDb or title search. Tantivy remains responsible for normal title lookup.
@@ -105,7 +111,15 @@ environment:
 
 Store the token in a private `.env` file or secret store, **never in a committed Compose file**.
 
-A participating installation sends at most **one batch comment every 24 hours**. The shared daily GitHub Issue collects bounded reports and regex proposals. The source-regex proposal includes the old and new regex, its handler metadata, and aggregate evidence.
+A participating installation sends at most **one confirmed batch comment every 24 hours**, containing up to 16 items (maximum 12 regex proposals). The first eligible batch can be sent immediately when sharing is enabled; later confirmed deliveries are separated by 24 hours. The shared daily GitHub Issue collects bounded reports and regex proposals. The source-regex proposal includes the old and new regex, its handler metadata, and aggregate evidence.
+
+### Offline archive, historical backfill and confirmed delivery
+
+- Local learning saves an append/update-by-fingerprint archive of eligible and activated regex in `/data/local-learning.sqlite3` **even with sharing disabled**. Retiring a rule or upgrading the parser does not delete the archive. The archive starts recording when this feature is installed; previously deleted rules cannot be recovered.
+- Turning GitHub sharing on exports the entire archive over successive bounded daily batches. Current rules must pass the latest independent validation. Older or lower-evidence rules become `historical_regex_review` items, strictly **non-executable** until human review and new independent validation.
+- Pending and confirmed fingerprints persist in `/data/community-learning.sqlite3`. A delivery is recorded only on a GitHub HTTP 201 response or when the same batch ID is found in a recent official community Issue. A failed or ambiguous response leaves the batch retryable.
+- GitHub Actions deduplicates against its global fingerprint ledger, existing accepted rules and a persistent unprocessed-proposal backlog maintained as a GitHub Release asset. Review throughput is intentionally bounded; receiving a comment is **not** proof that a rule has passed independent screening or been merged.
+- `GET /api/community/status` provides local archive, pending and confirmed-delivery counts. A remote global duplicate is decided by GitHub; local status cannot assert whether a remote PR is merged.
 
 The trusted GitHub Action:
 

@@ -8,7 +8,7 @@
 //! evidence and evicted first only when the configured quota is exceeded.
 use rusqlite::{params,Connection,OpenFlags,OptionalExtension};
 use serde_json::{json,Value};
-use std::sync::atomic::{AtomicBool,AtomicU64,Ordering};
+use std::sync::{OnceLock,mpsc::{sync_channel,SyncSender,TrySendError},atomic::{AtomicBool,AtomicU64,Ordering}};
 use sha2::{Digest,Sha256};
 use std::{env,fs,path::{Path,PathBuf},time::{Duration,SystemTime,UNIX_EPOCH}};
 
@@ -26,6 +26,22 @@ static CACHE_MISSES:AtomicU64=AtomicU64::new(0);
 // Updated by background maintenance, never by individual request writes.
 static CACHE_WRITES_ALLOWED:AtomicBool=AtomicBool::new(true);
 const BUSY_MS:u64=12;
+// Cache is acceleration only: never compete with the local learner for
+// SQLite write locks on each public request.
+const CACHE_QUEUE_SIZE:usize=4096;
+const CACHE_BATCH_SIZE:usize=32;
+static CACHE_DROPPED:AtomicU64=AtomicU64::new(0);
+static CACHE_WRITER:OnceLock<Option<SyncSender<CacheEvent>>>=OnceLock::new();
+
+struct CacheEvent{
+    cache_key:String,
+    namespace:String,
+    kind:String,
+    payload:Vec<u8>,
+    created_at:i64,
+    expires_at:i64,
+}
+
 
 pub fn storage_gb()->u64 {
     env::var("MATCHLAB_ML_MAX_STORAGE_GB")
@@ -65,6 +81,7 @@ pub fn status()->Value{
         "unmatched_cache_ttl_minutes":miss_ttl_secs()/60,
         "hits":CACHE_HITS.load(Ordering::Relaxed),
         "misses":CACHE_MISSES.load(Ordering::Relaxed),
+        "cache_queue_dropped":CACHE_DROPPED.load(Ordering::Relaxed),
         "cache_writes_allowed":CACHE_WRITES_ALLOWED.load(Ordering::Relaxed),
         "stale_entries_reparsed_and_rematched":true})
 }
@@ -144,41 +161,91 @@ fn read(kind:&str,title:&str,year:Option<i32>,series:Option<bool>,
     else{CACHE_MISSES.fetch_add(1,Ordering::Relaxed);}
     valid
 }
-fn write(kind:&str,title:&str,year:Option<i32>,series:Option<bool>,
-    metadata:Option<&Path>,value:&Value){
-    if !enabled() || !CACHE_WRITES_ALLOWED.load(Ordering::Acquire){return;}
-    let Some(ns)=namespace(kind,metadata)else{return;};
-    let Ok(raw)=serde_json::to_vec(value)else{return;};
-    if raw.len()>MAX_ENTRY_BYTES{return;}
-    // This is a best-effort acceleration. Lock contention or a full budget
-    // must never delay/fail the real parser or matcher.
-    let result=(||->rusqlite::Result<()> {
-        let db=Connection::open(state_file())?;
-        db.busy_timeout(Duration::from_millis(BUSY_MS))?;
-        initialize(&db)?;
-        // Quota is checked by background maintenance instead of issuing
-        // SQLite page_count/freelist_count PRAGMAs on every request write.
-        if !CACHE_WRITES_ALLOWED.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        db.execute(
+fn put_batch(db:&mut Connection,events:&[CacheEvent])->rusqlite::Result<()>{
+    if events.is_empty(){return Ok(());}
+    let tx=db.transaction()?;
+    {
+        let mut stmt=tx.prepare_cached(
             "INSERT INTO learning_cache
               (cache_key,namespace,kind,payload,bytes,created_at,expires_at)
              VALUES(?1,?2,?3,?4,?5,?6,?7)
              ON CONFLICT(cache_key) DO UPDATE SET
                payload=excluded.payload,bytes=excluded.bytes,
                created_at=excluded.created_at,expires_at=excluded.expires_at,
-               obsolete=0",
-            params![key(&ns,title,year,series),ns,kind,raw,
-                raw.len() as i64,now(),now()+if kind=="match"
-                    && value["selected"].is_null(){miss_ttl_secs()}
-                    else{cache_ttl_secs()}]
+               obsolete=0"
         )?;
-        Ok(())
-    })();
-    if result.is_err() {
-        // Do not log user titles, key material or response contents.
-        tracing::debug!("local learning cache write unavailable");
+        for item in events {
+            stmt.execute(params![
+                item.cache_key,item.namespace,item.kind,item.payload,
+                item.payload.len() as i64,item.created_at,item.expires_at
+            ])?;
+        }
+    }
+    tx.commit()
+}
+
+fn cache_worker()->Option<SyncSender<CacheEvent>>{
+    let (tx,rx)=sync_channel::<CacheEvent>(CACHE_QUEUE_SIZE);
+    let thread=std::thread::Builder::new()
+        .name("matchlab-cache-writer".into()).spawn(move||{
+            let path=state_file();
+            let mut connection:Option<Connection>=None;
+            while let Ok(first)=rx.recv(){
+                let mut batch=vec![first];
+                while batch.len()<CACHE_BATCH_SIZE {
+                    match rx.try_recv(){
+                        Ok(item)=>batch.push(item),
+                        Err(_)=>break,
+                    }
+                }
+                if !CACHE_WRITES_ALLOWED.load(Ordering::Acquire){continue;}
+                if connection.is_none(){
+                    connection=(||->rusqlite::Result<Connection>{
+                        let db=Connection::open(&path)?;
+                        db.busy_timeout(Duration::from_millis(150))?;
+                        db.execute_batch("PRAGMA journal_mode=WAL;")?;
+                        initialize(&db)?;
+                        Ok(db)
+                    })().ok();
+                }
+                if let Some(db)=connection.as_mut(){
+                    if put_batch(db,&batch).is_err(){
+                        // A busy local ML transaction or full disk must not
+                        // delay public matching or poison cached answers.
+                        connection=None;
+                        tracing::debug!("cache write batch skipped due to SQLite contention");
+                    }
+                }
+            }
+        });
+    if thread.is_err(){
+        tracing::warn!("cache writer unavailable; matching continues uncached");
+        None
+    }else{Some(tx)}
+}
+fn write(kind:&str,title:&str,year:Option<i32>,series:Option<bool>,
+    metadata:Option<&Path>,value:&Value){
+    if !enabled() || !CACHE_WRITES_ALLOWED.load(Ordering::Acquire){return;}
+    let Some(ns)=namespace(kind,metadata)else{return;};
+    let Ok(raw)=serde_json::to_vec(value)else{return;};
+    if raw.len()>MAX_ENTRY_BYTES{return;}
+    let time=now();
+    let event=CacheEvent{
+        cache_key:key(&ns,title,year,series),namespace:ns,
+        kind:kind.to_owned(),payload:raw,created_at:time,
+        expires_at:time+if kind=="match"&&value["selected"].is_null(){
+            miss_ttl_secs()
+        }else{cache_ttl_secs()}
+    };
+    // All request threads enqueue only; a single reused SQLite writer
+    // commits bounded batches. Saturation drops caching, never results.
+    let Some(tx)=CACHE_WRITER.get_or_init(cache_worker).as_ref()else{return;};
+    if let Err(e)=tx.try_send(event){
+        let n=CACHE_DROPPED.fetch_add(1,Ordering::Relaxed)+1;
+        if n==1||n%4096==0 {
+            tracing::warn!(dropped=n,disconnected=matches!(e,TrySendError::Disconnected(_)),
+                "ML result cache queue saturated; matching unaffected");
+        }
     }
 }
 pub fn get_parser(title:&str)->Option<Value>{
@@ -317,6 +384,18 @@ fn maintain_with_budget(db:&Connection,metadata:&Path,budget:u64)->Result<(),Str
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn bounded_cache_batch_preserves_current_namespace(){
+        let mut db=Connection::open_in_memory().unwrap();
+        initialize(&db).unwrap();
+        let event=CacheEvent{cache_key:"key".into(),namespace:"new".into(),
+            kind:"parse".into(),payload:br#"{"title":"Bleach"}"#.to_vec(),
+            created_at:1,expires_at:i64::MAX};
+        put_batch(&mut db,&[event]).unwrap();
+        assert_eq!(read_current(&db,"key","new",2).unwrap()["title"],"Bleach");
+        assert!(read_current(&db,"key","old",2).is_none());
+    }
+
     #[test]
     fn configurable_corpus_size_and_cache_limits_reject_invalid_values(){
         assert_eq!(bounded_count(Some("250000"),12_000,100,2_000_000),250_000);

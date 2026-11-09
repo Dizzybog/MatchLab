@@ -178,6 +178,41 @@ fn select(db:&Connection)->Result<Vec<Active>,String>{
     }).map_err(|e|e.to_string())?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())
 }
+/// Reconstruct the prior build's eligible TV families from persisted
+/// evidence before current-build reconciliation can retire them.
+pub fn persisted_rule_archive(db:&Connection)->Result<Vec<Value>,String>{
+    init(db)?;
+    let mut stmt=db.prepare("SELECT family,source_build,count(*) AS n,
+        count(DISTINCT identity_hash) AS titles,
+        sum(canonical_aligned) AS confirmations
+        FROM learned_tv_regex_evidence
+        GROUP BY family,source_build
+        HAVING n>=?1 AND titles>=?2 AND confirmations>=2
+        ORDER BY family,source_build").map_err(|e|e.to_string())?;
+    let rows=stmt.query_map(params![MIN_EXAMPLES,MIN_IDENTITIES],|r|Ok((
+        r.get::<_,String>(0)?,r.get::<_,String>(1)?,
+        r.get::<_,i64>(2)?,r.get::<_,i64>(3)?,r.get::<_,i64>(4)?)))
+        .map_err(|e|e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e|e.to_string())?;
+    let mut out=Vec::new();
+    for (family,source_build,n,titles,confirmations) in rows {
+        let Some((_,pattern))=templates().iter()
+            .find(|(name,_)|*name==family)else{continue;};
+        let (Some(seasons),Some(episodes))=(capture_pattern(&family,"seasons"),
+            capture_pattern(&family,"episodes"))else{continue;};
+        out.push(json!({"kind":"learned_tv_regex",
+            "fingerprint":hash(&format!("community-tv:{family}")),
+            "source_build":source_build,"family":family,
+            "fields":["seasons","episodes"],"regex":pattern.as_str(),
+            "native_patterns":{"seasons":seasons,"episodes":episodes},
+            "evidence_count":n,"distinct_titles":titles,
+            "canonical_confirmations":confirmations,
+            "verification":"archive_active_rule_review_only"}));
+    }
+    Ok(out)
+}
+
 // Each promoted pattern is only a regex. The source handler supplies
 // MatchLab's existing array(integer) transform and target field.
 fn capture_pattern(family:&str,field:&str)->Option<&'static str>{
@@ -236,6 +271,12 @@ pub fn reconcile(db:&Connection)->Result<(),String>{
 /// Independently replayable, privacy-safe proposals for the community.
 /// Only fixed pattern families and aggregate evidence, never filenames.
 pub fn community_proposals(db:&Connection)->Result<Vec<Value>,String>{
+    proposals(db,false)
+}
+pub fn archive_proposals(db:&Connection)->Result<Vec<Value>,String>{
+    proposals(db,true)
+}
+fn proposals(db:&Connection,archive:bool)->Result<Vec<Value>,String>{
     let active=select(db)?;
     let mut out=Vec::new();
     for rule in active {
@@ -249,7 +290,7 @@ pub fn community_proposals(db:&Connection)->Result<Vec<Value>,String>{
             params![rule.family,build()],
             |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))
         ).map_err(|e|e.to_string())?;
-        if count<12||identities<4||confirmed<2{continue;}
+        if !archive && (count<12||identities<4||confirmed<2){continue;}
         let (Some(season_regex),Some(episode_regex))=(
             capture_pattern(&rule.family,"seasons"),
             capture_pattern(&rule.family,"episodes")

@@ -19,6 +19,8 @@ mod field_audit;
 mod field_learning;
 mod tv_learning;
 mod community_learning;
+mod community_rule_archive;
+mod learning_rule_log;
 mod local_learning;
 mod online_model;
 mod candidate_discovery;
@@ -1526,6 +1528,7 @@ async fn ml_status()->Json<Value>{
         object.insert("training_and_cache".into(),learning_cache::status());
         object.insert("online_model".into(),online_model::OnlineModel::status());
         object.insert("unknown_markers".into(),candidate_discovery::status());
+        object.insert("regex_rules".into(),learning_rule_log::status());
     }
     Json(report)
 }
