@@ -81,7 +81,7 @@ fn safe_signal(field: &str, signal: &str) -> bool {
             || b.is_ascii_digit() || b == b'_' || b == b'.')
         && signal.bytes().any(|b| b.is_ascii_alphabetic() || b.is_ascii_digit())
 }
-fn pattern_for(field: &str, signal: &str) -> Option<Regex> {
+pub(crate) fn pattern_for(field: &str, signal: &str) -> Option<Regex> {
     if !safe_signal(field, signal) { return None; }
     // Turn a *literal* separator-normalized marker into a bounded,
     // linear-time regex. No arbitrary learned regex is executed.
