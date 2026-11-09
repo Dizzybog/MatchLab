@@ -42,6 +42,7 @@ def patch():
 def review_discovery(field="network",marker="futuretag"):
     pattern=r"(?i)(?:^|[ ._-])"+marker+r"(?:$|[ ._-])"
     return {**common("learned_field_regex_review",intake.DISCOVERY_EPOCH),
+        "evidence_count":24,"distinct_titles":12,
         "verification":"unverified_model_discovery_review_only",
         "field":field,"signal":marker,"regex":pattern,
         "canonical_confirmations":0,
