@@ -1809,17 +1809,30 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
             return Err("MATCHLAB_METADATA_REFRESH_HOURS must be between 1 and 720".into());
         }
         let target=PathBuf::from(&db);
+        let override_marker=metadata_import::bundled_animelists_override_marker();
         let refresh_index_state=index_state.clone();
         tokio::spawn(async move {
             let refresh_seconds=hours*3600;
             loop {
                 let check_target=target.clone();
+                let expected_override=override_marker.clone();
                 let last_refresh=tokio::task::spawn_blocking(move || {
                     let db=rusqlite::Connection::open_with_flags(
                         &check_target,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
                     let value:String=db.query_row(
                         "SELECT updated_at FROM metadata_state WHERE source='full_refresh'",
                         [],|row|row.get(0)).ok()?;
+                    // A previously published database may predate the
+                    // embedded mapping exceptions. Rebuild once on startup
+                    // when the baked-in exception list has changed, rather
+                    // than serving stale episode crosswalks for seven days.
+                    let current=db.query_row(
+                        "SELECT 1 FROM metadata_state WHERE source=?1",
+                        [&expected_override],|row|row.get::<_,i64>(0)).is_ok();
+                    if !current {
+                        tracing::info!("bundled Anime-Lists mappings changed; scheduling full metadata refresh");
+                        return None;
+                    }
                     value.parse::<u64>().ok()
                 }).await.ok().flatten();
                 let now=std::time::SystemTime::now()
