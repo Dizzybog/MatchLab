@@ -63,9 +63,9 @@ fn archived_rules(db:&Connection)->Result<Vec<Value>,String>{
     if exists==0{return Ok(Vec::new());}
     let mut stmt=db.prepare("SELECT payload FROM ml_shared_rule_archive
         ORDER BY first_seen,fingerprint LIMIT ?1").map_err(|e|e.to_string())?;
-    stmt.query_map([MAX_ARCHIVE],|r|r.get::<_,String>(0))
-        .map_err(|e|e.to_string())?
-        .map(|r|r.map_err(|e|e.to_string())
+    let rows=stmt.query_map([MAX_ARCHIVE],|r|r.get::<_,String>(0))
+        .map_err(|e|e.to_string())?;
+    rows.map(|r|r.map_err(|e|e.to_string())
             .and_then(|s|serde_json::from_str(&s).map_err(|e|e.to_string())))
         .collect()
 }
