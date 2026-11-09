@@ -21,12 +21,17 @@ use std::sync::{
 const EPOCH: i64 = 5;
 const MIN_EXAMPLES: i64 = 8;
 const MIN_TITLES: i64 = 4;
+// A rediscovered native marker is evidence, not a new executable rule.
+// Require independently observed *missing* fields in several releases.
+const MIN_GAP_EXAMPLES: i64 = 4;
+const MIN_GAP_TITLES: i64 = 2;
 const MIN_OVERRIDE_EXAMPLES: i64 = 16;
 const MIN_OVERRIDE_TITLES: i64 = 6;
 const MAX_RULES: usize = 96;
 const MAX_TITLE_BYTES: usize = 240;
 static ACTIVE:OnceLock<RwLock<ActiveRules>>=OnceLock::new();
 static REVISION: AtomicU64 = AtomicU64::new(0);
+static EVIDENCE_ONLY_CANDIDATES: AtomicU64 = AtomicU64::new(0);
 static ORIGINAL_HANDLER_COUNT:OnceLock<usize>=OnceLock::new();
 
 #[derive(Clone)]
@@ -476,7 +481,9 @@ fn select_rules(db: &Connection) -> Result<Vec<FieldRule>, String> {
     let mut stmt = db.prepare(
         "SELECT field,signal,canonical,count(*) AS examples,
                 count(DISTINCT identity_hash) AS titles,
-                sum(CASE WHEN origin=0 THEN 1 ELSE 0 END) AS canonical_examples
+                sum(CASE WHEN origin=0 THEN 1 ELSE 0 END) AS canonical_examples,
+                sum(CASE WHEN origin=1 THEN 1 ELSE 0 END) AS gap_examples,
+                count(DISTINCT CASE WHEN origin=1 THEN identity_hash END) AS gap_titles
          FROM (
            SELECT field,signal,canonical,identity_hash,0 AS origin
              FROM learned_field_evidence WHERE source_build=?1
@@ -491,17 +498,37 @@ fn select_rules(db: &Connection) -> Result<Vec<FieldRule>, String> {
         params![source_build, MIN_EXAMPLES, MIN_TITLES],
         |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,
             row.get::<_,String>(2)?,row.get::<_,i64>(3)?,
-            row.get::<_,i64>(4)?,row.get::<_,i64>(5)?)))
+            row.get::<_,i64>(4)?,row.get::<_,i64>(5)?,
+            row.get::<_,i64>(6)?,row.get::<_,i64>(7)?)))
         .map_err(|e| e.to_string())?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| e.to_string())?;
     let mut grouped: BTreeMap<(String,String), Vec<FieldRule>> = BTreeMap::new();
-    for (field, signal, canonical, examples, titles, canonical_examples) in matches {
+    let mut evidence_only=0u64;
+    for (field, signal, canonical, examples, titles,
+         canonical_examples, gap_examples, gap_titles) in matches {
         let Ok(value) = serde_json::from_str::<Value>(&canonical) else { continue; };
         if !validated_value(&field, &signal, &value) { continue; }
         let Some(regex) = pattern_for(&field, &signal) else { continue; };
-        grouped.entry((field.clone(), signal.clone())).or_default()
-            .push(FieldRule{field,signal,value,regex,examples,titles,canonical_examples});
+        // Explicit comparison against the original Rust parser is done
+        // during training_label: gap evidence is only emitted when the
+        // canonical field was missing (not when it disagreed). Observations
+        // already understood by the parser continue training the FTRL
+        // model, but cannot install a redundant executable regex.
+        if gap_examples<MIN_GAP_EXAMPLES || gap_titles<MIN_GAP_TITLES {
+            evidence_only+=1;
+            continue;
+        }
+        let rule=FieldRule{field:field.clone(),signal:signal.clone(),
+            value,regex,examples,titles,canonical_examples};
+        // Only count rules that can actually be attached to a native
+        // parser handler. Extension, language and subtitle markers still
+        // contribute training evidence, but must not inflate "active".
+        if source_handler_additions(std::slice::from_ref(&rule)).is_empty(){
+            evidence_only+=1;
+            continue;
+        }
+        grouped.entry((field, signal)).or_default().push(rule);
     }
     let mut active = Vec::new();
     for ((field,signal), candidates) in grouped {
@@ -522,6 +549,7 @@ fn select_rules(db: &Connection) -> Result<Vec<FieldRule>, String> {
         active.push(rule);
         if active.len() == MAX_RULES { break; }
     }
+    EVIDENCE_ONLY_CANDIDATES.store(evidence_only,Ordering::Relaxed);
     Ok(active)
 }
 /// Migration helper: snapshot old, previously activated rules before a
@@ -798,6 +826,8 @@ pub fn status() -> Value {
         }
         return json!({"enabled":crate::local_learning::active(),
             "active_rule_count":active.rules.len(),"active_rules_by_field":fields,
+            "evidence_only_candidates":EVIDENCE_ONLY_CANDIDATES.load(Ordering::Relaxed),
+            "activation_policy":"requires_multiple_canonical_field_gaps_and_native_handler",
             "revision":format!("{:016x}",revision()),
             "training_source":"canonical_rust_parser_and_allowlisted_raw_markers",
             "model":"rust_ftrl_proximal",
@@ -965,6 +995,50 @@ mod tests {
         assert_ne!(semantic_identity(&weak),semantic_identity(&strong));
         assert!(!may_override(&weak));
         assert!(may_override(&strong));
+    }
+    #[test]
+    fn native_successes_are_training_evidence_not_new_regex_rules(){
+        let db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        for n in 0..24 {
+            db.execute("INSERT INTO learned_field_evidence(
+                field,signal,example_hash,identity_hash,canonical,source_build,first_seen)
+                VALUES('codec','x264',?1,?2,'\"avc\"',?3,1)",
+                params![format!("sample{n}"),format!("series{n}"),build()]
+            ).unwrap();
+        }
+        assert!(select_rules(&db).unwrap().is_empty(),
+            "native x264 recognitions must not be promoted as ML discoveries");
+    }
+    #[test]
+    fn non_executable_gap_evidence_cannot_inflate_active_rules(){
+        let db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        for n in 0..16 {
+            db.execute("INSERT INTO learned_field_gap_evidence(
+                field,signal,example_hash,identity_hash,canonical,source_build,first_seen)
+                VALUES('extension','mkv',?1,?2,'\"mkv\"',?3,1)",
+                params![format!("sample{n}"),format!("series{n}"),build()]
+            ).unwrap();
+        }
+        assert!(select_rules(&db).unwrap().is_empty(),
+            "a marker with no native handler addition is review-only");
+    }
+    #[test]
+    fn a_single_missing_observation_is_not_a_validated_improvement(){
+        let db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        for n in 0..20 {
+            let table=if n==0{"learned_field_gap_evidence"}
+                else{"learned_field_evidence"};
+            let sql=format!("INSERT INTO {table}(
+                field,signal,example_hash,identity_hash,canonical,source_build,first_seen)
+                VALUES('resolution','1440p',?1,?2,'\"1440p\"',?3,1)");
+            db.execute(&sql,params![format!("sample{n}"),
+                format!("series{n}"),build()]).unwrap();
+        }
+        assert!(select_rules(&db).unwrap().is_empty(),
+            "numerous native successes cannot override insufficient gap evidence");
     }
     #[test]
     fn gap_only_rule_is_regex_evidence_not_a_field_override() {
