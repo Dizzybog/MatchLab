@@ -324,6 +324,14 @@ mod tests{
             observe(&db,&name,&parsed,&mut count).unwrap();
         }
         assert!(select(&db).unwrap()[0].may_override);
+        let proposals=community_proposals(&db).unwrap();
+        assert_eq!(proposals.len(),1);
+        assert_eq!(
+            proposals[0]["native_patterns"]["episodes"],
+            capture_pattern("sxe","episodes").unwrap());
+        assert_eq!(
+            proposals[0]["native_patterns"]["seasons"],
+            capture_pattern("sxe","seasons").unwrap());
     }
     #[test]
     fn training_never_uses_previous_overlay_as_canonical(){
