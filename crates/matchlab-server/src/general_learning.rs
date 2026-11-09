@@ -327,7 +327,8 @@ fn rule_parts(rules:&[Active])->(Vec<HandlerAddition>,Vec<HandlerCorrection>){
     }
     (add,correct)
 }
-fn replay(db:&Connection,all:&[Active])->Result<Option<(usize,usize)>,String>{
+fn replay(db:&Connection,previous:&[Active],all:&[Active],
+    newest:&str)->Result<Option<(usize,usize)>,String>{
     if all.is_empty(){return Ok(Some((0,0)));}
     let mut examples=Vec::new();
     let mut keys=BTreeSet::new();
@@ -335,7 +336,9 @@ fn replay(db:&Connection,all:&[Active])->Result<Option<(usize,usize)>,String>{
         keys.insert(rule.key.clone());
         examples.extend(read_examples(db,&rule.key)?);
     }
-    if examples.len().saturating_mul(2)+NEGATIVES.len()>MAX_TESTS{
+    // Each example is replayed as original + variant; bound the TOTAL
+    // titles, not merely the number of evidence rows.
+    if examples.len().saturating_mul(2)+NEGATIVES.len()+16>MAX_TESTS{
         return Ok(None);
     }
     let mut titles=Vec::new();
@@ -344,18 +347,35 @@ fn replay(db:&Connection,all:&[Active])->Result<Option<(usize,usize)>,String>{
         titles.push(example.variant_release.clone());
     }
     titles.extend(NEGATIVES.iter().map(|x|(*x).into()));
+    // Additional natural positives from unrelated field families must be
+    // preserved. This detects cross-field overextracts a narrow candidate
+    // corpus could otherwise miss.
+    let mut others=db.prepare("SELECT DISTINCT source_release
+        FROM ml_general_examples WHERE source_build=?1
+        ORDER BY source_release LIMIT 16").map_err(|e|e.to_string())?;
+    let controls=others.query_map([build()],|row|row.get::<_,String>(0))
+        .map_err(|e|e.to_string())?;
+    let controls=controls.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e|e.to_string())?;
+    titles.extend(controls);
+    if titles.len()>MAX_TESTS{return Ok(None);}
     // The baseline includes every existing native and ML addition/patch
     // except this learner. Candidate replay tests the entire combination.
     let (patches,base_additions)=crate::field_learning::source_rules_without_general(
         crate::tv_learning::handler_additions())?;
     let tv=crate::corrective_learning::handler_corrections();
+    let mut prior_corrections=tv.clone();
+    let (prior_additions,prior_extra)=rule_parts(previous);
+    prior_corrections.extend(prior_extra);
+    let mut previous_additions=base_additions.clone();
+    previous_additions.extend(prior_additions);
     let mut augmented=tv.clone();
     let (additional,corrective)=rule_parts(all);
     augmented.extend(corrective);
     let mut additions=base_additions.clone();
     additions.extend(additional);
     let before=match matchlab_parser::replay_handler_rules(
-        &patches,&base_additions,&tv,&titles){
+        &patches,&previous_additions,&prior_corrections,&titles){
         Ok(v)=>v,Err(_)=>return Ok(None)
     };
     let after=match matchlab_parser::replay_handler_rules(
@@ -376,15 +396,19 @@ fn replay(db:&Connection,all:&[Active])->Result<Option<(usize,usize)>,String>{
         let new=&after[2*i+1];
         if Value::Object(new.clone())!=example.expected{return Ok(None);}
         if old!=new{
+            if Value::Object(old.clone())==example.expected{
+                return Ok(None);
+            }
             *fixed.entry(example.key.clone()).or_default()+=1;
         }
         covered+=1;
     }
     let offset=examples.len()*2;
     if before[offset..]!=after[offset..]{return Ok(None);}
-    if !keys.iter().all(|key|fixed.get(key).copied().unwrap_or(0)
-        >=MIN_FIXES){return Ok(None);}
-    Ok(Some((covered,fixed.values().sum())))
+    let incremental=fixed.get(newest).copied().unwrap_or(0);
+    // A syntactically different regex that gives the same result as
+    // previous accepted rules is NOT a new improvement.
+    Ok((incremental>=MIN_FIXES).then_some((covered,incremental)))
 }
 fn persist(db:&Connection,ready:&[Active])->Result<(),String>{
     let tx=db.unchecked_transaction().map_err(|e|e.to_string())?;
@@ -416,8 +440,8 @@ pub fn reconcile(db:&Connection)->Result<(),String>{
         if ready.len()>=MAX_ACTIVE{break;}
         let mut candidate=ready.clone();
         candidate.push(rule.clone());
-        match replay(db,&candidate)?{
-            Some((checked,fixed)) if fixed>=MIN_FIXES* candidate.len()=>{
+        match replay(db,&ready,&candidate,&rule.key)?{
+            Some((checked,fixed)) if fixed>=MIN_FIXES=>{
                 let Some(last)=candidate.last_mut()else{continue;};
                 last.fixes=fixed;last.checked=checked;
                 ready=candidate;
@@ -540,7 +564,7 @@ mod tests{
             assert!(source(e.source_index).is_some());
         }
         assert!(candidates(&db).unwrap().is_empty());
-        assert!(replay(&db,&[]).unwrap().is_some());
+        assert!(replay(&db,&[],&[],"").unwrap().is_some());
         assert!(handler_additions().is_empty());
     }
     #[test]
