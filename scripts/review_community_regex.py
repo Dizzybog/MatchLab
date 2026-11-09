@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from community_rule_intake import valid_extended_rule
 
-ALLOWED={"learned_field_regex","learned_tv_regex","learned_source_regex_patch",
+ALLOWED={"learned_field_regex","learned_tv_regex","learned_source_regex_patch","learned_corrective_regex",
     "learned_field_regex_review","historical_regex_review"}
 MAX_QUEUE=4096
 
