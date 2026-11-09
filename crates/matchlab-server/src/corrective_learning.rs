@@ -459,6 +459,9 @@ pub fn reconcile(db:&Connection)->Result<(),String>{
         matchlab_parser::replay_handler_rules(
             &patches,&additions,&combined,&[])
             .map_err(|e|format!("TV corrective preflight failed: {e}"))?;
+        matchlab_parser::verify_live_regression_corpus(
+            &patches,&additions,&combined)
+            .map_err(|e|format!("TV corrective regression rejected: {e}"))?;
         let fingerprint=ready.iter().flat_map(|r|
             r.corrections.iter().map(|c|
                 format!("{}:{}:{}",r.family,c.source_index,c.pattern)))
