@@ -61,6 +61,8 @@ struct HandlerDefRaw {
     #[serde(default)]
     function: Option<String>,
     options: HandlerOptionsRaw,
+    #[serde(default)]
+    learned_tv_guard: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -133,11 +135,31 @@ enum MatchGuard {
     SitePrefix,
     UnmarkedSeason,
     AnchoredEpisode,
+    LearnedTv,
 }
 
 struct ParserEngine {
     handlers: Vec<RuntimeHandler>,
     prefilter: Prefilter,
+}
+
+fn learned_tv_ambiguous(title:&str)->bool{
+    static RANGES:Lazy<Regex>=Lazy::new(|| Regex::new(
+        r"(?i)(?:s[0-9]{1,3}[ ._-]*e[0-9]{1,5}|[0-9]{1,3}x[0-9]{1,5}|season[ ._-]+[0-9]{1,3}[ ._-]+episode[ ._-]+[0-9]{1,5})[ ._-]*(?:-|to|through)[ ._-]*(?:e(?:p(?:isode)?)?[ ._-]*)?[0-9]{1,5}(?:$|[ ._-])"
+    ).expect("bounded learned TV pack guard"));
+    static MARKERS:Lazy<Regex>=Lazy::new(|| Regex::new(
+        r"(?i)(?:^|[ ._-])(?:s[0-9]{1,3}[ ._-]*e[0-9]{1,5}|[0-9]{1,3}x[0-9]{1,5}|season[ ._-]+[0-9]{1,3}[ ._-]+episode[ ._-]+[0-9]{1,5})(?:$|[ ._-])"
+    ).expect("bounded learned TV multiple-marker guard"));
+    if title.len()>240 || RANGES.is_match(title) {return true;}
+    let mut previous_end=0usize;
+    let mut markers=0usize;
+    for m in MARKERS.find_iter(title) {
+        if m.start()>0 && m.start()<previous_end { continue; }
+        markers+=1;
+        previous_end=m.end().saturating_sub(1);
+        if markers>1 {return true;}
+    }
+    false
 }
 
 fn compile_regex(pattern: &str, ignore_case: bool) -> Result<PcreRegex, ParseError> {
@@ -267,7 +289,8 @@ impl ParserEngine {
         for mut raw in table.handlers {
             // Keep the generated upstream snapshot intact; these are deliberate
             // parser corrections applied before compiling both regexes and gates.
-            let guard = match (raw.name.as_str(), raw.pattern.as_deref()) {
+            let guard = if raw.learned_tv_guard { MatchGuard::LearnedTv } else {
+                match (raw.name.as_str(), raw.pattern.as_deref()) {
                 ("hdr", _) | ("bit_depth", Some(r"\bhdr10\b")) => MatchGuard::AmbiguousMetadata,
                 ("dubbed", Some(r"\bdual\b(?![ .-]*sub)")) => MatchGuard::AmbiguousMetadata,
                 ("site", Some(pattern)) if pattern.contains("com|org|net") => {
@@ -281,6 +304,7 @@ impl ParserEngine {
                 // Require a token boundary, except after an Sxx season marker.
                 ("episodes", Some(r"E(\d+)\b")) => MatchGuard::AnchoredEpisode,
                 _ => MatchGuard::None,
+                }
             };
             let is_hdr_format =
                 raw.name == "hdr" && raw.pattern.as_deref() == Some(r"\bHDR(?:10)?\b");
@@ -524,6 +548,14 @@ impl ParserEngine {
                     && !standalone_domain
                     && (m0.start() == 0 || raw_match.contains(char::is_whitespace))
                 {
+                    return Ok(None);
+                }
+            }
+            MatchGuard::LearnedTv => {
+                // The original parser handles ranges and season packs first.
+                // Never let a learned single-coordinate grammar silently
+                // reinterpret a range or several conflicting markers.
+                if learned_tv_ambiguous(title) {
                     return Ok(None);
                 }
             }
@@ -2809,7 +2841,8 @@ pub fn existing_regex_rules() -> Vec<Value> {
             let source = raw["pattern"].as_str()?;
             Some(json!({"index":index,"field":raw["name"],
                 "pattern":source,"transform":raw["transform"],
-                "flags":raw["flags"],"origin":"generated_handler"}))
+                "flags":raw["flags"],"options":raw["options"],
+                "kind":raw["kind"],"origin":"generated_handler"}))
         }).collect()
 }
 pub fn handler_patch_revision() -> u64 {
@@ -2934,6 +2967,9 @@ pub fn install_learned_handler_regex(
         }
         verify_learned_regex(&addition.pattern)?;
         raw["pattern"]=Value::String(addition.pattern.clone());
+        if field=="seasons"||field=="episodes" {
+            raw["learned_tv_guard"]=Value::Bool(true);
+        }
         rows.push(raw);
     }
     let candidate=ParserEngine::from_json(&document.to_string())?;
