@@ -304,8 +304,9 @@ fn maintain_with_budget(db:&Connection,metadata:&Path,budget:u64)->Result<(),Str
     // Reuse freed pages and checkpoint opportunistically, without a full
     // VACUUM that could cause CPU/IO spikes on weak hardware.
     let _=db.execute_batch("PRAGMA wal_checkpoint(PASSIVE);");
-    // A best-effort storage budget: a bounded amount of new cache writes
-    // may land before the next maintenance pass. Parsing never stops.
+    // Compute the final quota state after cache-count pruning as well.
+    // Only the background worker executes this SQLite page accounting.
+    let occupied=used_bytes(db)?;
     CACHE_WRITES_ALLOWED.store(occupied<=budget,Ordering::Release);
     if occupied>budget {
         tracing::warn!(occupied_bytes=occupied,budget_bytes=budget,
