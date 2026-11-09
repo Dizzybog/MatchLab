@@ -265,6 +265,12 @@ fn check_verified(metadata:&Connection,imdb:&str,absolute:i64,
     found.imdb_id==imdb && found.season==season && found.episode==episode
         && found.anidb_id==anidb && found.anidb_episode==anidb_ep
 }
+/// Returns true ONLY for results of the ML-free canonical parser.
+fn core_parser_already_solves(core:&Value,absolute:i64)->bool{
+    core["anime_episode_candidate"]["episode"].as_i64()==Some(absolute)
+        ||core["episodes"].as_array().is_some_and(|a|
+            a.len()==1 && a[0].as_i64()==Some(absolute))
+}
 fn validate_examples(db:&Connection,metadata:&Connection,marker:&str)->Result<bool,String>{
     let Some(regex)=regex_for(marker)else{return Ok(false);};
     let mut stmt=db.prepare("SELECT imdb_id,absolute_episode,season,episode,
@@ -290,12 +296,12 @@ fn validate_examples(db:&Connection,metadata:&Connection,marker:&str)->Result<bo
         if !check_verified(metadata,&imdb,abs,season,episode,&anidb,anidb_ep){
             return Ok(false);
         }
+        // ML is explicitly disabled here. The learned regex must never be
+        // retired just because its own output corrected this same example.
         let Ok(parsed)=matchlab_parser::parse_title_canonical(&title,false)else{return Ok(false);};
         let ordinary=Value::Object(parsed);
-        if ordinary["anime_episode_candidate"]["episode"].as_i64()==Some(abs)
-            ||ordinary["episodes"].as_array().is_some_and(|list|
-               list.len()==1 && list[0].as_i64()==Some(abs)){
-            return Ok(false); // already solved by the current core parser
+        if core_parser_already_solves(&ordinary,abs){
+            return Ok(false); // now solved independently by the core parser
         }
         valid+=1;
     }
@@ -648,6 +654,15 @@ pub fn observe(db:&Connection,metadata:&Connection,title:&str,
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn own_ml_output_must_not_retire_active_rule_bleach_326(){
+        let core=json!({"title":"Bleach","episodes":[]});
+        let ml_overlay=json!({"title":"Bleach","episodes":[326]});
+        assert!(!core_parser_already_solves(&core,326));
+        assert!(core_parser_already_solves(&ml_overlay,326));
+        // It is the CORE snapshot, never the enhanced response, that is
+        // used by validate_examples during startup and periodic refresh.
+    }
     #[test]
     fn bounded_regex_markers_only(){
         assert!(pattern_for("epis").unwrap().contains("epis"));
