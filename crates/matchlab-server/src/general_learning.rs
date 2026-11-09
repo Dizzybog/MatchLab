@@ -696,6 +696,7 @@ pub fn status()->Value{
         }
     }
     json!({"enabled":crate::local_learning::active(),
+        "live_regex_publication_enabled":matchlab_parser::learned_regex_publication_enabled(),
         "source_regex_handlers":catalogue().len(),
         "catalogue_fields":families.len(),
         "catalogue_handler_counts":families,
