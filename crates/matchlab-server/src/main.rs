@@ -1763,7 +1763,9 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         }
         let count=metadata_import::import_animelists(
             std::path::Path::new(&args[2]),std::path::Path::new(&args[3]))?;
-        tracing::info!("Anime-Lists mappings imported: {count}");
+        let overrides=metadata_import::apply_bundled_animelists_overrides(
+            std::path::Path::new(&args[2]))?;
+        tracing::info!("Anime-Lists mappings imported: {count}, bundled overrides: {overrides}");
         return Ok(());
     }
     if args.get(1).is_some_and(|arg|arg=="refresh-metadata") {
