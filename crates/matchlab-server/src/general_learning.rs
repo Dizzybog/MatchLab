@@ -102,42 +102,77 @@ fn identity(ctx:&ParseContext)->Option<String>{
     let normalized=crate::imdb_matcher::clean_title(title);
     (4..=140).contains(&normalized.len()).then(||hash(&normalized))
 }
-fn family_pattern(marker:&str)->Option<String>{
+/// Tokenize a canonical native match into safe structural components.
+/// This covers separator variations *and* letter/number tag boundaries
+/// (e.g. HDR10 -> HDR.10, AV1 -> AV-1). No guessed synonyms are learned.
+fn parts(marker:&str)->Option<Vec<String>>{
     let marker=marker.trim_matches(|c:char|
         matches!(c,' '|'.'|'_'|'-'));
-    if !(3..=48).contains(&marker.len())||!marker.is_ascii(){return None;}
-    let words=marker.split(|c|matches!(c,' '|'.'|'_'|'-'))
-        .filter(|s|!s.is_empty()).collect::<Vec<_>>();
-    if !(2..=6).contains(&words.len())
-        ||words.iter().any(|word|word.len()>24
-            ||!word.bytes().all(|b|b.is_ascii_alphanumeric())){
-        return None;
+    if !(2..=48).contains(&marker.len())||!marker.is_ascii(){return None;}
+    let mut words=Vec::<String>::new();
+    let mut token=String::new();
+    let mut prev:Option<u8>=None;
+    for byte in marker.bytes(){
+        if matches!(byte,b' '|b'.'|b'_'|b'-'){
+            if !token.is_empty(){words.push(std::mem::take(&mut token));}
+            prev=None;continue;
+        }
+        if !byte.is_ascii_alphanumeric(){return None;}
+        let split=prev.is_some_and(|prior|
+            prior.is_ascii_digit()!=byte.is_ascii_digit());
+        if split&&!token.is_empty(){words.push(std::mem::take(&mut token));}
+        token.push(byte as char);
+        prev=Some(byte);
     }
-    // This boundary is shared by every field. The original native handler
-    // still owns the conversion and the title-removal semantics.
+    if !token.is_empty(){words.push(token);}
+    (2..=6).contains(&words.len())
+        .then_some(words).filter(|v|
+            v.iter().all(|w|!w.is_empty()&&w.len()<=24))
+}
+fn family_pattern(marker:&str)->Option<String>{
+    let words=parts(marker)?;
     let body=words.iter().map(|word|regex::escape(word))
         .collect::<Vec<_>>().join("[ ._-]+");
     let pattern=format!("(?i)(?:^|[ ._-])({body})(?:$|[ ._-])");
     (pattern.len()<=256).then_some(pattern)
 }
-fn variant(source:&str,marker:&str)->Option<String>{
-    let marker=marker.trim_matches(|c:char|matches!(c,' '|'.'|'_'|'-'));
-    if source.matches(marker).count()!=1{return None;}
-    let start=source.find(marker)?;
-    let relative=marker.char_indices().find(|(i,c)|
-        matches!(*c,' '|'.'|'_'|'-')&&*i>0
-            &&*i+1<marker.len()
-            &&marker.as_bytes()[*i-1].is_ascii_alphanumeric()
-            &&marker.as_bytes()[*i+1].is_ascii_alphanumeric())?.0;
-    let at=start+relative;
-    // Every mutation is a punctuation-only equivalence. Choose a
-    // deterministic rotation to exercise different separators over time.
-    let replacement=match source.as_bytes()[at]{
-        b'-'=>'.',b'.'=>'_',b'_'=>' ',b' '=>'-',_=>return None
-    };
-    let mut title=source.to_owned();
-    title.replace_range(at..at+1,&replacement.to_string());
-    (title!=source).then_some(title)
+fn variants(source:&str,marker:&str)->Vec<String>{
+    let marker=marker.trim_matches(|c:char|
+        matches!(c,' '|'.'|'_'|'-'));
+    if source.matches(marker).count()!=1{return Vec::new();}
+    let Some(start)=source.find(marker)else{return Vec::new();};
+    let bytes=marker.as_bytes();
+    let mut boundary=None;
+    let mut punct=false;
+    for idx in 1..bytes.len(){
+        let b=bytes[idx];
+        let prev=bytes[idx-1];
+        if matches!(b,b' '|b'.'|b'_'|b'-')
+            &&idx+1<bytes.len()
+            &&prev.is_ascii_alphanumeric()&&bytes[idx+1].is_ascii_alphanumeric(){
+            boundary=Some(idx);punct=true;break;
+        }
+    }
+    if boundary.is_none(){
+        for idx in 1..bytes.len(){
+            if bytes[idx].is_ascii_digit()!=bytes[idx-1].is_ascii_digit()
+                &&bytes[idx].is_ascii_alphanumeric()
+                &&bytes[idx-1].is_ascii_alphanumeric(){
+                boundary=Some(idx);break;
+            }
+        }
+    }
+    let Some(offset)=boundary else{return Vec::new();};
+    let mut candidates=Vec::new();
+    for sep in [b'_',b'-',b'.',b' ']{
+        if punct&&bytes[offset]==sep{continue;}
+        let mut name=source.to_owned();
+        let target=(sep as char).to_string();
+        if punct{name.replace_range(start+offset..start+offset+1,&target);}
+        else{name.insert_str(start+offset,&target);}
+        if name!=source {candidates.push(name);}
+    }
+    candidates
 }
 fn classify(old:&Value,expected:&Value)->Option<&'static str>{
     if old==expected{return None;}
@@ -158,7 +193,8 @@ fn derive(name:&str,ctx:&ParseContext)->Vec<Evidence>{
         if !present(ctx.result.get(field)?){return None;}
         let fragment=match_info.raw_match.as_str();
         let pattern=family_pattern(fragment)?;
-        let altered=variant(name,fragment)?;
+        let altered=variants(name,fragment);
+        if altered.is_empty(){return None;}
         Some((index,field.to_owned(),pattern,altered))
     }).collect::<Vec<_>>();
     matches.sort_by_key(|(index,field,_,_)|(*index,field.clone()));
@@ -171,25 +207,31 @@ fn derive(name:&str,ctx:&ParseContext)->Vec<Evidence>{
         matches.truncate(2);
     }
     let mut out=Vec::new();
-    for (index,field,pattern,mutant) in matches{
-        let Ok(parsed)=matchlab_parser::parse_title_canonical(&mutant,false)else{
-            continue;
-        };
-        let previous=Value::Object(parsed);
-        let Some(expected)=ctx.result.get(&field)else{continue;};
-        let old=&previous[&field];
-        let Some(failure)=classify(old,expected)else{continue;};
+    for (index,field,pattern,mutants) in matches{
+        let Some(reference)=ctx.result.get(&field)else{continue;};
         let Some(template)=source(index)else{continue;};
-        let mode=if failure=="missing"{"add"}else if is_fixed_transform(template){
-            "correct"
-        }else{continue;};
-        let key=hash(&format!("{field}:{index}:{mode}:{pattern}"));
-        out.push(Evidence{
-            key,field,source_index:index,pattern,
-            mode:mode.into(),identity:identity.clone(),
-            source_release:name.into(),variant_release:mutant,
-            expected:Value::Object(ctx.result.clone())
-        });
+        let Ok(compiled)=regex::Regex::new(&pattern)else{continue;};
+        // Limit to three counterfactual parses per source marker and
+        // accept the first whose missing/wrong field the grammar can repair.
+        for mutant in mutants.into_iter().take(3){
+            if !compiled.is_match(&mutant){continue;}
+            let Ok(parsed)=matchlab_parser::parse_title_canonical(&mutant,false)else{
+                continue;
+            };
+            let previous=Value::Object(parsed);
+            let Some(failure)=classify(&previous[&field],reference)else{continue;};
+            let mode=if failure=="missing"{"add"}else if is_fixed_transform(template){
+                "correct"
+            }else{continue;};
+            let key=hash(&format!("{field}:{index}:{mode}:{pattern}"));
+            out.push(Evidence{
+                key,field:field.clone(),source_index:index,pattern:pattern.clone(),
+                mode:mode.into(),identity:identity.clone(),
+                source_release:name.into(),variant_release:mutant,
+                expected:Value::Object(ctx.result.clone())
+            });
+            break;
+        }
     }
     out
 }
@@ -539,16 +581,19 @@ mod tests{
     #[test]
     fn separator_mutation_synthesizes_bounded_generic_regex(){
         let original="Example.Show.2025.1080p.WEB-DL.x264";
-        let alternate=variant(original,"WEB-DL").unwrap();
-        assert_eq!(alternate,"Example.Show.2025.1080p.WEB.DL.x264");
+        let alternate=variants(original,"WEB-DL")[0].clone();
+        assert_eq!(alternate,"Example.Show.2025.1080p.WEB_DL.x264");
         let pattern=family_pattern("WEB-DL").unwrap();
         let re=regex::Regex::new(&pattern).unwrap();
         assert!(re.is_match(&alternate));
         assert!(re.is_match(original));
         assert!(family_pattern("A.B").is_some());
+        assert!(family_pattern("HDR10").is_some());
+        assert!(family_pattern("AV1").is_some());
         assert!(family_pattern("AB").is_none());
         assert!(family_pattern("password=sensitive").is_none());
-        assert!(variant(original,"WEB-DL").is_some());
+        let alpha_numeric=variants("Sample.Name.2025.HDR10.1080p","HDR10");
+        assert_eq!(alpha_numeric[0],"Sample.Name.2025.HDR_10.1080p");
     }
     #[test]
     fn all_field_evidence_and_noops_cannot_auto_publish_without_repairs(){
