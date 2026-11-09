@@ -49,6 +49,7 @@ struct Evidence{
 static ACTIVE:OnceLock<RwLock<Vec<Active>>>=OnceLock::new();
 static REVISION:AtomicU64=AtomicU64::new(0);
 static REJECTED:AtomicU64=AtomicU64::new(0);
+static CURSOR:AtomicU64=AtomicU64::new(0);
 static OBSERVED:AtomicU64=AtomicU64::new(0);
 
 fn active()->&'static RwLock<Vec<Active>>{
@@ -336,9 +337,9 @@ fn candidates(db:&Connection)->Result<Vec<Active>,String>{
         FROM ml_general_examples WHERE source_build=?1
         GROUP BY rule_key,field,source_index,pattern,mode
         HAVING n>=?2 AND titles>=?3
-        ORDER BY n DESC,rule_key LIMIT ?4").map_err(|e|e.to_string())?;
+        ORDER BY n DESC,rule_key").map_err(|e|e.to_string())?;
     let rows=stmt.query_map(params![build(),MIN_FIXES as i64,
-        MIN_IDENTITIES as i64,MAX_CANDIDATES as i64],|row|Ok(Active{
+        MIN_IDENTITIES as i64],|row|Ok(Active{
         key:row.get(0)?,field:row.get(1)?,
         source_index:row.get::<_,i64>(2)? as usize,
         pattern:row.get(3)?,mode:row.get(4)?,
@@ -489,11 +490,18 @@ pub fn handler_corrections()->Vec<HandlerCorrection>{
 pub fn reconcile(db:&Connection)->Result<(),String>{
     init(db)?;
     migrate(db)?;
-    let mut ready=Vec::new();
+    let mut ready=active().read().map(|r|r.clone())
+        .map_err(|e|e.to_string())?;
     let mut rejected=0u64;
-    for rule in candidates(db)? {
-        if ready.len()>=MAX_ACTIVE{break;}
-        let mut candidate=ready.clone();
+    let pool=candidates(db)?;
+    if !pool.is_empty(){
+        let start=CURSOR.fetch_add(MAX_CANDIDATES as u64,Ordering::AcqRel)
+            as usize%pool.len();
+        for offset in 0..pool.len().min(MAX_CANDIDATES){
+            if ready.len()>=MAX_ACTIVE{break;}
+            let rule=pool[(start+offset)%pool.len()].clone();
+            if ready.iter().any(|old|old.key==rule.key){continue;}
+            let mut candidate=ready.clone();
         candidate.push(rule.clone());
         match replay(db,&ready,&candidate,&rule.key)?{
             Some((checked,fixed)) if fixed>=MIN_FIXES=>{
@@ -502,6 +510,7 @@ pub fn reconcile(db:&Connection)->Result<(),String>{
                 ready=candidate;
             }
             _=>rejected+=1
+            }
         }
     }
     REJECTED.store(rejected,Ordering::Relaxed);
@@ -548,6 +557,7 @@ pub fn status()->Value{
         "catalogue_handler_counts":families,
         "catalogue_removing_handlers":removing,
         "candidate_limit":MAX_CANDIDATES,
+        "candidate_selection":"rotating bounded batches; previously verified active rules remain installed",
         "configured_training_example_limit":capacity(),
         "active_rule_limit":MAX_ACTIVE,
         "active_rules_by_field":fields,
