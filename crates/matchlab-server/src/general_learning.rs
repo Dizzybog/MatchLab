@@ -708,8 +708,12 @@ pub fn status()->Value{
         "active_count":handler_additions().len()+handler_corrections().len(),
         "observations":OBSERVED.load(Ordering::Relaxed),
         "replay_rejected":REJECTED.load(Ordering::Relaxed),
-        "scope":"all fields with meaning-preserving independently verified native-handler transformations",
-        "improvement_policy":"ADD >=4 repairs/2 identities; CORRECT >=8 repairs/4 identities; zero full-parser regressions",
+        "observation_scope":"all original parser fields",
+        "automatic_activation_scope":"known public metadata markers; native fixed scalar/boolean ADD only, skipIfAlreadyFound=true",
+        "high_priority_general_corrections_enabled":false,
+        "correction_policy":"nonempty TV coordinates require separate independent syntax validator; other fields review-only",
+        "improvement_policy":"ADD >=4 repairs/2 identities; preserve full shipped regression corpus and all already-correct inputs; reject no-ops",
+        "unseen_input_guarantee":"no mathematical zero-regression guarantee; bounded evidence and fail-closed publication",
         "model":"bounded online field-general regex induction; FTRL supplies advisory scores",
         "revision":format!("{:016x}",revision())})
 }
