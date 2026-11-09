@@ -328,6 +328,48 @@ fn mapped_absolute_range(db:&Connection,imdb:&str,start:i64,end:i64)->Result<Val
         "complete":missing==0}))
 }
 
+/// An EP01-24 pack has explicit endpoints, but no explicit season.
+/// Never guess an IMDb season from absolute anime numbering when its
+/// AniDB crosswalk is incomplete. For an ordinary, unambiguously matched
+/// single-season TV series, imported IMDb episode bounds can independently
+/// confirm that EP01-24 really means IMDb S01E01-E24.
+/// A missing or stale IMDb season snapshot is not permission to invent one.
+fn verified_ordinary_imdb_episode_range(
+    db:&Connection,imdb:&str,release_key:&str,matched_title:&str,
+    start:i64,end:i64,
+)->Result<Option<Value>,String>{
+    if start<=0 || end<start || end-start>=1_000
+        || !valid_sid_coordinate(1,start) || !valid_sid_coordinate(1,end)
+        || imdb_matcher::clean_title(matched_title)!=release_key {
+        return Ok(None);
+    }
+    let max_season:Option<i64>=db.query_row(
+        "SELECT max_season FROM seasons WHERE imdb_id=?1",
+        [imdb],|row|row.get(0)
+    ).optional().map_err(|e|e.to_string())?;
+    if max_season!=Some(1)
+        || !season_episode_end(db,imdb,1)?.is_some_and(|limit|limit>=end) {
+        return Ok(None);
+    }
+    // A linked AniDB identity indicates a potentially absolute episode
+    // numbering system. Preserve the crosswalk's authority, even if its
+    // mapping is incomplete or temporarily missing.
+    let anime_link:i64=db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM anime_series_map WHERE imdb_id=?1)
+            OR EXISTS(SELECT 1 FROM anime_ids
+                WHERE group_id=?1 AND type='anidb')",
+        [imdb],|row|row.get(0)
+    ).map_err(|e|e.to_string())?;
+    if anime_link!=0{return Ok(None);}
+    Ok(Some(json!({
+        "start_season":1,"start_episode":start,
+        "end_season":1,"end_episode":end,
+        "requested_episode_start":start,"requested_episode_end":end,
+        "complete":true,"segments":[],"unmapped_count":0,
+        "source":"verified_imdb_single_season_episode_range"
+    })))
+}
+
 /// Validate each episode in a season-labeled anime batch against the
 /// AniDB/TVDB crosswalk. A partial mapping never produces guessed endpoints.
 fn mapped_season_episode_range(
@@ -1305,10 +1347,34 @@ fn diagnose_with_policy(
                 }
             }else if verified_anime_range_imdb.as_ref()
                 .is_none_or(|verified|verified==&imdb_id) {
-                let range=mapped_absolute_range(&db,&imdb_id,start,end)?;
-                // Preserve the requested absolute endpoints even when some
-                // crosswalk entries are missing, but never invent IMDb or
-                // AniDB episode coordinates.
+                let mut range=mapped_absolute_range(&db,&imdb_id,start,end)?;
+                // Only after the authoritative AniDB mapping has no
+                // endpoints may imported IMDb metadata resolve a clearly
+                // marked EP01-24 range for a single-season non-anime show.
+                // For ambiguous title matches, partial anime mappings or
+                // an explicit multi-season release, fail closed.
+                let single_exact_imdb=imdb.iter()
+                    .filter(|candidate|imdb_matcher::clean_title(
+                        &candidate.matched_title)==key)
+                    .map(|candidate|candidate.imdb_id.as_str())
+                    .collect::<std::collections::BTreeSet<_>>().len()==1;
+                if range["unmapped_count"].as_i64()==Some(end-start+1)
+                    && range["segments"].as_array().is_some_and(Vec::is_empty)
+                    && seasons.is_empty()
+                    && single_exact_imdb
+                    && verified_anidb_range.is_none()
+                    && verified_anime_range_imdb.is_none()
+                    && parsed.get("anime_episode_range_candidate").is_none()
+                    && let Some(fallback)=verified_ordinary_imdb_episode_range(
+                        &db,&imdb_id,&key,
+                        winner["matched_title"].as_str().unwrap_or(""),
+                        start,end)?
+                {
+                    range=fallback;
+                }
+                // Preserve requested endpoints even when the AniDB
+                // crosswalk is incomplete. Never extrapolate a partly
+                // verified anime mapping into a fabricated season.
                 winner["episode_range"]=range.clone();
                 winner["season"]=range["start_season"].clone();
                 winner["episode"]=range["start_episode"].clone();
@@ -1318,6 +1384,8 @@ fn diagnose_with_policy(
                     range["start_season"].as_i64(),range["start_episode"].as_i64()){
                     json!(format!("{imdb_id}:{se}:{ep}"))
                 }else{json!(imdb_id)};
+                // These are the release's explicitly marked range
+                // endpoints, not proof that the work is anime.
                 winner["anime_episode_start"]=json!(start);
                 winner["anime_episode_end"]=json!(end);
                 winner["anime"]=Value::Null;
@@ -2826,6 +2894,94 @@ mod tests {
             std::fs::remove_file(database).unwrap();
             std::fs::remove_dir_all(format!("{}.tantivy",database.display())).unwrap();
         }
+    }
+
+    #[test]
+    fn explicit_ep01_24_release_uses_verified_imdb_first_season_range(){
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-born-with-luck-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
+            region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES('tt32592348','Born with Luck','bornwithluck',2026,
+                'series','',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt32592348',1);
+            INSERT INTO season_episodes VALUES('tt32592348',1,24,24);").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        let title="Born.with.Luck.2026.EP01-24.HD1080P.X264.AAC.Mandarin.CHS.XLYS";
+        let result=diagnose(&path,&MatchRequest{
+            title:title.into(),year:None,series:None}).unwrap();
+        assert_eq!(result.parsed["episode_start"],1,"{:?}",result.parsed);
+        assert_eq!(result.parsed["episode_end"],24,"{:?}",result.parsed);
+        assert_eq!(result.parsed["episode_range_numbering"],"absolute");
+        let winner=result.selected.expect("IMDb series identity must match");
+        assert_eq!(winner["imdb_id"],"tt32592348");
+        assert_eq!(winner["episode_range"]["source"],
+            "verified_imdb_single_season_episode_range");
+        assert_eq!(winner["season"],1);
+        assert_eq!(winner["episode"],1);
+        assert_eq!(winner["season_end"],1);
+        assert_eq!(winner["episode_end"],24);
+        assert_eq!(public_match_response(Some(winner)),json!({
+            "sid_start":"tt32592348:1:1","sid_end":"tt32592348:1:24",
+            "asid_start":null,"asid_end":null
+        }));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
+    fn imdb_episode_fallback_requires_single_season_episode_bounds_and_no_anime_link(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE seasons(imdb_id TEXT PRIMARY KEY,
+                max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO seasons VALUES('tt32592348',1);
+            INSERT INTO season_episodes VALUES('tt32592348',1,24,24);").unwrap();
+        let fallback=|title:&str,start:i64,end:i64|{
+            verified_ordinary_imdb_episode_range(
+                &db,"tt32592348","bornwithluck",title,start,end).unwrap()
+        };
+        assert_eq!(fallback("Born with Luck",1,24).unwrap()["complete"],true);
+        assert!(fallback("Other Show",1,24).is_none());
+        assert!(fallback("Born with Luck",1,25).is_none());
+        assert!(fallback("Born with Luck",0,24).is_none());
+        assert!(fallback("Born with Luck",24,1).is_none());
+        db.execute("UPDATE seasons SET max_season=2",[]).unwrap();
+        assert!(fallback("Born with Luck",1,24).is_none(),
+            "multiple-season absolute numbering must remain unresolved");
+        db.execute("UPDATE seasons SET max_season=1",[]).unwrap();
+        db.execute("INSERT INTO anime_series_map VALUES(
+            'tt32592348','321','654',0)",[]).unwrap();
+        assert!(fallback("Born with Luck",1,24).is_none(),
+            "known anime crosswalk takes precedence even when incomplete");
+        db.execute("DELETE FROM anime_series_map",[]).unwrap();
+        db.execute("INSERT INTO anime_ids VALUES(
+            'tt32592348','anidb','321')",[]).unwrap();
+        assert!(fallback("Born with Luck",1,24).is_none());
+        db.execute("DELETE FROM anime_ids",[]).unwrap();
+        db.execute("DELETE FROM season_episodes",[]).unwrap();
+        assert!(fallback("Born with Luck",1,24).is_none(),
+            "unknown IMDb episode bounds cannot authorize fallback");
     }
 
     #[test]
