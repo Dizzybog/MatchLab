@@ -233,6 +233,46 @@ pub fn reconcile(db:&Connection)->Result<(),String>{
     REVISION.store(u64::from_le_bytes(version),Ordering::Release);
     Ok(())
 }
+/// Recover independently corroborated source-build evidence that predates
+/// the offline archive. Historical regexes are for GitHub review only:
+/// runtime activation continues to require current-build verification.
+pub fn historical_proposals(db:&Connection)->Result<Vec<Value>,String>{
+    init(db)?;
+    let mut stmt=db.prepare("SELECT family,source_build,count(*) AS n,
+        count(DISTINCT identity_hash) AS identities,
+        sum(canonical_aligned) AS confirmations
+        FROM learned_tv_regex_evidence GROUP BY family,source_build
+        HAVING n>=12 AND identities>=4 AND confirmations>=2
+        ORDER BY source_build,family LIMIT 1024")
+        .map_err(|e|e.to_string())?;
+    let rows=stmt.query_map([],|r|Ok((
+        r.get::<_,String>(0)?,r.get::<_,String>(1)?,
+        r.get::<_,i64>(2)?,r.get::<_,i64>(3)?,
+        r.get::<_,i64>(4)?)))
+        .map_err(|e|e.to_string())?;
+    let mut out=Vec::new();
+    for row in rows{
+        let (family,source,count,identities,confirmed)=
+            row.map_err(|e|e.to_string())?;
+        let Some((_,expression))=templates().iter()
+            .find(|(name,_)|*name==family.as_str())else{continue;};
+        let (Some(season),Some(episode))=(
+            capture_pattern(&family,"seasons"),
+            capture_pattern(&family,"episodes"))else{continue;};
+        out.push(json!({
+            "kind":"learned_tv_regex",
+            "fingerprint":hash(&format!("community-tv:{family}")),
+            "family":family,"fields":["seasons","episodes"],
+            "regex":expression.as_str(),
+            "native_patterns":{"seasons":season,"episodes":episode},
+            "evidence_count":count,"distinct_titles":identities,
+            "canonical_confirmations":confirmed,
+            "source_build":source,
+            "verification":"explicit_tv_marker_and_canonical_confirmations",
+        }));
+    }
+    Ok(out)
+}
 /// Independently replayable, privacy-safe proposals for the community.
 /// Only fixed pattern families and aggregate evidence, never filenames.
 pub fn community_proposals(db:&Connection)->Result<Vec<Value>,String>{
