@@ -1830,6 +1830,10 @@ fn public_match_response(selected: Option<Value>) -> Value {
         .or(if has_range {None}else{start_season});
     let end_episode=winner["episode_end"].as_i64()
         .or(if has_range {None}else{start_episode});
+    // An unresolved range with neither season nor episode remains a title
+    // match; do not erase its legitimate bare IMDb identity.
+    let entirely_unscoped=start_season.is_none() && start_episode.is_none()
+        && end_season.is_none() && end_episode.is_none();
     // Retain the valid IMDb identity while discarding impossible episode
     // coordinates. A stale season_episodes snapshot or a bad parse must not
     // make the public /match API rejectable by StremThru.
@@ -1844,14 +1848,14 @@ fn public_match_response(selected: Option<Value>) -> Value {
             json!(format!("{imdb}:{se}:{ep}"))
         }else if let Some(se)=start_season{
             json!(format!("{imdb}:{se}"))
-        }else if has_range{Value::Null}else{json!(imdb)};
+        }else if has_range && !entirely_unscoped{Value::Null}else{json!(imdb)};
     let sid_end=if invalid_coordinates{json!(imdb)}
         else if imdb.is_empty(){Value::Null}
         else if let (Some(se),Some(ep))=(end_season,end_episode){
             json!(format!("{imdb}:{se}:{ep}"))
         }else if let Some(se)=end_season{
             json!(format!("{imdb}:{se}"))
-        }else if has_range{Value::Null}else{json!(imdb)};
+        }else if has_range && !entirely_unscoped{Value::Null}else{json!(imdb)};
     // An explicit second season without a corresponding last episode is
     // *not* a complete multi-season range. Previously the start episode
     // was silently reused as the last episode, or the end degraded to a
