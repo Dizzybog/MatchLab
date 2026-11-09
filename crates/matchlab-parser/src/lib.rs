@@ -3027,10 +3027,30 @@ pub fn install_learned_handler_regex(
     install_learned_handler_regex_with_corrections(patches,additions,&[])
 }
 
+/// Emergency safety switch: keep local training and replay active while
+/// serving the unchanged native parser. Read only when the background
+/// learning worker attempts to publish a generation.
+fn live_regex_allowed(value:Option<&str>)->bool{
+    !value.is_some_and(|v|matches!(v.to_ascii_lowercase().as_str(),
+        "false"|"0"|"off"|"no"))
+}
+pub fn learned_regex_publication_enabled()->bool{
+    live_regex_allowed(std::env::var("MATCHLAB_ML_LIVE_REGEX_ENABLED")
+        .ok().as_deref())
+}
 pub fn install_learned_handler_regex_with_corrections(
     patches:&[HandlerPatch],additions:&[HandlerAddition],
     corrections:&[HandlerCorrection]
 )->Result<(),ParseError>{
+    if !learned_regex_publication_enabled(){
+        // A saved rule can never bypass the operator's explicit disable.
+        let mut lock=LIVE_ENGINE.write().map_err(|_|ParseError::Data(
+            "live handler lock unavailable".into()))?;
+        *lock=None;
+        LIVE_REVISION.store(stable_patch_hash(&[],&[],&[]),
+            std::sync::atomic::Ordering::Release);
+        return Ok(());
+    }
     let additions=effective_handler_additions(patches,additions,corrections);
     let fingerprint=stable_patch_hash(patches,&additions,corrections);
     if LIVE_REVISION.load(std::sync::atomic::Ordering::Acquire)==fingerprint {
@@ -3307,6 +3327,14 @@ mod live_handler_catalog_tests {
         };
         assert!(compile_learned_engine(&[],&[],&[correction]).is_err(),
             "an arbitrary scalar field must not accept a high-priority rewrite");
+    }
+    #[test]
+    fn live_regex_kill_switch_requires_explicit_opt_out(){
+        assert!(live_regex_allowed(None));
+        assert!(live_regex_allowed(Some("true")));
+        for value in ["false","FALSE","off","0","no"]{
+            assert!(!live_regex_allowed(Some(value)));
+        }
     }
     #[test]
     fn unsafe_replacement_is_rejected_before_live_publication(){
