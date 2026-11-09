@@ -3018,6 +3018,33 @@ mod live_handler_catalog_tests {
         }
     }
     #[test]
+    fn learned_regex_addition_uses_native_matchlab_field_transform(){
+        let sources=existing_regex_rules();
+        let original=sources.iter().find(|entry|
+            entry["field"]=="codec" &&entry["transform"]=="value('hevc')"
+        ).expect("trusted hevc parser handler");
+        let index=original["index"].as_u64().unwrap() as usize;
+        let mut doc:Value=serde_json::from_str(HANDLERS_JSON).unwrap();
+        let handlers=doc["handlers"].as_array_mut().unwrap();
+        let mut extra=handlers[index].clone();
+        extra["pattern"]=json!(r"(?i)(?:^|[._ -])FUTUREHEVC(?:$|[._ -])");
+        handlers.push(extra);
+        let engine=ParserEngine::from_json(&doc.to_string()).unwrap();
+        let before=ENGINE.parse("Example.FUTUREHEVC.1080p",false).unwrap();
+        let result=engine.parse("Example.FUTUREHEVC.1080p",false).unwrap();
+        assert!(before.get("codec").is_none());
+        assert_eq!(result["codec"],"hevc");
+        assert_eq!(result["resolution"],"1080p");
+    }
+    #[test]
+    fn learned_tv_guards_reject_overlapping_coordinates_and_packs(){
+        assert!(!learned_tv_ambiguous("Series.S02E07.1080p"));
+        assert!(learned_tv_ambiguous("Series.S02E07.S03E08.1080p"));
+        assert!(learned_tv_ambiguous("Series.S02E07-E08.1080p"));
+        assert!(learned_tv_ambiguous("Series.02x07-08.1080p"));
+        assert!(learned_tv_ambiguous("Series.Season.2.Episode.7-8.1080p"));
+    }
+    #[test]
     fn unsafe_replacement_is_rejected_before_live_publication(){
         let old=handler_patch_revision();
         let rules=existing_regex_rules();
