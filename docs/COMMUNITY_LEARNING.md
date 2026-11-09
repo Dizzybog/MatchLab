@@ -464,6 +464,24 @@ GitHub Actions review job is not part of the MatchLab image or its
 weak-host runtime; core parser/matcher, online model training/inference
 and local regex application all run in Rust.
 
+## Measuring quality and performance
+
+The ML design follows three relevant research results:
+
+- **[FTRL-Proximal (McMahan et al., 2013)](https://research.google/pubs/ad-click-prediction-a-view-from-the-trenches/):** sparse online logistic models can use little memory and learn incrementally. This motivates the bounded native Rust model, **not** an unmeasured claim of better matching.
+- **[Snorkel / weak supervision (Ratner et al., 2017)](https://pmc.ncbi.nlm.nih.gov/articles/PMC5951191/):** several agreeing regex or parser outputs may be correlated, not independent proof. Keep canonical parser observations, literal release markers, independently verified AniDB mappings and model predictions distinguishable.
+- **[Rust RegexSet](https://docs.rs/regex/latest/regex/struct.RegexSet.html):** combining bounded compiled expressions avoids compiling regex on each request; benchmark the actual set size and input lengths. Original PCRE2 handlers have different performance characteristics.
+
+Before raising rule-promotion thresholds or deploying this feature broadly:
+
+1. Create a **human-checked holdout corpus** containing both valid and misleading release names. Separate titles, series, uploaders and time windows between training and evaluation, so near-duplicate releases cannot inflate results.
+2. Report **precision, recall, false-positive count and abstention rate for every field**, not just the FTRL's positive-versus-wrong-field pairwise ranking. Distinguish missing-field fills from overwrites of already parsed values.
+3. Compare `main` against ML disabled/enabled and cache disabled/enabled at multiple request rates. Record **p50/p95/p99 latency, CPU time, RSS, SQLite write rate, storage growth and background-worker cost** on both ARM64 and AMD64 with realistic metadata.
+4. Exercise simultaneous rule activation, rule rollback, metadata refresh and cache reads. Any obsolete result must be recomputed, rather than returned from a prior rule generation.
+5. Treat the current sample-count thresholds as **safety heuristics**, not statistical confidence intervals. Do not authorize an ambiguous rule simply because the model score increased. Require independent negative examples and reviewer approval for community regex changes.
+
+Do not adopt a larger model, a GPU runtime, or a new lock-free registry purely on theoretical grounds. Change the architecture only when these measurements identify a bottleneck or an actual accuracy gain.
+
 ## Troubleshooting and security boundaries
 
 - `MATCHLAB_ML_ENABLED=false`: no local training worker or
