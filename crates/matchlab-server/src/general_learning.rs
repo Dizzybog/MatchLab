@@ -125,10 +125,10 @@ fn variant(source:&str,marker:&str)->Option<String>{
     if source.matches(marker).count()!=1{return None;}
     let start=source.find(marker)?;
     let relative=marker.char_indices().find(|(i,c)|
-        matches!(c,' '|'.'|'_'|'-')&&*i>0
+        matches!(*c,' '|'.'|'_'|'-')&&*i>0
             &&*i+1<marker.len()
-            &&marker.as_bytes()[i-1].is_ascii_alphanumeric()
-            &&marker.as_bytes()[i+1].is_ascii_alphanumeric())?.0;
+            &&marker.as_bytes()[*i-1].is_ascii_alphanumeric()
+            &&marker.as_bytes()[*i+1].is_ascii_alphanumeric())?.0;
     let at=start+relative;
     // Every mutation is a punctuation-only equivalence. Choose a
     // deterministic rotation to exercise different separators over time.
@@ -335,7 +335,9 @@ fn replay(db:&Connection,all:&[Active])->Result<Option<(usize,usize)>,String>{
         keys.insert(rule.key.clone());
         examples.extend(read_examples(db,&rule.key)?);
     }
-    if examples.len()+NEGATIVES.len()>MAX_TESTS{return Ok(None);}
+    if examples.len().saturating_mul(2)+NEGATIVES.len()>MAX_TESTS{
+        return Ok(None);
+    }
     let mut titles=Vec::new();
     for example in &examples{
         titles.push(example.source_release.clone());
