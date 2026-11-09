@@ -1,6 +1,6 @@
 //! Persistent catalog of learned regex proposals, independent of GitHub opt-in.
 //! Source-build history is evidence for review, never permission to execute.
-use rusqlite::{params,Connection,OptionalExtension};
+use rusqlite::{params,Connection};
 use serde_json::{json,Value};
 use std::collections::{BTreeMap,BTreeSet};
 
@@ -121,7 +121,7 @@ pub fn snapshot(db:&Connection,meta:Option<&Connection>)->Result<usize,String>{
 /// else is preserved as REVIEW-ONLY, even across parser and metadata upgrades.
 pub fn for_sharing(db:&Connection,meta:Option<&Connection>)->Result<Vec<Value>,String>{
     let live=current(db,meta).into_iter()
-        .filter_map(|v|v["fingerprint"].as_str().map(|fp|(fp.to_owned(),v)))
+        .filter_map(|v|{ let fp=v["fingerprint"].as_str()?.to_owned(); Some((fp,v)) })
         .collect::<BTreeMap<_,_>>();
     let archive=archived_rules(db)?;
     let mut shared=BTreeSet::new();
