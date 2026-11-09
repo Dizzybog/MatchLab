@@ -131,6 +131,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
     if revalidate||crate::field_learning::revision()==0{
         crate::field_learning::reconcile(local)?;
         crate::tv_learning::reconcile(local)?;
+        crate::corrective_learning::reconcile(local)?;
     }
     let history_db=Connection::open_with_flags(history,OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e|e.to_string())?;
@@ -181,6 +182,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
     let tx=local.transaction().map_err(|e|e.to_string())?;
     let mut evidence=crate::field_learning::count_evidence(&tx)?;
     let mut tv_evidence=crate::tv_learning::count(&tx)?;
+    let mut corrective_evidence=crate::corrective_learning::count(&tx)?;
     let mut discovery=crate::candidate_discovery::budget(&tx)?;
     let mut samples=count(&tx,"samples")?;
     let mut patterns=count(&tx,"patterns")?;
@@ -204,6 +206,10 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
         let flags=crate::field_audit::audit(
             &title,&base,&details["selected"]);
         let clean=crate::field_audit::canonical_for_training(&base,&flags);
+        // Unlike the advisory ranker, corrective evidence must compare
+        // independent raw syntax with the untouched canonical parser.
+        crate::corrective_learning::observe(&tx,&title,&base,
+            &mut corrective_evidence)?;
         model.observe_canonical_fields(&tx,&title,&clean)?;
         for (field,signal) in crate::tv_learning::observe(
             &tx,&title,&clean,&mut tv_evidence)? {
@@ -268,6 +274,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
     }
     crate::field_learning::reconcile(local)?;
     crate::tv_learning::reconcile(local)?;
+    crate::corrective_learning::reconcile(local)?;
     Ok(processed)
 }
 /// Acknowledgment is the model's committed cursor; deleting durable
