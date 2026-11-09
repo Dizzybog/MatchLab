@@ -182,9 +182,15 @@ No finite corpus can guarantee that a newly installed ADD will never
 match an unseen ordinary title by accident. We therefore claim
 **zero observed regressions against the validated corpus**, NOT
 mathematical zero regression against every possible future release.
-Operators requiring strict zero change can disable learning with
-`MATCHLAB_ML_ENABLED=false`. The ordinary canonical parser and matcher
-remain functional without ML.
+Operators requiring strict zero change can set
+`MATCHLAB_ML_LIVE_REGEX_ENABLED=false`. This preserves background
+training and evidence while ensuring the native live parser does not
+install learned regex generations. Alternatively
+`MATCHLAB_ML_ENABLED=false` disables local ML altogether. Both
+controls require a container restart when changing Docker environment
+variables. The ordinary canonical parser and matcher remain functional
+without learned regexes. The separate verified AniDB episode-hint
+feature is outside this native-regex publication switch.
 
 ## Remaining work before declaring universal correctness
 
