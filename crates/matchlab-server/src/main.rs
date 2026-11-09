@@ -3938,7 +3938,7 @@ mod tests {
         assert!(unsafe_absolute["season"].is_null());
         assert!(unsafe_absolute["episode"].is_null());
         assert_eq!(unsafe_absolute["coordinate_fallback_blocked"],
-            "unknown_absolute_episode_season");
+            "episode_exceeds_known_bounds_or_unresolved_anime_crosswalk");
         let mut anidb_only=json!({"imdb_id":null,"category":"series",
             "season":null,"episode":null,"anime":{"asid":"42:4"},
             "anidb_independent_verified":true});
