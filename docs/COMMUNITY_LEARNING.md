@@ -66,25 +66,24 @@ These counts are conservative **engineering thresholds**, not statistically cali
 
 For source handlers, MatchLab knows the existing regex catalogue. The learner may submit the **original regex and proposed replacement regex**, with handler identity and supporting evidence. Live changes are limited to safe, verified families; riskier suggestions go to the GitHub review queue.
 
-## Langsiktig mål: alle parserfelt
+## Long-term goal: every parser field
 
-Alle feltene fra MatchLabs opprinnelige parserkatalog skal kunne delta i
-læring og være kandidater for ADD, REDUCE, EXPAND og CORRECT. En aktiv
-regex-regel krever en **uavhengig referanse** for det aktuelle feltet og
-replay av den komplette parseren, ikke bare en høy ML-score.
+Every field exposed by MatchLab's original parser catalogue must participate
+in learning and be eligible for ADD, REDUCE, EXPAND and CORRECT proposals.
+Activation still requires **independent reference evidence** for the field
+and replay of the entire parser, not a high ML score alone.
 
-Lokale, uavhengig bekreftbare metadata som oppløsning, codec, lydformat,
-HDR, lydkanaler, navngitte språk, undertekstmarkører og filendelser kan
-gjenbruke eksisterende native Rust-handlere til nye mønstre.
-For tittel, år, release-gruppe, network og andre mer kontekstavhengige
-felt må en uavhengig kontroll – for eksempel verifisert tittelmetadata
-eller et eksplisitt fasitdatasett – være tilgjengelig før en erstatning
-kan aktiveres. Hvis en sikker fasit ikke kan etableres, blir et forslag
-liggende i review, ikke installert ut fra modellens selvtillit alene.
+Unambiguous technical markers (resolution, codec, audio, HDR, channels,
+named languages, subtitle markers and extensions) can use verified native
+Rust handler transformations when a field-specific reference is available.
+Context-dependent fields such as title, year, release group, network and
+edition must obtain an independent reference (for example independently
+verified metadata or a curated labelled corpus) before replacements are
+allowed to become active.
 
-Dette er en **teknisk sikkerhetsgrense, ikke en permanent produktgrense**.
-Systemet skal ikke være låst til episode/sesong, men det skal heller ikke
-forveksle ukontrollerte parserresultater med bevis på riktig parsing.
+This is a **verification requirement, not a permanent product restriction**.
+The objective is not a TV-only learner, nor a model that amplifies its own
+mistakes by treating the parser's past output as ground truth.
 
 ## Four-error corrective regex learning (experimental)
 
