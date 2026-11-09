@@ -246,20 +246,25 @@ fn key(namespace:&str,title:&str,year:Option<i32>,series:Option<bool>)->String{
 /// Never open SQLite on a live /parse or /match request. Cold entries are
 /// recomputed once, then stored in the hot tier and a background disk queue.
 /// The cache is only acceleration; stale generations are never reused.
+fn read_in_generation(title:&str,year:Option<i32>,series:Option<bool>,
+    ns:&str)->Option<Value>{
+    if !enabled(){return None;}
+    // Only the bounded hot tier is read here; persistent cache hydration
+    // and all database access belong to the independent background actor.
+    let _=CACHE_WRITER.get_or_init(cache_worker);
+    let value=hot_lookup(&key(ns,title,year,series),ns,now());
+    if value.is_some(){CACHE_HITS.fetch_add(1,Ordering::Relaxed);}
+    else{CACHE_MISSES.fetch_add(1,Ordering::Relaxed);}
+    value
+}
 fn read(kind:&str,title:&str,year:Option<i32>,series:Option<bool>,
     metadata:Option<&Path>)->Option<Value>{
-    if !enabled(){return None;}
-    // Start a single worker lazily; it hydrates recent durable cache entries
-    // without blocking the caller or competing with the ML training writer.
-    let _=CACHE_WRITER.get_or_init(cache_worker);
     let ns=namespace(kind,metadata)?;
-    let value=hot_lookup(&key(&ns,title,year,series),&ns,now());
-    let valid=if namespace(kind,metadata).as_deref()==Some(ns.as_str()){
-        value
-    }else{None};
-    if valid.is_some(){CACHE_HITS.fetch_add(1,Ordering::Relaxed);}
-    else{CACHE_MISSES.fetch_add(1,Ordering::Relaxed);}
-    valid
+    let result=read_in_generation(title,year,series,&ns);
+    // The default parser cache still checks its own generation. Strict
+    // matching passes an already captured generation and validates it at
+    // the end of the match, to avoid repeated metadata filesystem calls.
+    (namespace(kind,metadata).as_deref()==Some(ns.as_str())).then_some(result).flatten()
 }
 fn hydrate_hot_cache(db:&Connection)->rusqlite::Result<()>{
     let time=now();
@@ -396,10 +401,9 @@ fn cache_worker()->Option<SyncSender<CacheEvent>>{
         None
     }else{Some(tx)}
 }
-fn write(kind:&str,title:&str,year:Option<i32>,series:Option<bool>,
-    metadata:Option<&Path>,value:&Value){
+fn write_in_generation(kind:&str,title:&str,year:Option<i32>,
+    series:Option<bool>,ns:String,value:&Value){
     if !enabled() || !CACHE_WRITES_ALLOWED.load(Ordering::Acquire){return;}
-    let Some(ns)=namespace(kind,metadata)else{return;};
     let Ok(raw)=serde_json::to_vec(value)else{return;};
     if raw.len()>MAX_ENTRY_BYTES{return;}
     let time=now();
@@ -437,15 +441,19 @@ pub fn get_parser(title:&str)->Option<Value>{
     read("parse",title,None,None,None)
 }
 pub fn put_parser(title:&str,value:&Value){
-    write("parse",title,None,None,None,value);
+    if let Some(ns)=namespace("parse",None){
+        write_in_generation("parse",title,None,None,ns,value);
+    }
 }
+/// The caller must verify the same generation again before returning a
+/// cached match. diagnose_logged always performs that metadata/rules check.
 pub fn get_match(title:&str,year:Option<i32>,series:Option<bool>,
-    metadata:&Path)->Option<Value>{
-    read("match",title,year,series,Some(metadata))
+    generation:&str)->Option<Value>{
+    read_in_generation(title,year,series,generation)
 }
 pub fn put_match(title:&str,year:Option<i32>,series:Option<bool>,
-    metadata:&Path,value:&Value){
-    write("match",title,year,series,Some(metadata),value);
+    generation:&str,value:&Value){
+    write_in_generation("match",title,year,series,generation.to_owned(),value);
 }
 fn initialize(db:&Connection)->rusqlite::Result<()>{
     db.execute_batch(
