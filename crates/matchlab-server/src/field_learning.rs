@@ -8,7 +8,7 @@
 //!
 //! Ordinary matching never opens SQLite: the worker atomically hot-swaps an
 //! immutable in-memory ruleset. The whole module is disabled by default.
-use regex::{Regex,RegexBuilder,RegexSet,RegexSetBuilder};
+use regex::{Regex,RegexBuilder};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -42,11 +42,10 @@ struct FieldRule {
 
 struct ActiveRules{
     rules:Vec<FieldRule>,
-    matcher:Option<RegexSet>,
 }
 fn registry()->&'static RwLock<ActiveRules>{
     ACTIVE.get_or_init(||RwLock::new(ActiveRules{
-        rules:Vec::new(),matcher:None
+        rules:Vec::new()
     }))
 }
 pub fn revision() -> u64 {
@@ -598,13 +597,8 @@ fn install(mut incoming: Vec<FieldRule>) {
     let bytes = Sha256::digest(fingerprint.as_bytes());
     let mut id = [0u8;8];
     id.copy_from_slice(&bytes[..8]);
-    // One automaton prunes up to 96 rules in one pass. The original
-    // compiled regex still checks boundaries, field-specific conflicts
-    // and positive/negative probes for each candidate.
-    let matcher=RegexSetBuilder::new(incoming.iter().map(|rule|rule.regex.as_str()))
-        .size_limit(1024*1024).build().ok();
     if let Ok(mut guard)=registry().write(){
-        *guard=ActiveRules{rules:incoming,matcher};
+        *guard=ActiveRules{rules:incoming};
         REVISION.store(u64::from_le_bytes(id),Ordering::Release);
     }
 }
@@ -668,6 +662,49 @@ fn source_handler_patches(active:&[FieldRule])
     patches
 }
 
+/// Learned regex is interpreted using an existing MatchLab handler.
+/// Its field, transform and options are not written by the model.
+fn source_handler_additions(active:&[FieldRule])
+    ->Vec<matchlab_parser::HandlerAddition>{
+    let catalog=matchlab_parser::existing_regex_rules();
+    let mut out=Vec::new();
+    for rule in active {
+        // Context-sensitive tags need additional native parser guards before
+        // automation. They can still be shared as human-review proposals.
+        if !matches!(rule.field.as_str(),
+            "resolution"|"codec"|"quality"|"bit_depth"|"subbed"|"dubbed"){
+            continue;
+        }
+        let transform=match &rule.value {
+            Value::String(value)=>format!("value('{value}')"),
+            Value::Bool(true)=>"boolean".to_owned(),
+            _=>continue,
+        };
+        let template=catalog.iter().find(|row|
+            row["field"]==rule.field
+            &&row["transform"].as_str()==Some(transform.as_str())
+            &&row["index"].as_u64().is_some()
+        );
+        let Some(index)=template.and_then(|row|row["index"].as_u64())
+            .map(|i|i as usize)else{continue;};
+        out.push(matchlab_parser::HandlerAddition{
+            source_index:index,pattern:rule.regex.as_str().to_owned()
+        });
+        if out.len()>=96{break;}
+    }
+    out
+}
+
+/// Publish only regex into MatchLab's parser. No ML field postprocessor.
+pub fn publish_parser_rules()->Result<(),String>{
+    let fields=registry().read().map_err(|e|e.to_string())?.rules.clone();
+    let patches=source_handler_patches(&fields);
+    let mut additions=source_handler_additions(&fields);
+    additions.extend(crate::tv_learning::handler_additions());
+    matchlab_parser::install_learned_handler_regex(&patches,&additions)
+        .map_err(|e|format!("learned parser regex rejected: {e}"))
+}
+
 pub fn reconcile(db: &Connection) -> Result<(), String> {
     init(db)?;
     let current = build();
@@ -698,71 +735,12 @@ pub fn reconcile(db: &Connection) -> Result<(), String> {
     }
     tx.commit().map_err(|e| e.to_string())?;
     let patches=source_handler_patches(&active);
-    // Compile a complete parser engine in the learning worker and swap it
-    // atomically. On validation failure no existing handler is modified.
-    matchlab_parser::install_handler_patches(&patches)
-        .map_err(|e|format!("live source handler patch rejected: {e}"))?;
+    let mut additions=source_handler_additions(&active);
+    additions.extend(crate::tv_learning::handler_additions());
+    matchlab_parser::install_learned_handler_regex(&patches,&additions)
+        .map_err(|e|format!("learned parser regex rejected: {e}"))?;
     install(active);
     Ok(())
-}
-fn propose_with_prefilter(title:&str,parsed:&mut Value,active:&[FieldRule],
-    matcher:Option<&RegexSet>) {
-    if active.is_empty() || !safe_title(title) { return; }
-    let Some(map) = parsed.as_object_mut() else { return; };
-    // Never let an unverified field rule change title, production year,
-    // IMDb/AniDB identity or season/episode coordinates.
-    let mut candidates: BTreeMap<&str, Vec<&FieldRule>> = BTreeMap::new();
-    let matched=matcher.map(|set|set.matches(leaf(title)));
-    for (index,rule) in active.iter().enumerate(){
-        if matched.as_ref().is_some_and(|found|!found.matched(index)){continue;}
-        if !rule.regex.is_match(leaf(title)){continue;}
-        if !independent_context_with_re(title,&rule.field,&rule.signal,&rule.regex){
-            continue;
-        }
-        candidates.entry(&rule.field).or_default().push(rule);
-    }
-    let mut changes = Vec::new();
-    for (field, rules) in candidates {
-        if rules.len() != 1 { continue; }
-        let rule = rules[0];
-        let current = map.get(field).cloned().unwrap_or(Value::Null);
-        if current == rule.value { continue; }
-        let empty = match &current {
-            Value::Null => true,
-            Value::String(s) => s.is_empty(),
-            Value::Array(a) => a.is_empty(),
-            Value::Bool(false) if matches!(field,"subbed"|"dubbed") => true,
-            _ => false,
-        };
-        // Existing values need more independent support than missing values.
-        if !empty && !may_override(rule) {
-            continue;
-        }
-        // A release may carry multiple conflicting specifications (e.g.
-        // WEB-DL plus WEBRip). The existing parse has explicit evidence
-        // too; never let population frequency decide which is correct.
-        if !empty && current.as_str().is_some_and(|old| {
-            let token = normalize(old);
-            !token.is_empty() && normalize(leaf(title)).contains(&token)
-        }) {
-            continue;
-        }
-        // A multilingual release may legitimately have many languages;
-        // never overwrite an already populated language list.
-        if field=="languages" && !empty { continue; }
-        if !validated_value(field,&rule.signal,&rule.value) { continue; }
-        changes.push(json!({"field":field,"marker":rule.signal,
-            "previous":current,"value":rule.value,"evidence":rule.examples,
-            "independent_titles":rule.titles}));
-        map.insert(field.to_owned(),rule.value.clone());
-    }
-    if !changes.is_empty() {
-        map.insert("learned_field_overrides".into(),Value::Array(changes));
-    }
-}
-#[cfg(test)]
-fn propose_from(title:&str,parsed:&mut Value,active:&[FieldRule]){
-    propose_with_prefilter(title,parsed,active,None);
 }
 /// Privacy-preserving operator observability. Never return filenames,
 /// release history, hashes, canonical labels from private observations or IDs.
@@ -788,12 +766,7 @@ pub fn status() -> Value {
         "active_rule_count":0,"active_rules_by_field":{},
         "error":"rule_registry_unavailable"})
 }
-pub fn apply(title: &str, parsed: &mut Value) {
-    if !crate::local_learning::active() { return; }
-    if let Ok(guard) = registry().read() {
-        propose_with_prefilter(title,parsed,&guard.rules,guard.matcher.as_ref());
-    }
-}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -811,64 +784,31 @@ mod tests {
         assert!(!pattern_for("audio","aac").unwrap().is_match("PaaCific"));
     }
     #[test]
-    fn learns_missing_and_overrides_wrong_technical_fields_only_with_more_evidence() {
-        let weak=rule("codec","x265",json!("hevc"),8,4);
-        let strong=rule("quality","web_dl",json!("WEB-DL"),16,6);
-        let mut parsed=json!({"title":"Film","quality":"WEBRip","codec":null,
-            "seasons":[3],"episodes":[5],"year":2024});
-        propose_from("Film.x265.WEB-DL",&mut parsed,&[weak,strong]);
-        assert_eq!(parsed["codec"],"hevc");
-        assert_eq!(parsed["quality"],"WEB-DL");
-        assert_eq!(parsed["seasons"],json!([3]));
-        assert_eq!(parsed["episodes"],json!([5]));
-        assert_eq!(parsed["year"],2024);
-        assert_eq!(parsed["learned_field_overrides"].as_array().unwrap().len(),2);
+    fn learned_additions_are_regex_only_and_reuse_original_handler_semantics() {
+        let mut codec=rule("codec","x265",json!("hevc"),8,4);
+        let weak=source_handler_additions(&[codec.clone()]);
+        assert_eq!(weak.len(),1);
+        let catalog=matchlab_parser::existing_regex_rules();
+        let template=&catalog[weak[0].source_index];
+        assert_eq!(template["field"],"codec");
+        assert_eq!(template["transform"],"value('hevc')");
+        assert!(weak[0].pattern.contains("x265"));
+        codec.examples=20;
+        codec.titles=8;
+        let strong=source_handler_additions(&[codec]);
+        assert_eq!(strong.len(),1);
+        assert_eq!(strong[0].pattern,weak[0].pattern);
     }
     #[test]
-    fn existing_explicit_release_marker_defeats_a_conflicting_learned_rule() {
-        let mut parsed=json!({"quality":"WEBRip","codec":"avc"});
-        propose_from("Film.WEBRip.WEB-DL.x264",&mut parsed,&[
-            rule("quality","web_dl",json!("WEB-DL"),64,20),
-            rule("codec","x265",json!("hevc"),64,20)
-        ]);
-        assert_eq!(parsed["quality"],"WEBRip");
-        assert_eq!(parsed["codec"],"avc");
-    }
-    #[test]
-    fn prefiltered_set_preserves_the_same_rule_decisions(){
-        let active=vec![
-            rule("resolution","2160p",json!("2160p"),20,8),
-            rule("codec","x265",json!("hevc"),20,8),
-            rule("audio","aac",json!("AAC"),20,8)
-        ];
-        let compiled=RegexSetBuilder::new(active.iter().map(|r|r.regex.as_str()))
-            .build().unwrap();
-        for name in ["Film.2160p.WEB-DL.x265","Film.720p.WEBRip.AAC",
-            "Film.1080p.2160p.x265","Film.WEB-DL"]{
-            let mut baseline=json!({"title":"Film"});
-            let mut optimized=baseline.clone();
-            propose_from(name,&mut baseline,&active);
-            propose_with_prefilter(name,&mut optimized,&active,Some(&compiled));
-            assert_eq!(baseline,optimized,"prefilter changed {name}");
+    fn context_sensitive_tags_stay_review_only() {
+        for (field,signal,value) in [
+            ("languages","german",json!(["de"])),
+            ("channels","5.1",json!("5.1")),
+            ("audio","aac",json!("AAC")),
+        ] {
+            assert!(source_handler_additions(&[
+                rule(field,signal,value,40,10)]).is_empty());
         }
-    }
-    #[test]
-    fn even_a_single_active_rule_must_reject_competing_raw_markers() {
-        let mut parsed=json!({"title":"Film"});
-        propose_from("Film.1080p.2160p",&mut parsed,&[
-            rule("resolution","1080p",json!("1080p"),20,8)
-        ]);
-        assert!(parsed.get("resolution").is_none());
-        assert!(!consistent("languages","norwegian",&json!(["no","sv"])));
-    }
-    #[test]
-    fn competing_signals_fail_closed() {
-        let mut parsed=json!({"title":"Film","resolution":"720p"});
-        propose_from("Film.1080p.2160p",&mut parsed,&[
-            rule("resolution","1080p",json!("1080p"),20,8),
-            rule("resolution","2160p",json!("2160p"),20,8)
-        ]);
-        assert_eq!(parsed["resolution"],"720p");
     }
     #[test]
     fn conservative_language_and_number_validation() {
@@ -876,11 +816,9 @@ mod tests {
         assert!(!consistent("languages","norwegian",&json!(["en"])));
         assert!(consistent("bit_depth","10bit",&json!(10)));
         assert!(!validated_value("title","bleach",&json!("Other")));
-        let mut parsed=json!({"languages":["fr"]});
-        propose_from("Film.German.1080p",&mut parsed,&[
+        assert!(source_handler_additions(&[
             rule("languages","german",json!(["de"]),32,10)
-        ]);
-        assert_eq!(parsed["languages"],json!(["fr"]));
+        ]).is_empty());
     }
     #[test]
     fn learned_codec_values_follow_the_original_parser_api() {
@@ -981,14 +919,6 @@ mod tests {
         assert!(may_override(&strong));
     }
     #[test]
-    fn a_default_false_dubbed_flag_is_an_absence_not_a_confirmed_negative() {
-        let mut parsed=json!({"title":"Film","dubbed":false});
-        propose_from("Film.1080p.DUBBED",&mut parsed,&[
-            rule("dubbed","dubbed",json!(true),8,4)
-        ]);
-        assert_eq!(parsed["dubbed"],true);
-    }
-    #[test]
     fn gap_only_rule_fills_missing_but_cannot_override_parser() {
         let db=Connection::open_in_memory().unwrap();
         init(&db).unwrap();
@@ -1002,12 +932,9 @@ mod tests {
         let rules=select_rules(&db).unwrap();
         assert_eq!(rules.len(),1);
         assert_eq!(rules[0].canonical_examples,0);
-        let mut missing=json!({"title":"Film"});
-        propose_from("Film.2160p",&mut missing,&rules);
-        assert_eq!(missing["resolution"],"2160p");
-        let mut populated=json!({"title":"Film","resolution":"720p"});
-        propose_from("Film.2160p",&mut populated,&rules);
-        assert_eq!(populated["resolution"],"720p");
+        // A gap rule may add parser regex, but does not change any JSON
+        // field itself; existing bundled parser rules retain priority.
+        assert_eq!(source_handler_additions(&rules).len(),1);
         for n in 0..2 {
             db.execute("INSERT INTO learned_field_evidence(
                 field,signal,example_hash,identity_hash,canonical,source_build,first_seen)
@@ -1017,8 +944,7 @@ mod tests {
         }
         let rules=select_rules(&db).unwrap();
         assert_eq!(rules[0].canonical_examples,2);
-        propose_from("Film.2160p",&mut populated,&rules);
-        assert_eq!(populated["resolution"],"2160p");
+        assert!(may_override(&rules[0]));
     }
     #[test]
     fn conflicting_gap_and_canonical_evidence_quarantines_rule() {
