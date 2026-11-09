@@ -649,10 +649,10 @@ impl ParserEngine {
         matched
             .entry(handler.name.clone())
             .or_insert_with(|| MatchInfo {
-                // Source marker is retained for the background
-                // all-field rule learner. Only the local SQLite worker
-                // receives it; this never changes parser response JSON.
-                raw_match: raw_match.to_owned(),
+                raw_match: if matches!(handler.name.as_str(),"episodes"|"group")
+                    ||CAPTURE_ALL_MATCHES.with(Cell::get){
+                    raw_match.to_owned()
+                }else{String::new()},
                 match_index: m0.start(),
                 source_index: Some(handler.source_index),
             });
@@ -2837,6 +2837,9 @@ thread_local! {
     static CANONICAL_ONLY: Cell<bool> = const { Cell::new(false) };
     // Background-only candidate replay; never published to public requests.
     static REPLAY_ENGINE: RefCell<Option<Arc<ParserEngine>>> = const { RefCell::new(None) };
+    // Retain non-episode raw matches only in the offline learning worker;
+    // ordinary API parsing keeps its original low-allocation behavior.
+    static CAPTURE_ALL_MATCHES: Cell<bool> = const { Cell::new(false) };
 }
 static LIVE_ENGINE: Lazy<RwLock<Option<Arc<ParserEngine>>>> =
     Lazy::new(|| RwLock::new(None));
@@ -2919,10 +2922,14 @@ pub fn parse_title_canonical_context(
     name:&str,translate_languages:bool
 )->Result<ParseContext,ParseError>{
     CANONICAL_ONLY.with(|flag|{
-        let previous=flag.replace(true);
-        let result=engine_parse_context(name,translate_languages);
-        flag.set(previous);
-        result
+        CAPTURE_ALL_MATCHES.with(|capture|{
+            let old_flag=flag.replace(true);
+            let old_capture=capture.replace(true);
+            let result=engine_parse_context(name,translate_languages);
+            capture.set(old_capture);
+            flag.set(old_flag);
+            result
+        })
     })
 }
 /// A learned pattern reuses a trusted parser handler's field,
