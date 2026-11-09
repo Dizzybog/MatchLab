@@ -3204,6 +3204,52 @@ pub fn replay_handler_rules(
     let _restore=RestoreReplay;
     titles.iter().map(|title|parse_title(title,false)).collect()
 }
+/// Universal fail-closed pre-publication guard for *every* learned
+/// regex publisher (technical, TV, generic, source replacement). Unlike an
+/// isolated pattern check, this compares complete public parser outputs
+/// against the currently installed parser on known-correct representative
+/// releases, including titles, years, multi-episode ranges and metadata.
+pub fn verify_live_regression_corpus(
+    patches:&[HandlerPatch],additions:&[HandlerAddition],
+    corrections:&[HandlerCorrection]
+)->Result<(),ParseError>{
+    const PROTECTED:&[&str]=&[
+        "Dune.2021.1080p.BluRay.x265",
+        "Dune.1984.1080p.BluRay",
+        "Breaking.Bad.S01E01.1080p.BluRay",
+        "The.Voice.US.S03E02.1080p.WEB-DL",
+        "The.Office.US.S02E03.1080p.WEB-DL",
+        "The.Simpsons.S10E05.1080p.WEB-DL",
+        "Bobs.Burgers.S10E05.720p.WEB.x264",
+        "90.Day.Fiance.S12E15.1080p.WEB",
+        "Frieren.Beyond.Journeys.End.S01E02.1080p",
+        "Bleach.Episode.1067.1080p",
+        "One.Piece.Episode.1067.1080p",
+        "Food.Wars.The.Third.Plate.S03E11.1080p",
+        "The.Danish.Girl.2015.1080p",
+        "The.German.Connection.2005.1080p",
+        "The100.2014.S01E01.1080p",
+        "Example.S01E01.S02E02.1080p",
+        "Example.S01E01-E04.1080p",
+        "Example.2025.1080p.DDP5.1.HDR",
+        "Film.1917.2019.2160p.BluRay",
+        "The.Ultimate.Edition.2025.1080p",
+        "Movie.2005.1080p.WEB-DL",
+        "S01E01.1999.Movie.Title.1080p",
+        "Example.Movie.2025.Ultimate Edition.1080p.WEB-DL",
+    ];
+    let titles=PROTECTED.iter().map(|s|(*s).to_owned())
+        .collect::<Vec<_>>();
+    let baseline=titles.iter().map(|s|parse_title(s,false))
+        .collect::<Result<Vec<_>,_>>()?;
+    let proposed=replay_handler_rules(patches,additions,corrections,&titles)?;
+    if proposed!=baseline{
+        return Err(ParseError::Data(
+            "learned regex changed a protected, previously correct parser result"
+                .into()));
+    }
+    Ok(())
+}
 /// Compatibility helper for isolated parser-regression tests.
 pub fn replay_corrective_regex(
     corrections:&[HandlerCorrection],titles:&[String]
@@ -3327,6 +3373,19 @@ mod live_handler_catalog_tests {
         };
         assert!(compile_learned_engine(&[],&[],&[correction]).is_err(),
             "an arbitrary scalar field must not accept a high-priority rewrite");
+    }
+    #[test]
+    fn universal_regression_guard_rejects_cross_field_false_positives(){
+        let source=existing_regex_rules().into_iter().find(|r|
+            r["field"]=="codec"&&r["transform"]=="value('hevc')"
+            &&r["options"]["skipIfAlreadyFound"]==true).unwrap();
+        let addition=HandlerAddition{
+            source_index:source["index"].as_u64().unwrap() as usize,
+            pattern:r"(?i)(?:^|[._ -])(S01E01)(?:$|[._ -])".into()
+        };
+        assert!(verify_live_regression_corpus(&[],&[addition],&[]).is_err(),
+            "learning must not convert a legitimate episode token into codec metadata");
+        assert!(verify_live_regression_corpus(&[],&[],&[]).is_ok());
     }
     #[test]
     fn live_regex_kill_switch_requires_explicit_opt_out(){
