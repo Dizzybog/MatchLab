@@ -67,7 +67,11 @@ those timings alone do not establish an overall speedup. Validate full-catalog
 import times, peak memory, and p95/p99 match latency on production-scale data
 before quantifying performance gains.
 
-The historical curated Anime-Lists overrides are preserved as `data/anime-list.override.xml` for reference. **They are not automatically applied by the current Rust refresh pipeline.** The default import consumes the supplied Anime-Lists XML only; integrate these overrides explicitly before relying on their special-case mappings.
+## Bundled Anime-Lists mapping corrections
+
+The production Rust binary includes `data/anime-list.override.xml`. Every full metadata refresh imports the regular Anime-Lists feed first, then **replaces** `episode_map` rows for each AniDB ID listed in the bundled exceptions. It also updates any existing `anime_series_map` TVDB family references while preserving IMDb links. The ordinary episode crosswalk uses the resulting combined SQLite tables; there is no runtime override lookup or extra network request.
+
+The override import is part of the staged database build and happens before Tantivy index generation and publication. If it fails, the current working database is preserved. The staging snapshot records an `animelists_override` entry in `metadata_state`. The same embedded corrections are used for custom `MATCHLAB_METADATA_URLS` sources. Updating the list requires a new image and a successful full metadata refresh; restarting alone does not rewrite an existing database.
 
 ## Verification
 
