@@ -439,7 +439,7 @@ fn build_batch(db:&Connection,time:u64)->Result<Option<(String,Value,Vec<String>
     let mut reports=Vec::new();
     let mut rules=Vec::new();
     for item in items{
-        if matches!(item["kind"].as_str(),Some("verified_regex_proposal" | "learned_field_regex" | "learned_tv_regex" | "learned_source_regex_patch" | "learned_field_regex_review")){
+        if matches!(item["kind"].as_str(),Some("verified_regex_proposal" | "learned_field_regex" | "learned_tv_regex" | "learned_source_regex_patch" | "learned_field_regex_review" | "historical_regex_review")){
             rules.push(item);
         }else{
             reports.push(item);
@@ -585,6 +585,23 @@ mod tests{
             "http://example.com","token=secret","magnet:?xt=test","A\nB"]{
             assert!(safe_leaf(bad).is_none(),"{bad}");
         }
+    }
+    #[test]
+    #[test]
+    fn historical_backfill_is_a_rule_not_an_anomaly_report(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE pending(
+            fingerprint TEXT PRIMARY KEY,payload TEXT NOT NULL,
+            created_at INTEGER NOT NULL);").unwrap();
+        let fingerprint="a".repeat(64);
+        let row=json!({"kind":"historical_regex_review",
+            "fingerprint":fingerprint,"review_only":true});
+        db.execute("INSERT INTO pending VALUES(?1,?2,1)",
+            params![fingerprint,row.to_string()]).unwrap();
+        let (_,batch,keys)=build_batch(&db,now()).unwrap().unwrap();
+        assert_eq!(keys.len(),1);
+        assert_eq!(batch["rules"].as_array().unwrap().len(),1);
+        assert!(batch["reports"].as_array().unwrap().is_empty());
     }
     #[test]
     fn batch_is_bounded_and_same_report_is_deduplicated_across_windows(){
