@@ -102,9 +102,11 @@ environment:
   MATCHLAB_ML_MAX_STORAGE_GB: "10"
   MATCHLAB_ML_CACHE_ENABLED: "true"
   MATCHLAB_ML_CACHE_MAX_ENTRIES: "200000"
+  MATCHLAB_ML_QUEUE_MAX_ITEMS: "20000"
+  MATCHLAB_ML_TRAINING_BATCH_SIZE: "64"
 ```
 
-Only `MATCHLAB_ML_ENABLED` is required; the other settings are optional limits. The training limit counts retained observations, **not RAM usage**. The local SQLite cache speeds up repeated requests, but after parser, rule or metadata changes, old answers are ignored and the next request is parsed and matched again. Learning evidence is never treated as a completed match.
+Only `MATCHLAB_ML_ENABLED` is required; the other settings are optional limits. The training limit counts retained observations, **not RAM usage**. A separate bounded SQLite ML job queue stores observations after matching, and the trainer processes 64 jobs at a time with retry and backoff. Cache hits use a small in-memory tier: HTTP parsing/matching never opens the cache SQLite file. Cache writes run in their own background worker and separate database, avoiding lock contention with training. After parser, rule or metadata changes, old cached answers are ignored and requests are parsed/matched again. Learning evidence is never treated as a completed match.
 
 Check `GET /api/ml/status` to see local model and rule statistics. No separate AI server, GPU or online AI service is required.
 
@@ -185,7 +187,11 @@ See [Machine Learning and Community Learning](docs/COMMUNITY_LEARNING.md) for su
 | `MATCHLAB_MAX_CONCURRENT_MATCHES` | `4` | Maximum concurrent matches (example uses 2) |
 | `MATCHLAB_ML_ENABLED` | `false` | Enable local background learning |
 | `MATCHLAB_ML_TRAINING_MAX_EXAMPLES` | `12000` | Maximum retained training observations |
-| `MATCHLAB_ML_MAX_STORAGE_GB` | `1` | Best-effort local learning and cache disk budget |
+| `MATCHLAB_ML_MAX_STORAGE_GB` | `1` | Local learning evidence budget (separate from cache) |
+| `MATCHLAB_ML_QUEUE_MAX_ITEMS` | `20000` | Bounded durable ML observation queue; oldest observations are dropped only if overwhelmed |
+| `MATCHLAB_ML_TRAINING_BATCH_SIZE` | `64` | Training jobs consumed per transaction (8–128) |
+| `MATCHLAB_ML_CACHE_STATE_FILE` | `/data/ml-result-cache.sqlite3` | Separate SQLite cache, never the local training database |
+| `MATCHLAB_ML_CACHE_MAX_STORAGE_GB` | `1` | Independent cache disk budget |
 | `MATCHLAB_ML_CACHE_ENABLED` | `true` when ML is on | Cache repeat requests |
 | `MATCHLAB_ML_CACHE_MAX_ENTRIES` | `100000` | Maximum persistent cache entries |
 | `MATCHLAB_COMMUNITY_LEARNING_ENABLED` | `false` | Enable optional GitHub reporting |
