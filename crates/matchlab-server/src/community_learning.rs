@@ -386,27 +386,50 @@ fn daily_thread(client:&reqwest::blocking::Client,time:u64)->Result<Option<u64>,
 
 fn build_batch(db:&Connection,time:u64)->Result<Option<(String,Value,Vec<String>)>,String>{
     let mut stmt=db.prepare(
-        "SELECT fingerprint,payload FROM pending ORDER BY fingerprint LIMIT ?1"
+        "SELECT fingerprint,payload FROM pending ORDER BY created_at,fingerprint LIMIT 64"
     ).map_err(|e|e.to_string())?;
-    let rows=stmt.query_map([MAX_BATCH as i64],|r|
+    let rows=stmt.query_map([],|r|
         Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))
         .map_err(|e|e.to_string())?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e|e.to_string())?;
-    if rows.is_empty(){return Ok(None);}
-    let fingerprints=rows.iter().map(|(k,_)|k.clone()).collect::<Vec<_>>();
-    let items=rows.iter().map(|(_,v)|
-        serde_json::from_str::<Value>(v).map_err(|e|e.to_string()))
-        .collect::<Result<Vec<_>,_>>()?;
+    let mut fingerprints=Vec::new();
     let mut reports=Vec::new();
     let mut rules=Vec::new();
-    for item in items{
-        if matches!(item["kind"].as_str(),Some("verified_regex_proposal" | "learned_field_regex" | "learned_tv_regex" | "learned_source_regex_patch" | "learned_field_regex_review")){
-            rules.push(item);
-        }else{
-            reports.push(item);
+    // Enforce byte limits on the actual serialized GitHub comment. Large
+    // verified anime proposals must never block an entire archived backlog.
+    for (key,raw) in rows{
+        let item:Value=serde_json::from_str(&raw).map_err(|e|e.to_string())?;
+        let is_rule=matches!(item["kind"].as_str(),
+            Some("verified_regex_proposal"|"learned_field_regex"
+            |"learned_tv_regex"|"learned_source_regex_patch"
+            |"learned_field_regex_review"));
+        if is_rule&&rules.len()>=MAX_RULES_PER_BATCH{continue;}
+        if fingerprints.len()>=MAX_BATCH{break;}
+        let mut candidate_reports=reports.clone();
+        let mut candidate_rules=rules.clone();
+        if is_rule{candidate_rules.push(item)}else{candidate_reports.push(item)}
+        let mut keys=fingerprints.clone();
+        keys.push(key.clone());
+        keys.sort();
+        let candidate=json!({"protocol":PROTOCOL,"learning_epoch":EPOCH,
+            "build_sha":build_sha(),"source":"matchlab-community-batch",
+            "batch_id":hex_digest(&format!("{}\n{}\n{}",
+                build_sha(),EPOCH,keys.join("\n"))),
+            "created_unix":time,"verified":false,
+            "reports":candidate_reports,"rules":candidate_rules});
+        if candidate.to_string().len()+MARKER.len()+2>MAX_BODY{
+            if fingerprints.is_empty(){
+                return Err("single archived sharing proposal exceeds GitHub comment limit".into());
+            }
+            break;
         }
+        fingerprints.push(key);
+        reports=candidate_reports;
+        rules=candidate_rules;
     }
+    if fingerprints.is_empty(){return Ok(None);}
+    fingerprints.sort();
     let batch_id=hex_digest(&format!("{}\n{}\n{}",
         build_sha(),EPOCH,fingerprints.join("\n")));
     let batch=json!({"protocol":PROTOCOL,"learning_epoch":EPOCH,
@@ -415,8 +438,6 @@ fn build_batch(db:&Connection,time:u64)->Result<Option<(String,Value,Vec<String>
         "reports":reports,"rules":rules});
     Ok(Some((batch_id,batch,fingerprints)))
 }
-// Commit report digests BEFORE a network write. On a timeout/crash we may
-// lose one batch, but never spam GitHub by retrying an ambiguous POST.
 fn mark_attempted(
     db:&mut Connection,time:u64,batch_id:&str,fingerprints:&[String],
 )->Result<(),String>{
