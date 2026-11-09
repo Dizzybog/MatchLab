@@ -392,8 +392,8 @@ fn request_json(response:reqwest::blocking::Response)->Result<Value,String>{
 /// POST an Issue comment: that permission is confirmed by the first HTTP 201.
 fn classify_token_http(status:reqwest::StatusCode,repository:bool)->TokenAuth{
     if status==reqwest::StatusCode::UNAUTHORIZED {TokenAuth::Rejected}
-    else if repository && matches!(status,
-        reqwest::StatusCode::FORBIDDEN|reqwest::StatusCode::NOT_FOUND){
+    else if repository && (status==reqwest::StatusCode::FORBIDDEN
+        ||status==reqwest::StatusCode::NOT_FOUND){
         TokenAuth::RepositoryUnavailable
     }else{TokenAuth::NetworkUnavailable}
 }
@@ -653,7 +653,7 @@ pub fn start(history:PathBuf,metadata:PathBuf){
         let mut previous=TokenAuth::NotChecked;
         loop{
             // Perform a credential check on startup, before sharing attempts,
-            // and re-check periodically for revoked/rotated token or outages.
+            // and re-check periodically for expired/revoked tokens or outages.
             // Never echo token, request headers or GitHub response payloads.
             let key=token.clone();
             let check=tokio::task::spawn_blocking(move||{
