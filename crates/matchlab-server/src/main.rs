@@ -455,19 +455,40 @@ fn reconcile_series_coordinates(
         && season.is_some() && episode.is_some();
     if !verified_crosswalk {
         if season.is_none(){season=parsed_season;}
-        if episode.is_none(){episode=parsed_episode;}
-        // EP04 with no season is a first-season episode unless the
-        // available IMDb metadata refutes that coordinate. For anime,
-        // unbounded absolute episodes >150 are unsafe to relabel.
-        if season.is_none() {
-            if let Some(ep)=episode {
-                let imdb=winner["imdb_id"].as_str().unwrap_or_default();
+        let imdb=winner["imdb_id"].as_str().unwrap_or_default();
+        let has_anime=winner["anime_ids"].as_object()
+            .is_some_and(|ids|!ids.is_empty());
+        // Do not restore an episode which known IMDb bounds reject. When
+        // IMDb episode coverage is missing but a bounded anime season
+        // crosswalk exists, its failure also blocks guessed IMDb episodes.
+        // An anime with NO season crosswalk still retains explicit S17E01.
+        if episode.is_none() {
+            if let Some(ep)=parsed_episode {
+                let target_season=season.unwrap_or(1);
+                let imdb_max=season_episode_end(db,imdb,target_season)?;
+                let unverified_anime=if has_anime && imdb_max.is_none() {
+                    db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM anime_series_map l
+                           JOIN episode_map m ON m.anidb_id=l.anidb_id
+                           WHERE l.imdb_id=?1 AND m.tvdb_season=?2)",
+                        rusqlite::params![imdb,target_season],
+                        |row|row.get::<_,i64>(0)
+                    ).map_err(|e|e.to_string())? != 0
+                }else{false};
+                if imdb_max.is_some_and(|end|ep>end)||unverified_anime {
+                    winner["coordinate_fallback_blocked"]=json!(
+                        "episode_exceeds_known_bounds_or_unresolved_anime_crosswalk");
+                }else{
+                    episode=Some(ep);
+                }
+            }
+        }
+        if season.is_none(){
+            if let Some(ep)=episode{
                 let max=season_episode_end(db,imdb,1)?;
-                let known_anime=winner["anime_ids"].as_object()
-                    .is_some_and(|ids|!ids.is_empty());
                 if max.is_some_and(|end|ep>end)
-                    ||(known_anime && max.is_none() && ep>150){
-                    episode=None; // episode without a season cannot become a SID
+                    ||(has_anime && max.is_none() && ep>150){
+                    episode=None;
                     winner["coordinate_fallback_blocked"]=json!("unknown_absolute_episode_season");
                 }else{
                     season=Some(1);
@@ -1799,11 +1820,8 @@ fn public_match_response(selected: Option<Value>) -> Value {
     // Keep a bare IMDb ID (not a fictitious :S:0 episode) when an
     // incomplete interval has neither episode endpoint. Season remains
     // visible in /debug/match/strict and the independent /parse output.
-    if has_range && winner["episode"].as_i64().is_none()
-        && winner["episode_end"].as_i64().is_none(){
-        return json!({"sid_start":imdb,"sid_end":imdb,
-            "asid_start":null,"asid_end":null});
-    }
+    let unscoped_range=has_range && winner["episode"].as_i64().is_none()
+        && winner["episode_end"].as_i64().is_none();
     let start_season=winner["season"].as_i64();
     let start_episode=winner["episode"].as_i64();
     let end_season=winner["season_end"].as_i64()
@@ -1821,12 +1839,12 @@ fn public_match_response(selected: Option<Value>) -> Value {
         else if imdb.is_empty(){Value::Null}
         else if let (Some(se),Some(ep))=(start_season,start_episode){
             json!(format!("{imdb}:{se}:{ep}"))
-        }else if has_range{Value::Null}else{json!(imdb)};
+        }else if has_range && !unscoped_range{Value::Null}else{json!(imdb)};
     let sid_end=if invalid_coordinates{json!(imdb)}
         else if imdb.is_empty(){Value::Null}
         else if let (Some(se),Some(ep))=(end_season,end_episode){
             json!(format!("{imdb}:{se}:{ep}"))
-        }else if has_range{Value::Null}else{json!(imdb)};
+        }else if has_range && !unscoped_range{Value::Null}else{json!(imdb)};
     // An explicit second season without a corresponding last episode is
     // *not* a complete multi-season range. Previously the start episode
     // was silently reused as the last episode, or the end degraded to a
@@ -3439,6 +3457,8 @@ mod tests {
         // safety guard still withholds an unverified S01E999 and ASID.
         let unmatched=unavailable.selected.expect("retain unique anime identity");
         assert_eq!(unmatched["imdb_id"],"tt4644488");
+        assert_eq!(unmatched["season"],1,
+            "an explicit season survives when its episode is invalid");
         assert!(unmatched["episode"].is_null(),
             "do not publish an unverified anime episode");
         assert_eq!(public_match_response(Some(unmatched)),json!({
@@ -4247,8 +4267,10 @@ mod tests {
             title:"Animationseries1.S01E99.1080p.WEB-DL".into(),
             year:None,series:None}).unwrap().selected.unwrap();
         assert_eq!(unknown["imdb_id"],"tt0000201");
-        assert!(unknown["season"].is_null());
-        assert!(unknown["episode"].is_null());
+        assert_eq!(unknown["season"],1,
+            "explicit S01 survives the missing IMDb episode table");
+        assert!(unknown["episode"].is_null(),
+            "an unverified episode outside bounded AniDB evidence is withheld");
         assert_eq!(unknown["sid"],"tt0000201");
         assert!(unknown["anime"].is_null());
         std::fs::remove_file(&path).unwrap();
