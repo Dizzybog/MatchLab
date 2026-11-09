@@ -172,6 +172,43 @@ fn select(db:&Connection)->Result<Vec<Active>,String>{
     }).map_err(|e|e.to_string())?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())
 }
+// Each promoted pattern is only a regex. The source handler supplies
+// MatchLab's existing array(integer) transform and target field.
+fn capture_pattern(family:&str,field:&str)->Option<&'static str>{
+    match (family,field){
+        ("sxe","seasons")=>Some(r"(?i)(?:^|[._ -])s([0-9]{1,3})[._ -]*e[0-9]{1,5}(?:$|[._ -])"),
+        ("sxe","episodes")=>Some(r"(?i)(?:^|[._ -])s[0-9]{1,3}[._ -]*e([0-9]{1,5})(?:$|[._ -])"),
+        ("x","seasons")=>Some(r"(?i)(?:^|[._ -])([0-9]{1,3})x[0-9]{1,5}(?:$|[._ -])"),
+        ("x","episodes")=>Some(r"(?i)(?:^|[._ -])[0-9]{1,3}x([0-9]{1,5})(?:$|[._ -])"),
+        ("words","seasons")=>Some(r"(?i)(?:^|[._ -])season[._ -]+([0-9]{1,3})[._ -]+episode[._ -]+[0-9]{1,5}(?:$|[._ -])"),
+        ("words","episodes")=>Some(r"(?i)(?:^|[._ -])season[._ -]+[0-9]{1,3}[._ -]+episode[._ -]+([0-9]{1,5})(?:$|[._ -])"),
+        _=>None,
+    }
+}
+fn additions_for(active:&[Active])->Vec<matchlab_parser::HandlerAddition>{
+    let catalog=matchlab_parser::existing_regex_rules();
+    let mut out=Vec::new();
+    for rule in active {
+        for field in ["seasons","episodes"]{
+            let Some(pattern)=capture_pattern(&rule.family,field)else{continue;};
+            let template=catalog.iter().find(|entry|
+                entry["field"]==field
+                &&entry["transform"]=="array(integer)"
+                &&entry["options"]["skipIfAlreadyFound"]==true
+                &&entry["index"].as_u64().is_some()
+            );
+            if let Some(index)=template.and_then(|r|r["index"].as_u64()){
+                out.push(matchlab_parser::HandlerAddition{
+                    source_index:index as usize,pattern:pattern.to_owned()
+                });
+            }
+        }
+    }
+    out
+}
+pub fn handler_additions()->Vec<matchlab_parser::HandlerAddition>{
+    registry().read().ok().map(|r|additions_for(&r)).unwrap_or_default()
+}
 pub fn reconcile(db:&Connection)->Result<(),String>{
     let updated=select(db)?;
     if registry().read().ok().is_some_and(|g|*g==updated)
@@ -182,36 +219,13 @@ pub fn reconcile(db:&Connection)->Result<(),String>{
     let digest=Sha256::digest(identity.as_bytes());
     let mut version=[0u8;8];
     version.copy_from_slice(&digest[..8]);
+    // Test and compile all new regex atomically before publishing status.
+    // The normal parser, not the learner, will interpret season/episode.
+    crate::field_learning::publish_parser_rules_with_tv(additions_for(&updated))?;
     let mut lock=registry().write().map_err(|e|e.to_string())?;
     *lock=updated;
     REVISION.store(u64::from_le_bytes(version),Ordering::Release);
     Ok(())
-}
-fn propose(name:&str,parsed:&mut Value,active:&[Active]){
-    let Some((family,coords))=detected(name)else{return;};
-    let Some(rule)=active.iter().find(|r|r.family==family)else{return;};
-    let Some(map)=parsed.as_object_mut()else{return;};
-    let mut changes=Vec::new();
-    for (field,n) in [("seasons",coords.season),("episodes",coords.episode)]{
-        let current=map.get(field).cloned().unwrap_or(Value::Null);
-        if current==json!([n]){continue;}
-        let missing=current.is_null()
-            ||current.as_array().is_some_and(|v|v.is_empty());
-        if !missing&&!rule.may_override{continue;}
-        // Never overwrite a season pack, episode range, or another
-        // explicit, already recognized multi-coordinate release.
-        if current.as_array().is_some_and(|v|v.len()>1){continue;}
-        changes.push(json!({"field":field,"old":current,"new":[n],
-            "rule_family":family}));
-        map.insert(field.into(),json!([n]));
-    }
-    if !changes.is_empty(){
-        map.insert("learned_tv_regex_changes".into(),Value::Array(changes));
-    }
-}
-pub fn apply(name:&str,parsed:&mut Value){
-    if !crate::local_learning::active(){return;}
-    if let Ok(guard)=registry().read(){propose(name,parsed,&guard);}
 }
 /// Independently replayable, privacy-safe proposals for the community.
 /// Only fixed pattern families and aggregate evidence, never filenames.
@@ -249,7 +263,7 @@ pub fn community_proposals(db:&Connection)->Result<Vec<Value>,String>{
 pub fn status()->Value{
     let rules=registry().read().ok().map(|r|r.clone()).unwrap_or_default();
     json!({"active_rule_count":rules.len(),
-        "replacement_capable":rules.iter().filter(|r|r.may_override).count(),
+        "high_evidence_families":rules.iter().filter(|r|r.may_override).count(),
         "families":rules.iter().map(|r|r.family.clone()).collect::<Vec<_>>(),
         "scope":"ordinary TV SxxExx, NxM and Season N Episode M"})
 }
@@ -269,26 +283,16 @@ mod tests{
         assert!(detected("Show.2024.WEB-DL").is_none());
     }
     #[test]
-    fn low_evidence_fills_only_missing_coordinates(){
-        let rule=Active{family:"sxe".into(),may_override:false};
-        let mut parsed=json!({"title":"Show","seasons":[],"episodes":[]});
-        propose("Show.S02E07.1080p",&mut parsed,&[rule.clone()]);
-        assert_eq!(parsed["seasons"],json!([2]));
-        assert_eq!(parsed["episodes"],json!([7]));
-        let mut existing=json!({"title":"Show","seasons":[3],"episodes":[8]});
-        propose("Show.S02E07.1080p",&mut existing,&[rule]);
-        assert_eq!(existing["seasons"],json!([3]));
-        assert_eq!(existing["episodes"],json!([8]));
-    }
-    #[test]
-    fn stronger_evidence_can_correct_but_not_destroy_packs(){
-        let rule=Active{family:"sxe".into(),may_override:true};
-        let mut wrong=json!({"title":"Show","seasons":[1],"episodes":[7]});
-        propose("Show.S02E07.1080p",&mut wrong,&[rule.clone()]);
-        assert_eq!(wrong["seasons"],json!([2]));
-        let mut pack=json!({"title":"Show","seasons":[1,2],"episodes":[7,8]});
-        propose("Show.S02E07.1080p",&mut pack,&[rule]);
-        assert_eq!(pack["seasons"],json!([1,2]));
+    fn tv_learner_only_publishes_patterns_not_values(){
+        let active=Active{family:"sxe".into(),may_override:false};
+        let rules=additions_for(&[active]);
+        assert_eq!(rules.len(),2);
+        let source=matchlab_parser::existing_regex_rules();
+        let fields=rules.iter().map(|r|
+            source[r.source_index]["field"].as_str().unwrap()).collect::<Vec<_>>();
+        assert_eq!(fields,vec!["seasons","episodes"]);
+        let compiled=rules.iter().map(|r|Regex::new(&r.pattern).unwrap()).collect::<Vec<_>>();
+        assert!(compiled.iter().all(|r|r.is_match("Show.S02E07.1080p")));
     }
     #[test]
     fn promotion_needs_diverse_titles_and_canonical_replay(){
