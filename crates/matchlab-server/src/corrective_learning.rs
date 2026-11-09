@@ -356,6 +356,66 @@ fn review_candidate(db:&Connection,family:&str,
     }
     Ok((metrics.repaired>=MIN_ERRORS as usize).then_some(metrics))
 }
+/// Independent candidate families may be valid in isolation but interact
+/// when loaded together. Replay their UNION against the full existing parser
+/// over balanced positive, error and negative controls before publishing.
+fn validate_combination(db:&Connection,rules:&[ActiveRule])->Result<bool,String>{
+    if rules.is_empty(){return Ok(true);}
+    let mut names=BTreeSet::new();
+    let active=rules.iter().map(|r|r.family.as_str()).collect::<BTreeSet<_>>();
+    for rule in rules{
+        for (condition,limit) in [("error_class!='aligned'",16),
+                                  ("error_class='aligned'",8)]{
+            // SQL fragments are fixed internal literals, not user input.
+            let sql=format!("SELECT release_name FROM ml_corrective_observations
+                WHERE source_build=?1 AND family=?2 AND {condition}
+                ORDER BY observed_at DESC,example_hash LIMIT {limit}");
+            let mut stmt=db.prepare(&sql).map_err(|e|e.to_string())?;
+            let rows=stmt.query_map(params![build(),rule.family],
+                |row|row.get::<_,String>(0)).map_err(|e|e.to_string())?;
+            for row in rows{names.insert(row.map_err(|e|e.to_string())?);}
+        }
+    }
+    for negative in ["The100.2014.S01E01.1080p",
+        "District.9.2009.1080p","Example.S01E01.S02E02.1080p",
+        "Example.S01E01-E03.1080p","Episode.300.Explained.2025.1080p",
+        "The.Danish.Girl.2015.1080p","Movie.1917.2019.1080p",
+        "Example.2005.2160p.WEB-DL"]{
+        names.insert(negative.to_owned());
+    }
+    if names.len()>128{return Ok(false);}
+    let names=names.into_iter().collect::<Vec<_>>();
+    let corrections=rules.iter().flat_map(|r|r.corrections.iter().cloned())
+        .collect::<Vec<_>>();
+    let (patches,additions)=crate::field_learning::current_source_rules(
+        crate::tv_learning::handler_additions())?;
+    let old=match matchlab_parser::replay_handler_rules(
+        &patches,&additions,&[],&names){
+        Ok(value)=>value,Err(_)=>return Ok(false)
+    };
+    let new=match matchlab_parser::replay_handler_rules(
+        &patches,&additions,&corrections,&names){
+        Ok(value)=>value,Err(_)=>return Ok(false)
+    };
+    let mut repairs=BTreeMap::<String,usize>::new();
+    for ((title,old),new) in names.iter().zip(old).zip(new){
+        let mut prior=old.clone();
+        let mut candidate=new.clone();
+        for field in ["seasons","episodes"]{
+            prior.remove(field);candidate.remove(field);
+        }
+        if prior!=candidate{return Ok(false);}
+        if let Some(reference)=expected(title)
+            &&active.contains(reference.family){
+            let was=category(&reference,&Value::Object(old.clone()))=="aligned";
+            let now=category(&reference,&Value::Object(new.clone()))=="aligned";
+            if !now || (was&&old!=new) || (!was&&old==new){return Ok(false);}
+            if !was{*repairs.entry(reference.family.to_owned()).or_default()+=1;}
+        }else if old!=new{return Ok(false);}
+    }
+    Ok(rules.iter().all(|r|repairs.get(&r.family).copied().unwrap_or(0)
+        >=MIN_ERRORS as usize))
+}
 pub fn handler_corrections()->Vec<matchlab_parser::HandlerCorrection>{
     registry().read().map(|rules|rules.iter()
         .flat_map(|r|r.corrections.iter().cloned()).collect())
@@ -373,7 +433,11 @@ pub fn reconcile(db:&Connection)->Result<(),String>{
     for (family,_evidence) in candidates {
         let Some(corrections)=candidate(&family)else{continue;};
         if let Some(metrics)=review_candidate(db,&family,&corrections)?{
-            ready.push(ActiveRule{family,corrections,metrics});
+            let mut attempt=ready.clone();
+            attempt.push(ActiveRule{family,corrections,metrics});
+            if validate_combination(db,&attempt)?{
+                ready=attempt;
+            }else{pending+=1;}
         }else{pending+=1;}
     }
     REVIEWED.store(pending,Ordering::Relaxed);
