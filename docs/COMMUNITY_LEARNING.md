@@ -1,509 +1,144 @@
-# MatchLab Machine Learning and Community Learning
+# Machine Learning and Community Learning
 
-**Help MatchLab learn how torrents are named, without surrendering the
-speed, privacy or deterministic checks of the Rust matcher.** This design
-has two separately controlled capabilities: offline local learning and
-optional GitHub community contributions. Both default to **off**.
+MatchLab parses torrent release names and matches movies, TV shows and anime against local metadata. Its **optional Machine Learning (ML)** feature helps the parser recognize more release-name patterns.
 
-No remote AI service, external training API, model download, account or
-GitHub connection is needed for the local learning engine. The official
-AMD64 and ARM64 Docker image contains the Rust parser and a compact,
-trainable **FTRL-Proximal** model implemented in Rust. There is no ONNX
-Runtime or runtime model download. Normal parsing/matching still starts
-without any learning worker when the feature is disabled.
+**The learner changes regex rules, never parsed field values.** For example, if a new release format contains an episode marker that the parser misses, the learner may propose a regex for that marker. Once the rule is sufficiently verified, MatchLab itself uses the regex to extract fields. The existing IMDb/AniDB matcher is still responsible for identifying and validating the result.
 
-## Goals, scope and what the ML model really does
+## Start here
 
-MatchLab compares release filename parsing with IMDb/AniDB/TVDB matches.
-The local worker observes field-level disagreements and groups recurring
-patterns by release markers, media fields and matching outcomes. Examples:
+MatchLab has three independent parts:
 
-| Release | Parser/matcher difference | Learning action |
+1. **Parser:** Fast Rust code that extracts release fields using its own regex handlers and transformations.
+2. **Matcher:** Tantivy title search, IMDb/AniDB metadata and verified episode mappings.
+3. **Optional learner:** A background Rust FTRL-Proximal model and rule validators. They observe new release patterns and produce regex additions or replacement proposals.
+
+The model is **not called during normal HTTP matching**. The parser runs compiled regex; the matcher still decides whether a title or episode is valid. Local ML needs no GPU, Python service, Ollama, ONNX Runtime or other AI server.
+
+There are two opt-in switches:
+
+| Mode | Setting | What it does |
 | --- | --- | --- |
-| `Bleach_300` | An absolute episode is recognized, but its IMDb/AniDB coordinates are missing | Look up exact mapping; do not invent IDs |
-| `Bleach S16` | Season parsing succeeds, but AniDB range remains incomplete | Investigate crosswalk, not parser regex |
-| `Series.EPIS.300` | Existing regex misses or misreads an alternative episode marker | Learn a bounded `EPIS` regex if many independent crosswalks confirm it |
-| `Film.2024` | Torrent year differs from IMDb original release year | Record a possible mismatch; NOT proof of incorrect matching |
-| Other codecs, languages, resolution, quality | Technical tag absent or conflicts with the core parser | Induce a field-specific literal-marker regex from concordant parser results **or separately checked missing-field markers**; quarantine ambiguity |
-
-Three **local live learning rule families** are implemented in Rust
-using bounded, linear-time regex templates and background-only validation:
-
-- **Absolute anime episodes:** an unusual marker can supersede a wrong
-  built-in episode/season interpretation, but the current AniDB/TVDB
-  crosswalk must uniquely confirm the exact IMDb identity and episode.
-- **Technical release fields:** raw filename tags can generate restricted
-  field-specific literal regex for `resolution`, `codec`, `quality`,
-  `audio`, `bit_depth`, `hdr`, `channels`, `languages`, `subbed`,
-  `dubbed`, and `extension`. At least 8 concordant examples from
-  4 distinct title identities permit filling an empty field; changing an
-  existing value requires at least 16 examples from 6 title identities,
-  **including at least two canonical-parser confirmations**,
-  with no contradictory evidence and no explicit competing tag.
-  Labels have two distinct provenances: (1) **original canonical Rust
-  parser** results, and (2) a restricted mapping from explicitly recognizable
-  raw technical tags **only when that parser misses the field**. The second
-  stream learns to fill omissions; it cannot independently authorize
-  overwriting existing values. Already learned outputs never train
-  themselves.
-- **Ordinary TV coordinates:** explicit `S02E07`, `2x07` and
-  `Season 2 Episode 7` patterns can fill missing season/episode
-  fields after diverse observations, with stricter evidence needed
-  before correcting an existing single coordinate.
-
-Regexes are synthesized from a small literal-marker grammar, never from
-user/model-supplied regex bytes. Technical labels are marker-grounded and
-conservatively validated; they are not independently proven IMDb metadata.
-Production year, unmarked season/episode, title and IMDb/AniDB identity
-remain *review-only* unless their own independent source-of-truth checks
-can establish a correction. With explicit GitHub sharing enabled, the
-exporter now includes every **evidence-backed regex addition or proposed
-change to an existing source handler**, as well as crosswalk-verified anime
-episode rules. Other proposals are held for human review; their presence
-in a GitHub PR never makes them executable on another installation.
-
-The lightweight **native Rust FTRL-Proximal model now genuinely learns**
-online: it updates bounded, sparse logistic weights from verified technical
-release markers, explicit TV coordinates and canonical parser evidence. Each accepted field example
-also creates a counterfactual label for a *different field*. This is a
-valid **field-classification negative**, not evidence that a media title
-or a candidate IMDb identity is wrong. The model's score is **uncalibrated
-and advisory only**. It cannot establish IMDb truth or authorize regex
-or episode overrides. Rule activation still uses independent evidence
-counts, diversity, crosswalk metadata, negative probes, and regression
-checks, not model-score thresholds.
-
-### Full parser-rule awareness and live source replacements
-
-The learner can inspect the **complete generated Rust parser handler
-catalogue**, including the original regex, target field, transform, flags
-and handler index. This is read in the background, not per request. It
-distinguishes three possible outcomes:
-
-- **Additional field regex:** detect a missing technical marker without
-  altering existing parser source handlers.
-- **Broader source-handler regex:** for sufficiently verified simple
-  resolution, codec and bit-depth markers, keep the original pattern as
-  one branch of a new bounded expression and widen it with the learned
-  marker. The handler retains its original ordering and transformation.
-  Rust compiles a replacement parser engine outside the HTTP path,
-  validates the regex using a linear-time grammar and swaps it atomically.
-- **Review-only proposals:** complicated existing PCRE patterns, ambiguous
-  titles, dates, unknown values and unverified identity/coordinate
-  corrections must not be silently replaced.
-
-The original engine remains available for canonical replay during
-training. Learned/modified output can **never** become an independent
-training label. In-memory and persistent parse/match cache namespaces
-include the active source-patch and local-rule revisions.
-
-### Ordinary TV season and episode learning
-
-Normal TV coordinates are **not anime-only**. A separate Rust learner now
-collects independently readable explicit `S02E07`, `2x07` and
-`Season 2 Episode 7` examples. The source grammar rejects multiple
-conflicting marker instances and implausible values. At least 8 distinct
-observations from 4 title identities, including 2 original-parser
-confirmations, are needed to activate a missing-field rule. More than
-16 observations across 6 identities, with 4 canonical confirmations,
-can correct one conflicting season or episode; season packs and ranges
-are not overwritten. Ordinary matching never retrains or recompiles regex.
-Unknown absolute-only episode numbers remain distinct from independently
-verified anime crosswalk corrections.
-
-All other parsed fields, including title, year, edition, network, release
-type and flags, remain available for discrepancy auditing. A general
-model score does not prove the correct value of a disputed field, so the
-individual validator for that field must authorize activation. This is
-important for titles containing numbers that look like seasons or years.
-
-## Opt-in modes
-
-| Mode | Environment | Data sharing | Native Rust learning worker |
-| --- | --- | --- | --- |
-| Standard (default) | No ML variables | None | Dormant |
-| Local learning | `MATCHLAB_ML_ENABLED=true` | None; works offline | One CPU worker, local cache and live regex overlays |
-| Community Learning | Local learning + `MATCHLAB_COMMUNITY_LEARNING_ENABLED=true` + private GitHub token | One bounded batch per 24h to GitHub | Same independent local worker |
-
-For local-only learning:
-
-~~~yaml
-services:
-  matchlab:
-    image: ghcr.io/dizzybog/matchlab:latest
-    environment:
-      MATCHLAB_ML_ENABLED: "true"
-      MATCHLAB_ML_MAX_STORAGE_GB: "10"
-      MATCHLAB_ML_TRAINING_MAX_EXAMPLES: "500000"
-      MATCHLAB_ML_CACHE_ENABLED: "true"
-      MATCHLAB_ML_CACHE_MAX_ENTRIES: "200000"
-      MATCHLAB_ML_CACHE_TTL_HOURS: "720"
-      MATCHLAB_ML_UNMATCHED_CACHE_TTL_MINUTES: "30"
-    volumes:
-      - metadata:/data
-~~~
-
-Only `MATCHLAB_ML_ENABLED` is required. An ML-disabled container
-never creates the learning worker or
-opens the community uploader. A GitHub token by itself is insufficient
-to activate anything. The Rust matcher still works without a token.
-
-### Technical resources
-
-- The production Docker image includes **no native ONNX library**.
-  All learning and inference run in Rust with a single background worker.
-  CI compiles and runs actual training and inference on **linux/amd64**
-  and native **linux/arm64**.
-- The FTRL model has 16,384 hash slots and only **128 KiB of z/n parameters**;
-  additional runtime memory holds bounded observations and compiled rules.
-  No Python backend, Ollama, external training process or GPU.
-- The local SQLite file is `/data/local-learning.sqlite3` by default,
-  and the logical storage target `MATCHLAB_ML_MAX_STORAGE_GB`
-  defaults to **1 GiB**, supporting 1–128 GiB. The budget is a
-  best-effort on-disk quota, not an exact hard filesystem partition.
-  `MATCHLAB_ML_TRAINING_MAX_EXAMPLES` (default 12,000, range
-  100–2,000,000) separately controls the **number of retained independently
-  validated technical field observations per current build**, not physical
-  GiB or the number of unique torrent names. The background worker can
-  reclaim the oldest unpromoted evidence when the corpus fills but protects
-  active rule provenance. `MATCHLAB_ML_CACHE_MAX_ENTRIES` controls derived
-  cache rows separately (default 100,000), and the cache's positive/missing
-  result TTLs can be set in hours/minutes. Cache entries never train models.
-- Persistent caching can be disabled independently with
-  `MATCHLAB_ML_CACHE_ENABLED=false`; rule learning can remain active.
-- Ordinary parser/matcher hot paths never train or infer with the model. Compiled
-  lightweight community-approved regex patterns can run even when
-  local ML is off, but still require current metadata validation
-  before changing final episode coordinates.
-
-## Local evidence and rules
-
-The Rust worker scans retained diagnostic history in bounded chunks.
-A candidate is relevant only if its release marker maps to an
-independently verified IMDb and AniDB/TVDB episode crosswalk, its title
-matches the selected canonical IMDb title exactly after normalization,
-and the current base parser is demonstrably missing or misreading that
-absolute episode. The evidence includes a private release title, exact
-coordinate tuple and a stable dedup fingerprint. No guess is treated as
-a training label merely because it recurs.
-
-For a **local live regex**, the minimum is **8** checked observations,
-at least **2** IMDb identities and **3** distinct episode numbers.
-The rule must satisfy a safe marker grammar, pass negative probes,
-be within the maximum rule count, and remain reproducible against
-current metadata and parser code. Live activation is a hot-reload
-of a small set of compiled rules; a proposed episode override
-does not become a final SID/ASID until the matcher proves the
-crosswalk for that particular request.
-
-A rule with insufficient or stale evidence is *quarantined* or
-marked *obsolete*, not returned as an active rule. Old evidence is
-retained for later revalidation as a cache rather than deleted
-immediately. Historical cache records are never final answers.
-
-### Docker/image and metadata upgrades
-
-Each completed parse/match cache entry is bound to an exact
-source/build, active regex revision, metadata revision and expiration.
-Changed or obsolete cache entries **never serve requests**, even
-when still stored. They are reparsed and rematched on demand using
-current Rust code and metadata, then cached in the new namespace.
-There is no CPU-heavy full-cache replay on startup.
-
-On an image or metadata update, the local worker rechecks learned
-regex evidence against current code and crosswalks before activating
-it. Obsolete candidates and their observations remain available for
-future reconsideration; if the global learning database exceeds its
-quota, inactive obsolete records are evicted first, including their
-supporting examples, with SQLite foreign-key cascades. Current
-verified active rules are protected. Incompatible learning epochs
-invalidate old labels without automatically erasing their history.
-
-### Technical field-rule lifecycle
-
-The local worker maintains a bounded SQLite evidence cache with hashed
-release/title identities, canonical field labels, independent raw-marker
-gap evidence, and parser build provenance. Missing-field evidence is kept
-in a distinct table rather than masquerading as original parser output.
-It does not upload these local technical-field observations in local-only
-mode. On refresh or startup, it rebuilds the eligible technical ruleset for
-the current parser build; obsolete observations remain historical cache
-until the shared storage budget requires eviction. A rule change updates
-both in-memory and persistent parse/match cache namespaces, so an old
-answer is not reused after an override changes.
-
-The technical-rule engine deliberately **does not** infer unverified
-`imdb_id`, `anidb_id`, `title`, `year`, or ordinary season/episode
-coordinates from repetition alone. A filename can have multiple quality,
-language or codec markers; that ambiguity must not be resolved by frequency.
-If a field is already present in the raw filename or two active rules
-compete, the engine retains the deterministic parser output. A failure to
-load or validate rules leaves normal parsing and Tantivy matching intact.
-
-This is incremental pattern induction, not a continuously fine-tuned
-neural model or an all-fields, arbitrary PCRE2 generator. New **unknown**
-release markers that lack an independently defensible label remain
-observations to investigate; the learner does not manufacture ground truth
-from repetition. For example, an explicit `2160p` can train a missing
-resolution, while an unknown string resembling a resolution cannot be
-assigned a value merely because it appears frequently. The native FTRL
-model supplies advisory prioritization only. Full automatic override coverage
-will require independent, field-specific validators and negative
-regression datasets before that scope can be safely extended.
-
-## Native online model and candidate discovery
-
-The native Rust **FTRL-Proximal** online classifier uses 16,384 hashed
-weight slots. It extracts field/marker combinations, short character n-grams,
-release context and approximate marker position. Model parameters use
-approximately 128 KiB for the sparse optimizer state and are persisted
-atomically with the history cursor and SQLite evidence batch. No runtime
-model download, inference library, Python service or GPU is required.
-
-Positive training examples come **only** from original-parser outputs or
-strictly independently interpreted raw filename markers. Every such label
-provides a counterfactual negative for an intentionally incompatible field
-class, not an assertion about IMDb or episode identity. Previously learned
-overlays, model predictions and unverified IMDb matches never train
-themselves. Learned weights remain **shadow-only**: they rank diagnostic
-observations and unfamiliar marker candidates but **cannot approve** rules.
-
-A deterministic title-group holdout withholds a portion of examples from
-gradient updates. Only after sufficient positive/negative training does it
-count pairwise classification successes. A rolling 32-pair summary can signal
-possible concept drift for human review; it **does not** modify runtime
-rules automatically. These metrics do not measure full parser precision,
-recall, or calibrated confidence. Truly production-grade evaluation requires
-an independently labeled, split-by-title-and-time regression corpus.
-
-The `candidate_discovery` stage scans a **bounded number of technical
-suffix tokens** after known release markers, learns their recurrence across
-distinct normalized titles, and ranks them with the online model. Unknown
-tokens stay private in the opt-in local SQLite store, are never published
-through HTTP or GitHub, and **never execute as regex**. The store caps
-itself at 256 distinct candidates and 12,000 title identities, reclaiming
-only old low-evidence candidates as needed. High-evidence unknown tags
-remain candidates until their values have an independent source of truth.
-In contrast, explicit new pixel heights such as `1440p` have a restricted
-numeric validator and can safely join the technical live-rule family.
-
-### Batching and hot-path isolation
-
-The background worker processes a bounded history batch within **one
-transaction** for its model weights, training deduplication, evidence and
-cursor. It reuses its SQLite connection, avoids per-observation full-table
-counts, and performs a single original Rust parse per release shared by
-the anime, technical and discovery components. Idle rule revalidation is
-throttled. The normal API **never runs model training or inference**; active
-technical rules share a precompiled regex-set prefilter with additional
-per-field conflict checks. The parser-cache mutex is released before any
-learned-rule processing.
-
-## Contribute to the GitHub community (optional)
-
-**Nothing leaves a local-only installation.** To contribute:
-
-1. Use a current official MatchLab image. Historical releases built
-   from upstream `main` can still report compatible, unresolved errors;
-   the main-branch reviewer discards problems already fixed.
-2. Create a personal GitHub token:
-   - If you are a repository member, use a [fine-grained PAT](https://github.com/settings/personal-access-tokens/new)
-     with **Dizzybog/MatchLab → Issues: read/write** only.
-   - If you are an external public contributor, a
-     [classic PAT](https://github.com/settings/tokens) with
-     `public_repo` may be necessary; that scope is broader.
-     Use a dedicated, restricted account if appropriate.
-   Do not post your token in an Issue or chat.
-3. Store the actual token in an **uncommitted local `.env`** or a
-   secret injector and enable both flags:
-
-   ~~~yaml
-   environment:
-     MATCHLAB_ML_ENABLED: "true"
-     MATCHLAB_COMMUNITY_LEARNING_ENABLED: "true"
-     MATCHLAB_COMMUNITY_GITHUB_TOKEN: ${MATCHLAB_COMMUNITY_GITHUB_TOKEN}
-   ~~~
-
-4. Redeploy and check `GET /api/community/status`: the response
-   should show `local_learning_enabled: true`, `enabled: true`,
-   and `ready: true`. Disable the sharing flag and redeploy to
-   opt out; revoke the token if no longer needed.
-
-**Privacy warning:** Local evidence and complete cache results can
-contain private release names; keep `/data` private. Public
-GitHub Issues and PRs may still reveal release *basenames*, even
-after rejecting paths, URL strings and obvious secrets. Contribute
-only filenames you are willing to make public. The client never
-uploads complete metadata SQLite files, torrent contents, tracker
-credentials, or the GitHub token.
-
-### The 24-hour contribution protocol
-
-- GitHub Actions creates/reuses **one shared Issue per UTC day**.
-  Clients only submit comments to the dated Issue created by the
-  `github-actions[bot]`; they never create their own Issues.
-- Each explicitly opted-in client collects up to **16** unique items
-  over a **24-hour window**, then attempts at most one batch comment.
-  A batch may contain strict anomaly observations and rule proposals.
-  Clients mark attempted batches and fingerprints before submitting
-  to avoid reposting after an ambiguous network timeout. This means
-  an individual batch may be lost rather than duplicated.
-- The local ledger survives upgrades and prevents resending the same
-  fingerprint. A GitHub Release asset maintains global cross-install
-  deduplication. GitHub may still impose API/abuse limits.
-- Compatible **v2 anomaly** reports continue to be reviewed. **v3
-  batches** can also carry verified local regex proposals. GitHub
-  validates both independently, never trusting a claimed SHA as
-  cryptographic proof of a running binary.
-- The source commit must be an ancestor of current upstream main.
-  Reported parser anomalies are replayed by the **latest Rust parser**;
-  identity/crosswalk claims need independent verification, because
-  no client's reported ID is a trustworthy label by itself.
-
-### What gets shared when GitHub sharing is enabled
-
-Local learning never shares data by default. When BOTH
-`MATCHLAB_ML_ENABLED=true` and
-`MATCHLAB_COMMUNITY_LEARNING_ENABLED=true` are configured with a valid
-GitHub token, the worker can submit up to two high-evidence regex proposals
-in a bounded 24-hour batch.
-
-| Proposal | GitHub payload | Status after PR |
-| --- | --- | --- |
-| New technical-field regex | Field, raw marker, synthesized regex, canonical value and distinct evidence counts | Human-review proposal |
-| New ordinary-TV coordinate regex | `SxxExx`/`NxM`/`Season N Episode M` template and evidence counts | Human-review proposal |
-| Change to existing generated regex | Original handler index, field, transform, original regex and proposed broadened regex, evidence counts | Human-review proposal |
-| Verified absolute anime marker | Restricted episode-marker regex and separately crosswalk-checked evidence | Curated reviewed rule after independent human approval |
-
-The GitHub Action reads untrusted Issue comments as **data**, validates
-exact grammars and source handler identity, runs Rust tests and opens at most
-one review PR daily. New technical/TV/source proposals enter
-`learning/community_regex_proposals.json` as **non-executable review
-records**; a maintainer must independently replay representative
-examples and integrate accepted changes into the parser. Anime markers
-continue to use `learning/community_rules.json`. The bot never
-auto-merges. Regex proposal envelopes contain no private torrent filenames;
-separate optional anomaly reports or crosswalk examples may contain
-sanitized basenames, so review privacy before opting into sharing.
-
-### How a high-evidence regex becomes a PR
-
-A local regex must be **active and evidence-gated** before export.
-For *absolute anime episode* rules specifically, upstream requires at
-least 12 independently revalidated observations, 4 IMDb identities,
-5 distinct episodes and sanitized filenames, plus current crosswalk
-verification. Technical-field, ordinary-TV and existing-handler
-proposals have their own strict evidence-count and grammar validations.
-Those three types are **review-only** because aggregate observations
-alone cannot prove correct parsing across the full metadata corpus.
-The uploader sends a generated, restricted regex (and original pattern
-for source changes), not arbitrary model-authored PCRE2 expressions.
-
-The daily trusted GitHub Actions workflow:
-
-1. Loads the previous day's Issue comments as **untrusted JSON data**;
-   rejects malformed schemas, incompatible epochs, non-mainline SHAs
-   and already seen fingerprints.
-2. Regenerates the canonical regex from its allowlisted release
-   marker. Checks sufficient evidence diversity and sanitized names.
-3. Screens anime proposals using the current Rust parser and negative
-   probes. Non-anime and existing-handler proposals are checked
-   against their trusted template or original source catalogue and
-   recorded in `learning/community_regex_proposals.json` as
-   **non-executable review data**. The bot chooses at most one
-   proposal per category per daily PR run.
-4. Runs the Rust test and all-target check on the candidate before
-   opening a GitHub pull request. The bot account must have
-   permission to create PRs. **All PRs require human review** of the
-   claimed IMDb/AniDB evidence and are **never auto-merged**.
-5. Approved anime markers can be packaged into the next image as
-   curated rules after a reviewed merge. Technical/TV/source-handler
-   records are **not installed by merely merging their review queue**:
-   maintainers must first integrate and validate the exact parser
-   change in a separate code review.
-
-**Important limitation:** GitHub currently replays parser output
-against the current code but does not independently download a
-full IMDb/AniDB metadata database in the bot review job. Thus a
-valid-looking mapping supplied by a client is still a **claim**,
-not authoritative proof. The bot may open a review PR but cannot
-approve or merge a proposed rule autonomously. Also, the current
-local FTRL model is not probability-calibrated; claims of calibrated
-99% certainty would be misleading.
-
-## Maintainer setup
-
-After merging the implementation PR and verifying the Docker image:
-
-1. Enable **Issues**, **GitHub Actions** and **GitHub Releases** for
-   the repository.
-2. In **Settings → Actions → General**, allow GitHub Actions to
-   **create pull requests**. The daily workflow requests
-   `contents: write`, `issues: write` and `pull-requests: write`;
-   no permission to merge or approve is used. Branch protection
-   must still require review and CI as desired.
-3. Verify the Docker publishing workflow supplies
-   `MATCHLAB_BUILD_SHA` at compile time for the official image.
-   Compatible older builds can submit hypotheses but are rechecked
-   against current main.
-4. From **Actions → Community learning review**, choose **Run
-   workflow** to seed today's shared Issue, or leave the UTC 00:23
-   schedule enabled. Scheduled jobs can be delayed or disabled on
-   inactive repositories; monitor failed runs.
-5. Check the daily review artifact (7-day retention), rule PRs and
-   `community-learning-ledger` GitHub Release asset. If GitHub
-   rejects PR creation due to repository settings, fix the setting
-   and re-run the workflow; never embed a maintainer PAT in Docker.
-6. Independently verify proposed rule examples, negative tests,
-   and actual IMDb/AniDB crosswalks before approving and merging
-   any bot PR. Review the scope of every new regex.
-
-Python in the hosted GitHub Actions review job is not part of the
-MatchLab image or its runtime; core parser/matcher, online model training/inference
-and local regex application all run in Rust.
-
-## Measuring quality and performance
-
-The ML design follows three relevant research results:
-
-- **[FTRL-Proximal (McMahan et al., 2013)](https://research.google/pubs/ad-click-prediction-a-view-from-the-trenches/):** sparse online logistic models can use little memory and learn incrementally. This motivates the bounded native Rust model, **not** an unmeasured claim of better matching.
-- **[Snorkel / weak supervision (Ratner et al., 2017)](https://pmc.ncbi.nlm.nih.gov/articles/PMC5951191/):** several agreeing regex or parser outputs may be correlated, not independent proof. Keep canonical parser observations, literal release markers, independently verified AniDB mappings and model predictions distinguishable.
-- **[Rust RegexSet](https://docs.rs/regex/latest/regex/struct.RegexSet.html):** combining bounded compiled expressions avoids compiling regex on each request; benchmark the actual set size and input lengths. Original PCRE2 handlers have different performance characteristics.
-
-Before raising rule-promotion thresholds or deploying this feature broadly:
-
-1. Create a **human-checked holdout corpus** containing both valid and misleading release names. Separate titles, series, uploaders and time windows between training and evaluation, so near-duplicate releases cannot inflate results.
-2. Report **precision, recall, false-positive count and abstention rate for every field**, not just the FTRL's positive-versus-wrong-field pairwise ranking. Distinguish missing-field fills from overwrites of already parsed values.
-3. Compare `main` against ML disabled/enabled and cache disabled/enabled at multiple request rates. Record **p50/p95/p99 latency, CPU time, RSS, SQLite write rate, storage growth and background-worker cost** on both ARM64 and AMD64 with realistic metadata.
-4. Exercise simultaneous rule activation, rule rollback, metadata refresh and cache reads. Any obsolete result must be recomputed, rather than returned from a prior rule generation.
-5. Treat the current sample-count thresholds as **safety heuristics**, not statistical confidence intervals. Do not authorize an ambiguous rule simply because the model score increased. Require independent negative examples and reviewer approval for community regex changes.
-
-Do not adopt a larger model, a GPU runtime, or a new lock-free registry purely on theoretical grounds. Change the architecture only when these measurements identify a bottleneck or an actual accuracy gain.
-
-## Troubleshooting and security boundaries
-
-- `MATCHLAB_ML_ENABLED=false`: no local training worker or
-  learning-specific GitHub traffic. The usual matching API works.
-- Local ML on, sharing off: no GitHub traffic related to learning.
-- Sharing on without local ML/token/official SHA: uploader refuses
-  to start. See `/api/community/status` and container logs.
-- Local model storage missing or damaged: the worker rebuilds the small
-  model from fresh, independently validated observations. Normal parsing
-  and matching are unaffected.
-- An ambiguous episode, an unverifiable IMDb identity, stale
-  metadata, or insufficient independent evidence cannot
-  activate a local override or authorize a GitHub PR.
-- An unsupported parser/label epoch quarantines old learned
-  evidence; it is not silently promoted to new training labels.
-- A GitHub token is not remote attestation. Contributors can forge
-  reports; all inputs remain untrusted until independent review.
-- The runtime regex language is restricted to safe, bounded,
-  linear-time templates. No remote Issue can execute shell,
-  SQL, Rust or arbitrary regex bytecode.
-- The local learning quota uses SQLite page measurements and
-  background maintenance; it is a logical best-effort storage
-  budget, not a hard OS disk quota.
-
-For the matching API, metadata behavior and debugging see
-[API documentation](API.md), [metadata lifecycle](LOCAL_METADATA.md)
-and [release parser audit](RELEASE_PARSER_AUDIT.md).
+| Local learning | `MATCHLAB_ML_ENABLED=true` | Learns and activates eligible regex locally |
+| Community sharing | `MATCHLAB_COMMUNITY_LEARNING_ENABLED=true` plus a GitHub token | Sends eligible regex proposals to GitHub for review |
+
+Both are disabled by default. Local learning works without community sharing.
+
+## What learning actually changes
+
+The background worker:
+
+1. Reads new release names and **reparses them with the original MatchLab parser**, not an ML-modified or cached result.
+2. Records bounded evidence from trusted parser output, explicit release markers and independently checked anime mappings.
+3. Trains a small online FTRL-Proximal ranker to prioritize patterns needing investigation. Its score is **not a probability of correctness**.
+4. Builds candidate regex from restricted, linear-time grammars. Arbitrary model-written PCRE and downloaded code are not executed.
+5. Requires repeated examples from independent titles, conflict checks and negative tests before a regex can be promoted.
+6. Compiles accepted additions and source-handler replacements **on the background worker** and atomically installs a new parser engine. Existing parser fields, transformations and ordinary matching logic are not modified by ML.
+
+A promoted rule can be **additional** (recognize a new syntax) or a **replacement** for an existing regex. Replacement patterns preserve the original parser handler and its transformation; source changes retain the original matching branch when safely possible. When proof is insufficient, the proposed regex remains review-only.
+
+### Supported rule families
+
+| Release pattern | Behavior |
+| --- | --- |
+| Technical tags such as resolution, codec and quality | Verified, context-safe additions reuse an existing MatchLab handler's transformation; selected source regex can be broadened |
+| Explicit TV season/episode forms such as `S02E07`, `2x07` and `Season 2 Episode 7` | Verified regex is compiled as native season/episode handlers. The parser guards against ambiguous multiple markers, ranges and packs |
+| Absolute anime episode markers | A learned regex may supply a candidate to MatchLab's matcher. An IMDb/AniDB crosswalk must independently verify it before matching changes coordinates |
+| Context-sensitive languages, audio/channels, unmarked episodes, titles, years or IMDb IDs | Can be observed and proposed for review, but no unverified field rewrite is performed |
+
+**No ML method writes `seasons`, `episodes`, `codec`, `title`, `year`, SID or ASID into a parser response.** MatchLab creates those fields by executing its own handlers and matching logic. Reviewed anime rules may be included in an image so users without ML can benefit from them.
+
+### Evidence and safety
+
+Current local rule-promotion gates include:
+
+- Technical fields: at least **8 agreeing observations from 4 title identities** to qualify for a native regex addition.
+- Selected source-regex replacements: at least **16 observations, 6 identities and 2 original-parser confirmations**.
+- Explicit TV conventions: at least **8 observations, 4 title identities and 2 original-parser confirmations**.
+- Absolute anime markers: at least **8 independently verified examples**, including diversity across IMDb identities and absolute episodes, plus an independently checked AniDB/TVDB crosswalk.
+
+These counts are conservative **engineering thresholds**, not statistically calibrated confidence values. Conflicting markers, ambiguous episode ranges, changes to parser builds, or invalid source mappings must block promotion. Incompatible historical evidence is retained for review or pruned under quota pressure; it cannot silently authorize current rules.
+
+For source handlers, MatchLab knows the existing regex catalogue. The learner may submit the **original regex and proposed replacement regex**, with handler identity and supporting evidence. Live changes are limited to safe, verified families; riskier suggestions go to the GitHub review queue.
+
+## Enable local learning
+
+Add these options to your Compose service's environment:
+
+```yaml
+environment:
+  MATCHLAB_ML_ENABLED: "true"
+  MATCHLAB_ML_TRAINING_MAX_EXAMPLES: "500000"
+  MATCHLAB_ML_MAX_STORAGE_GB: "10"
+  MATCHLAB_ML_CACHE_ENABLED: "true"
+  MATCHLAB_ML_CACHE_MAX_ENTRIES: "200000"
+```
+
+Only `MATCHLAB_ML_ENABLED` is required. The other values are optional limits. The example count is a maximum number of retained training **observations**, not RAM allocation or guaranteed unique torrent names.
+
+The model, evidence, active rules and optional result cache persist in `/data/local-learning.sqlite3`. The worker publishes new compiled rules without restarting the server. Learning runs independently of normal matching.
+
+`GET /api/ml/status` provides counts, model diagnostics and active rule summaries, without publishing original release names.
+
+### Cache and upgrades
+
+The optional cache stores exact-key results in SQLite; it does **not** perform IMDb or title search. Tantivy remains responsible for normal title lookup.
+
+A new parser build, active regex change or metadata generation changes the cache namespace. **An obsolete completed parse or match is never reused.** The next request is parsed and matched again with the current code and rules. Training evidence can be retained, but cached answers and previously learned outputs do not become training truth.
+
+Successful results and no-matches have different expiration times. The learning-storage quota is a best-effort SQLite disk budget managed in the background, not a strict OS disk quota.
+
+## Share regex improvements through GitHub
+
+Sharing is always optional. Provide a GitHub token that can comment on Issues in the upstream repository, and configure:
+
+```yaml
+environment:
+  MATCHLAB_ML_ENABLED: "true"
+  MATCHLAB_COMMUNITY_LEARNING_ENABLED: "true"
+  MATCHLAB_COMMUNITY_GITHUB_TOKEN: ${MATCHLAB_COMMUNITY_GITHUB_TOKEN}
+```
+
+Store the token in a private `.env` file or secret store, **never in a committed Compose file**.
+
+A participating installation sends at most **one batch comment every 24 hours**. The shared daily GitHub Issue collects bounded reports and regex proposals. The source-regex proposal includes the old and new regex, its handler metadata, and aggregate evidence.
+
+The trusted GitHub Action:
+
+1. Validates incoming data, build ancestry, deduplication fingerprints and allowed regex grammar.
+2. Replays relevant samples against the current Rust parser when the evidence is available.
+3. Creates at most one **human-review PR** for the daily run.
+4. Keeps technical, TV and source-handler suggestions in `learning/community_regex_proposals.json` as **non-executable review data**. Independently approved changes must be integrated before they affect other installations.
+5. Publishes independently reviewed anime marker rules through `learning/community_rules.json`.
+
+**No community submission automatically replaces MatchLab source code, activates an unverified regex on another server, or merges its own PR.**
+
+Some reports can contain sanitized filename samples. Removing paths, credentials and URLs does not guarantee a filename is non-sensitive. Read each opt-in's privacy implications before enabling it.
+
+### Maintainer setup
+
+The repository needs Issues, GitHub Actions and Releases enabled. Under repository Actions settings, allow workflows to create pull requests. The scheduled workflow runs on the trusted default branch; it requires a controlled post-merge Issue → intake → review-PR test before declaring community sharing production-verified.
+
+Maintainers should independently validate representative IMDb/AniDB mappings, negative examples, field-level regressions and every proposed original-handler replacement before merging. The GitHub token supplied to a contributor is not trusted attestation.
+
+## Performance and reliability checks
+
+The architecture follows research on [FTRL-Proximal](https://research.google/pubs/ad-click-prediction-a-view-from-the-trenches/) for compact online learning and [weak supervision](https://pmc.ncbi.nlm.nih.gov/articles/PMC5951191/) for cautious treatment of correlated labels. [Rust regex and RegexSet](https://docs.rs/regex/latest/regex/) provide a bounded matching strategy; the existing parser also has trusted PCRE2 handlers, so measure the complete engine.
+
+Production sign-off requires:
+
+- A manually verified, title-separated **and time-separated** holdout dataset.
+- Precision, recall, false positives, abstentions and overwrites measured **by parsed field**; the model's pairwise score alone is not overall parser accuracy.
+- ARM64 and AMD64 comparisons of `main` versus ML disabled/enabled, including p50/p95/p99 latency, CPU, RSS, SQLite writes and disk growth.
+- Concurrent live regex changes, rollback, cache invalidation and metadata-refresh tests.
+- Verification that bad proposals **fail closed** and do not disrupt standard matching.
+- Full Rust workspace tests, security intake tests and multi-platform Docker builds on the **final merged code**.
+
+A larger model or additional inference runtime is not justified until realistic measurements identify a benefit.
+
+## Troubleshooting
+
+If learning is disabled, the normal parser and matcher operate without an ML worker. If learning fails or its database is unavailable, normal matching must continue with the last safe compiled parser. Insufficient evidence cannot activate new regex. Changed builds or metadata require revalidation; an old learned rule must not silently become active.
+
+If sharing is enabled but the token, official build identity or local learning is missing, community reporting stays disabled. Check `GET /api/community/status` and container logs.
+
+For endpoint details see [API reference](API.md); for parser semantics see [Release parser audit](RELEASE_PARSER_AUDIT.md); for metadata see [Metadata lifecycle](LOCAL_METADATA.md).
