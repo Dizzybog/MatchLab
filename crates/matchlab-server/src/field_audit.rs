@@ -155,6 +155,118 @@ fn compare_parsed_to_selected(parsed:&Value,selected:&Value)->Vec<Value>{
     issues
 }
 
+/// These are suspicious extraction *spans*, not trusted corrections.
+/// Record them as review evidence; an ML score must not turn them directly
+/// into a field value or activate a source regex.
+fn extraction_review(raw:&str,parsed:&Value)->Vec<Value>{
+    let name=leaf(raw);
+    let release=tokens(name);
+    let mut issues=Vec::new();
+    let structural=|token:&str|{
+        let b=token.as_bytes();
+        let explicit_sxe=b.first()==Some(&b's')
+            && token.split_once('e').is_some_and(|(s,e)|
+                s.len()>=2&&s[1..].bytes().all(|c|c.is_ascii_digit())
+                &&!e.is_empty()&&e.bytes().all(|c|c.is_ascii_digit()));
+        let numeric_pair=token.split_once('x').is_some_and(|(l,r)|
+            !l.is_empty()&&!r.is_empty()&&l.len()<=3&&r.len()<=5
+            &&l.bytes().all(|c|c.is_ascii_digit())
+            &&r.bytes().all(|c|c.is_ascii_digit()));
+        explicit_sxe||numeric_pair||supported_pixel_height(token)
+            ||matches!(token,"x264"|"x265"|"h264"|"h265"|"hevc"|
+                "webdl"|"webrip"|"bluray"|"bdrip"|"hdrip"|"hdtv")
+    };
+    if let Some(split)=release.iter().position(|t|structural(t))
+        &&split>0
+        &&let Some(parsed_title)=parsed["title"].as_str()
+        &&!parsed_title.is_empty()
+    {
+        let extracted=tokens(parsed_title);
+        let expected_prefix=&release[..split];
+        let aligned=extracted.iter().zip(expected_prefix)
+            .all(|(a,b)|a==b);
+        if aligned && extracted.len()>expected_prefix.len()
+            &&extracted.iter().any(|t|structural(t)){
+            issues.push(json!({
+                "code":"field_overextracted_title","field":"title",
+                "confidence":"review","signal":"release_marker_in_title",
+                "severity":"review",
+                "message":"Parsed title may contain release metadata beyond its title boundary"
+            }));
+        } else if aligned && extracted.len()+1<expected_prefix.len() {
+            issues.push(json!({
+                "code":"field_underextracted_title","field":"title",
+                "confidence":"review","signal":"unparsed_title_prefix",
+                "severity":"review",
+                "message":"Parsed title may omit multiple words before the first release marker"
+            }));
+        }
+    }
+    // A clear SxxExx-Eyy range is evidence that extracting only one
+    // episode may be incomplete; it is *not* a replacement coordinate.
+    static RANGE:std::sync::OnceLock<regex::Regex>=std::sync::OnceLock::new();
+    let range=RANGE.get_or_init(||regex::Regex::new(
+        r"(?i)(?:^|[._ -])s[0-9]{1,3}[._ -]*e([0-9]{1,4})[._ -]*(?:-|to|through)[._ -]*(?:e(?:p)?)?[._ -]*([0-9]{1,4})(?:$|[._ -])"
+    ).expect("bounded episode-range evidence pattern"));
+    if name.len()<=240 {
+        if let Some(caps)=range.captures(name)
+            &&let (Some(a),Some(b))=(caps.get(1),caps.get(2))
+            &&let (Ok(start),Ok(end))=(
+                a.as_str().parse::<i64>(),b.as_str().parse::<i64>())
+            &&start>0&&end>=start&&end-start<=100
+            &&let Some(episodes)=parsed["episodes"].as_array()
+            &&!episodes.is_empty()
+            &&(!episodes.iter().any(|v|v.as_i64()==Some(start))
+                ||!episodes.iter().any(|v|v.as_i64()==Some(end)))
+        {
+            issues.push(json!({
+                "code":"field_underextracted_episodes","field":"episodes",
+                "confidence":"review","signal":"explicit_episode_range_incomplete",
+                "severity":"review",
+                "message":"An explicit episode range may have been parsed incompletely"
+            }));
+        }
+    }
+    // Exactly one explicit SxxExx marker is a useful negative probe for
+    // extracting multiple episode values from the same release.
+    static SINGLE:std::sync::OnceLock<regex::Regex>=std::sync::OnceLock::new();
+    let single=SINGLE.get_or_init(||regex::Regex::new(
+        r"(?i)(?:^|[._ -])s[0-9]{1,3}[._ -]*e([0-9]{1,5})(?:$|[._ -])"
+    ).expect("bounded explicit episode evidence pattern"));
+    if name.len()<=240
+        &&!range.is_match(name)
+        &&single.captures_iter(name).take(2).count()==1
+        &&let Some(episodes)=parsed["episodes"].as_array()
+        &&episodes.len()>1
+    {
+        issues.push(json!({
+            "code":"field_overextracted_episodes","field":"episodes",
+            "confidence":"review","signal":"single_episode_multiple_values",
+            "severity":"review",
+            "message":"An explicit single episode marker produced several episode values"
+        }));
+    }
+    issues
+}
+/// Skip suspicious canonical outputs when training the advisory online model.
+/// Review evidence is retained independently; a misparse must not become
+/// a positive training label simply because the parser emitted it.
+pub fn canonical_for_training(parsed:&Value,flags:&[Value])->Value{
+    let mut copy=parsed.clone();
+    let Some(map)=copy.as_object_mut()else{return copy;};
+    for flag in flags {
+        let code=flag["code"].as_str().unwrap_or("");
+        if !(code.starts_with("field_overextracted_")
+            ||code.starts_with("field_underextracted_")
+            ||code.starts_with("field_mismatch_")){continue;}
+        if let Some(field)=flag["field"].as_str(){
+            if field=="season"{map.remove("seasons");}
+            else if field=="episode"{map.remove("episodes");}
+            else{map.remove(field);}
+        }
+    }
+    copy
+}
 pub fn audit(raw:&str,parsed:&Value,selected:&Value)->Vec<Value>{
     // Requests can contain full relative paths. Only inspect the basename;
     // never emit arbitrary user-provided tokens as the diagnostic signal.
@@ -245,6 +357,7 @@ pub fn audit(raw:&str,parsed:&Value,selected:&Value)->Vec<Value>{
             "severity":"review",
             "message":"Parsed absolute anime episode candidate has no verified selected anime coordinate"}));
     }
+    out.extend(extraction_review(name,parsed));
     out.extend(compare_parsed_to_selected(parsed,selected));
     out
 }
@@ -321,6 +434,48 @@ mod tests{
                 "episode":8}));
         assert!(flags.contains(&"field_mismatch_episode".into()),"{flags:?}");
         assert!(!flags.contains(&"field_unresolved_episode".into()));
+    }
+    #[test]
+    fn learns_from_over_and_underextracted_title_spans_without_guessing(){
+        let too_long=codes("Jojo.Stone.Ocean.S02E07.1080p",
+            json!({"title":"Jojo Stone Ocean S02E07","seasons":[2],
+                "episodes":[7]}),Value::Null);
+        assert!(too_long.contains(&"field_overextracted_title".to_owned()));
+        let too_short=codes("Jojo.Stone.Ocean.S02E07.1080p",
+            json!({"title":"Jojo"}),Value::Null);
+        assert!(too_short.contains(&"field_underextracted_title".to_owned()));
+        let normal=codes("Jojo.Stone.Ocean.S02E07.1080p",
+            json!({"title":"Jojo Stone Ocean","seasons":[2],
+                "episodes":[7]}),Value::Null);
+        assert!(!normal.iter().any(|v|v.contains("extracted_title")));
+    }
+    #[test]
+    fn detects_incomplete_ranges_and_overfull_episode_arrays(){
+        let incomplete=codes("Show.S02E07-E08.1080p",
+            json!({"title":"Show","episodes":[7]}),Value::Null);
+        assert!(incomplete.contains(
+            &"field_underextracted_episodes".to_owned()));
+        let complete=codes("Show.S02E07-E08.1080p",
+            json!({"title":"Show","episodes":[7,8]}),Value::Null);
+        assert!(!complete.contains(
+            &"field_underextracted_episodes".to_owned()));
+        let excessive=codes("Show.S02E07.1080p",
+            json!({"title":"Show","episodes":[7,8]}),Value::Null);
+        assert!(excessive.contains(
+            &"field_overextracted_episodes".to_owned()));
+    }
+    #[test]
+    fn does_not_use_suspicious_field_values_as_training_truth(){
+        let parsed=json!({"title":"Show S02E07","episodes":[7,8],
+            "codec":"avc","year":2024});
+        let issues=vec![json!({"code":"field_overextracted_title",
+            "field":"title"}),json!({"code":"field_mismatch_episode",
+            "field":"episode"})];
+        let safe=canonical_for_training(&parsed,&issues);
+        assert!(safe.get("title").is_none());
+        assert!(safe.get("episodes").is_none());
+        assert_eq!(safe["codec"],"avc");
+        assert_eq!(parsed["episodes"],json!([7,8]));
     }
     #[test]
     fn season_only_and_absolute_anime_stay_separate(){
