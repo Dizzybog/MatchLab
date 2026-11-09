@@ -28,24 +28,29 @@ Both are disabled by default. Local learning works without community sharing.
 The background worker:
 
 1. Reads new release names and **reparses them with the original MatchLab parser**, not an ML-modified or cached result.
-2. Records bounded evidence from trusted parser output, explicit release markers and independently checked anime mappings.
-3. Trains a small online FTRL-Proximal ranker to prioritize patterns needing investigation. Its score is **not a probability of correctness**.
+2. Observes **every field returned by the canonical parser**, including title, year, seasons, episodes, audio, languages, release group, network, edition and other metadata. Missing-field clues and unfamiliar markers are considered across the full original parser-field catalogue.
+3. Trains a small online FTRL-Proximal ranker to prioritize field-specific regex improvements. Its score is **not a probability of correctness**.
 4. Builds candidate regex from restricted, linear-time grammars. Arbitrary model-written PCRE and downloaded code are not executed.
-5. Requires repeated examples from independent titles, conflict checks and negative tests before a regex can be promoted.
-6. Compiles accepted additions and source-handler replacements **on the background worker** and atomically installs a new parser engine. Existing parser fields, transformations and ordinary matching logic are not modified by ML.
+5. Requires repeated examples from independent titles, conflict checks and negative tests before a regex can be promoted. **Every field may be considered**, but an unverified pattern stays inactive regardless of the field.
+6. Compiles validated additions and source-handler replacements **on the background worker** and atomically installs a new parser engine. Existing parser field names, transformations and matching logic are not modified by ML.
 
 A promoted rule can be **additional** (recognize a new syntax) or a **replacement** for an existing regex. Replacement patterns preserve the original parser handler and its transformation; source changes retain the original matching branch when safely possible. When proof is insufficient, the proposed regex remains review-only.
 
-### Supported rule families
+### All parser fields are learning targets
 
-| Release pattern | Behavior |
+Learning is **not limited to video tags or TV coordinates**. The background model receives every populated canonical parser field, and the discovery process can rank unfamiliar markers against the original parser's complete field catalogue. Example targets include:
+
+| Field family | What regex improvement may address |
 | --- | --- |
-| Technical tags such as resolution, codec and quality | Verified, context-safe additions reuse an existing MatchLab handler's transformation; selected source regex can be broadened |
-| Explicit TV season/episode forms such as `S02E07`, `2x07` and `Season 2 Episode 7` | Verified regex is compiled as native season/episode handlers. The parser guards against ambiguous multiple markers, ranges and packs |
-| Absolute anime episode markers | A learned regex may supply a candidate to MatchLab's matcher. An IMDb/AniDB crosswalk must independently verify it before matching changes coordinates |
-| Context-sensitive language, audio/channel, subtitle/dub tags, unmarked episodes, titles, years or IMDb IDs | Can be observed and proposed for review, but are not automatically installed as local source regex |
+| Title, year, date, season, episode and episode code | Better identification of structural boundaries and episode/year notations |
+| Languages, subtitles, dubbing, audio, codec and channels | More accurate tagging of language and sound properties |
+| Resolution, quality, bit depth, HDR and other video properties | Recognition of new or alternate release markers |
+| Network, release group, edition, region, release type and other flags | Better extraction of release and distribution metadata |
+| Anime episode naming | Additional candidate regex, with independent IMDb/AniDB episode verification by MatchLab |
 
-**No ML method writes `seasons`, `episodes`, `codec`, `title`, `year`, SID or ASID into a parser response.** MatchLab creates those fields by executing its own handlers and matching logic. Reviewed anime rules may be included in an image so users without ML can benefit from them.
+**Every field can contribute evidence and become the subject of a proposed regex improvement.** Automatic live activation still requires a dedicated validator for the pattern and field, enough independent examples, negative checks and safe parser behavior. A field with no sufficiently validated rule remains in learning/review; it is **not** rewritten or guessed by the model. The current implementation has live validators for selected technical and explicit TV patterns; expanding automatic verification to other field families remains part of the production-readiness work. No field is permanently excluded from learning.
+
+**No ML method writes `seasons`, `episodes`, `codec`, `title`, `year`, SID or ASID into a parser response.** MatchLab creates those values using its own original or learned regex rules, transforms and independently verified metadata.
 
 ### Evidence and safety
 
@@ -133,7 +138,7 @@ Production sign-off requires:
 - Verification that bad proposals **fail closed** and do not disrupt standard matching.
 - Full Rust workspace tests, security intake tests and multi-platform Docker builds on the **final merged code**.
 
-A larger model or additional inference runtime is not justified until realistic measurements identify a benefit.
+A larger model or additional inference runtime is not justified until realistic measurements identify a benefit. Enabling additional fields for live regex promotion must be preceded by field-specific validation tests, not merely high ML scores.
 
 ## Troubleshooting
 
