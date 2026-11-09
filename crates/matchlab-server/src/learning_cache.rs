@@ -259,6 +259,8 @@ fn read_in_generation(title:&str,year:Option<i32>,series:Option<bool>,
 }
 fn read(kind:&str,title:&str,year:Option<i32>,series:Option<bool>,
     metadata:Option<&Path>)->Option<Value>{
+    // ML off: zero cache hashing, allocations, SQLite or disk checks.
+    if !enabled(){return None;}
     let ns=namespace(kind,metadata)?;
     let result=read_in_generation(title,year,series,&ns);
     // The default parser cache still checks its own generation. Strict
@@ -425,11 +427,11 @@ fn write_in_generation(kind:&str,title:&str,year:Option<i32>,
         if !keys.insert(identity.clone()){return;}
     }
     let Some(tx)=CACHE_WRITER.get_or_init(cache_worker).as_ref()else{
-        if let Ok(mut keys)=queued_keys().try_lock(){keys.remove(&identity);}
+        if let Ok(mut keys)=queued_keys().lock(){keys.remove(&identity);}
         return;
     };
     if let Err(e)=tx.try_send(event){
-        if let Ok(mut keys)=queued_keys().try_lock(){keys.remove(&identity);}
+        if let Ok(mut keys)=queued_keys().lock(){keys.remove(&identity);}
         let n=CACHE_DROPPED.fetch_add(1,Ordering::Relaxed)+1;
         if n==1||n%4096==0 {
             tracing::warn!(dropped=n,disconnected=matches!(e,TrySendError::Disconnected(_)),
@@ -441,6 +443,7 @@ pub fn get_parser(title:&str)->Option<Value>{
     read("parse",title,None,None,None)
 }
 pub fn put_parser(title:&str,value:&Value){
+    if !enabled(){return;}
     if let Some(ns)=namespace("parse",None){
         write_in_generation("parse",title,None,None,ns,value);
     }
