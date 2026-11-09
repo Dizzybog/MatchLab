@@ -445,9 +445,38 @@ fn used_bytes(db:&Connection)->Result<u64,String>{
         .map_err(|e|e.to_string())?;
     Ok(pages.saturating_sub(reusable)*size)
 }
-/// Called off the hot path. Version/expiry changes mark old cache rows as
-/// obsolete, never delete them immediately. Under the configured quota,
-/// they remain available for historical analysis (but not live cache hits).
+/// The separate ML evidence database still needs its own quota maintenance.
+/// Only the single learning worker calls this (never API/cache threads), and
+/// only after all shareable historical rules have been archived. Active
+/// rules are protected: evict obsolete candidates, then oldest samples.
+pub fn maintain_learning(db:&Connection)->Result<(),String>{
+    let budget=storage_gb()*GIB;
+    let mut occupied=used_bytes(db)?;
+    if occupied<=budget{return Ok(());}
+    for _ in 0..16{
+        let regex_removed=crate::learned_regex::evict_obsolete(db,32)?;
+        let fields_removed=crate::field_learning::evict_obsolete(db,512)?;
+        if regex_removed+fields_removed==0{break;}
+        occupied=used_bytes(db)?;
+        if occupied<=budget{return Ok(());}
+    }
+    for _ in 0..16{
+        let removed=db.execute(
+            "DELETE FROM samples WHERE key IN (
+                SELECT key FROM samples ORDER BY observed_at ASC LIMIT 256
+            )",[]).map_err(|e|e.to_string())?;
+        if removed==0{break;}
+        occupied=used_bytes(db)?;
+        if occupied<=budget{return Ok(());}
+    }
+    // A persistent archive or active regex must never be discarded to
+    // force the disk below quota. Keep the model running but report pressure.
+    tracing::warn!(occupied_bytes=occupied,budget_bytes=budget,
+        "ML learning evidence remains over quota; active rules and history preserved");
+    Ok(())
+}
+
+/// Called off the hot path. Cache maintenance never touches training evidence.
 /// Request cache maintenance without touching SQLite in the ML learner.
 /// The cache's sole writer performs maintenance between bounded write batches.
 pub fn maintain(_db:&Connection,metadata:&Path)->Result<(),String>{
