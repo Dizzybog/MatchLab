@@ -109,7 +109,11 @@ environment:
   MATCHLAB_COMMUNITY_GITHUB_TOKEN: ${MATCHLAB_COMMUNITY_GITHUB_TOKEN}
 ```
 
-Store the token in a private `.env` file or secret store, **never in a committed Compose file**.
+Store the token in a private `.env` file or secret store, **never in a committed Compose file**. For a complete step-by-step token creation and Docker Compose setup, follow [the README sharing guide](../README.md#share-improvements-with-the-community-optional).
+
+Use a **fine-grained PAT** restricted to `Dizzybog/MatchLab` with `Issues: Read and write` when the upstream repository is available in your token's repository selector (for example as its owner). External contributors who cannot select upstream may use a **classic PAT** with the `public_repo` scope, but it permits wider access across public repositories; set an expiration and revoke when no longer needed. `repo` (private-repository scope), Contents write, PR write and Actions write are not required.
+
+At startup, when both ML and community sharing are enabled, MatchLab calls GitHub's authenticated user and repository endpoints **without publishing a test comment**. The log confirms `community sharing GitHub token valid: authenticated and upstream Issues reachable` after successful authentication. `GET /api/community/status` includes `token_authentication` (`not_checked`, `authenticated`, `rejected`, `repository_unavailable` or `network_unavailable`) and `ready` is only true after verification. Verification is retried every five minutes, and neither the token nor the response payload is printed. This check cannot prove Issues comment *write* authorization; actual posting permission is confirmed only by a successful HTTP 201 response. For HTTP 403 when posting, revisit PAT scopes, expiration and repository interaction restrictions.
 
 A participating installation sends at most **one confirmed batch comment every 24 hours**, containing up to 16 items (maximum 12 regex proposals). The first eligible batch can be sent immediately when sharing is enabled; later confirmed deliveries are separated by 24 hours. The shared daily GitHub Issue collects bounded reports and regex proposals. The source-regex proposal includes the old and new regex, its handler metadata, and aggregate evidence.
 
