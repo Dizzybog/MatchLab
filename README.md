@@ -108,6 +108,14 @@ Only `MATCHLAB_ML_ENABLED` is required; the other settings are optional limits. 
 
 Check `GET /api/ml/status` to see local model and rule statistics. No separate AI server, GPU or online AI service is required.
 
+### ML background queue and SQLite isolation
+
+The local ML worker follows a Stremthru-inspired **durable cursor queue**: request history is persisted independently, the learner consumes at most 256 rows per transaction (up to four batches per drain), and advances its cursor **only in the same transaction as learned evidence**. On a SQLite busy error it retries the unacknowledged batch with bounded backoff; parsing and matching continue without waiting for training. A failed transaction is not considered learned.
+
+The repeat-query cache has a separate SQLite file and a single background writer with a bounded 4096-item in-memory queue, keyed coalescing, 128-item transactions, and exponential retry for failed writes. Its cache is an optimization only: when its queue is full or disk budget exhausted, matching still executes normally. The old `local-learning.sqlite3` file is preserved, but its legacy cache rows are not automatically migrated into the new cache; they will be rebuilt by requests. Keep the `/data` volume persistent.
+
+The cache remains optional (`MATCHLAB_ML_CACHE_ENABLED=false`), and `MATCHLAB_ML_ENABLED=false` disables all local ML work. The dashboard ML status API includes cache batch retry/write counters and the count of dropped cache events. Do not interpret a full cache queue as lost matching results. SQLite file separation removes **cache-versus-learning writer contention**, but does not guarantee that every source of SQLite locking or CPU overhead is eliminated.
+
 ### Share improvements with the community (optional)
 
 GitHub sharing is **off by default**, even when local ML is on. MatchLab only posts proposed regex changes and selected diagnostics as comments on Issues in [Dizzybog/MatchLab](https://github.com/Dizzybog/MatchLab). It does **not** create Issues or merge PRs.
@@ -185,8 +193,10 @@ See [Machine Learning and Community Learning](docs/COMMUNITY_LEARNING.md) for su
 | `MATCHLAB_MAX_CONCURRENT_MATCHES` | `4` | Maximum concurrent matches (example uses 2) |
 | `MATCHLAB_ML_ENABLED` | `false` | Enable local background learning |
 | `MATCHLAB_ML_TRAINING_MAX_EXAMPLES` | `12000` | Maximum retained training observations |
-| `MATCHLAB_ML_MAX_STORAGE_GB` | `1` | Best-effort local learning and cache disk budget |
+| `MATCHLAB_ML_MAX_STORAGE_GB` | `1` | Best-effort per-database budget for ML learning data and the isolated cache; provision disk space for both |
 | `MATCHLAB_ML_CACHE_ENABLED` | `true` when ML is on | Cache repeat requests |
+| `MATCHLAB_ML_CACHE_STATE_FILE` | `/data/local-learning-cache.sqlite3` | Independent SQLite file for cache; keeps cache writes from locking ML model training |
+
 | `MATCHLAB_ML_CACHE_MAX_ENTRIES` | `100000` | Maximum persistent cache entries |
 | `MATCHLAB_COMMUNITY_LEARNING_ENABLED` | `false` | Enable optional GitHub reporting |
 | `MATCHLAB_COMMUNITY_GITHUB_TOKEN` | Unset | Fine-grained PAT with Issues Read/write on upstream (owner), or classic `public_repo` PAT for external contributors; validated on startup |
