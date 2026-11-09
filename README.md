@@ -91,6 +91,17 @@ The learning process is:
 3. Test proposed regex rules against known values, conflicting patterns and negative examples.
 4. Activate eligible rules in memory without restarting. More uncertain changes are kept for review.
 
+The generated parser contains **458 ordered handlers across 48 field families**
+(449 regex handlers and nine Rust functions). The new *field-general*
+learner can derive safe regex candidates from existing native handler
+provenance and meaning-preserving release-tag variants. It must prove
+**incremental improvement**, preserve complete parser results, reject
+duplicate/no-op rules and revalidate stored evidence after upgrades.
+More ambiguous changes remain review-only until independent references
+establish a reliable result. See the [complete parser and ML regex audit](docs/ML_REGEX_ENGINE.md)
+for field families, transform safety, title-removal interactions, rule
+lifecycle and remaining limitations.
+
 **ML learns from every field that MatchLab parses**, including titles, years, seasons, episodes, languages, video and audio details, release groups, and other metadata. It looks for recurring naming patterns and can propose **new regex rules or improvements to existing ones** for any field. A rule is activated in the live parser **without restarting** only when sufficient independent evidence and field-specific safety checks support it; otherwise it remains inactive for further validation or review. Anime episode patterns still require verified metadata mappings. **ML changes regex only: MatchLab performs all field extraction and IMDb/AniDB matching.** With community sharing enabled, the exact regex additions and replacements can be proposed on GitHub. An ML score alone never activates a rule.
 
 Enable learning in the Compose environment:
