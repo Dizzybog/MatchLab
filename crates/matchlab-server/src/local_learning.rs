@@ -399,6 +399,10 @@ pub fn start(history:PathBuf,metadata:PathBuf){
                             let meta=Connection::open_with_flags(
                                 &metadata,OpenFlags::SQLITE_OPEN_READ_ONLY).ok();
                             crate::community_rule_archive::snapshot(db,meta.as_ref())?;
+                            // Local evidence and durable cache have separate
+                            // quotas and writers. Archive rules before any
+                            // obsolete-evidence eviction under disk pressure.
+                            crate::learning_cache::maintain_learning(db)?;
                         }
                         crate::learning_rule_log::after_cycle(db,&mut rule_observer)?;
                         Ok(n)
