@@ -18,7 +18,7 @@ use std::sync::{
     OnceLock, RwLock,
 };
 
-const EPOCH: i64 = 3;
+const EPOCH: i64 = 4;
 const MIN_EXAMPLES: i64 = 8;
 const MIN_TITLES: i64 = 4;
 const MIN_OVERRIDE_EXAMPLES: i64 = 16;
@@ -106,8 +106,18 @@ fn language_code(signal: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+fn canonical_codec(signal: &str) -> Option<&'static str> {
+    match signal {
+        "x264" | "h264" | "avc" => Some("avc"),
+        "x265" | "h265" | "hevc" => Some("hevc"),
+        "av1" => Some("av1"),
+        _ => None,
+    }
+}
 fn consistent(field: &str, signal: &str, value: &Value) -> bool {
     match field {
+        "codec" => canonical_codec(signal).is_some_and(|canonical|
+            value.as_str().is_some_and(|s|s.eq_ignore_ascii_case(canonical))),
         "languages" => {
             let Some(code) = language_code(signal) else { return false; };
             value.as_array().is_some_and(|values|
@@ -153,7 +163,8 @@ fn validated_value(field: &str, signal: &str, value: &Value) -> bool {
 fn independent_marker_value(field:&str,signal:&str)->Option<Value>{
     let value=match (field,signal){
         ("resolution",value) if crate::field_audit::supported_pixel_height(value)=>json!(value),
-        ("codec","x264"|"x265"|"h264"|"h265"|"hevc"|"av1")=>json!(signal),
+        ("codec","x264"|"x265"|"h264"|"h265"|"avc"|"hevc"|"av1")=>
+            json!(canonical_codec(signal)?),
         ("quality","web_dl"|"webdl")=>json!("WEB-DL"),
         ("quality","webrip")=>json!("WEBRip"),
         ("quality","bluray")=>json!("BluRay"),
@@ -801,12 +812,12 @@ mod tests {
     }
     #[test]
     fn learns_missing_and_overrides_wrong_technical_fields_only_with_more_evidence() {
-        let weak=rule("codec","x265",json!("x265"),8,4);
+        let weak=rule("codec","x265",json!("hevc"),8,4);
         let strong=rule("quality","web_dl",json!("WEB-DL"),16,6);
         let mut parsed=json!({"title":"Film","quality":"WEBRip","codec":null,
             "seasons":[3],"episodes":[5],"year":2024});
         propose_from("Film.x265.WEB-DL",&mut parsed,&[weak,strong]);
-        assert_eq!(parsed["codec"],"x265");
+        assert_eq!(parsed["codec"],"hevc");
         assert_eq!(parsed["quality"],"WEB-DL");
         assert_eq!(parsed["seasons"],json!([3]));
         assert_eq!(parsed["episodes"],json!([5]));
@@ -815,19 +826,19 @@ mod tests {
     }
     #[test]
     fn existing_explicit_release_marker_defeats_a_conflicting_learned_rule() {
-        let mut parsed=json!({"quality":"WEBRip","codec":"x264"});
+        let mut parsed=json!({"quality":"WEBRip","codec":"avc"});
         propose_from("Film.WEBRip.WEB-DL.x264",&mut parsed,&[
             rule("quality","web_dl",json!("WEB-DL"),64,20),
-            rule("codec","x265",json!("x265"),64,20)
+            rule("codec","x265",json!("hevc"),64,20)
         ]);
         assert_eq!(parsed["quality"],"WEBRip");
-        assert_eq!(parsed["codec"],"x264");
+        assert_eq!(parsed["codec"],"avc");
     }
     #[test]
     fn prefiltered_set_preserves_the_same_rule_decisions(){
         let active=vec![
             rule("resolution","2160p",json!("2160p"),20,8),
-            rule("codec","x265",json!("x265"),20,8),
+            rule("codec","x265",json!("hevc"),20,8),
             rule("audio","aac",json!("AAC"),20,8)
         ];
         let compiled=RegexSetBuilder::new(active.iter().map(|r|r.regex.as_str()))
@@ -872,18 +883,40 @@ mod tests {
         assert_eq!(parsed["languages"],json!(["fr"]));
     }
     #[test]
+    fn learned_codec_values_follow_the_original_parser_api() {
+        for (marker, expected) in [
+            ("x264", "avc"), ("h264", "avc"), ("avc", "avc"),
+            ("x265", "hevc"), ("h265", "hevc"), ("hevc", "hevc"),
+            ("av1", "av1"),
+        ] {
+            let release=format!("Example.{marker}.WEB-DL");
+            let original=matchlab_parser::parse_title_canonical(&release,false).unwrap();
+            let inferred=independent_marker_value("codec",marker);
+            assert_eq!(inferred,Some(json!(expected)),"wrong codec for {marker}");
+            assert!(consistent("codec",marker,&json!(expected)));
+            assert!(!consistent("codec",marker,&json!(marker.to_uppercase()))
+                || marker==expected,"raw alias must not replace canonical values");
+            if let Some(value)=original.get("codec") {
+                assert_eq!(value.as_str(),Some(expected),
+                    "canonical parser disagrees for {marker}");
+            }
+        }
+        assert!(independent_marker_value("codec","unknown").is_none());
+        assert!(!validated_value("codec","x265",&json!("x265")));
+    }
+    #[test]
     fn cached_overlay_cannot_become_a_training_label() {
         let db=Connection::open_in_memory().unwrap();
         init(&db).unwrap();
-        let details=json!({"parsed":{"title":"Example","codec":"x265",
-            "learned_field_overrides":[{"field":"codec","value":"x265"}]}});
+        let details=json!({"parsed":{"title":"Example","codec":"hevc",
+            "learned_field_overrides":[{"field":"codec","value":"hevc"}]}});
         observe(&db,"Example.x265.WEB-DL",&details).unwrap();
         let n:i64=db.query_row("SELECT count(*) FROM learned_field_evidence WHERE field=\'codec\'",[],
             |row|row.get(0)).unwrap();
         // An observation is only accepted if the *base* parser recognized
         // and independently supplied the exact same value.
         let original=matchlab_parser::parse_title("Example.x265.WEB-DL",false).unwrap();
-        assert_eq!(n>0,original["codec"].as_str().is_some_and(|value|normalize(value)=="x265"));
+        assert_eq!(n>0,original["codec"].as_str().is_some_and(|value|normalize(value)=="hevc"));
     }
     #[test]
     fn title_words_and_bare_numbers_are_not_release_tags() {
@@ -903,7 +936,7 @@ mod tests {
             Some((json!("1440p"),true)));
         assert!(training_label("Film.1440p.1080p","resolution","1440p",&empty).is_none());
         assert_eq!(training_label("Film.x265.WEB-DL","codec","x265",&empty),
-            Some((json!("x265"),true)));
+            Some((json!("hevc"),true)));
         assert_eq!(training_label("Film.1080p.DUBBED","dubbed","dubbed",&empty),
             Some((json!(true),true)));
         let mut default_flag=serde_json::Map::new();
@@ -915,7 +948,7 @@ mod tests {
         assert!(training_label("Film.1080p.2160p","resolution","2160p",&empty).is_none());
         assert!(training_label("Film.AAC.DTS.WEB-DL","audio","aac",&empty).is_none());
         let mut confident=serde_json::Map::new();
-        confident.insert("codec".into(),json!("x264"));
+        confident.insert("codec".into(),json!("avc"));
         assert!(training_label("Film.x264.x265","codec","x264",&confident).is_none());
         assert!(training_label("The Danish Girl.1080p","languages","danish",&empty).is_none());
         assert!(training_label("Film.1080p.mkv.WEB-DL","extension","mkv",&empty).is_none());
@@ -929,9 +962,9 @@ mod tests {
     #[test]
     fn gap_labels_cannot_train_from_the_previous_learned_result() {
         let mut parsed=serde_json::Map::new();
-        parsed.insert("codec".into(),json!("x264"));
+        parsed.insert("codec".into(),json!("avc"));
         parsed.insert("learned_field_overrides".into(),json!([
-            {"field":"codec","value":"x265"}]));
+            {"field":"codec","value":"hevc"}]));
         assert!(training_label("Film.x265","codec","x265",&parsed).is_none());
     }
     #[test]
@@ -1031,13 +1064,13 @@ mod tests {
                 field,signal,example_hash,identity_hash,canonical,source_build,first_seen)
                 VALUES('codec','x265',?1,?2,?3,?4,1)",
                 params![n.to_string(),format!("film{}",n%8),
-                    if n==15 {r#""x264""#} else {r#""x265""#},build()])
+                    if n==15 {r#""avc""#} else {r#""hevc""#},build()])
                 .unwrap();
         }
         assert!(select_rules(&db).unwrap().is_empty(),
             "conflicting observations must quarantine a learned rule");
         db.execute("DELETE FROM learned_field_evidence WHERE canonical=?1",
-            [r#""x264""#]).unwrap();
+            [r#""avc""#]).unwrap();
         assert_eq!(select_rules(&db).unwrap().len(),1);
     }
 }
