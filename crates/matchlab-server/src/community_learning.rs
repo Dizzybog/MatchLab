@@ -381,51 +381,6 @@ fn daily_thread(client:&reqwest::blocking::Client,time:u64)->Result<Option<u64>,
         .and_then(|v|v["number"].as_u64()))
 }
 
-/// Look for an exact previously accepted batch in official bot-created
-/// community threads. Check recent days because a crash may cross UTC midnight.
-fn remote_batch_confirmed(client:&reqwest::blocking::Client,time:u64,
-    batch_id:&str)->Result<bool,String>{
-    let data=request_json(client.get(format!(
-        "https://api.github.com/repos/{REPO}/issues"))
-        .query(&[("state","all"),("sort","created"),("direction","desc"),
-            ("per_page","100")])
-        .header("Accept","application/vnd.github+json")
-        .send().map_err(|e|e.to_string())?)?;
-    let items=data.as_array().ok_or("invalid GitHub issue list")?;
-    for day in 0..=3u64 {
-        let stamp=time.saturating_sub(day*DAY_SECS);
-        let day=chrono::DateTime::from_timestamp(stamp as i64,0)
-            .ok_or("invalid issue date")?.format("%Y-%m-%d").to_string();
-        let expected=format!("[community-learning] {day}");
-        let Some(issue)=items.iter().find(|v|
-            v["title"]==expected
-            &&v["user"]["login"]=="github-actions[bot]"
-            &&v.get("pull_request").is_none())
-            .and_then(|v|v["number"].as_u64())else{continue;};
-        for page in 1..=10 {
-            let comments=request_json(client.get(format!(
-                "https://api.github.com/repos/{REPO}/issues/{issue}/comments"))
-                .query(&[("per_page","100"),("page",&page.to_string())])
-                .header("Accept","application/vnd.github+json")
-                .send().map_err(|e|e.to_string())?)?;
-            let rows=comments.as_array().ok_or("invalid GitHub comment page")?;
-            for item in rows {
-                let Some(body)=item["body"].as_str()else{continue;};
-                let Some(raw)=body.strip_prefix(MARKER).and_then(|s|s.trim_start().strip_prefix('{'))else{continue;};
-                // Reattach the first JSON brace; malformed or unrelated
-                // comments can never acknowledge a local pending batch.
-                if let Ok(data)=serde_json::from_str::<Value>(&format!("{{{raw}"))
-                    &&data["batch_id"]==batch_id
-                    &&data["source"]=="matchlab-community-batch" {
-                    return Ok(true);
-                }
-            }
-            if rows.len()<100 {break;}
-        }
-    }
-    Ok(false)
-}
-
 fn build_batch(db:&Connection,time:u64)->Result<Option<(String,Value,Vec<String>)>,String>{
     let mut stmt=db.prepare(
         "SELECT fingerprint,payload FROM pending ORDER BY created_at,fingerprint LIMIT 64"
