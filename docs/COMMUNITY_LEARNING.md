@@ -80,7 +80,7 @@ environment:
 
 Only `MATCHLAB_ML_ENABLED` is required. The other values are optional limits. The example count is a maximum number of retained training **observations**, not RAM allocation or guaranteed unique torrent names.
 
-The model, evidence, active rules and optional result cache persist in `/data/local-learning.sqlite3`. The worker publishes new compiled rules without restarting the server. Learning runs independently of normal matching.
+The model, verified evidence and active rules persist in `/data/local-learning.sqlite3`. A separate bounded durable queue in `/data/history.sqlite3` stores post-match observations, independently of the dashboard's 1,000 detailed rows. Cached parse/match results are stored in `/data/ml-result-cache.sqlite3` (configurable with `MATCHLAB_ML_CACHE_STATE_FILE`), **not** alongside ML training writes. Old cache rows in the previous learning SQLite file are not migrated and never used as labels; it is safe to let the bounded cache rebuild. The worker publishes new compiled rules without restarting the server.
 
 `GET /api/ml/status` provides counts, model diagnostics and active rule summaries, without publishing original release names.
 
@@ -88,15 +88,15 @@ The model, evidence, active rules and optional result cache persist in `/data/lo
 
 When local learning is active, MatchLab logs each currently active custom regex on startup and logs each new, modified or retired regex during operation. The `custom ML regex inventory` event includes `active_custom_rules`, `field_rules_in_database`, `anime_rules_in_database`, `tv_rule_families`, `compiled_regex_patterns`, and `archived_custom_rules_in_database`. Only rule identifiers and regex patterns are logged, never original torrent filenames or the private training dataset. Set `RUST_LOG=matchlab_server=info` to display these events.
 
-The history writer reuses one SQLite connection and commits up to 64 history events together while keeping 14-day minute statistics and 1,000 raw history records. Optional cached results use a separate bounded, asynchronous SQLite writer rather than a write connection per public request; cache saturation skips cache storage but does not drop the matching result. Check `/api/ml/status` for the number of cache events skipped. A temporarily busy learning database cannot be allowed to interrupt public matching.
+The history writer reuses one SQLite connection and commits up to 64 history events together while keeping 14-day minute statistics and 1,000 raw history records. The ML observation queue persists separately from these 1,000 raw history records and is consumed in bounded batches using an atomic training cursor, idempotent retry and exponential backoff. Optional cached results use a separate bounded, asynchronous SQLite writer rather than a write connection per public request; cache saturation skips cache storage but does not drop the matching result. Check `/api/ml/status` for the number of cache events skipped. A temporarily busy learning database cannot be allowed to interrupt public matching.
 
 ### Cache and upgrades
 
-The optional cache stores exact-key results in SQLite; it does **not** perform IMDb or title search. Tantivy remains responsible for normal title lookup.
+The optional cache stores exact-key results in its own SQLite database and keeps a bounded 32 MiB in-memory hot tier. HTTP requests **never open SQLite to read or write cache entries**; they use the hot tier and enqueue best-effort persistence. A cold cache miss is parsed/matched normally; the recent durable entries are rehydrated asynchronously after restart. The cache does **not** perform IMDb or title search. Tantivy remains responsible for normal title lookup.
 
 A new parser build, active regex change or metadata generation changes the cache namespace. **An obsolete completed parse or match is never reused.** The next request is parsed and matched again with the current code and rules. Training evidence can be retained, but cached answers and previously learned outputs do not become training truth.
 
-Successful results and no-matches have different expiration times. The learning-storage quota is a best-effort SQLite disk budget managed in the background, not a strict OS disk quota.
+Successful results and no-matches have different expiration times. `MATCHLAB_ML_MAX_STORAGE_GB` applies to local learning evidence; `MATCHLAB_ML_CACHE_MAX_STORAGE_GB` separately limits the cache SQLite file (default 1 GiB). Neither is a strict OS filesystem quota. `MATCHLAB_ML_QUEUE_MAX_ITEMS` (default 20,000) bounds queued training records; overflow may discard optional observations but never successful API matching. `MATCHLAB_ML_TRAINING_BATCH_SIZE` (default 64, range 8–128) controls learning transaction size. Normal work is never delayed awaiting SQLite locks; failed jobs retry without advancing the committed cursor. The approach follows [StremThru's bounded persistent job queue](https://github.com/MunifTanjim/stremthru/tree/main/internal/job/job_queue): identity/dedup, bounded batches, delayed retry and independent workers.
 
 ## Share regex improvements through GitHub
 
