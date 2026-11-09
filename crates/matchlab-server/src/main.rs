@@ -17,6 +17,7 @@ mod dashboard_history;
 mod debug_feed;
 mod field_audit;
 mod field_learning;
+mod corrective_learning;
 mod tv_learning;
 mod community_learning;
 mod community_rule_archive;
@@ -1706,6 +1707,7 @@ async fn ml_status()->Json<Value>{
         object.insert("online_model".into(),online_model::OnlineModel::status());
         object.insert("unknown_markers".into(),candidate_discovery::status());
         object.insert("regex_rules".into(),learning_rule_log::status());
+        object.insert("corrective_regex".into(),corrective_learning::status());
     }
     Json(report)
 }
