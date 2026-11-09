@@ -95,6 +95,7 @@ TV_GRAMMARS={
 }
 FIELD_EPOCH=5
 TV_EPOCH=2
+DISCOVERY_EPOCH=2
 # Must match the restricted native Rust TV regex installed by tv_learning.rs.
 # GitHub receives the exact added patterns, not only the diagnostic grammar.
 TV_NATIVE_PATTERNS={
@@ -133,7 +134,32 @@ def valid_extended_rule(r,sha):
          ("canonical_confirmations",0))):return None
     if r["canonical_confirmations"]>r["evidence_count"]:return None
     if not isinstance(r.get("fingerprint"),str):return None
-    if kind=="learned_field_regex":
+    if kind=="learned_field_regex_review":
+        # Unknown-field predictions are intentionally review-only.
+        # A self-reported model score is not proof of a source regex fix.
+        expected=common|{"field","signal","regex","review_only"}
+        if set(r)!=expected or r["source_build"]!=sha+f":{DISCOVERY_EPOCH}":
+            return None
+        field,signal=r["field"],r["signal"]
+        if not isinstance(field,str) or not isinstance(signal,str):
+            return None
+        if (r["review_only"] is not True
+            or r["verification"]!="unverified_model_discovery_review_only"
+            or r["canonical_confirmations"]!=0
+            or r["evidence_count"]<12 or r["distinct_titles"]<12):
+            return None
+        if not re.fullmatch(r"[a-z0-9]{3,16}",signal):
+            return None
+        try:
+            catalog=json.loads(CATALOG.read_text())["handlers"]
+        except (OSError,KeyError,TypeError,ValueError):
+            return None
+        if not any(h.get("kind")=="regex" and h.get("name")==field
+                for h in catalog):return None
+        pattern=r"(?i)(?:^|[ ._-])"+signal+r"(?:$|[ ._-])"
+        if r["regex"]!=pattern:return None
+        expected_fp=digest(f"community-review:{field}:{signal}:{pattern}")
+    elif kind=="learned_field_regex":
         expected=common|{"field","signal","regex","canonical"}
         if set(r)!=expected or r["source_build"]!=sha+f":{FIELD_EPOCH}":return None
         field,signal=r["field"],r["signal"]
