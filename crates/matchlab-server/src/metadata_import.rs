@@ -385,6 +385,16 @@ pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>
 /// Apply the checked-in exceptions to the SAME SQLite episode_map used by
 /// ordinary Anime-Lists matches. The XML is embedded in the production Rust
 /// binary, so no extra download, file mount, or runtime configuration is needed.
+/// A stable fingerprint in metadata_state lets the startup scheduler refresh
+/// an older volume when this embedded list changes, without redownloading the
+/// entire catalog on every ordinary image upgrade or restart.
+pub(crate) fn bundled_animelists_override_marker()->String{
+    let mut hash=0xcbf29ce484222325u64;
+    for byte in include_bytes!("../../../data/anime-list.override.xml"){
+        hash=(hash^u64::from(*byte)).wrapping_mul(0x100000001b3);
+    }
+    format!("animelists_override_{hash:016x}")
+}
 pub(crate) fn apply_bundled_animelists_overrides(db_path:&Path)->Result<u64,Box<dyn Error>>{
     // Build this lookup index only after bulk Anime-Lists import. Override
     // updates can then preserve IMDb links without a table scan per AniDB ID.
@@ -571,6 +581,12 @@ fn import_animelists_reader<R:std::io::BufRead>(
     let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
     tx.execute("INSERT OR REPLACE INTO metadata_state VALUES(?1,?2,?3)",
         params![source_name,now,count])?;
+    if override_existing{
+        // Published snapshots record which exact embedded XML was applied.
+        // This marker is written in the same transaction as the mappings.
+        tx.execute("INSERT OR REPLACE INTO metadata_state VALUES(?1,?2,?3)",
+            params![bundled_animelists_override_marker(),now,count])?;
+    }
     tx.commit()?;
     Ok(count)
 }
@@ -817,6 +833,10 @@ mod tests {
             WHERE imdb_id='tt0434665' AND anidb_id='15449'
                 AND tvdb_id='74796'",[],|r|r.get(0)).unwrap();
         assert_eq!(links,1,"preserve and correct existing IMDb links");
+        let marker=bundled_animelists_override_marker();
+        let applied:i64=db.query_row("SELECT COUNT(*) FROM metadata_state
+            WHERE source=?1",[&marker],|r|r.get(0)).unwrap();
+        assert_eq!(applied,1,"record the exact list version for startup refreshes");
         // The ordinary production crosswalk must resolve all three Bleach
         // cours; the override is not a second or special-case matcher.
         for (episode,anidb_id,anime_episode) in
