@@ -28,7 +28,7 @@ Both are disabled by default. Local learning works without community sharing.
 The background worker:
 
 1. Reads new release names and **reparses them with the original MatchLab parser**, not an ML-modified or cached result.
-2. Observes **every field returned by the canonical parser**, including title, year, seasons, episodes, audio, languages, release group, network, edition and other metadata. Missing-field clues and unfamiliar markers are considered across the full original parser-field catalogue.
+2. Observes **every field returned by the canonical parser**, including title, year, seasons, episodes, audio, languages, release group, network, edition and other metadata. The background audit captures **four error classes**: missing extraction, excessive extraction, incomplete extraction, and incorrect field assignment (such as swapping `seasons` and `episodes`). It also records explicit markers that contradict nonempty parser values.
 3. Trains a small online FTRL-Proximal ranker to prioritize field-specific regex improvements. Its score is **not a probability of correctness**.
 4. Builds candidate regex from restricted, linear-time grammars. Arbitrary model-written PCRE and downloaded code are not executed.
 5. Requires repeated examples from independent titles, conflict checks and negative tests before a regex can be promoted. **Every field may be considered**, but an unverified pattern stays inactive regardless of the field.
