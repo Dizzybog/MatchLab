@@ -466,6 +466,45 @@ fn replay(db:&Connection,previous:&[Active],all:&[Active],
     // previous accepted rules is NOT a new improvement.
     Ok((incremental>=MIN_FIXES).then_some((covered,incremental)))
 }
+/// Re-check persisted active rules as one composed parser generation.
+/// A new observation or native source update can invalidate an old regex:
+/// fail closed and retire it instead of silently keeping stale behavior.
+fn active_safe(db:&Connection,rules:&[Active])->Result<bool,String>{
+    if rules.is_empty(){return Ok(true);}
+    let mut examples=Vec::new();
+    for rule in rules{
+        examples.extend(read_examples(db,&rule.key,2)?);
+    }
+    let titles=examples.iter()
+        .flat_map(|e|[e.source_release.clone(),e.variant_release.clone()])
+        .chain(NEGATIVES.iter().map(|s|(*s).to_owned()))
+        .collect::<Vec<_>>();
+    if titles.len()>MAX_TESTS{return Ok(false);}
+    let (patches,mut additions)=crate::field_learning::source_rules_without_general(
+        crate::tv_learning::handler_additions())?;
+    let native_additions=additions.clone();
+    let tv=crate::corrective_learning::handler_corrections();
+    let baseline=match matchlab_parser::replay_handler_rules(
+        &patches,&native_additions,&tv,&titles){
+        Ok(v)=>v,Err(_)=>return Ok(false)
+    };
+    let (extra,corrections)=rule_parts(rules);
+    additions.extend(extra);
+    let mut all=tv.clone();
+    all.extend(corrections);
+    let replay=match matchlab_parser::replay_handler_rules(
+        &patches,&additions,&all,&titles){
+        Ok(v)=>v,Err(_)=>return Ok(false)
+    };
+    for (i,e) in examples.iter().enumerate(){
+        if Value::Object(replay[2*i].clone())!=e.expected
+            ||Value::Object(replay[2*i+1].clone())!=e.expected {
+            return Ok(false);
+        }
+    }
+    let offset=examples.len()*2;
+    Ok(baseline[offset..]==replay[offset..])
+}
 fn persist(db:&Connection,ready:&[Active])->Result<(),String>{
     let tx=db.unchecked_transaction().map_err(|e|e.to_string())?;
     tx.execute("DELETE FROM ml_general_verified_rules",[])
@@ -493,6 +532,13 @@ pub fn reconcile(db:&Connection)->Result<(),String>{
     let mut ready=active().read().map(|r|r.clone())
         .map_err(|e|e.to_string())?;
     let mut rejected=0u64;
+    // A formerly active rule is never grandfathered in when fresh
+    // evidence invalidates it or other rules change. Remove the newest
+    // corrections until the complete parser is safe again.
+    while !ready.is_empty()&&!active_safe(db,&ready)?{
+        ready.pop();
+        rejected+=1;
+    }
     let pool=candidates(db)?;
     if !pool.is_empty(){
         let start=CURSOR.fetch_add(MAX_CANDIDATES as u64,Ordering::AcqRel)
