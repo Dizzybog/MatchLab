@@ -1028,26 +1028,22 @@ fn diagnose_with_policy(
                     }else if selected_season.is_some() && series &&
                         seasons.len()==1 && episodes.len()==1 &&
                         imdb_matcher::clean_title(&c.title)==key &&
-                        season_episode_end(&db,&c.imdb_id,
-                            selected_season.unwrap_or(0))?
-                            .is_some_and(|last|ep<=last){
-                        // A canonical IMDb title with an explicit season and
-                        // episode may retain its verified IMDb SID even when
-                        // the separate AniDB/TVDB crosswalk lacks an episode.
-                        // Only known IMDb season bounds qualify; do not use
-                        // this fallback for named sequel/part aliases, which
-                        // can map the same local S01E03 into a later season.
+                        candidate_has_episode(&db,&c.imdb_id,
+                            selected_season.unwrap_or(0),ep)?{
+                        // An exact canonical IMDb series winner keeps the
+                        // explicitly parsed SxxExx when there is no proven
+                        // AniDB mapping, unless IMDb metadata definitively
+                        // rules that episode out. A missing season_episode row
+                        // is NOT evidence that S17E01 is invalid (Bleach's
+                        // season 17 is absent from some IMDb snapshots).
+                        // Do not use this for named sequel/part aliases:
+                        // those can remap local S01E03 to another season.
                         // No crosswalk: ASID intentionally stays null.
                     }else if !c.anime_ids.is_empty()||specific{
-                        // Once IMDb has selected a series, explicit parsed
-                        // SxxExx coordinates are not guesses about the anime
-                        // identity. An absent or ambiguous AniDB crosswalk
-                        // must suppress only ASID, not season/episode or SID.
-                        // Bare/part-local episode guesses remain conservative.
-                        if seasons.len()!=1 || episodes.len()!=1 {
-                            selected_season=None;
-                            selected_episode=None;
-                        }
+                        // Never infer anime part or absolute numbering without
+                        // a verified crosswalk and identity: leave SID at title.
+                        selected_season=None;
+                        selected_episode=None;
                     }
                 }
             }
