@@ -56,8 +56,9 @@ Learning is **not limited to video tags or TV coordinates**. The background mode
 
 Current local rule-promotion gates include:
 
-- Technical fields: at least **8 agreeing observations from 4 title identities** to qualify for a native regex addition.
+- Technical fields: at least **8 agreeing observations from 4 title identities**, including **4 missing-field observations from 2 identities**, to qualify for a native regex addition. Native successes remain training evidence but cannot activate a duplicate regex. A corresponding native Rust handler must actually exist for the field and transform; unsupported live fields remain review-only.
 - Selected source-regex replacements: at least **16 observations, 6 identities and 2 original-parser confirmations**.
+- TV coordinate patterns: at least **8 observations from 4 title identities**, **2 canonical confirmations**, and **3 explicitly missing season/episode observations across 2 identities**. Disagreements, packs and ambiguous coordinates are not considered correctable missing-field evidence. Previously trained TV evidence is archived; the new evidence epoch retrains this decision from fresh raw titles.
 - Explicit TV conventions: at least **8 observations, 4 title identities and 2 original-parser confirmations**.
 - Absolute anime markers: at least **8 independently verified examples**, including diversity across IMDb identities and absolute episodes, plus an independently checked AniDB/TVDB crosswalk.
 
@@ -83,6 +84,14 @@ Only `MATCHLAB_ML_ENABLED` is required. The other values are optional limits. Th
 The model, verified evidence and active rules persist in `/data/local-learning.sqlite3`. A separate bounded durable queue in `/data/history.sqlite3` stores post-match observations, independently of the dashboard's 1,000 detailed rows. Cached parse/match results are stored in `/data/ml-result-cache.sqlite3` (configurable with `MATCHLAB_ML_CACHE_STATE_FILE`), **not** alongside ML training writes. Old cache rows in the previous learning SQLite file are not migrated and never used as labels; it is safe to let the bounded cache rebuild. The worker publishes new compiled rules without restarting the server.
 
 `GET /api/ml/status` provides counts, model diagnostics and active rule summaries, without publishing original release names.
+
+### Novelty, negative controls and active-rule accounting
+
+The offline learner reparses every queued raw release through the **canonical native parser without learned overlays**. It records *correctly parsed* field markers separately from *independently witnessed missing fields*. Both can train the bounded FTRL model; only true missing-field gaps can authorize a live regex. False-positive or conflicting field values do not count as missing evidence.
+
+Only technical fields with a known, applicable native Rust handler are counted as active field regex rules. Extension, language, subtitle and other non-executable candidates remain as evidence/review proposals. Negative controls reject ambiguous release markers, conflicting tags, title words mistaken for technical tags, season/episode packs and conflicting coordinates. Candidate patterns are assembled from an allowlisted finite grammar, not executable model-generated arbitrary regular expressions.
+
+Previously archived rules remain in `ml_shared_rule_archive` for review and sharing. Lower active counts after upgrading are expected: this is deliberately stricter live activation rather than loss of historical evidence. Status includes `evidence_only_candidates` and `activation_policy`, separate from the number of compiled patterns.
 
 ### Regex logging and SQLite contention
 
