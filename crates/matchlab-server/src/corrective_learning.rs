@@ -261,7 +261,7 @@ fn candidate(family:&str)->Option<Vec<matchlab_parser::HandlerCorrection>>{
 struct Counts {
     examples:i64,identities:BTreeSet<String>,
     errors:i64,error_identities:BTreeSet<String>,confirmations:i64,
-    kinds:BTreeSet<String>,
+    confirmation_identities:BTreeSet<String>,kinds:BTreeSet<String>,
 }
 fn eligible(db:&Connection)->Result<Vec<(String,Counts)>,String>{
     init(db)?;
@@ -277,8 +277,10 @@ fn eligible(db:&Connection)->Result<Vec<(String,Counts)>,String>{
         let entry=counts.entry(family).or_default();
         entry.examples+=1;
         entry.identities.insert(id.clone());
-        if kind=="aligned"{entry.confirmations+=1;}
-        else {
+        if kind=="aligned"{
+            entry.confirmations+=1;
+            entry.confirmation_identities.insert(id);
+        }else{
             entry.errors+=1;entry.error_identities.insert(id);
             entry.kinds.insert(kind);
         }
@@ -289,6 +291,7 @@ fn eligible(db:&Connection)->Result<Vec<(String,Counts)>,String>{
         &&v.errors>=MIN_ERRORS
         &&v.error_identities.len() as i64>=MIN_ERROR_IDENTITIES
         &&v.confirmations>=MIN_CONFIRMATIONS
+        &&v.confirmation_identities.len() as i64>=MIN_CONFIRMATIONS
     ).collect())
 }
 fn review_candidate(db:&Connection,family:&str,
