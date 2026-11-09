@@ -785,11 +785,19 @@ fn source_handler_additions(active:&[FieldRule])
 pub fn publish_parser_rules_with_tv(
     tv_additions:Vec<matchlab_parser::HandlerAddition>
 )->Result<(),String>{
+    publish_parser_rules_with_tv_and_corrections(
+        tv_additions,crate::corrective_learning::handler_corrections())
+}
+pub fn publish_parser_rules_with_tv_and_corrections(
+    tv_additions:Vec<matchlab_parser::HandlerAddition>,
+    corrections:Vec<matchlab_parser::HandlerCorrection>
+)->Result<(),String>{
     let fields=registry().read().map_err(|e|e.to_string())?.rules.clone();
     let patches=source_handler_patches(&fields);
     let mut additions=source_handler_additions(&fields);
     additions.extend(tv_additions);
-    matchlab_parser::install_learned_handler_regex(&patches,&additions)
+    matchlab_parser::install_learned_handler_regex_with_corrections(
+        &patches,&additions,&corrections)
         .map_err(|e|format!("learned parser regex rejected: {e}"))
 }
 
@@ -825,7 +833,8 @@ pub fn reconcile(db: &Connection) -> Result<(), String> {
     let patches=source_handler_patches(&active);
     let mut additions=source_handler_additions(&active);
     additions.extend(crate::tv_learning::handler_additions());
-    matchlab_parser::install_learned_handler_regex(&patches,&additions)
+    matchlab_parser::install_learned_handler_regex_with_corrections(
+        &patches,&additions,&crate::corrective_learning::handler_corrections())
         .map_err(|e|format!("learned parser regex rejected: {e}"))?;
     install(active);
     Ok(())
