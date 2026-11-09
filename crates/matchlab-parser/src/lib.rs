@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::cell::Cell;
+use std::cell::{Cell,RefCell};
 use std::sync::{Arc,RwLock};
 use std::collections::{HashMap, HashSet};
 
@@ -2829,6 +2829,8 @@ static HANDLERS_JSON: &str = include_str!("generated/handlers.json");
 thread_local! {
     // Training labels and regression checks must bypass live learned rules.
     static CANONICAL_ONLY: Cell<bool> = const { Cell::new(false) };
+    // Background-only candidate replay; never published to public requests.
+    static REPLAY_ENGINE: RefCell<Option<Arc<ParserEngine>>> = const { RefCell::new(None) };
 }
 static LIVE_ENGINE: Lazy<RwLock<Option<Arc<ParserEngine>>>> =
     Lazy::new(|| RwLock::new(None));
@@ -2840,6 +2842,16 @@ pub struct HandlerPatch {
     pub index: usize,
     pub original_pattern: String,
     pub replacement_pattern: String,
+}
+
+/// A high-priority, native-handler regex correction. The learned pattern
+/// cannot choose its output field or transform: both are copied from a
+/// bundled Rust-parser handler. Only bounded TV coordinate grammars qualify.
+#[derive(Clone,Debug,PartialEq,Eq)]
+pub struct HandlerCorrection {
+    pub source_index: usize,
+    pub pattern: String,
+    pub is_range: bool,
 }
 
 /// All original generated parser handlers, including years, seasons,
@@ -2863,6 +2875,9 @@ pub fn handler_patch_revision() -> u64 {
 }
 fn parse_engine_active() -> Option<Arc<ParserEngine>> {
     if CANONICAL_ONLY.with(Cell::get) { return None; }
+    if let Some(candidate)=REPLAY_ENGINE.with(|slot|slot.borrow().clone()){
+        return Some(candidate);
+    }
     LIVE_ENGINE.read().ok().and_then(|guard|guard.clone())
 }
 fn engine_parse(raw:&str,translate:bool)->Result<Map<String,Value>,ParseError>{
@@ -2899,13 +2914,16 @@ pub struct HandlerAddition {
     pub pattern: String,
 }
 
-fn stable_patch_hash(patches:&[HandlerPatch],additions:&[HandlerAddition])->u64{
+fn stable_patch_hash(patches:&[HandlerPatch],additions:&[HandlerAddition],
+    corrections:&[HandlerCorrection])->u64{
     let mut value=0xcbf29ce484222325u64;
     let mut lines=patches.iter().map(|rule|
         format!("patch:{}:{}:{}\n",rule.index,
             rule.original_pattern,rule.replacement_pattern)).collect::<Vec<_>>();
     lines.extend(additions.iter().map(|rule|
         format!("add:{}:{}\n",rule.source_index,rule.pattern)));
+    lines.extend(corrections.iter().map(|rule|
+        format!("correct:{}:{}:{}\n",rule.source_index,rule.is_range,rule.pattern)));
     lines.sort();
     for line in lines {
         for byte in line.bytes() {
@@ -2926,31 +2944,52 @@ pub fn install_handler_patches(patches:&[HandlerPatch])->Result<(),ParseError>{
 pub fn install_learned_handler_regex(
     patches:&[HandlerPatch],additions:&[HandlerAddition]
 )->Result<(),ParseError>{
+    install_learned_handler_regex_with_corrections(patches,additions,&[])
+}
+
+pub fn install_learned_handler_regex_with_corrections(
+    patches:&[HandlerPatch],additions:&[HandlerAddition],
+    corrections:&[HandlerCorrection]
+)->Result<(),ParseError>{
+    let fingerprint=stable_patch_hash(patches,additions,corrections);
+    if LIVE_REVISION.load(std::sync::atomic::Ordering::Acquire)==fingerprint {
+        return Ok(());
+    }
+    if patches.is_empty()&&additions.is_empty()&&corrections.is_empty(){
+        let mut lock=LIVE_ENGINE.write().map_err(|_|ParseError::Data(
+            "live handler lock unavailable".into()))?;
+        *lock=None;
+        LIVE_REVISION.store(fingerprint,std::sync::atomic::Ordering::Release);
+        return Ok(());
+    }
+    let candidate=compile_learned_engine(patches,additions,corrections)?;
+    let mut lock=LIVE_ENGINE.write().map_err(|_|
+        ParseError::Data("live handler lock unavailable".into()))?;
+    *lock=Some(Arc::new(candidate));
+    LIVE_REVISION.store(fingerprint,std::sync::atomic::Ordering::Release);
+    Ok(())
+}
+
+/// Compile a full candidate parser without publishing it. Every source
+/// change retains its original handler identity, conversion and options.
+fn compile_learned_engine(
+    patches:&[HandlerPatch],additions:&[HandlerAddition],
+    corrections:&[HandlerCorrection]
+)->Result<ParserEngine,ParseError>{
     let mut sorted=patches.to_vec();
     sorted.sort_by_key(|p|p.index);
     if sorted.windows(2).any(|w|w[0].index==w[1].index){
         return Err(ParseError::Data("duplicate handler patch".into()));
     }
-    if sorted.len()>32||additions.len()>96{
+    if sorted.len()>32||additions.len()>96||corrections.len()>16{
         return Err(ParseError::Data("too many live regex rules".into()));
     }
     let mut ordered_additions=additions.to_vec();
     ordered_additions.sort_by(|a,b|(&a.source_index,&a.pattern)
         .cmp(&(&b.source_index,&b.pattern)));
     if ordered_additions.windows(2).any(|w|
-        w[0].source_index==w[1].source_index && w[0].pattern==w[1].pattern){
+        w[0].source_index==w[1].source_index&&w[0].pattern==w[1].pattern){
         return Err(ParseError::Data("duplicate handler addition".into()));
-    }
-    let fingerprint=stable_patch_hash(&sorted,&ordered_additions);
-    if LIVE_REVISION.load(std::sync::atomic::Ordering::Acquire)==fingerprint {
-        return Ok(());
-    }
-    if patches.is_empty()&&additions.is_empty(){
-        let mut lock=LIVE_ENGINE.write().map_err(|_|ParseError::Data(
-            "live handler lock unavailable".into()))?;
-        *lock=None;
-        LIVE_REVISION.store(fingerprint,std::sync::atomic::Ordering::Release);
-        return Ok(());
     }
     let mut document:Value=serde_json::from_str(HANDLERS_JSON)
         .map_err(|e|ParseError::Data(e.to_string()))?;
@@ -2965,9 +3004,40 @@ pub fn install_learned_handler_regex(
         verify_learned_regex(&patch.replacement_pattern)?;
         raw["pattern"]=Value::String(patch.replacement_pattern.clone());
     }
-    // Additions are appended so normal bundled handlers have precedence.
-    // Their original field, options and transform are preserved exactly.
-    // The learner cannot inject arbitrary field values, scripts or transforms.
+    // Corrections are inserted before original handlers for the SAME
+    // target field. This is required to fix a nonempty but incorrect value:
+    // appending a regex after a skipIfAlreadyFound handler cannot repair it.
+    // The source must be a safe array/range transform with no removal.
+    let mut ordered_corrections=corrections.to_vec();
+    ordered_corrections.sort_by(|a,b|(&a.source_index,&a.pattern)
+        .cmp(&(&b.source_index,&b.pattern)));
+    ordered_corrections.dedup_by(|a,b|a.source_index==b.source_index
+        &&a.pattern==b.pattern&&a.is_range==b.is_range);
+    for correction in &ordered_corrections{
+        let mut raw=rows.get(correction.source_index).cloned().ok_or_else(||
+            ParseError::Data("unknown corrective source handler".into()))?;
+        let field=raw["name"].as_str().unwrap_or_default().to_owned();
+        let transform=raw["transform"].as_str().unwrap_or_default();
+        if raw["kind"]!="regex"
+            ||!matches!(field.as_str(),"seasons"|"episodes")
+            ||!(transform=="array(integer)"
+                ||(field=="episodes"&&correction.is_range&&transform=="range_func"))
+            ||(correction.is_range&&transform!="range_func")
+            ||raw["options"]["remove"]==true
+            ||raw["options"]["skipIfAlreadyFound"]!=true {
+            return Err(ParseError::Data("unsafe corrective handler".into()));
+        }
+        verify_learned_regex(&correction.pattern)?;
+        raw["pattern"]=Value::String(correction.pattern.clone());
+        // Explicit single-coordinate rules need the same ambiguity guard
+        // as native TV learning. A dedicated bounded range rule is separate.
+        raw["learned_tv_guard"]=Value::Bool(!correction.is_range);
+        let insert=rows.iter().position(|handler|handler["name"]==field)
+            .ok_or_else(||ParseError::Data("missing corrective field".into()))?;
+        rows.insert(insert,raw);
+    }
+    // Ordinary learned additions remain low-priority and cannot overwrite
+    // a valid value emitted by the original parser.
     for addition in &ordered_additions{
         let mut raw=rows.get(addition.source_index).cloned().ok_or_else(||
             ParseError::Data("unknown addition source handler".into()))?;
@@ -2985,12 +3055,31 @@ pub fn install_learned_handler_regex(
         }
         rows.push(raw);
     }
-    let candidate=ParserEngine::from_json(&document.to_string())?;
-    let mut lock=LIVE_ENGINE.write().map_err(|_|
-        ParseError::Data("live handler lock unavailable".into()))?;
-    *lock=Some(Arc::new(candidate));
-    LIVE_REVISION.store(fingerprint,std::sync::atomic::Ordering::Release);
-    Ok(())
+    ParserEngine::from_json(&document.to_string())
+}
+
+/// Test candidate corrections against replayed raw titles with no changes
+/// to the global parser engine. All titles share one compiled candidate.
+pub fn replay_corrective_regex(
+    corrections:&[HandlerCorrection],titles:&[String]
+)->Result<Vec<Map<String,Value>>,ParseError>{
+    if titles.len()>128{return Err(ParseError::Data(
+        "corrective replay corpus too large".into()));}
+    let candidate=Arc::new(compile_learned_engine(&[],&[],corrections)?);
+    struct RestoreReplay;
+    impl Drop for RestoreReplay{
+        fn drop(&mut self){
+            REPLAY_ENGINE.with(|slot|{*slot.borrow_mut()=None;});
+        }
+    }
+    REPLAY_ENGINE.with(|slot|{
+        if slot.borrow().is_some(){return Err(ParseError::Data(
+            "nested corrective replay".into()));}
+        *slot.borrow_mut()=Some(candidate);
+        Ok(())
+    })?;
+    let _restore=RestoreReplay;
+    titles.iter().map(|title|parse_title(title,false)).collect()
 }
 fn verify_learned_regex(pattern:&str)->Result<(),ParseError>{
     if !(4..=512).contains(&pattern.len()){
