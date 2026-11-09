@@ -16,6 +16,9 @@ const HISTORY_BATCH_SIZE:usize = 64;
 // Dedicated, bounded SQLite job spool (separate from the 1,000-row dashboard
 // retention window). Producers never synchronously touch this DB from API.
 const MAX_ML_QUEUE_ITEMS:i64 = 20_000;
+static ML_QUEUE_EVICTED:AtomicUsize=AtomicUsize::new(0);
+pub fn ml_queue_evicted()->usize{ML_QUEUE_EVICTED.load(Ordering::Relaxed)}
+pub fn history_telemetry_dropped()->usize{HISTORY_DROPPED.load(Ordering::Relaxed)}
 fn ml_queue_max_items()->i64{
     std::env::var("MATCHLAB_ML_QUEUE_MAX_ITEMS").ok()
         .and_then(|v|v.parse::<i64>().ok())
@@ -175,12 +178,20 @@ fn persist_batch_with_learning(db:&mut Connection,items:&[HistoryEvent],
     // StremThru-style bounded persistence: retain jobs independently of
     // the dashboard history. Older overflow entries are dropped only from
     // ML evidence, never from actual parsing/matching.
-    if train{
+    let evicted=if train{
         tx.execute("DELETE FROM ml_training_queue WHERE id <= (
             SELECT COALESCE(MAX(id),0)-?1 FROM ml_training_queue
-        )",[ml_queue_max_items()])?;
+        )",[ml_queue_max_items()])?
+    }else{0};
+    tx.commit()?; 
+    if evicted>0{
+        let total=ML_QUEUE_EVICTED.fetch_add(evicted,Ordering::Relaxed)+evicted;
+        if total==evicted||total%4096<evicted{
+            tracing::warn!(evicted_total=total,
+                "ML queue retention limit evicted older observations; matching unaffected");
+        }
     }
-    tx.commit()
+    Ok(())
 }
 
 /// Synchronous single-event writer, also used in tests and fallback paths.
