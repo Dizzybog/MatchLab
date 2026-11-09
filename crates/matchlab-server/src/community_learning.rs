@@ -498,7 +498,12 @@ fn cycle(history:&Path,metadata:&Path,storage:&Path,token:&str)->Result<(),Strin
         .and_then(|v|v.parse::<u64>().ok()).unwrap_or(time);
     if time<started.saturating_add(DAY_SECS){return Ok(());}
     let Some((id,batch,fingerprints))=build_batch(&db,time)?else{
-        put(&db,"window_start",&time.to_string())?;
+        // During first opt-in the offline archive may still be upgrading.
+        // Keep the first-send window open until a real batch exists, rather
+        // than imposing a 24-hour delay on a late archive snapshot.
+        let confirmed:i64=db.query_row("SELECT count(*) FROM reported",[],
+            |r|r.get(0)).map_err(|e|e.to_string())?;
+        if confirmed>0 {put(&db,"window_start",&time.to_string())?;}
         return Ok(());
     };
     // Older builds may report; GitHub Action replays their observations against
