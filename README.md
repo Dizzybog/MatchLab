@@ -110,6 +110,14 @@ Only `MATCHLAB_ML_ENABLED` is required; the other settings are optional limits. 
 
 Check `GET /api/ml/status` to see local model and rule statistics. No separate AI server, GPU or online AI service is required.
 
+### ML novelty gate (parser improvement, not regex duplication)
+
+The model still trains from every parser field, including successful canonical parses, but a technical marker is only **activated as a new regex** after at least **four independent missing-field observations covering two title identities**, alongside the existing minimum of eight examples and four distinct title identities. A valid native parser handler must exist for the exact field/transformation; otherwise the candidate remains training or review evidence. This prevents standard markers like `x264`, `1080p`, `mkv` and `subbed` from inflating the active-rule count merely because they are common.
+
+TV families require three distinct missing-coordinate observations, two distinct affected titles and two correct original-parser confirmations before activation. Conflicting coordinates never count as missing. Learned regexes still use MatchLab's original field transforms, never directly produce field values, and are shared only after local validation. Historical rules remain archived; an updated build may initially show fewer **active** rules without deleting its learned evidence.
+
+`GET /api/ml/status` now reports `evidence_only_candidates` and an `activation_policy`. This intentionally prioritizes useful changes over the raw number of generated patterns.
+
 ### Share improvements with the community (optional)
 
 GitHub sharing is **off by default**, even when local ML is on. MatchLab only posts proposed regex changes and selected diagnostics as comments on Issues in [Dizzybog/MatchLab](https://github.com/Dizzybog/MatchLab). It does **not** create Issues or merge PRs.
