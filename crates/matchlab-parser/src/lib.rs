@@ -3109,14 +3109,17 @@ fn compile_learned_engine(
     ParserEngine::from_json(&document.to_string())
 }
 
-/// Test candidate corrections against replayed raw titles with no changes
-/// to the global parser engine. All titles share one compiled candidate.
-pub fn replay_corrective_regex(
+/// Test the COMPLETE candidate parser, including existing technical and
+/// TV overlays, before changing a live rule. New corrections must improve
+/// the actual installed parser combination, not merely a bare regex sample.
+pub fn replay_handler_rules(
+    patches:&[HandlerPatch],additions:&[HandlerAddition],
     corrections:&[HandlerCorrection],titles:&[String]
 )->Result<Vec<Map<String,Value>>,ParseError>{
     if titles.len()>128{return Err(ParseError::Data(
         "corrective replay corpus too large".into()));}
-    let candidate=Arc::new(compile_learned_engine(&[],&[],corrections)?);
+    let additions=effective_handler_additions(additions,corrections);
+    let candidate=Arc::new(compile_learned_engine(patches,&additions,corrections)?);
     struct RestoreReplay;
     impl Drop for RestoreReplay{
         fn drop(&mut self){
@@ -3131,6 +3134,12 @@ pub fn replay_corrective_regex(
     })?;
     let _restore=RestoreReplay;
     titles.iter().map(|title|parse_title(title,false)).collect()
+}
+/// Compatibility helper for isolated parser-regression tests.
+pub fn replay_corrective_regex(
+    corrections:&[HandlerCorrection],titles:&[String]
+)->Result<Vec<Map<String,Value>>,ParseError>{
+    replay_handler_rules(&[],&[],corrections,titles)
 }
 fn verify_learned_regex(pattern:&str)->Result<(),ParseError>{
     if !(4..=512).contains(&pattern.len()){
