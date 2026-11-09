@@ -8,7 +8,7 @@
 //! evidence and evicted first only when the configured quota is exceeded.
 use rusqlite::{params,Connection,OpenFlags,OptionalExtension};
 use serde_json::{json,Value};
-use std::sync::atomic::{AtomicU64,Ordering};
+use std::sync::atomic::{AtomicBool,AtomicU64,Ordering};
 use sha2::{Digest,Sha256};
 use std::{env,fs,path::{Path,PathBuf},time::{Duration,SystemTime,UNIX_EPOCH}};
 
@@ -23,6 +23,8 @@ const DEFAULT_CACHE_ENTRIES:i64=100_000;
 const MAX_CACHE_ENTRIES:i64=2_000_000;
 static CACHE_HITS:AtomicU64=AtomicU64::new(0);
 static CACHE_MISSES:AtomicU64=AtomicU64::new(0);
+// Updated by background maintenance, never by individual request writes.
+static CACHE_WRITES_ALLOWED:AtomicBool=AtomicBool::new(true);
 const BUSY_MS:u64=12;
 
 pub fn storage_gb()->u64 {
@@ -63,6 +65,7 @@ pub fn status()->Value{
         "unmatched_cache_ttl_minutes":miss_ttl_secs()/60,
         "hits":CACHE_HITS.load(Ordering::Relaxed),
         "misses":CACHE_MISSES.load(Ordering::Relaxed),
+        "cache_writes_allowed":CACHE_WRITES_ALLOWED.load(Ordering::Relaxed),
         "stale_entries_reparsed_and_rematched":true})
 }
 pub fn enabled()->bool{
@@ -143,7 +146,7 @@ fn read(kind:&str,title:&str,year:Option<i32>,series:Option<bool>,
 }
 fn write(kind:&str,title:&str,year:Option<i32>,series:Option<bool>,
     metadata:Option<&Path>,value:&Value){
-    if !enabled(){return;}
+    if !enabled() || !CACHE_WRITES_ALLOWED.load(Ordering::Acquire){return;}
     let Some(ns)=namespace(kind,metadata)else{return;};
     let Ok(raw)=serde_json::to_vec(value)else{return;};
     if raw.len()>MAX_ENTRY_BYTES{return;}
@@ -153,9 +156,9 @@ fn write(kind:&str,title:&str,year:Option<i32>,series:Option<bool>,
         let db=Connection::open(state_file())?;
         db.busy_timeout(Duration::from_millis(BUSY_MS))?;
         initialize(&db)?;
-        // Fail closed when the entire local learning DB is at its quota.
-        // The low-priority worker will reclaim obsolete rows first.
-        if used_bytes(&db).unwrap_or(u64::MAX)>=storage_gb()*GIB {
+        // Quota is checked by background maintenance instead of issuing
+        // SQLite page_count/freelist_count PRAGMAs on every request write.
+        if !CACHE_WRITES_ALLOWED.load(Ordering::Acquire) {
             return Ok(());
         }
         db.execute(
@@ -301,6 +304,9 @@ fn maintain_with_budget(db:&Connection,metadata:&Path,budget:u64)->Result<(),Str
     // Reuse freed pages and checkpoint opportunistically, without a full
     // VACUUM that could cause CPU/IO spikes on weak hardware.
     let _=db.execute_batch("PRAGMA wal_checkpoint(PASSIVE);");
+    // A best-effort storage budget: a bounded amount of new cache writes
+    // may land before the next maintenance pass. Parsing never stops.
+    CACHE_WRITES_ALLOWED.store(occupied<=budget,Ordering::Release);
     if occupied>budget {
         tracing::warn!(occupied_bytes=occupied,budget_bytes=budget,
             "learning storage remains over budget; future cache writes blocked");
