@@ -104,6 +104,35 @@ fn source_valid(row:&Value)->bool{
         &&row["field"].as_str().is_some_and(|s|!s.is_empty())
         &&row["pattern"].as_str().is_some_and(|s|!s.is_empty())
 }
+// Live activation is deliberately narrower than observation. A
+// self-supervised punctuation mutation does NOT independently prove that
+// an already nonempty value is wrong. Corrections must use a dedicated
+// independent reference validator (TV coordinates currently do).
+fn approved_addition_source(row:&Value)->bool{
+    let Some(field)=row["field"].as_str()else{return false;};
+    source_valid(row) &&is_fixed_transform(row)
+        &&row["options"]["skipIfAlreadyFound"]==true
+        &&matches!(field,
+            "edition"|"quality"|"resolution"|"codec"|"bit_depth"
+            |"network"|"upscaled"|"subbed"|"dubbed"|"proper"
+            |"repack"|"retail"|"remastered"|"unrated"
+            |"uncensored"|"hardcoded"|"commentary"|"preair")
+}
+fn bounded_generated_regex(pattern:&str)->bool{
+    let prefix="(?i)(?:^|[ ._-])(";
+    let suffix=")(?:$|[ ._-])";
+    let Some(body)=pattern.strip_prefix(prefix)
+        .and_then(|p|p.strip_suffix(suffix))else{return false;};
+    let parts=body.split("[ ._-]+").collect::<Vec<_>>();
+    (2..=6).contains(&parts.len())&&pattern.len()<=256
+        &&parts.iter().all(|s|!s.is_empty()&&s.len()<=24
+            &&s.bytes().all(|b|b.is_ascii_alphanumeric()))
+}
+fn promotable(rule:&Active)->bool{
+    rule.mode=="add"&&bounded_generated_regex(&rule.pattern)
+        &&source(rule.source_index).is_some_and(|s|
+            s["field"]==rule.field &&approved_addition_source(s))
+}
 fn identity(ctx:&ParseContext)->Option<String>{
     let title=ctx.result.get("title")?.as_str()?.trim();
     let normalized=crate::imdb_matcher::clean_title(title);
@@ -364,7 +393,11 @@ fn candidates(db:&Connection)->Result<Vec<Active>,String>{
         pattern:row.get(3)?,mode:row.get(4)?,
         fixes:0,checked:0
     })).map_err(|e|e.to_string())?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())
+    let proposals=rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e|e.to_string())?;
+    // Invalid persisted rules and arbitrary field overwrites cannot become
+    // executable even if a local SQLite database was imported or modified.
+    Ok(proposals.into_iter().filter(promotable).collect())
 }
 fn read_examples(db:&Connection,key:&str,limit:usize)->Result<Vec<Evidence>,String>{
     let mut stmt=db.prepare("SELECT field,source_index,pattern,mode,
@@ -412,6 +445,7 @@ fn replay(db:&Connection,previous:&[Active],all:&[Active],
     if all.is_empty(){return Ok(Some((0,0)));}
     let mut examples=Vec::new();
     for rule in all{
+        if !promotable(rule){return Ok(None);}
         // Re-test the new candidate on multiple independent observations.
         // Already verified rules keep two cross-family regression probes.
         let limit=if rule.key==newest {8}else{2};
@@ -501,7 +535,14 @@ fn active_safe(db:&Connection,rules:&[Active])->Result<bool,String>{
     if rules.is_empty(){return Ok(true);}
     let mut examples=Vec::new();
     for rule in rules{
-        examples.extend(read_examples(db,&rule.key,2)?);
+        if !promotable(rule){return Ok(false);}
+        let rows=read_examples(db,&rule.key,2)?;
+        if rows.len()<2 ||rows[0].identity==rows[1].identity{
+            // Evidence was deleted, became stale, or covers only one work.
+            // Never grandfather a verified regex without live references.
+            return Ok(false);
+        }
+        examples.extend(rows);
     }
     let titles=examples.iter()
         .flat_map(|e|[e.source_release.clone(),e.variant_release.clone()])
@@ -524,11 +565,19 @@ fn active_safe(db:&Connection,rules:&[Active])->Result<bool,String>{
         &patches,&additions,&all,&titles){
         Ok(v)=>v,Err(_)=>return Ok(false)
     };
+    let mut repaired=BTreeMap::<String,usize>::new();
     for (i,e) in examples.iter().enumerate(){
         if Value::Object(replay[2*i].clone())!=e.expected
             ||Value::Object(replay[2*i+1].clone())!=e.expected {
             return Ok(false);
         }
+        if baseline[2*i+1]!=replay[2*i+1]{
+            *repaired.entry(e.key.clone()).or_default()+=1;
+        }
+    }
+    if rules.iter().any(|r|repaired.get(&r.key).copied().unwrap_or(0)==0){
+        // The native parser or another rule now performs the same repair.
+        return Ok(false);
     }
     let offset=examples.len()*2;
     Ok(baseline[offset..]==replay[offset..])
