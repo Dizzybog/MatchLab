@@ -966,7 +966,6 @@ mod tests {
         for (field,signal,expected) in [
             ("audio","aac",json!(["AAC"])),
             ("audio","eac3",json!(["Dolby Digital Plus"])),
-            ("hdr","hdr10",json!(["HDR10"])),
             ("hdr","dovi",json!(["DV"])),
             ("channels","5.1",json!(["5.1"])),
             ("languages","norsk",json!(["no"])),
@@ -978,6 +977,13 @@ mod tests {
             assert!(!additions.is_empty(),
                 "{field}/{signal} should reuse a native Rust handler");
         }
+        // Native HDR10 has a pattern-dependent transform; a generic
+        // cloned handler cannot guarantee the same semantics. It remains
+        // evidence-only until a safe field validator/transform is available.
+        assert_eq!(independent_marker_value("hdr","hdr10"),
+            Some(json!(["HDR10"])));
+        assert!(source_handler_additions(&[rule(
+            "hdr","hdr10",json!(["HDR10"]),24,8)]).is_empty());
         let subs=rule("subbed","subbed",json!(true),24,8);
         assert!(!source_handler_additions(&[subs]).is_empty());
         let file=rule("extension","mkv",json!("mkv"),24,8);
