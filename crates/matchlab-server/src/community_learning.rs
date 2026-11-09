@@ -282,6 +282,10 @@ fn collect_rule_proposals(db:&Connection,metadata:&Path,time:u64)->Result<(),Str
         .unwrap_or_default());
     rules.extend(crate::tv_learning::community_proposals(&local)
         .unwrap_or_default());
+    // Include high-frequency unknown-marker proposals for every original
+    // parser field. These can only enter GitHub's human-review queue.
+    rules.extend(crate::candidate_discovery::community_proposals(&local)
+        .unwrap_or_default());
     // Distinct fingerprints avoid repeats between source patch proposals
     // and newly added technical/TV regex families.
     rules.sort_by(|a,b|a["fingerprint"].as_str().cmp(&b["fingerprint"].as_str()));
@@ -371,7 +375,7 @@ fn build_batch(db:&Connection,time:u64)->Result<Option<(String,Value,Vec<String>
     let mut reports=Vec::new();
     let mut rules=Vec::new();
     for item in items{
-        if matches!(item["kind"].as_str(),Some("verified_regex_proposal" | "learned_field_regex" | "learned_tv_regex" | "learned_source_regex_patch")){
+        if matches!(item["kind"].as_str(),Some("verified_regex_proposal" | "learned_field_regex" | "learned_tv_regex" | "learned_source_regex_patch" | "learned_field_regex_review")){
             rules.push(item);
         }else{
             reports.push(item);
