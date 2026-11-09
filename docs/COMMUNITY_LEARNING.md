@@ -43,7 +43,7 @@ A promoted rule can be **additional** (recognize a new syntax) or a **replacemen
 | Technical tags such as resolution, codec and quality | Verified, context-safe additions reuse an existing MatchLab handler's transformation; selected source regex can be broadened |
 | Explicit TV season/episode forms such as `S02E07`, `2x07` and `Season 2 Episode 7` | Verified regex is compiled as native season/episode handlers. The parser guards against ambiguous multiple markers, ranges and packs |
 | Absolute anime episode markers | A learned regex may supply a candidate to MatchLab's matcher. An IMDb/AniDB crosswalk must independently verify it before matching changes coordinates |
-| Context-sensitive languages, audio/channels, unmarked episodes, titles, years or IMDb IDs | Can be observed and proposed for review, but no unverified field rewrite is performed |
+| Context-sensitive language, audio/channel, subtitle/dub tags, unmarked episodes, titles, years or IMDb IDs | Can be observed and proposed for review, but are not automatically installed as local source regex |
 
 **No ML method writes `seasons`, `episodes`, `codec`, `title`, `year`, SID or ASID into a parser response.** MatchLab creates those fields by executing its own handlers and matching logic. Reviewed anime rules may be included in an image so users without ML can benefit from them.
 
