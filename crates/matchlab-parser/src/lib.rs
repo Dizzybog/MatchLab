@@ -3103,19 +3103,17 @@ fn compile_learned_engine(
             ParseError::Data("unknown corrective source handler".into()))?;
         let field=raw["name"].as_str().unwrap_or_default().to_owned();
         let transform=raw["transform"].as_str().unwrap_or_default();
-        // High-priority correction is field-agnostic. It inherits
-        // the ORIGINAL native handler's field, transform, flags and
-        // removal policy. Field safety comes from independent replay,
-        // not a hardcoded list of field names.
+        // A high-priority rule can replace an already populated field.
+        // Only ordinary TV coordinates have a separate independent numeric
+        // oracle today. The general learner must never obtain replacement
+        // authority just from its own canonical parse history.
         let is_tv=matches!(field.as_str(),"seasons"|"episodes");
         let tv_transform=transform=="array(integer)"
             ||(field=="episodes"&&correction.is_range&&transform=="range_func");
-        let native_fixed=transform=="boolean"
-            ||transform.starts_with("value('")&&!transform.contains("$1")
-            ||transform.starts_with("uniq_concat(value('");
         if raw["kind"]!="regex"
-            ||(is_tv&&!tv_transform)
-            ||(!is_tv&&!native_fixed)
+            ||!is_tv||!tv_transform
+            ||raw["options"]["remove"]==true
+            ||raw["options"]["skipIfAlreadyFound"]!=true
             ||(correction.is_range
                 &&!(field=="episodes"&&transform=="range_func")) {
             return Err(ParseError::Data("unsafe corrective handler".into()));
@@ -3296,6 +3294,19 @@ mod live_handler_catalog_tests {
         assert!(learned_tv_ambiguous("Series.S02E07-E08.1080p"));
         assert!(learned_tv_ambiguous("Series.02x07-08.1080p"));
         assert!(learned_tv_ambiguous("Series.Season.2.Episode.7-8.1080p"));
+    }
+    #[test]
+    fn unverified_non_tv_regex_cannot_override_nonempty_values(){
+        let source=existing_regex_rules().into_iter().find(|r|
+            r["field"]=="edition" &&r["transform"]=="value('Ultimate Edition')")
+            .expect("trusted native edition rule");
+        let correction=HandlerCorrection{
+            source_index:source["index"].as_u64().unwrap() as usize,
+            pattern:r"(?i)(?:^|[ ._-])(Ultimate[ ._-]+Edition)(?:$|[ ._-])".into(),
+            is_range:false
+        };
+        assert!(compile_learned_engine(&[],&[],&[correction]).is_err(),
+            "an arbitrary scalar field must not accept a high-priority rewrite");
     }
     #[test]
     fn unsafe_replacement_is_rejected_before_live_publication(){
