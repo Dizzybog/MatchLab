@@ -253,9 +253,8 @@ regression datasets before that scope can be safely extended.
 
 ## Native online model and candidate discovery
 
-The previous fixed eight-feature ONNX bootstrap has been replaced with a
-native Rust **FTRL-Proximal** online classifier with 16,384 hashed weight
-slots. It extracts field/marker combinations, short character n-grams,
+The native Rust **FTRL-Proximal** online classifier uses 16,384 hashed
+weight slots. It extracts field/marker combinations, short character n-grams,
 release context and approximate marker position. Model parameters use
 approximately 128 KiB for the sparse optimizer state and are persisted
 atomically with the history cursor and SQLite evidence batch. No runtime
@@ -459,9 +458,8 @@ After merging the implementation PR and verifying the Docker image:
    and actual IMDb/AniDB crosswalks before approving and merging
    any bot PR. Review the scope of every new regex.
 
-**No external Learning Hub server is required.** Python in the hosted
-GitHub Actions review job is not part of the MatchLab image or its
-weak-host runtime; core parser/matcher, online model training/inference
+Python in the hosted GitHub Actions review job is not part of the
+MatchLab image or its runtime; core parser/matcher, online model training/inference
 and local regex application all run in Rust.
 
 ## Measuring quality and performance
