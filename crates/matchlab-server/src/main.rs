@@ -455,7 +455,7 @@ fn reconcile_series_coordinates(
         && season.is_some() && episode.is_some();
     if !verified_crosswalk {
         if season.is_none(){season=parsed_season;}
-        let imdb=winner["imdb_id"].as_str().unwrap_or_default();
+        let imdb=winner["imdb_id"].as_str().unwrap_or_default().to_owned();
         let has_anime=winner["anime_ids"].as_object()
             .is_some_and(|ids|!ids.is_empty());
         // Do not restore an episode which known IMDb bounds reject. When
@@ -465,13 +465,13 @@ fn reconcile_series_coordinates(
         if episode.is_none() {
             if let Some(ep)=parsed_episode {
                 let target_season=season.unwrap_or(1);
-                let imdb_max=season_episode_end(db,imdb,target_season)?;
+                let imdb_max=season_episode_end(db,&imdb,target_season)?;
                 let unverified_anime=if has_anime && imdb_max.is_none() {
                     db.query_row(
                         "SELECT EXISTS(SELECT 1 FROM anime_series_map l
                            JOIN episode_map m ON m.anidb_id=l.anidb_id
                            WHERE l.imdb_id=?1 AND m.tvdb_season=?2)",
-                        rusqlite::params![imdb,target_season],
+                        rusqlite::params![&imdb,target_season],
                         |row|row.get::<_,i64>(0)
                     ).map_err(|e|e.to_string())? != 0
                 }else{false};
@@ -485,7 +485,7 @@ fn reconcile_series_coordinates(
         }
         if season.is_none(){
             if let Some(ep)=episode{
-                let max=season_episode_end(db,imdb,1)?;
+                let max=season_episode_end(db,&imdb,1)?;
                 if max.is_some_and(|end|ep>end)
                     ||(has_anime && max.is_none() && ep>150){
                     episode=None;
