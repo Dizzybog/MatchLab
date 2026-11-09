@@ -13,13 +13,13 @@ use std::sync::{OnceLock,RwLock,atomic::{AtomicU64,Ordering}};
 const EPOCH:u32=1;
 const MIN_FIXES:usize=4;
 const MIN_IDENTITIES:usize=2;
-const MAX_ACTIVE:usize=48;
+const MAX_ACTIVE:usize=16;
 const MAX_EXAMPLES:i64=16_384;
 fn capacity()->i64{
     MAX_EXAMPLES.min(crate::learning_cache::training_max_examples())
 }
-const MAX_CANDIDATES:usize=24;
-const MAX_TESTS:usize=120;
+const MAX_CANDIDATES:usize=4;
+const MAX_TESTS:usize=128;
 const NEGATIVES:&[&str]=&[
     "The.Danish.Girl.2015.1080p",
     "The.German.Connection.2005.1080p",
@@ -203,11 +203,11 @@ fn derive(name:&str,ctx:&ParseContext)->Vec<Evidence>{
     matches.sort_by_key(|(index,field,_,_)|(*index,field.clone()));
     // Never amplify background parser CPU on every incoming request.
     // The rotation distributes all handler families across the corpus.
-    if matches.len()>2{
+    if matches.len()>1{
         let digest=Sha256::digest(name.as_bytes());
         let position=digest[0] as usize%matches.len();
         matches.rotate_left(position);
-        matches.truncate(2);
+        matches.truncate(1);
     }
     let mut out=Vec::new();
     for (index,field,pattern,mutants) in matches{
@@ -346,13 +346,13 @@ fn candidates(db:&Connection)->Result<Vec<Active>,String>{
     })).map_err(|e|e.to_string())?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())
 }
-fn read_examples(db:&Connection,key:&str)->Result<Vec<Evidence>,String>{
+fn read_examples(db:&Connection,key:&str,limit:usize)->Result<Vec<Evidence>,String>{
     let mut stmt=db.prepare("SELECT field,source_index,pattern,mode,
        identity_hash,source_release,variant_release,expected
        FROM ml_general_examples WHERE source_build=?1 AND rule_key=?2
        ORDER BY identity_hash,example_hash LIMIT ?3")
         .map_err(|e|e.to_string())?;
-    let rows=stmt.query_map(params![build(),key,(MAX_TESTS-NEGATIVES.len()) as i64],
+    let rows=stmt.query_map(params![build(),key,limit as i64],
         |row|{
             let expected:String=row.get(7)?;
             Ok(Evidence{
@@ -386,7 +386,10 @@ fn replay(db:&Connection,previous:&[Active],all:&[Active],
     if all.is_empty(){return Ok(Some((0,0)));}
     let mut examples=Vec::new();
     for rule in all{
-        examples.extend(read_examples(db,&rule.key)?);
+        // Re-test the new candidate on multiple independent observations.
+        // Already verified rules keep two cross-family regression probes.
+        let limit=if rule.key==newest {8}else{2};
+        examples.extend(read_examples(db,&rule.key,limit)?);
     }
     // Each example is replayed as original + variant; bound the TOTAL
     // titles, not merely the number of evidence rows.
