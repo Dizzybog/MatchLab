@@ -309,15 +309,20 @@ fn review_candidate(db:&Connection,family:&str,
         "Movie.1917.2019.1080p","Example.2005.2160p.WEB-DL"]
         .iter().map(|s|(*s).to_owned()));
     if names.len()>128{return Ok(None);}
-    let replay=match matchlab_parser::replay_corrective_regex(corrections,&names){
+    let (patches,additions)=crate::field_learning::current_source_rules(
+        crate::tv_learning::handler_additions())?;
+    let baseline=match matchlab_parser::replay_handler_rules(
+        &patches,&additions,&[],&names){
+        Ok(values)=>values,Err(_)=>return Ok(None)
+    };
+    let replay=match matchlab_parser::replay_handler_rules(
+        &patches,&additions,corrections,&names){
         Ok(values)=>values,Err(_)=>return Ok(None)
     };
     let mut metrics=ReplayMetrics::default();
-    for (name,new) in names.iter().zip(replay){
+    for (name,(old,new)) in names.iter().zip(
+        baseline.into_iter().zip(replay.into_iter())){
         metrics.checked+=1;
-        let old=match matchlab_parser::parse_title_canonical(name,false){
-            Ok(value)=>value,Err(_)=>return Ok(false)
-        };
         // Changes outside the two independently validated fields must
         // fail closed, including newly introduced output keys.
         let mut previous=old.clone();
