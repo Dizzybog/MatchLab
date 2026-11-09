@@ -81,7 +81,7 @@ The public `/match` endpoint has stricter matching requirements than the dashboa
 
 ## Optional Machine Learning
 
-**MatchLab works normally without Machine Learning (ML).** When enabled, a small Rust model learns patterns from release names in the background and proposes improvements to the existing regex parser. Normal requests still use compiled parsing rules; they do not run the model.
+**MatchLab works normally without Machine Learning (ML).** When enabled, a small Rust model learns patterns from release names in the background. It can add new regex patterns or suggest replacements for existing ones. **ML never sets or overwrites parsed fields.** MatchLab's own parser interprets the compiled rules, and its matcher verifies IMDb/AniDB identities as usual. The model is not run on each request.
 
 The learning process is:
 
@@ -90,7 +90,7 @@ The learning process is:
 3. Test proposed regex rules against known values, conflicting patterns and negative examples.
 4. Activate eligible rules in memory without restarting. More uncertain changes are kept for review.
 
-Today, local learning can improve **technical tags** (such as resolution and codecs), **explicit TV season/episode formats** and **verified absolute anime episode markers**. It can also propose carefully limited changes to existing parser regex. Other fields, including titles, years and IMDb/AniDB identities, can be inspected but are **not automatically rewritten from model predictions**. A model score alone never approves a new rule.
+Today, eligible technical and explicit TV regex can be installed in MatchLab's parser **live, without restarting**. After independent crosswalk verification, learned anime episode-marker regex can be used by MatchLab's matcher. Proposed changes to existing source regex are checked before live activation. Other fields can be observed, but uncertain patterns remain review-only. **All output fields are produced by MatchLab, never by the learner.** A high model score alone never approves a rule.
 
 Enable learning in the Compose environment:
 
