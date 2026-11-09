@@ -21,7 +21,7 @@ CODES={"season","episode","series","part","year","movie","sample",
        "x264","x265","h264","h265","hevc","hdr10","dovi",
        "ep","eps","new","the","eng","sub","dub"}
 MAX_BODY=16384
-MAX_RULES=2
+MAX_RULES=12
 MAX_SAMPLES=12
 MAX_CATCHUP_PROPOSALS=4096
 
