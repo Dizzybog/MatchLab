@@ -7,7 +7,7 @@ use matchlab_parser::{HandlerAddition,HandlerCorrection,ParseContext};
 use rusqlite::{params,Connection};
 use serde_json::{json,Value};
 use sha2::{Digest,Sha256};
-use std::collections::{BTreeMap,BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{OnceLock,RwLock,atomic::{AtomicU64,Ordering}};
 
 const EPOCH:u32=1;
@@ -331,9 +331,7 @@ fn replay(db:&Connection,previous:&[Active],all:&[Active],
     newest:&str)->Result<Option<(usize,usize)>,String>{
     if all.is_empty(){return Ok(Some((0,0)));}
     let mut examples=Vec::new();
-    let mut keys=BTreeSet::new();
     for rule in all{
-        keys.insert(rule.key.clone());
         examples.extend(read_examples(db,&rule.key)?);
     }
     // Each example is replayed as original + variant; bound the TOTAL
