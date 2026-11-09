@@ -122,14 +122,9 @@ fn parse_cached(title:&str)->Result<Value,String>{
             cache_generation_current(*saved_generation,*at,generation)
                 .then(||value.clone()))
     });
-    if let Some(mut enriched)=cached{
-        field_learning::apply(title,&mut enriched);
-        tv_learning::apply(title,&mut enriched);
-        learned_regex::apply(title,&mut enriched);
-        if parse_rules_revision()==generation{
-            return Ok(enriched);
-        }
-        // Rules changed during evaluation; fall through to fresh parsing.
+    if let Some(value)=cached {
+        if parse_rules_revision()==generation {return Ok(value);}
+        // A concurrent source-regex update requires a fresh parser run.
     }
     // Persisted hits are likewise strict current-namespace only. On a
     // parser/image/regex change, an old result can remain as historical
@@ -163,11 +158,7 @@ fn parse_cached(title:&str)->Result<Value,String>{
         }
         guard.insert(title.to_string(),(Instant::now(),parse_rules_revision(),value.clone()));
     }
-    let mut enriched=value;
-    field_learning::apply(title,&mut enriched);
-    tv_learning::apply(title,&mut enriched);
-    learned_regex::apply(title,&mut enriched);
-    Ok(enriched)
+    Ok(value)
 }
 fn numbers(v: Option<&Value>) -> Vec<i64> {
     match v {
@@ -663,15 +654,15 @@ fn diagnose_with_policy(
             parsed.insert("anime_title_verified".into(),json!(true));
         }
     }
-    // Exception overlay: a learned marker can supersede a wrong built-in
-    // episode/season regex, but only for this specific release when the
-    // *current* AniDB/TVDB crosswalk uniquely verifies its identity and
-    // absolute coordinate. Unverified proposals remain diagnostics only.
+    // The ML subsystem supplies a compiled regex candidate, never a parsed
+    // field value. Only MatchLab's matcher may reinterpret an episode after
+    // independently verifying the current AniDB/TVDB crosswalk.
+    let learned_candidate=learned_regex::candidate(&req.title,&parsed_value);
     if req.series!=Some(false)
         && parsed_value.get("episode_end").is_none()
         && parsed_value.get("season_end").is_none()
         && parsed_value.get("anime_episode_range_candidate").is_none()
-        && let Some(candidate)=parsed_value.get("learned_regex_candidate")
+        && let Some(candidate)=learned_candidate.as_ref()
         && let (Some(candidate_title),Some(absolute))=(
             candidate["title"].as_str(),candidate["episode"].as_i64())
         && (1..=99_999).contains(&absolute)
