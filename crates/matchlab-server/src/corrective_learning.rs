@@ -449,10 +449,16 @@ pub fn reconcile(db:&Connection)->Result<(),String>{
     if changed {
         let next=ready.iter().flat_map(|r|r.corrections.iter().cloned())
             .collect::<Vec<_>>();
-        // Build and atomically publish only after independent replay proves
-        // actual repairs without any observed regression.
-        crate::field_learning::publish_parser_rules_with_tv_and_corrections(
-            crate::tv_learning::handler_additions(),next)?;
+        // Rehearse the complete live rule set without publishing first.
+        // Never leave an unpersisted parser generation active if SQLite
+        // reports an error during the materialized rule update.
+        let (patches,additions)=crate::field_learning::current_source_rules(
+            crate::tv_learning::handler_additions())?;
+        let mut combined=next.clone();
+        combined.extend(crate::general_learning::handler_corrections());
+        matchlab_parser::replay_handler_rules(
+            &patches,&additions,&combined,&[])
+            .map_err(|e|format!("TV corrective preflight failed: {e}"))?;
         let fingerprint=ready.iter().flat_map(|r|
             r.corrections.iter().map(|c|
                 format!("{}:{}:{}",r.family,c.source_index,c.pattern)))
@@ -476,6 +482,10 @@ pub fn reconcile(db:&Connection)->Result<(),String>{
                 .map_err(|e|e.to_string())?;
         }
         tx.commit().map_err(|e|e.to_string())?;
+        // A failing publication cannot introduce a new live rule; it leaves
+        // only a retryable materialized DB record behind.
+        crate::field_learning::publish_parser_rules_with_tv_and_corrections(
+            crate::tv_learning::handler_additions(),next)?;
         *registry().write().map_err(|e|e.to_string())?=ready;
         REVISION.store(u64::from_le_bytes(bytes).max(1),Ordering::Release);
     }
