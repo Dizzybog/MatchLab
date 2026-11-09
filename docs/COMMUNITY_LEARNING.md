@@ -84,6 +84,12 @@ The model, evidence, active rules and optional result cache persist in `/data/lo
 
 `GET /api/ml/status` provides counts, model diagnostics and active rule summaries, without publishing original release names.
 
+### Regex logging and SQLite contention
+
+When local learning is active, MatchLab logs each currently active custom regex on startup and logs each new, modified or retired regex during operation. The `custom ML regex inventory` event includes `active_custom_rules`, `field_rules_in_database`, `anime_rules_in_database`, `tv_rule_families`, `compiled_regex_patterns`, and `archived_custom_rules_in_database`. Only rule identifiers and regex patterns are logged, never original torrent filenames or the private training dataset. Set `RUST_LOG=matchlab_server=info` to display these events.
+
+The history writer reuses one SQLite connection and commits up to 64 history events together while keeping 14-day minute statistics and 1,000 raw history records. Optional cached results use a separate bounded, asynchronous SQLite writer rather than a write connection per public request; cache saturation skips cache storage but does not drop the matching result. Check `/api/ml/status` for the number of cache events skipped. A temporarily busy learning database cannot be allowed to interrupt public matching.
+
 ### Cache and upgrades
 
 The optional cache stores exact-key results in SQLite; it does **not** perform IMDb or title search. Tantivy remains responsible for normal title lookup.
@@ -105,7 +111,7 @@ environment:
 
 Store the token in a private `.env` file or secret store, **never in a committed Compose file**.
 
-A participating installation sends at most **one confirmed batch comment every 24 hours**. The first eligible batch can be sent immediately when sharing is enabled; later confirmed deliveries are separated by 24 hours. The shared daily GitHub Issue collects bounded reports and regex proposals. The source-regex proposal includes the old and new regex, its handler metadata, and aggregate evidence.
+A participating installation sends at most **one confirmed batch comment every 24 hours**, containing up to 16 items (maximum 12 regex proposals). The first eligible batch can be sent immediately when sharing is enabled; later confirmed deliveries are separated by 24 hours. The shared daily GitHub Issue collects bounded reports and regex proposals. The source-regex proposal includes the old and new regex, its handler metadata, and aggregate evidence.
 
 ### Offline archive, historical backfill and confirmed delivery
 
