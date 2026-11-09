@@ -16,8 +16,11 @@ services:
       MATCHLAB_ML_ENABLED: "${MATCHLAB_ML_ENABLED:-false}"
       # Number of distinct validated training observations to retain.
       MATCHLAB_ML_TRAINING_MAX_EXAMPLES: "${MATCHLAB_ML_TRAINING_MAX_EXAMPLES:-500000}"
-      # Training evidence and query-cache share this best-effort disk budget.
+      # Training evidence quota (cache has a separate SQLite database/budget).
       MATCHLAB_ML_MAX_STORAGE_GB: "${MATCHLAB_ML_MAX_STORAGE_GB:-10}"
+      MATCHLAB_ML_QUEUE_MAX_ITEMS: "${MATCHLAB_ML_QUEUE_MAX_ITEMS:-20000}"
+      MATCHLAB_ML_TRAINING_BATCH_SIZE: "${MATCHLAB_ML_TRAINING_BATCH_SIZE:-64}"
+      MATCHLAB_ML_CACHE_MAX_STORAGE_GB: "${MATCHLAB_ML_CACHE_MAX_STORAGE_GB:-1}"
       # Versioned result cache; stale answers are parsed and matched again.
       MATCHLAB_ML_CACHE_ENABLED: "${MATCHLAB_ML_CACHE_ENABLED:-true}"
       MATCHLAB_ML_CACHE_MAX_ENTRIES: "${MATCHLAB_ML_CACHE_MAX_ENTRIES:-200000}"
