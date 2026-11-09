@@ -1,6 +1,7 @@
 //! Persistent, bounded request history and independent 14-day statistics.
 //! The metadata database is separate and is never modified here.
 use rusqlite::{params, Connection};
+use sha2::{Digest,Sha256};
 use serde_json::{json, Value};
 use std::{
     path::{Path,PathBuf},
@@ -73,6 +74,7 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         -- request ID is an idempotency key for safe restart/replay.
         CREATE TABLE IF NOT EXISTS ml_training_queue(
             id INTEGER PRIMARY KEY NOT NULL,
+            title_hash TEXT NOT NULL UNIQUE,
             title TEXT NOT NULL,
             details TEXT NOT NULL
         );
@@ -142,8 +144,10 @@ fn persist_batch_with_learning(db:&mut Connection,items:&[HistoryEvent],
              VALUES(?1,?2,?3,?4,?5,?6) RETURNING id"
         )?;
         let mut enqueue=tx.prepare_cached(
-            "INSERT OR IGNORE INTO ml_training_queue(id,title,details)
-             VALUES(?1,?2,?3)"
+            "INSERT INTO ml_training_queue(id,title_hash,title,details)
+             VALUES(?1,?2,?3,?4)
+             ON CONFLICT(title_hash) DO UPDATE SET
+               id=excluded.id,title=excluded.title,details=excluded.details"
         )?;
         for item in items{
             let details=item.details.to_string();
@@ -155,7 +159,11 @@ fn persist_batch_with_learning(db:&mut Connection,items:&[HistoryEvent],
                 details
             ],|r|r.get(0))?;
             if train && item.status!="error"{
-                enqueue.execute(params![id,item.title,details])?;
+                // Key by the exact release title: identical pending requests
+                // coalesce to the newest observation before training. The
+                // request's increasing ID keeps the durable cursor correct.
+                let identity=format!("{:x}",Sha256::digest(item.title.as_bytes()));
+                enqueue.execute(params![id,identity,item.title,details])?;
             }
         }
     }
@@ -448,6 +456,34 @@ mod tests {
         drop(db);
         cleanup(&path);
     }
+    #[test]
+    fn repeated_title_coalesces_to_newest_pending_training_job(){
+        let path=path();
+        initialize(&path).unwrap();
+        let mut db=connect(&path).unwrap();
+        let events=[HistoryEvent{
+            path:path.clone(),title:"Bleach.EPIS326".into(),
+            status:"matched".into(),selected:None,
+            details:json!({"selected":{"imdb_id":"tt0000001"}}),
+            duration_ms:1
+        },HistoryEvent{
+            path:path.clone(),title:"Bleach.EPIS326".into(),
+            status:"matched".into(),selected:None,
+            details:json!({"selected":{"imdb_id":"tt0000002"}}),
+            duration_ms:1
+        }];
+        persist_batch_with_learning(&mut db,&events,true).unwrap();
+        let (count,id,details):(i64,i64,String)=db.query_row(
+            "SELECT COUNT(*),MAX(id),MAX(details) FROM ml_training_queue",
+            [],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!(count,1);
+        assert_eq!(id,2);
+        assert_eq!(serde_json::from_str::<Value>(&details).unwrap()
+            ["selected"]["imdb_id"],"tt0000002");
+        drop(db);
+        cleanup(&path);
+    }
+
     #[test]
     fn ml_queue_overflow_is_bounded_by_monotonic_request_ids(){
         // Test the exact queue retention predicate independently of env vars.
