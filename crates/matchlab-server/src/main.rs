@@ -1483,8 +1483,8 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result
         learning_cache::match_namespace(&state.db)
     }else{None};
     let mut result=if cacheable{
-        if let Some(snapshot)=learning_cache::get_match(
-            &req.title,req.year,req.series,&state.db){
+        if let Some(snapshot)=generation.as_deref().and_then(|ns|
+            learning_cache::get_match(&req.title,req.year,req.series,ns)){
             match serde_json::from_value::<Diagnostic>(snapshot){
                 Ok(diagnostic)=>Ok(diagnostic),
                 Err(_)=>diagnose(&state.db,req),
@@ -1505,8 +1505,10 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result
     if cacheable
         && let Ok(ref diagnostic)=result
         && let Ok(snapshot)=serde_json::to_value(diagnostic){
-        learning_cache::put_match(
-            &req.title,req.year,req.series,&state.db,&snapshot);
+        if let Some(ref ns)=generation{
+            learning_cache::put_match(
+                &req.title,req.year,req.series,ns,&snapshot);
+        }
     }
     let elapsed=start.elapsed().as_millis() as u64;
     match &result{
