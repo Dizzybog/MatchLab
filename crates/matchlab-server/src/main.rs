@@ -3761,7 +3761,7 @@ mod tests {
                 media_type:"tvSeries".into(),matched_title:"Example".into(),
                 anime_ids:std::collections::BTreeMap::new(),source:"imdb".into()
             }],
-            anime_candidate:None,selected:Some(json!({
+            anime_candidate:None,anidb_candidate:None,selected:Some(json!({
                 "imdb_id":"tt1234567","season":1,"episode":7
             })),reason:"Verified".into(),
         };
