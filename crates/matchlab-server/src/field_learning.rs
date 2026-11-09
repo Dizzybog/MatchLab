@@ -795,7 +795,7 @@ fn source_handler_additions(active:&[FieldRule])
         // Other fields still enter training/review but cannot promote without
         // an independent reference validator.
         if !technical_field(&rule.field){continue;}
-        let transform=match (&rule.field,&rule.value) {
+        let transform=match (rule.field.as_str(),&rule.value) {
             ("extension",Value::String(_))=>"lowercase".to_owned(),
             (_,Value::String(value))=>format!("value('{value}')"),
             (_,Value::Array(labels)) if labels.len()==1 =>
