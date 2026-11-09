@@ -39,6 +39,14 @@ def patch():
         "original_regex":source["pattern"],"proposed_regex":value,
         "transform":source["transform"],
         "fingerprint":sha(f"community-patch:{index}:{source['pattern']}:{value}")}
+def review_discovery(field="network",marker="futuretag"):
+    pattern=r"(?i)(?:^|[ ._-])"+marker+r"(?:$|[ ._-])"
+    return {**common("learned_field_regex_review",intake.DISCOVERY_EPOCH),
+        "verification":"unverified_model_discovery_review_only",
+        "field":field,"signal":marker,"regex":pattern,
+        "canonical_confirmations":0,
+        "review_only":True,
+        "fingerprint":sha(f"community-review:{field}:{marker}:{pattern}")}
 def batch(proposals):
     fps=sorted(r["fingerprint"] for r in proposals)
     batch_id=sha(SHA+"\n1\n"+"\n".join(fps))
@@ -78,6 +86,28 @@ class TestAllRegexSharing(unittest.TestCase):
         p=tv()
         p["source_build"]=SHA+":1"
         self.assertIsNone(intake.valid_extended_rule(p,SHA))
+    def test_any_parser_field_can_submit_discovery_for_review_only(self):
+        for field in ("title","year","group","network","languages",
+                      "seasons","episodes","quality","audio"):
+            candidate=review_discovery(field=field)
+            self.assertIsNotNone(intake.valid_extended_rule(candidate,SHA),field)
+            self.assertEqual(len(intake.parse_batch(
+                batch([candidate]),SHA,lambda *_:True)),1)
+            queued,added=review.screen([candidate],[])
+            self.assertTrue(added)
+            self.assertFalse(queued[0]["automatic_activation"])
+        forged=review_discovery()
+        forged["regex"]=r"(?s)(.*)+"
+        self.assertIsNone(intake.valid_extended_rule(forged,SHA))
+        forged=review_discovery()
+        forged["canonical_confirmations"]=8
+        self.assertIsNone(intake.valid_extended_rule(forged,SHA))
+        forged=review_discovery()
+        forged["field"]="imdb_id"
+        self.assertIsNone(intake.valid_extended_rule(forged,SHA))
+        forged=review_discovery()
+        forged["source_build"]=SHA+":1"
+        self.assertIsNone(intake.valid_extended_rule(forged,SHA))
     def test_two_rules_are_allowed_one_pr_review_at_a_time(self):
         rows=[technical(),tv()]
         accepted=intake.parse_batch(batch(rows),SHA,lambda *_:True)
