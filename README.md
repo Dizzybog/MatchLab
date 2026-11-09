@@ -119,7 +119,7 @@ environment:
   MATCHLAB_COMMUNITY_GITHUB_TOKEN: ${MATCHLAB_COMMUNITY_GITHUB_TOKEN}
 ```
 
-MatchLab can then submit opted-in learning reports and proposed regex changes for maintainer review. **Nothing is merged automatically.** Technical/TV/source-regex suggestions first enter a non-executable review queue; independently verified rules must be integrated before other users receive them. Reports can include sanitized release filenames, so only enable sharing if you accept publishing that information.
+MatchLab can then submit opted-in learning reports and proposed regex changes for maintainer review. **Eligible rules are archived locally even while sharing is disabled** and are sent oldest-first when it is enabled (up to 12 regex proposals per daily batch). GitHub receipts and rule fingerprints are persisted, so an uncertain network request does not falsely mark a rule as delivered. Historical rules retain their original build SHA, and learned parser success cannot retire a rule that the original parser still needs. **Nothing is merged automatically.** Technical/TV/source-regex suggestions first enter a non-executable review queue; independently verified rules must be integrated before other users receive them. Reports can include sanitized release filenames, so only enable sharing if you accept publishing that information.
 
 See [Machine Learning and Community Learning](docs/COMMUNITY_LEARNING.md) for supported patterns, limitations, privacy considerations, validation rules and contributor setup.
 
