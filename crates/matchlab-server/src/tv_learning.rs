@@ -87,6 +87,12 @@ fn detected(name:&str)->Option<(&'static str,Coordinates)>{
     }
     winner
 }
+/// Independent raw-name reference for the background parser auditor.
+/// Never supplies an output field or a training label by itself.
+pub(crate) fn explicit_coordinates(name:&str)->Option<(i64,i64)>{
+    detected(name).map(|(_,coordinates)|(
+        coordinates.season,coordinates.episode))
+}
 fn identity(parsed:&Value)->Option<String>{
     let raw=parsed["title"].as_str()?;
     let normalized=crate::matchlab_matcher::clean_title(raw);
