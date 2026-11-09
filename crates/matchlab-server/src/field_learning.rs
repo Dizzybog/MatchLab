@@ -782,6 +782,19 @@ fn source_handler_additions(active:&[FieldRule])
 }
 
 /// Publish only regex into MatchLab's parser. No ML field postprocessor.
+/// Read the same source patches and additions the live engine would
+/// install. Background replay must include them to catch cross-rule
+/// conflicts and redundant/ineffective corrective regexes.
+pub(crate) fn current_source_rules(
+    tv_additions:Vec<matchlab_parser::HandlerAddition>
+)->Result<(Vec<matchlab_parser::HandlerPatch>,
+    Vec<matchlab_parser::HandlerAddition>),String>{
+    let fields=registry().read().map_err(|e|e.to_string())?.rules.clone();
+    let patches=source_handler_patches(&fields);
+    let mut additions=source_handler_additions(&fields);
+    additions.extend(tv_additions);
+    Ok((patches,additions))
+}
 pub fn publish_parser_rules_with_tv(
     tv_additions:Vec<matchlab_parser::HandlerAddition>
 )->Result<(),String>{
@@ -792,10 +805,7 @@ pub fn publish_parser_rules_with_tv_and_corrections(
     tv_additions:Vec<matchlab_parser::HandlerAddition>,
     corrections:Vec<matchlab_parser::HandlerCorrection>
 )->Result<(),String>{
-    let fields=registry().read().map_err(|e|e.to_string())?.rules.clone();
-    let patches=source_handler_patches(&fields);
-    let mut additions=source_handler_additions(&fields);
-    additions.extend(tv_additions);
+    let (patches,additions)=current_source_rules(tv_additions)?;
     matchlab_parser::install_learned_handler_regex_with_corrections(
         &patches,&additions,&corrections)
         .map_err(|e|format!("learned parser regex rejected: {e}"))
