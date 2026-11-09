@@ -2914,6 +2914,38 @@ pub struct HandlerAddition {
     pub pattern: String,
 }
 
+/// Deduplicate by parser semantics, not by handler index. The same regex
+/// can originate from several native templates or from both a TV addition
+/// and a correction; compiling those copies only increases parsing work.
+fn effective_handler_additions(
+    additions:&[HandlerAddition],corrections:&[HandlerCorrection]
+)->Vec<HandlerAddition>{
+    let catalog=existing_regex_rules();
+    let mut seen=HashSet::new();
+    let mut out=Vec::new();
+    let corrected=corrections.iter().filter_map(|rule|{
+        let source=catalog.get(rule.source_index)?;
+        Some((source["field"].as_str()?.to_owned(),rule.pattern.as_str()))
+    }).collect::<HashSet<_>>();
+    for addition in additions{
+        let Some(source)=catalog.get(addition.source_index)else{continue;};
+        let Some(field)=source["field"].as_str()else{continue;};
+        let Some(transform)=source["transform"].as_str()else{continue;};
+        let key=(field.to_owned(),addition.pattern.clone(),transform.to_owned());
+        if corrected.contains(&(field.to_owned(),addition.pattern.as_str())){
+            continue;
+        }
+        // A rule with the same field, regex and conversion already exists
+        // in the canonical parser. Do not append an inert copy.
+        if catalog.iter().any(|native|
+            native["field"]==field &&native["pattern"]==addition.pattern
+            &&native["transform"]==transform){
+            continue;
+        }
+        if seen.insert(key){out.push(addition.clone());}
+    }
+    out
+}
 fn stable_patch_hash(patches:&[HandlerPatch],additions:&[HandlerAddition],
     corrections:&[HandlerCorrection])->u64{
     let mut value=0xcbf29ce484222325u64;
@@ -2951,7 +2983,8 @@ pub fn install_learned_handler_regex_with_corrections(
     patches:&[HandlerPatch],additions:&[HandlerAddition],
     corrections:&[HandlerCorrection]
 )->Result<(),ParseError>{
-    let fingerprint=stable_patch_hash(patches,additions,corrections);
+    let additions=effective_handler_additions(additions,corrections);
+    let fingerprint=stable_patch_hash(patches,&additions,corrections);
     if LIVE_REVISION.load(std::sync::atomic::Ordering::Acquire)==fingerprint {
         return Ok(());
     }
@@ -2962,7 +2995,7 @@ pub fn install_learned_handler_regex_with_corrections(
         LIVE_REVISION.store(fingerprint,std::sync::atomic::Ordering::Release);
         return Ok(());
     }
-    let candidate=compile_learned_engine(patches,additions,corrections)?;
+    let candidate=compile_learned_engine(patches,&additions,corrections)?;
     let mut lock=LIVE_ENGINE.write().map_err(|_|
         ParseError::Data("live handler lock unavailable".into()))?;
     *lock=Some(Arc::new(candidate));
@@ -3016,6 +3049,7 @@ fn compile_learned_engine(
         .cmp(&(&b.source_index,&b.pattern)));
     ordered_corrections.dedup_by(|a,b|a.source_index==b.source_index
         &&a.pattern==b.pattern&&a.is_range==b.is_range);
+    let mut seen_corrections=HashSet::new();
     for correction in &ordered_corrections{
         let mut raw=source_rows.get(correction.source_index).cloned().ok_or_else(||
             ParseError::Data("unknown corrective source handler".into()))?;
@@ -3031,10 +3065,22 @@ fn compile_learned_engine(
             return Err(ParseError::Data("unsafe corrective handler".into()));
         }
         verify_learned_regex(&correction.pattern)?;
+        let key=(field.clone(),correction.pattern.clone(),transform.to_owned());
+        if !seen_corrections.insert(key){continue;}
         raw["pattern"]=Value::String(correction.pattern.clone());
         // Explicit single-coordinate rules need the same ambiguity guard
         // as native TV learning. A dedicated bounded range rule is separate.
         raw["learned_tv_guard"]=Value::Bool(!correction.is_range);
+        // Reposition an identical native handler instead of duplicating
+        // its regex at higher priority. The replay gate validates the move.
+        if let Some(index)=rows.iter().position(|handler|
+            handler["kind"]=="regex" &&handler["name"]==raw["name"]
+            &&handler["pattern"]==raw["pattern"]
+            &&handler["transform"]==raw["transform"]
+            &&handler["flags"]==raw["flags"]
+            &&handler["options"]==raw["options"]){
+            rows.remove(index);
+        }
         let insert=rows.iter().position(|handler|handler["name"]==field)
             .ok_or_else(||ParseError::Data("missing corrective field".into()))?;
         rows.insert(insert,raw);
