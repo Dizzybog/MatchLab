@@ -72,7 +72,9 @@ fn pattern(flag:&Value,parsed:&Value,selected:&Value)->Option<(String,String)>{
         format!("year_delta:{}",p-s)
     }else if code.starts_with("field_missing_")
         ||code.starts_with("field_overextracted_")
-        ||code.starts_with("field_underextracted_"){
+        ||code.starts_with("field_underextracted_")
+        ||matches!(code,"field_mismatch_codec"|"field_mismatch_quality"|
+            "field_mismatch_resolution"){
         // Stable, bounded anomaly kind only. Never store a private fragment
         // of the original title as a rule label.
         flag["signal"].as_str().unwrap_or("unknown").to_owned()
@@ -346,6 +348,9 @@ mod tests{
             ("field_underextracted_title","unparsed_title_prefix"),
             ("field_underextracted_episodes","explicit_episode_range_incomplete"),
             ("field_overextracted_episodes","single_episode_multiple_values"),
+            ("field_mismatch_codec","explicit_codec_disagrees"),
+            ("field_mismatch_quality","explicit_quality_disagrees"),
+            ("field_mismatch_resolution","explicit_resolution_disagrees"),
         ] {
             let diagnostic=json!({"code":code,"signal":signal,"field":"title"});
             let found=pattern(&diagnostic,&parsed,&unmatched).unwrap();
