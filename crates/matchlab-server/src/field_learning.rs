@@ -867,6 +867,9 @@ pub fn publish_parser_rules_with_tv_and_corrections(
     let (patches,additions)=current_source_rules(tv_additions)?;
     let mut corrections=corrections;
     corrections.extend(crate::general_learning::handler_corrections());
+    matchlab_parser::verify_live_regression_corpus(
+        &patches,&additions,&corrections)
+        .map_err(|e|format!("learned regex regression rejected: {e}"))?;
     matchlab_parser::install_learned_handler_regex_with_corrections(
         &patches,&additions,&corrections)
         .map_err(|e|format!("learned parser regex rejected: {e}"))
@@ -907,6 +910,9 @@ pub fn reconcile(db: &Connection) -> Result<(), String> {
     additions.extend(crate::general_learning::handler_additions());
     let mut corrections=crate::corrective_learning::handler_corrections();
     corrections.extend(crate::general_learning::handler_corrections());
+    matchlab_parser::verify_live_regression_corpus(
+        &patches,&additions,&corrections)
+        .map_err(|e|format!("learned regex regression rejected: {e}"))?;
     matchlab_parser::install_learned_handler_regex_with_corrections(
         &patches,&additions,&corrections)
         .map_err(|e|format!("learned parser regex rejected: {e}"))?;
