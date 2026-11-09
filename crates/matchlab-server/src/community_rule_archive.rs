@@ -27,8 +27,8 @@ fn current(db:&Connection,meta:Option<&Connection>)->Vec<Value>{
         .unwrap_or_default());
     rules.extend(crate::general_learning::community_proposals(db)
         .unwrap_or_default());
-    rules.extend(crate::candidate_discovery::community_proposals(db)
-        .unwrap_or_default());
+    // Unknown local marker guesses may contain private filename fragments.
+    // Keep them in the local review model, NEVER in the automatic export.
     if let Some(meta)=meta {
         rules.extend(crate::learned_regex::proposals(db,meta)
             .unwrap_or_default());
@@ -36,6 +36,11 @@ fn current(db:&Connection,meta:Option<&Connection>)->Vec<Value>{
     rules
 }
 fn historical(payload:&Value)->Option<Value>{
+    // Old local archives may contain unverified guessed marker tokens from
+    // prior builds. They are not sanitized public regex proposals.
+    if payload["verification"]=="unverified_model_discovery_review_only"{
+        return None;
+    }
     let fingerprint=payload["fingerprint"].as_str()?;
     let source_build=payload["source_build"].as_str()?;
     let kind=payload["kind"].as_str()?;
@@ -156,6 +161,9 @@ pub fn for_sharing(db:&Connection,meta:Option<&Connection>)->Result<Vec<Value>,S
     let mut shared=BTreeSet::new();
     let mut out=Vec::new();
     for prior in archive {
+        if prior["verification"]=="unverified_model_discovery_review_only"{
+            continue;
+        }
         let Some(fp)=prior["fingerprint"].as_str()else{continue};
         if !shared.insert(fp.to_owned()){continue;}
         if let Some(active)=live.get(fp) {out.push(active.clone());}
@@ -174,6 +182,16 @@ pub fn count(db:&Connection)->i64{
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn old_unverified_marker_archives_never_leak_to_github(){
+        let guessed=json!({
+            "kind":"learned_field_regex_review","fingerprint":"old",
+            "source_build":"old:1","field":"title",
+            "signal":"privategroup","regex":"(?i)privategroup",
+            "verification":"unverified_model_discovery_review_only"
+        });
+        assert!(historical(&guessed).is_none());
+    }
     #[test]
     fn pre_upgrade_materialized_field_rule_is_archived_before_reconcile(){
         let db=Connection::open_in_memory().unwrap();
