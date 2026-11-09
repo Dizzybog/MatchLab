@@ -9,8 +9,8 @@
 use rusqlite::{params,Connection};
 #[cfg(test)] use rusqlite::OptionalExtension;
 use serde_json::{json,Value};
-use std::collections::{HashMap,VecDeque};
-use std::sync::{OnceLock,RwLock,mpsc::{sync_channel,SyncSender,TrySendError,RecvTimeoutError},atomic::{AtomicBool,AtomicU64,Ordering}};
+use std::collections::{HashMap,HashSet,VecDeque};
+use std::sync::{Mutex,OnceLock,RwLock,mpsc::{sync_channel,SyncSender,TrySendError,RecvTimeoutError},atomic::{AtomicBool,AtomicU64,Ordering}};
 use sha2::{Digest,Sha256};
 use std::{env,fs,path::{Path,PathBuf},time::{Duration,SystemTime,UNIX_EPOCH}};
 
@@ -42,6 +42,18 @@ static CACHE_MAINTENANCE_METADATA:OnceLock<PathBuf>=OnceLock::new();
 
 static CACHE_DROPPED:AtomicU64=AtomicU64::new(0);
 static CACHE_WRITER:OnceLock<Option<SyncSender<CacheEvent>>>=OnceLock::new();
+// Idempotent pending-key registry, inspired by StremThru's getKey queue.
+// A burst of duplicate requests should enqueue ONE disk write per cache key.
+static CACHE_PENDING:OnceLock<Mutex<HashSet<String>>>=OnceLock::new();
+fn queued_keys()->&'static Mutex<HashSet<String>>{
+    CACHE_PENDING.get_or_init(||Mutex::new(HashSet::new()))
+}
+fn release_queued(items:&[CacheEvent]){
+    if let Ok(mut keys)=queued_keys().lock(){
+        for item in items{keys.remove(&item.cache_key);}
+    }
+}
+
 
 struct CacheEvent{
     cache_key:String,
@@ -172,6 +184,9 @@ pub fn status()->Value{
         "hits":CACHE_HITS.load(Ordering::Relaxed),
         "misses":CACHE_MISSES.load(Ordering::Relaxed),
         "cache_queue_dropped":CACHE_DROPPED.load(Ordering::Relaxed),
+        "cache_queued_keys":CACHE_PENDING.get()
+            .and_then(|s|s.try_lock().ok()).map(|keys|keys.len())
+            .unwrap_or(0),
         "cache_writes_allowed":CACHE_WRITES_ALLOWED.load(Ordering::Relaxed),
         "stale_entries_reparsed_and_rematched":true})
 }
@@ -336,6 +351,7 @@ fn cache_worker()->Option<SyncSender<CacheEvent>>{
                     hydrated=false;
                 }
                 let Some(db)=connection.as_mut()else{
+                    release_queued(&batch);
                     if maintenance{
                         CACHE_MAINTENANCE_REQUESTED.store(true,Ordering::Release);
                     }
@@ -354,6 +370,9 @@ fn cache_worker()->Option<SyncSender<CacheEvent>>{
                         connection=None;
                     }
                 }
+                // Release keys after a committed (or dropped) batch. A later
+                // observation can then retry a previously failed disk write.
+                release_queued(&batch);
                 if maintenance{
                     if let Some(metadata)=CACHE_MAINTENANCE_METADATA.get(){
                         if let Some(db)=connection.as_ref(){
@@ -395,8 +414,18 @@ fn write(kind:&str,title:&str,year:Option<i32>,series:Option<bool>,
     // reopening SQLite. The disk queue is best-effort and never blocks matching.
     hot_insert(event.cache_key.clone(),event.namespace.clone(),value.clone(),
         event.expires_at,event.payload.len());
-    let Some(tx)=CACHE_WRITER.get_or_init(cache_worker).as_ref()else{return;};
+    let identity=event.cache_key.clone();
+    {
+        // Never wait for queue bookkeeping from a parser/match thread.
+        let Ok(mut keys)=queued_keys().try_lock()else{return;};
+        if !keys.insert(identity.clone()){return;}
+    }
+    let Some(tx)=CACHE_WRITER.get_or_init(cache_worker).as_ref()else{
+        if let Ok(mut keys)=queued_keys().try_lock(){keys.remove(&identity);}
+        return;
+    };
     if let Err(e)=tx.try_send(event){
+        if let Ok(mut keys)=queued_keys().try_lock(){keys.remove(&identity);}
         let n=CACHE_DROPPED.fetch_add(1,Ordering::Relaxed)+1;
         if n==1||n%4096==0 {
             tracing::warn!(dropped=n,disconnected=matches!(e,TrySendError::Disconnected(_)),
