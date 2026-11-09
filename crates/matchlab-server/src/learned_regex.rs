@@ -265,6 +265,13 @@ fn check_verified(metadata:&Connection,imdb:&str,absolute:i64,
     found.imdb_id==imdb && found.season==season && found.episode==episode
         && found.anidb_id==anidb && found.anidb_episode==anidb_ep
 }
+/// Only the canonical parser with ML explicitly disabled may decide whether
+/// a learned regex has become redundant. Never pass the ML-enhanced result.
+fn core_parser_already_solves(ordinary:&Value,absolute:i64)->bool{
+    ordinary["anime_episode_candidate"]["episode"].as_i64()==Some(absolute)
+        ||ordinary["episodes"].as_array().is_some_and(|list|
+            list.len()==1 && list[0].as_i64()==Some(absolute))
+}
 fn validate_examples(db:&Connection,metadata:&Connection,marker:&str)->Result<bool,String>{
     let Some(regex)=regex_for(marker)else{return Ok(false);};
     let mut stmt=db.prepare("SELECT imdb_id,absolute_episode,season,episode,
@@ -290,12 +297,12 @@ fn validate_examples(db:&Connection,metadata:&Connection,marker:&str)->Result<bo
         if !check_verified(metadata,&imdb,abs,season,episode,&anidb,anidb_ep){
             return Ok(false);
         }
+        // Self-feedback guard: never validate redundancy against the ML-enhanced
+        // result. A rule that fixes a missing coordinate must not retire itself.
         let Ok(parsed)=matchlab_parser::parse_title_canonical(&title,false)else{return Ok(false);};
         let ordinary=Value::Object(parsed);
-        if ordinary["anime_episode_candidate"]["episode"].as_i64()==Some(abs)
-            ||ordinary["episodes"].as_array().is_some_and(|list|
-               list.len()==1 && list[0].as_i64()==Some(abs)){
-            return Ok(false); // already solved by the current core parser
+        if core_parser_already_solves(&ordinary,abs){
+            return Ok(false); // fixed independently by the original parser
         }
         valid+=1;
     }
@@ -628,6 +635,19 @@ pub fn observe(db:&Connection,metadata:&Connection,title:&str,
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn ml_correction_must_not_retire_its_own_regex(){
+        // Regression: original parser misses Bleach 326; ML resolves 326.
+        // This does not mean the core parser learned to parse it.
+        let core=json!({"title":"Bleach","episodes":[]});
+        let enhanced=json!({"title":"Bleach","episodes":[326]});
+        assert!(!core_parser_already_solves(&core,326));
+        assert!(core_parser_already_solves(&enhanced,326));
+        // A future core parser release may solve the same coordinate on its
+        // own; only then may revalidation classify the rule as redundant.
+        let future_core=json!({"title":"Bleach","episodes":[326]});
+        assert!(core_parser_already_solves(&future_core,326));
+    }
     #[test]
     fn bounded_regex_markers_only(){
         assert!(pattern_for("epis").unwrap().contains("epis"));
