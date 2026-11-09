@@ -14,6 +14,9 @@ const POLL_SECS:u64=300;
 const PAGE_SIZE:i64=100;
 const MAX_PAGES:usize=5;
 const MAX_BATCH:usize=16;
+const MAX_RULES_PER_BATCH:usize=12;
+const RECEIPT_RETRY_SECS:u64=900;
+const MAX_RECEIPT_PAGES:usize=20;
 const MAX_SEEN:i64=50_000;
 const MAX_BODY:usize=16_384;
 const MARKER:&str="<!-- matchlab-community-batch-v3 -->";
@@ -39,7 +42,24 @@ fn eligible(local:bool,share:bool,has_token:bool,official_build:bool)->bool{
 fn enabled()->bool{eligible(crate::local_learning::active(),opted_in(),
     github_token().is_some(),valid_sha(build_sha()))}
 pub async fn status()->Json<Value>{
-    Json(json!({"enabled":opted_in(),"local_learning_enabled":crate::local_learning::active(),
+    let local=env::var("MATCHLAB_ML_STATE_FILE")
+        .unwrap_or_else(|_|"/data/local-learning.sqlite3".into());
+    let sharing=env::var("MATCHLAB_COMMUNITY_STATE_FILE")
+        .unwrap_or_else(|_|"/data/community-learning.sqlite3".into());
+    let archived=Connection::open_with_flags(
+        local,OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
+        .and_then(|db|db.query_row(
+            "SELECT COUNT(*) FROM community_rule_archive",[],|r|r.get::<_,i64>(0)).ok())
+        .unwrap_or(0);
+    let sharing_db=Connection::open_with_flags(
+        sharing,OpenFlags::SQLITE_OPEN_READ_ONLY).ok();
+    let count=|sql:&str|sharing_db.as_ref().and_then(|db|
+        db.query_row(sql,[],|r|r.get::<_,i64>(0)).ok()).unwrap_or(0);
+    Json(json!({"archived_regex_proposals":archived,
+        "queued_reports_and_rules":count("SELECT COUNT(*) FROM pending"),
+        "confirmed_deliveries":count("SELECT COUNT(*) FROM reported"),
+        "unconfirmed_batches":count("SELECT COUNT(*) FROM inflight"),
+        "enabled":opted_in(),"local_learning_enabled":crate::local_learning::active(),
         "ready":enabled(),
         "protocol":PROTOCOL,"learning_epoch":EPOCH,
         "build_sha":valid_sha(build_sha()).then_some(build_sha()),
@@ -182,7 +202,12 @@ fn connect(path:&Path)->Result<Connection,String>{
          CREATE TABLE IF NOT EXISTS reported(
            fingerprint TEXT PRIMARY KEY,first_reported_at INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS batches(
-           batch_id TEXT PRIMARY KEY,attempted_at INTEGER NOT NULL);"
+           batch_id TEXT PRIMARY KEY,attempted_at INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS inflight(
+           batch_id TEXT PRIMARY KEY,issue INTEGER NOT NULL,
+           payload TEXT NOT NULL,fingerprints TEXT NOT NULL,
+           created_at INTEGER NOT NULL,last_attempt INTEGER NOT NULL DEFAULT 0,
+           attempts INTEGER NOT NULL DEFAULT 0);"
     ).map_err(|e|e.to_string())?;
     Ok(db)
 }
@@ -208,11 +233,13 @@ fn ensure_version(db:&mut Connection,history:&Path,time:u64)->Result<(),String>{
     let version=format!("{PROTOCOL}:{EPOCH}:{}",build_sha());
     if setting(db,"version")?.as_deref()==Some(version.as_str()){return Ok(());}
     let latest=latest_id(history)?;
+    // Preserve unacknowledged history across parser/image upgrades.
+    let window=setting(db,"window_start")?
+        .unwrap_or_else(||time.saturating_sub(DAY_SECS).to_string());
     let tx=db.transaction().map_err(|e|e.to_string())?;
-    tx.execute("DELETE FROM pending",[]).map_err(|e|e.to_string())?;
     put(&tx,"version",&version)?;
     put(&tx,"after_id",&latest.to_string())?;
-    put(&tx,"window_start",&time.to_string())?;
+    put(&tx,"window_start",&window)?;
     tx.commit().map_err(|e|e.to_string())
 }
 fn scan(db:&Connection,history:&Path,metadata:&Path,time:u64)->Result<(),String>{
