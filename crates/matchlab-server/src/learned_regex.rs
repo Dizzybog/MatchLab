@@ -129,24 +129,20 @@ fn curated_rules()->&'static Vec<ActiveRule>{
         }).collect()
     })
 }
-/// Learned overrides are *proposals* only. Even if the built-in parser
-/// extracted another value, this may propose a more specific candidate.
-/// The public matcher must independently verify its exact anime identity
-/// and absolute episode in the current AniDB/TVDB crosswalk before it can
-/// change any parsed value. /parse never silently rewrites coordinates.
-fn propose_from(title:&str,parsed:&mut Value,active:&[ActiveRule]){
-    if active.is_empty(){return;} // no ML/curated rules: no regex work on default
-    let Some(map)=parsed.as_object_mut()else{return;};
-    // Regex scans consume the trailing separator. Continue from that same
-    // separator to detect multiple potentially contradictory episode markers.
+/// Regex recognition returns a candidate to the ordinary MatchLab matcher.
+/// Learning never inserts or changes a parser field; IMDb/AniDB verification
+/// and any resulting coordinate changes belong exclusively to MatchLab.
+fn propose_from(title:&str,parsed:&Value,active:&[ActiveRule])->Option<Value>{
+    if active.is_empty(){return None;}
+    let map=parsed.as_object()?;
     let mut rest=title;
     let mut markers=0usize;
-    for _ in 0..3{
+    for _ in 0..3 {
         let Some(caps)=marker_re().captures(rest)else{break;};
         let Some(full)=caps.get(0)else{break;};
         if caps.get(1).is_some_and(|m|safe_marker(&m.as_str().to_ascii_lowercase())){
             markers+=1;
-            if markers>1{return;}
+            if markers>1{return None;}
         }
         let mut advance=full.end();
         if full.as_str().ends_with([' ','.','_','-']){
@@ -155,46 +151,40 @@ fn propose_from(title:&str,parsed:&mut Value,active:&[ActiveRule]){
         if advance==0||advance>=rest.len(){break;}
         rest=&rest[advance..];
     }
-    // Explicit SxxExx coordinates always take precedence over a learned
-    // marker; also do not reinterpret existing verified anime candidates.
     static EXPLICIT:OnceLock<Regex>=OnceLock::new();
     let explicit=EXPLICIT.get_or_init(||Regex::new(
         r"(?i)(?:^|[ ._-])s[0-9]{1,3}[ ._-]*e[0-9]{1,4}(?:$|[ ._-])"
     ).expect("explicit episode guard"));
-    if explicit.is_match(title) || map.get("anime_title_verified").and_then(Value::as_bool)==Some(true)
-        || map.get("learned_regex_candidate").is_some(){return;}
+    if explicit.is_match(title)
+        || map.get("anime_title_verified").and_then(Value::as_bool)==Some(true){
+        return None;
+    }
     let mut winner=None;
-    for rule in active{
+    for rule in active {
         let Some((name,episode))=match_release(&rule.pattern,title)else{continue;};
-        // Built-in already got the exact coordinate: no learned override.
         if map.get("episodes").and_then(Value::as_array).is_some_and(|episodes|
-            episodes.len()==1&&episodes[0].as_i64()==Some(episode))
-            && map.get("seasons").and_then(Value::as_array).is_none_or(|seasons|seasons.is_empty()){
-            return;
+            episodes.len()==1 && episodes[0].as_i64()==Some(episode))
+            && map.get("seasons").and_then(Value::as_array)
+                .is_none_or(|seasons|seasons.is_empty()){
+            return None;
         }
         if winner.replace((name.to_owned(),episode,rule.marker.clone())).is_some(){
-            return; // ambiguity: do not choose between competing ML patterns
+            return None;
         }
     }
-    if let Some((title,episode,marker))=winner{
-        map.insert("learned_regex_candidate".into(),json!({
-            "title":title,"episode":episode,"marker":marker,
-            "source":"local_learned_regex","needs_crosswalk_verification":true
-        }));
-    }
+    winner.map(|(name,episode,marker)|json!({
+        "title":name,"episode":episode,"marker":marker,
+        "source":"learned_regex","needs_crosswalk_verification":true
+    }))
 }
-/// Runs only when local opt-in is enabled. This never overwrites parser
-/// coordinates by itself, and the default matcher has no ML dependency.
-pub fn apply(title:&str,parsed:&mut Value){
-    // Public reviewed rules are available in every image without any ML
-    // worker, shared GitHub token, model initialization or network access.
+/// No parser output mutation. The MatchLab matcher interprets the verified
+/// candidate using its existing IMDb/AniDB mapping and exception rules.
+pub fn candidate(title:&str,parsed:&Value)->Option<Value>{
     let reviewed=curated_rules();
-    if !crate::local_learning::active(){
-        propose_from(title,parsed,reviewed);
-        return;
+    if !crate::local_learning::active() {
+        return propose_from(title,parsed,reviewed);
     }
-    if let Ok(local)=rules().read(){
-        // Prefer a known curated rule if both lists have the same marker.
+    if let Ok(local)=rules().read() {
         let mut list=Vec::with_capacity(reviewed.len()+local.len());
         for rule in reviewed.iter().chain(local.iter()){
             if list.iter().any(|item:&ActiveRule|item.marker==rule.marker){continue;}
@@ -202,9 +192,9 @@ pub fn apply(title:&str,parsed:&mut Value){
                 list.push(ActiveRule{marker:rule.marker.clone(),pattern});
             }
         }
-        propose_from(title,parsed,&list);
+        propose_from(title,parsed,&list)
     }else{
-        propose_from(title,parsed,reviewed);
+        propose_from(title,parsed,reviewed)
     }
 }
 
@@ -655,18 +645,13 @@ mod tests{
         let active=vec![ActiveRule{
             marker:"epis".into(),pattern:regex_for("epis").unwrap()
         }];
-        let mut parsed=json!({
-            "title":"Bleach","seasons":[3],"episodes":[7]
-        });
-        propose_from("Bleach.EPIS.300",&mut parsed,&active);
-        assert_eq!(parsed["learned_regex_candidate"]["episode"],300);
-        assert_eq!(parsed["learned_regex_candidate"]["needs_crosswalk_verification"],true);
-        // The parser's original value is never overwritten here; the
-        // current matcher must independently verify the proposal first.
-        assert_eq!(parsed["episodes"],json!([7]));
-        let mut explicit=json!({"title":"Bleach","seasons":[3],"episodes":[7]});
-        propose_from("Bleach.S03E07.EPIS300",&mut explicit,&active);
-        assert!(explicit.get("learned_regex_candidate").is_none());
+        let parsed=json!({"title":"Bleach","seasons":[3],"episodes":[7]});
+        let before=parsed.clone();
+        let suggestion=propose_from("Bleach.EPIS.300",&parsed,&active).unwrap();
+        assert_eq!(suggestion["episode"],300);
+        assert_eq!(suggestion["needs_crosswalk_verification"],true);
+        assert_eq!(parsed,before,"ML must never mutate parser fields");
+        assert!(propose_from("Bleach.S03E07.EPIS300",&parsed,&active).is_none());
     }
     #[test]
     fn ambiguous_competing_regex_patterns_never_modify_fields(){
@@ -674,9 +659,8 @@ mod tests{
             ActiveRule{marker:"epis".into(),pattern:regex_for("epis").unwrap()},
             ActiveRule{marker:"epic".into(),pattern:regex_for("epic").unwrap()}
         ];
-        let mut parsed=json!({"title":"Bleach","episodes":[],"seasons":[]});
-        propose_from("Bleach.EPIS300.EPIC301",&mut parsed,&active);
-        assert!(parsed.get("learned_regex_candidate").is_none());
+        let parsed=json!({"title":"Bleach","episodes":[],"seasons":[]});
+        assert!(propose_from("Bleach.EPIS300.EPIC301",&parsed,&active).is_none());
     }
     #[test]
     fn obsolete_rule_and_supporting_evidence_cascade_together(){
@@ -786,8 +770,7 @@ mod tests{
     #[test]
     fn disabled_rules_never_patch_parser_outputs(){
         install(vec![]);
-        let mut parsed=json!({"title":"Bleach","episodes":[],"seasons":[]});
-        apply("Bleach_EPIS300",&mut parsed);
-        assert!(parsed.get("anime_episode_candidate").is_none());
+        let parsed=json!({"title":"Bleach","episodes":[],"seasons":[]});
+        assert!(candidate("Bleach_EPIS300",&parsed).is_none());
     }
 }
