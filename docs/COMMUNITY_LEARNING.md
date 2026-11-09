@@ -66,6 +66,26 @@ These counts are conservative **engineering thresholds**, not statistically cali
 
 For source handlers, MatchLab knows the existing regex catalogue. The learner may submit the **original regex and proposed replacement regex**, with handler identity and supporting evidence. Live changes are limited to safe, verified families; riskier suggestions go to the GitHub review queue.
 
+## Langsiktig mål: alle parserfelt
+
+Alle feltene fra MatchLabs opprinnelige parserkatalog skal kunne delta i
+læring og være kandidater for ADD, REDUCE, EXPAND og CORRECT. En aktiv
+regex-regel krever en **uavhengig referanse** for det aktuelle feltet og
+replay av den komplette parseren, ikke bare en høy ML-score.
+
+Lokale, uavhengig bekreftbare metadata som oppløsning, codec, lydformat,
+HDR, lydkanaler, navngitte språk, undertekstmarkører og filendelser kan
+gjenbruke eksisterende native Rust-handlere til nye mønstre.
+For tittel, år, release-gruppe, network og andre mer kontekstavhengige
+felt må en uavhengig kontroll – for eksempel verifisert tittelmetadata
+eller et eksplisitt fasitdatasett – være tilgjengelig før en erstatning
+kan aktiveres. Hvis en sikker fasit ikke kan etableres, blir et forslag
+liggende i review, ikke installert ut fra modellens selvtillit alene.
+
+Dette er en **teknisk sikkerhetsgrense, ikke en permanent produktgrense**.
+Systemet skal ikke være låst til episode/sesong, men det skal heller ikke
+forveksle ukontrollerte parserresultater med bevis på riktig parsing.
+
 ## Four-error corrective regex learning (experimental)
 
 The audit distinguishes **missing**, **overextracted**, **underextracted** and
