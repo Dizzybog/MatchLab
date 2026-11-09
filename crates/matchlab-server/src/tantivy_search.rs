@@ -570,6 +570,16 @@ pub fn anidb_ids_exact(db:&Connection,key:&str)->Result<BTreeSet<String>,String>
     }else{anidb_ids_exact_uncached(db,key)}
 }
 
+/// A very short anime alias must not establish identity for a different
+/// release title beginning with that word ("Monster: The Jeffrey Dahmer
+/// Story" is not the 2004 anime "Monster"). Compare the BEST / longest
+/// alias with the COMPLETE normalized title. Keep nested shorter aliases
+/// available only when a sufficiently specific longer alias also matches.
+fn anime_alias_covers_title(key:&str,longest_alias_len:usize)->bool{
+    longest_alias_len==key.len()
+        ||(longest_alias_len.saturating_mul(2)>=key.len()
+            &&key.len().saturating_sub(longest_alias_len)<=16)
+}
 /// Resolve AniDB aliases through exact Tantivy term lookups, including aliases
 /// that are prefixes of a release. SQLite is only used later for mapping data.
 fn anime_aliases_uncached(db:&Connection,key:&str,min_prefix:usize)->Result<Vec<AnimeAlias>,String>{
@@ -604,6 +614,13 @@ fn anime_aliases_uncached(db:&Connection,key:&str,min_prefix:usize)->Result<Vec<
     if let Some(dir)=memory_dir {let _=std::fs::remove_dir_all(dir);}
     matches.sort_by(|a,b|b.clean_title.len().cmp(&a.clean_title.len())
         .then(a.anidb_id.cmp(&b.anidb_id)).then(a.imdb_id.cmp(&b.imdb_id)));
+    // This single gate protects IMDb's anime fallback, anime-priority
+    // season/episode mapping, and title-only anime identity together.
+    // It leaves exact matches untouched and retains nested valid prefixes.
+    if matches.first().is_some_and(|best|
+        !anime_alias_covers_title(key,best.clean_title.len())){
+        matches.clear();
+    }
     Ok(matches)
 }
 
@@ -1005,6 +1022,30 @@ mod persistence_tests {
         assert_eq!(candidates(&db,"a.b",None,false,1).unwrap(),vec!["tt1234567"]);
     }
 
+    #[test]
+    fn short_anime_alias_cannot_hijack_a_longer_unrelated_title(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER,
+                title TEXT NOT NULL DEFAULT '',category TEXT NOT NULL DEFAULT 'movie',
+                region TEXT NOT NULL DEFAULT '',original INTEGER NOT NULL DEFAULT 1,
+                ordering INTEGER NOT NULL DEFAULT 0,type TEXT NOT NULL DEFAULT 'movie');
+            CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
+            CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT);
+            INSERT INTO titles(imdb_id,clean_title,year)
+                VALUES('tt0434706','monster',2004);
+            INSERT INTO anidb_titles VALUES('100','monster');
+            INSERT INTO anime_series_map VALUES('100','tt0434706');").unwrap();
+        let long=crate::title_normalization::clean_title(
+            "Monster The Jeffrey Dahmer Story");
+        assert!(anime_aliases(&db,&long,6).unwrap().is_empty(),
+            "2004 anime must not match a series with a much longer title");
+        let exact=anime_aliases(&db,"monster",6).unwrap();
+        assert_eq!(exact.len(),1,"the original exact anime title must still work");
+        assert_eq!(exact[0].clean_title,"monster");
+        assert!(anime_alias_covers_title("bleachtybw",6),
+            "reasonable partial aliases remain eligible");
+        assert!(!anime_alias_covers_title(&long,7));
+    }
     #[test]
     fn anime_aliases_collect_nested_prefixes_in_one_query() {
         let db=Connection::open_in_memory().unwrap();
