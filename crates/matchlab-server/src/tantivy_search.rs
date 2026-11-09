@@ -97,10 +97,14 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
     if !marker.exists(){
         let parent=dir.parent().ok_or("index directory has no parent")?;
         std::fs::create_dir_all(parent).map_err(|e|e.to_string())?;
-        let stage=parent.join(format!(".tantivy-stage-{}-{}",
+        // Two in-memory Tantivy builds may start within one clock tick.
+        // A process-wide nonce prevents them sharing a staging directory
+        // (and colliding on its Tantivy writer lock or meta.json).
+        let stage=parent.join(format!(".tantivy-stage-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-                .map_err(|e|e.to_string())?.as_nanos()));
+                .map_err(|e|e.to_string())?.as_nanos(),
+            MEMORY_INDEX_NONCE.fetch_add(1,Ordering::Relaxed)));
         let result=(|| -> Result<(),String>{
             std::fs::create_dir_all(&stage).map_err(|e|e.to_string())?;
             let staging_index=Index::create_in_dir(&stage,schema).map_err(|e|e.to_string())?;
