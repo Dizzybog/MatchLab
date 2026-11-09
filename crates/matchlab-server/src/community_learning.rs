@@ -300,31 +300,30 @@ fn collect_rule_proposals(db:&Connection,metadata:&Path,time:u64)->Result<(),Str
         &state,OpenFlags::SQLITE_OPEN_READ_ONLY
     )else{return Ok(());};
     let _=local.busy_timeout(Duration::from_millis(250));
-    let Ok(meta)=Connection::open_with_flags(
-        metadata,OpenFlags::SQLITE_OPEN_READ_ONLY
-    )else{return Ok(());};
-    let mut rules=crate::learned_regex::proposals(&local,&meta)
-        .unwrap_or_default();
+    // Durable archive first, oldest rule first. This survives changing
+    // parser builds and turning community sharing on long after training.
+    let mut rules=crate::sharing_archive::load(&local).unwrap_or_default();
+    // Fresh current-build rules can be shared immediately even before the
+    // background archiving worker finishes its first cycle.
+    if let Ok(meta)=Connection::open_with_flags(
+        metadata,OpenFlags::SQLITE_OPEN_READ_ONLY){
+        rules.extend(crate::learned_regex::proposals(&local,&meta)
+            .unwrap_or_default());
+    }
     rules.extend(crate::field_learning::community_proposals(&local)
         .unwrap_or_default());
     rules.extend(crate::tv_learning::community_proposals(&local)
         .unwrap_or_default());
-    // Include high-frequency unknown-marker proposals for every original
-    // parser field. These can only enter GitHub's human-review queue.
     rules.extend(crate::candidate_discovery::community_proposals(&local)
         .unwrap_or_default());
-    // Distinct fingerprints avoid repeats between source patch proposals
-    // and newly added technical/TV regex families.
-    rules.sort_by(|a,b|a["fingerprint"].as_str().cmp(&b["fingerprint"].as_str()));
-    rules.dedup_by(|a,b|a["fingerprint"]==b["fingerprint"]);
+    let mut distinct=std::collections::HashSet::new();
+    rules.retain(|rule|rule["fingerprint"].as_str()
+        .is_some_and(|fp|distinct.insert(fp.to_owned())));
     let mut count:i64=db.query_row("SELECT COUNT(*) FROM pending",[],|r|r.get(0))
         .map_err(|e|e.to_string())?;
     let mut added=0usize;
     for proposal in rules {
-        // Reserve two rule slots per daily batch, regardless of whether
-        // unrelated history anomalies are already in the queue.
-        if count>=MAX_BATCH as i64 || added>=2 {break;}
-        if count>=MAX_BATCH as i64{break;}
+        if count>=MAX_BATCH as i64 || added>=MAX_RULES_PER_BATCH{break;}
         let Some(key)=proposal["fingerprint"].as_str()else{continue;};
         let seen:i64=db.query_row(
             "SELECT EXISTS(SELECT 1 FROM reported WHERE fingerprint=?1)",
