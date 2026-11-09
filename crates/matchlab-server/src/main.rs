@@ -19,6 +19,7 @@ mod field_audit;
 mod field_learning;
 mod tv_learning;
 mod community_learning;
+mod sharing_archive;
 mod local_learning;
 mod online_model;
 mod candidate_discovery;

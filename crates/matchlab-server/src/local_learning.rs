@@ -307,7 +307,15 @@ pub fn start(history:PathBuf,metadata:PathBuf){
                             crate::learning_cache::maintain(db,&metadata)?;
                             maintained=std::time::Instant::now();
                         }
-                        scan(&history,&metadata,db,refresh)
+                        scan(&history,&metadata,db,refresh)?;
+                        // Persist validated regex evidence independently of
+                        // GitHub opt-in. Training uses canonical, ML-free
+                        // parser data; an overlay fixing a title cannot
+                        // remove its own training justification.
+                        if let Err(error)=crate::sharing_archive::snapshot(db,&metadata) {
+                            tracing::warn!(%error,"offline regex archive update skipped");
+                        }
+                        Ok(())
                     })();
                     if let Err(error)=result{
                         tracing::warn!(%error,"local learning cycle skipped");
