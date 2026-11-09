@@ -285,6 +285,33 @@ mod tests{
         let found=search(&db,"The Voice US",None,true,3,"The.Voice.US.S03E02.1080p",true,10).unwrap();
         assert_eq!(found[0].imdb_id,"tt100");
     }
+    #[test]
+    fn monster_dahmer_release_never_becomes_monster_2004_anime(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_season INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);
+            CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
+            INSERT INTO titles VALUES('tt0434706','Monster','monster',2004,
+                'series','JP',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt0434706',1);
+            INSERT INTO anidb_titles VALUES('100','monster');
+            INSERT INTO anime_series_map VALUES('tt0434706','100','100',0);").unwrap();
+        let wrong=search(&db,"Monster The Jeffrey Dahmer Story",None,true,1,
+            "monster.the.jeffrey.dahmer.story.s01.e01",true,10).unwrap();
+        assert!(wrong.is_empty(),
+            "an unrelated long live-action title must not return the 2004 Monster anime");
+        let exact=search(&db,"Monster",None,true,1,"Monster.S01E01",true,10)
+            .unwrap();
+        assert_eq!(exact.len(),1);
+        assert_eq!(exact[0].imdb_id,"tt0434706",
+            "the exact anime title should still match normally");
+    }
     #[test] fn imdb_exact_year_and_series_cap() {
         let db=Connection::open_in_memory().unwrap();
         db.create_scalar_function("reverse",1,
