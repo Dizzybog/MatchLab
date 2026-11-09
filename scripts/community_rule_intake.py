@@ -129,8 +129,10 @@ def valid_extended_rule(r,sha):
     kind=r.get("kind")
     common={"kind","fingerprint","evidence_count","distinct_titles",
         "canonical_confirmations","source_build","verification"}
+    min_evidence=0 if kind=="historical_regex_review" else 12
+    min_titles=0 if kind=="historical_regex_review" else 4
     if not all(bounded_int(r.get(k),v) for k,v in
-        (("evidence_count",12),("distinct_titles",4),
+        (("evidence_count",min_evidence),("distinct_titles",min_titles),
          ("canonical_confirmations",0))):return None
     if r["canonical_confirmations"]>r["evidence_count"]:return None
     if not isinstance(r.get("fingerprint"),str):return None
@@ -164,7 +166,7 @@ def valid_extended_rule(r,sha):
         # inherit activation rights from a retired parser/metadata build.
         expected={"kind","original_kind","fingerprint","source_build",
             "field","signal","regex","evidence_count","distinct_titles",
-            "review_only","verification"}
+            "canonical_confirmations","review_only","verification"
         if set(r)!=expected:return None
         if r["original_kind"] not in {
             "verified_regex_proposal","learned_field_regex",
@@ -190,6 +192,7 @@ def valid_extended_rule(r,sha):
             return None
         if any(ord(c)<32 or ord(c)>126 for c in r["regex"]):return None
         if not re.fullmatch("[0-9a-f]{64}",r["fingerprint"]):return None
+        if r["canonical_confirmations"] != 0:return None
         if not bounded_int(r["evidence_count"],0) or not bounded_int(
             r["distinct_titles"],0
         ):return None
@@ -297,7 +300,7 @@ def parse_batch(comment,current_sha,ancestor=git_ancestor):
 
 def collect(all_comments,sha,seen,now=None,ancestor=git_ancestor):
     if now is None:now=datetime.now(timezone.utc)
-    cutoff=now-timedelta(days=2)
+    cutoff=now-timedelta(days=15)
     output=[]
     seen=set(seen)
     pending=set()

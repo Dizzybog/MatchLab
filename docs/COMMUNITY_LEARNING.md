@@ -105,7 +105,15 @@ environment:
 
 Store the token in a private `.env` file or secret store, **never in a committed Compose file**.
 
-A participating installation sends at most **one batch comment every 24 hours**. The shared daily GitHub Issue collects bounded reports and regex proposals. The source-regex proposal includes the old and new regex, its handler metadata, and aggregate evidence.
+A participating installation sends at most **one confirmed batch comment every 24 hours**. The first eligible batch can be sent immediately when sharing is enabled; later confirmed deliveries are separated by 24 hours. The shared daily GitHub Issue collects bounded reports and regex proposals. The source-regex proposal includes the old and new regex, its handler metadata, and aggregate evidence.
+
+### Offline archive, historical backfill and confirmed delivery
+
+- Local learning saves an append/update-by-fingerprint archive of eligible and activated regex in `/data/local-learning.sqlite3` **even with sharing disabled**. Retiring a rule or upgrading the parser does not delete the archive. The archive starts recording when this feature is installed; previously deleted rules cannot be recovered.
+- Turning GitHub sharing on exports the entire archive over successive bounded daily batches. Current rules must pass the latest independent validation. Older or lower-evidence rules become `historical_regex_review` items, strictly **non-executable** until human review and new independent validation.
+- Pending and confirmed fingerprints persist in `/data/community-learning.sqlite3`. A delivery is recorded only on a GitHub HTTP 201 response or when the same batch ID is found in a recent official community Issue. A failed or ambiguous response leaves the batch retryable.
+- GitHub Actions deduplicates against its global fingerprint ledger, existing accepted rules and a persistent unprocessed-proposal backlog maintained as a GitHub Release asset. Review throughput is intentionally bounded; receiving a comment is **not** proof that a rule has passed independent screening or been merged.
+- `GET /api/community/status` provides local archive, pending and confirmed-delivery counts. A remote global duplicate is decided by GitHub; local status cannot assert whether a remote PR is merged.
 
 The trusted GitHub Action:
 

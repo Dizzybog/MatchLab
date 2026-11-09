@@ -52,7 +52,7 @@ fn historical(payload:&Value)->Option<Value>{
         "evidence_count":payload["evidence_count"].as_i64().unwrap_or(0),
         "distinct_titles":payload["distinct_titles"].as_i64()
             .or_else(||payload["distinct_imdb"].as_i64()).unwrap_or(0),
-        "review_only":true,
+        "review_only":true,"canonical_confirmations":0,
         "verification":"historical_archive_requires_independent_review"
     }))
 }
