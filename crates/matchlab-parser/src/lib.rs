@@ -2918,7 +2918,8 @@ pub struct HandlerAddition {
 /// can originate from several native templates or from both a TV addition
 /// and a correction; compiling those copies only increases parsing work.
 fn effective_handler_additions(
-    additions:&[HandlerAddition],corrections:&[HandlerCorrection]
+    patches:&[HandlerPatch],additions:&[HandlerAddition],
+    corrections:&[HandlerCorrection]
 )->Vec<HandlerAddition>{
     let catalog=existing_regex_rules();
     let mut seen=HashSet::new();
@@ -2937,6 +2938,14 @@ fn effective_handler_additions(
         if corrected.contains(&(field.to_owned(),addition.pattern.as_str())){
             continue;
         }
+        // When an existing source regex is broadened, that same new marker
+        // must not also be appended as a separate native handler.
+        let extra=format!("(?:{})",addition.pattern);
+        if patches.iter().any(|patch|{
+            let Some(native)=by_index(patch.index)else{return false;};
+            native["field"]==field &&native["transform"]==transform
+                &&patch.replacement_pattern.ends_with(&extra)
+        }){continue;}
         // A rule with the same field, regex and conversion already exists
         // in the canonical parser. Do not append an inert copy.
         if catalog.iter().any(|native|
@@ -2985,7 +2994,7 @@ pub fn install_learned_handler_regex_with_corrections(
     patches:&[HandlerPatch],additions:&[HandlerAddition],
     corrections:&[HandlerCorrection]
 )->Result<(),ParseError>{
-    let additions=effective_handler_additions(additions,corrections);
+    let additions=effective_handler_additions(patches,additions,corrections);
     let fingerprint=stable_patch_hash(patches,&additions,corrections);
     if LIVE_REVISION.load(std::sync::atomic::Ordering::Acquire)==fingerprint {
         return Ok(());
@@ -3118,7 +3127,7 @@ pub fn replay_handler_rules(
 )->Result<Vec<Map<String,Value>>,ParseError>{
     if titles.len()>128{return Err(ParseError::Data(
         "corrective replay corpus too large".into()));}
-    let additions=effective_handler_additions(additions,corrections);
+    let additions=effective_handler_additions(patches,additions,corrections);
     let candidate=Arc::new(compile_learned_engine(patches,&additions,corrections)?);
     struct RestoreReplay;
     impl Drop for RestoreReplay{
@@ -3183,14 +3192,14 @@ mod live_handler_catalog_tests {
         let pattern=r"(?i)(?:^|[._ -])s[0-9]{1,3}[._ -]*e([0-9]{1,5})(?:$|[._ -])";
         let addition=HandlerAddition{source_index,pattern:pattern.to_owned()};
         assert_eq!(effective_handler_additions(
-            &[addition.clone(),addition.clone()],&[]).len(),1);
+            &[],&[addition.clone(),addition.clone()],&[]).len(),1);
         let correction=HandlerCorrection{
             source_index,pattern:pattern.to_owned(),is_range:false};
-        assert!(effective_handler_additions(&[addition.clone()],&[correction])
+        assert!(effective_handler_additions(&[],&[addition.clone()],&[correction])
             .is_empty(),"a corrective rule must not also be appended");
         let native=HandlerAddition{
             source_index,pattern:source["pattern"].as_str().unwrap().to_owned()};
-        assert!(effective_handler_additions(&[native],&[])
+        assert!(effective_handler_additions(&[],&[native],&[])
             .is_empty(),"the source parser already owns this exact regex");
     }
     #[test]
@@ -3200,7 +3209,7 @@ mod live_handler_catalog_tests {
         ).expect("existing codec handler");
         let inert=HandlerAddition{source_index:source["index"].as_u64()
             .unwrap() as usize,pattern:source["pattern"].as_str().unwrap().to_owned()};
-        let normalized=effective_handler_additions(&[inert],&[]);
+        let normalized=effective_handler_additions(&[],&[inert],&[]);
         assert!(normalized.is_empty());
         assert_eq!(stable_patch_hash(&[],&normalized,&[]),
             stable_patch_hash(&[],&[],&[]));
