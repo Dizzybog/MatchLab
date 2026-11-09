@@ -236,6 +236,12 @@ pub fn reconcile(db:&Connection)->Result<(),String>{
 /// Independently replayable, privacy-safe proposals for the community.
 /// Only fixed pattern families and aggregate evidence, never filenames.
 pub fn community_proposals(db:&Connection)->Result<Vec<Value>,String>{
+    proposals(db,false)
+}
+pub fn archive_proposals(db:&Connection)->Result<Vec<Value>,String>{
+    proposals(db,true)
+}
+fn proposals(db:&Connection,archive:bool)->Result<Vec<Value>,String>{
     let active=select(db)?;
     let mut out=Vec::new();
     for rule in active {
@@ -249,7 +255,7 @@ pub fn community_proposals(db:&Connection)->Result<Vec<Value>,String>{
             params![rule.family,build()],
             |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))
         ).map_err(|e|e.to_string())?;
-        if count<12||identities<4||confirmed<2{continue;}
+        if !archive && (count<12||identities<4||confirmed<2){continue;}
         let (Some(season_regex),Some(episode_regex))=(
             capture_pattern(&rule.family,"seasons"),
             capture_pattern(&rule.family,"episodes")

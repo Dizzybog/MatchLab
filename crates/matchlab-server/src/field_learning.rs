@@ -521,10 +521,16 @@ fn select_rules(db: &Connection) -> Result<Vec<FieldRule>, String> {
 /// hashed evidence totals and bundled-handler patterns are exported:
 /// no private torrent names, IMDb identifiers or raw observations.
 pub fn community_proposals(db:&Connection)->Result<Vec<Value>,String>{
+    proposals(db,false)
+}
+pub fn archive_proposals(db:&Connection)->Result<Vec<Value>,String>{
+    proposals(db,true)
+}
+fn proposals(db:&Connection,archive:bool)->Result<Vec<Value>,String>{
     let rules=select_rules(db)?;
     let mut out=Vec::new();
     for rule in &rules {
-        if rule.examples<12 ||rule.titles<4{continue;}
+        if !archive && (rule.examples<12 ||rule.titles<4){continue;}
         let canonical=serde_json::to_string(&rule.value).map_err(|e|e.to_string())?;
         let key=format!("community-field:{}:{}:{canonical}",rule.field,rule.signal);
         out.push(json!({

@@ -533,6 +533,26 @@ fn reload(db:&Connection,build:&str,revision:&str)->Result<(),String>{
     install(active);
     Ok(())
 }
+/// Keep all locally activated anime regex identities in the offline archive,
+/// including those below the stricter community-sharing threshold.
+pub fn archive_proposals(db:&Connection)->Result<Vec<Value>,String>{
+    init(db)?;
+    let mut stmt=db.prepare("SELECT marker,verified_build FROM learned_regex_active
+        ORDER BY marker").map_err(|e|e.to_string())?;
+    let rows=stmt.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))
+        .map_err(|e|e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e|e.to_string())?;
+    Ok(rows.into_iter().filter_map(|(marker,build)|{
+        let regex=pattern_for(&marker)?;
+        Some(json!({"kind":"verified_regex_proposal",
+            "fingerprint":hash(&format!("community-regex:{marker}")),
+            "marker":marker,"regex":regex,"source_build":format!("{build}:{EPOCH}"),
+            "verification":"archive_active_rule_review_only",
+            "evidence_count":0,"distinct_imdb":0}))
+    }).collect())
+}
+
 /// A single independently verified anime mapping is *one observation*, not
 /// permission to patch the parser. At least 8 diverse examples are required.
 pub fn observe(db:&Connection,metadata:&Connection,title:&str,

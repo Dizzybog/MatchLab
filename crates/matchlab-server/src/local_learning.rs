@@ -307,7 +307,12 @@ pub fn start(history:PathBuf,metadata:PathBuf){
                             crate::learning_cache::maintain(db,&metadata)?;
                             maintained=std::time::Instant::now();
                         }
-                        scan(&history,&metadata,db,refresh)
+                        scan(&history,&metadata,db,refresh)?;
+                        if refresh {
+                            let meta=Connection::open_with_flags(&metadata,OpenFlags::SQLITE_OPEN_READ_ONLY).ok();
+                            crate::community_rule_archive::snapshot(db,meta.as_ref())?;
+                        }
+                        Ok(())
                     })();
                     if let Err(error)=result{
                         tracing::warn!(%error,"local learning cycle skipped");
