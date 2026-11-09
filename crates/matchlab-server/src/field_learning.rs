@@ -139,7 +139,7 @@ fn canonical_audio(signal:&str)->Option<&'static str>{
 fn canonical_hdr(signal:&str)->Option<&'static str>{
     match signal {
         "dovi"|"dolbyvision"=>Some("DV"),
-        "hdr10"=>Some("HDR"),"hdr10plus"=>Some("HDR10+"),
+        "hdr10"=>Some("HDR10"),"hdr10plus"=>Some("HDR10+"),
         _=>None
     }
 }
@@ -960,6 +960,33 @@ mod tests {
             assert!(source_handler_additions(&[
                 rule(field,signal,value,40,10)]).is_empty());
         }
+    }
+    #[test]
+    fn independently_verified_array_fields_can_generate_native_regex_rules(){
+        for (field,signal,expected) in [
+            ("audio","aac",json!(["AAC"])),
+            ("audio","eac3",json!(["Dolby Digital Plus"])),
+            ("hdr","hdr10",json!(["HDR10"])),
+            ("hdr","dovi",json!(["DV"])),
+            ("channels","5.1",json!(["5.1"])),
+            ("languages","norsk",json!(["no"])),
+        ]{
+            assert_eq!(independent_marker_value(field,signal),Some(expected.clone()),
+                "{field}/{signal} lacks independent canonical evidence");
+            let item=rule(field,signal,expected,24,8);
+            let additions=source_handler_additions(&[item]);
+            assert!(!additions.is_empty(),
+                "{field}/{signal} should reuse a native Rust handler");
+        }
+        let subs=rule("subbed","subbed",json!(true),24,8);
+        assert!(!source_handler_additions(&[subs]).is_empty());
+        let file=rule("extension","mkv",json!("mkv"),24,8);
+        assert!(!source_handler_additions(&[file]).is_empty());
+        // No discovered marker may install a rule without an independently
+        // validated label with a native parser transform.
+        assert!(independent_marker_value("audio","mystery_audio").is_none());
+        assert!(source_handler_additions(&[rule(
+            "title","show",json!("Show"),24,8)]).is_empty());
     }
     #[test]
     fn conservative_language_and_number_validation() {
