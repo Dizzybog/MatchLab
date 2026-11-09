@@ -115,9 +115,10 @@ class TestAllRegexSharing(unittest.TestCase):
         self.assertEqual(len(accepted),2)
         first,changed=review.screen(accepted,[])
         self.assertTrue(changed)
-        self.assertEqual(len(first),1)
+        self.assertEqual(len(first),2,
+            "both regexes must enter the persistent review queue on day one")
         second,changed=review.screen(accepted,first)
-        self.assertTrue(changed)
+        self.assertFalse(changed,"same rules must be deduplicated next time")
         self.assertEqual(len(second),2)
     def test_offline_rule_from_older_image_requires_git_ancestry(self):
         old="b"*40
@@ -141,6 +142,15 @@ class TestAllRegexSharing(unittest.TestCase):
             batch(archive+[review_discovery(marker="extraarchive")]),
             SHA,lambda *_:True),
             "server and trusted GitHub intake must enforce the same limit")
+    def test_full_historical_batch_is_queued_without_loss(self):
+        backlog=[review_discovery(field="network",marker=f"archived{i:03d}")
+                 for i in range(12)]
+        queued,changed=review.screen(backlog,[])
+        self.assertTrue(changed)
+        self.assertEqual(len(queued),12)
+        queued_again,changed=review.screen(backlog,queued)
+        self.assertFalse(changed)
+        self.assertEqual(len(queued_again),12)
     def test_no_untrusted_extra_fields_or_title_samples(self):
         row=technical()
         row["samples"]=["Private.Movie.2024"]
