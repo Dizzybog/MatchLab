@@ -33,6 +33,13 @@ struct ActiveRule {marker:String,pattern:Regex}
 fn rules()->&'static RwLock<Vec<ActiveRule>> {
     ACTIVE.get_or_init(||RwLock::new(Vec::new()))
 }
+/// Logged regex are already validated/active. Never log raw observations.
+pub(crate) fn regexes_for_log()->Vec<(String,String)>{
+    rules().read().ok().map(|r|r.iter().map(|v|
+        (v.marker.clone(),v.pattern.as_str().to_owned())).collect())
+        .unwrap_or_default()
+}
+
 fn hash(s:&str)->String{format!("{:x}",Sha256::digest(s.as_bytes()))}
 fn build()->String{
     // The official Docker image bakes the source SHA in at compile time.
