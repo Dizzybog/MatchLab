@@ -244,12 +244,17 @@ pub fn community_proposals(db:&Connection)->Result<Vec<Value>,String>{
             |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))
         ).map_err(|e|e.to_string())?;
         if count<12||identities<4||confirmed<2{continue;}
+        let (Some(season_regex),Some(episode_regex))=(
+            capture_pattern(&rule.family,"seasons"),
+            capture_pattern(&rule.family,"episodes")
+        )else{continue;};
         out.push(json!({
             "kind":"learned_tv_regex",
             "fingerprint":hash(&format!("community-tv:{}",rule.family)),
             "family":rule.family,
             "fields":["seasons","episodes"],
             "regex":expression.as_str(),
+            "native_patterns":{"seasons":season_regex,"episodes":episode_regex},
             "evidence_count":count,
             "distinct_titles":identities,
             "canonical_confirmations":confirmed,
