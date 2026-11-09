@@ -38,7 +38,11 @@ fn current(db:&Connection,meta:Option<&Connection>)->Vec<Value>{
 fn historical(payload:&Value)->Option<Value>{
     // Old local archives may contain unverified guessed marker tokens from
     // prior builds. They are not sanitized public regex proposals.
-    if payload["verification"]=="unverified_model_discovery_review_only"{
+    if payload["verification"]=="unverified_model_discovery_review_only"
+        ||payload["kind"]=="learned_general_regex_review"
+        ||payload["original_kind"]=="learned_general_regex_review"{
+        // Historical arbitrary general regex metadata may predate the new
+        // static public vocabulary guard. Never export it from an archive.
         return None;
     }
     let fingerprint=payload["fingerprint"].as_str()?;
@@ -161,7 +165,9 @@ pub fn for_sharing(db:&Connection,meta:Option<&Connection>)->Result<Vec<Value>,S
     let mut shared=BTreeSet::new();
     let mut out=Vec::new();
     for prior in archive {
-        if prior["verification"]=="unverified_model_discovery_review_only"{
+        if prior["verification"]=="unverified_model_discovery_review_only"
+            ||prior["kind"]=="learned_general_regex_review"
+            ||prior["original_kind"]=="learned_general_regex_review"{
             continue;
         }
         let Some(fp)=prior["fingerprint"].as_str()else{continue};
@@ -191,6 +197,13 @@ mod tests {
             "verification":"unverified_model_discovery_review_only"
         });
         assert!(historical(&guessed).is_none());
+        let old_general=json!({
+            "kind":"learned_general_regex_review",
+            "fingerprint":"old-general","source_build":"old:1",
+            "field":"edition","regex":"(?i)Private.Show.Title",
+            "verification":"native_handler_metamorphic_replay_requires_upstream_review"
+        });
+        assert!(historical(&old_general).is_none());
     }
     #[test]
     fn pre_upgrade_materialized_field_rule_is_archived_before_reconcile(){
