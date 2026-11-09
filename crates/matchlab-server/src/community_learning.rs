@@ -405,7 +405,7 @@ fn validate_github_token(client:&reqwest::blocking::Client,token:&str)->TokenAut
     if !result.status().is_success(){
         return classify_token_http(result.status(),false);
     }
-    let Ok(user)=result.json::<Value>()else{return TokenAuth::NetworkUnavailable;};
+    let Ok(user)=request_json(result)else{return TokenAuth::NetworkUnavailable;};
     if !user["login"].as_str().is_some_and(|name|!name.is_empty()){
         return TokenAuth::NetworkUnavailable;
     }
@@ -416,7 +416,7 @@ fn validate_github_token(client:&reqwest::blocking::Client,token:&str)->TokenAut
     if !result.status().is_success(){
         return classify_token_http(result.status(),true);
     }
-    let Ok(repo)=result.json::<Value>()else{return TokenAuth::NetworkUnavailable;};
+    let Ok(repo)=request_json(result)else{return TokenAuth::NetworkUnavailable;};
     if repo["full_name"].as_str()!=Some(REPO) || repo["has_issues"]!=true{
         return TokenAuth::RepositoryUnavailable;
     }
