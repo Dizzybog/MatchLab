@@ -836,7 +836,7 @@ fn source_handler_additions(active:&[FieldRule])
 /// Read the same source patches and additions the live engine would
 /// install. Background replay must include them to catch cross-rule
 /// conflicts and redundant/ineffective corrective regexes.
-pub(crate) fn current_source_rules(
+pub(crate) fn source_rules_without_general(
     tv_additions:Vec<matchlab_parser::HandlerAddition>
 )->Result<(Vec<matchlab_parser::HandlerPatch>,
     Vec<matchlab_parser::HandlerAddition>),String>{
@@ -844,6 +844,14 @@ pub(crate) fn current_source_rules(
     let patches=source_handler_patches(&fields);
     let mut additions=source_handler_additions(&fields);
     additions.extend(tv_additions);
+    Ok((patches,additions))
+}
+pub(crate) fn current_source_rules(
+    tv_additions:Vec<matchlab_parser::HandlerAddition>
+)->Result<(Vec<matchlab_parser::HandlerPatch>,
+    Vec<matchlab_parser::HandlerAddition>),String>{
+    let (patches,mut additions)=source_rules_without_general(tv_additions)?;
+    additions.extend(crate::general_learning::handler_additions());
     Ok((patches,additions))
 }
 pub fn publish_parser_rules_with_tv(
@@ -857,6 +865,8 @@ pub fn publish_parser_rules_with_tv_and_corrections(
     corrections:Vec<matchlab_parser::HandlerCorrection>
 )->Result<(),String>{
     let (patches,additions)=current_source_rules(tv_additions)?;
+    let mut corrections=corrections;
+    corrections.extend(crate::general_learning::handler_corrections());
     matchlab_parser::install_learned_handler_regex_with_corrections(
         &patches,&additions,&corrections)
         .map_err(|e|format!("learned parser regex rejected: {e}"))
@@ -894,8 +904,11 @@ pub fn reconcile(db: &Connection) -> Result<(), String> {
     let patches=source_handler_patches(&active);
     let mut additions=source_handler_additions(&active);
     additions.extend(crate::tv_learning::handler_additions());
+    additions.extend(crate::general_learning::handler_additions());
+    let mut corrections=crate::corrective_learning::handler_corrections();
+    corrections.extend(crate::general_learning::handler_corrections());
     matchlab_parser::install_learned_handler_regex_with_corrections(
-        &patches,&additions,&crate::corrective_learning::handler_corrections())
+        &patches,&additions,&corrections)
         .map_err(|e|format!("learned parser regex rejected: {e}"))?;
     install(active);
     Ok(())
