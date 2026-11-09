@@ -3203,6 +3203,20 @@ mod live_handler_catalog_tests {
             .is_empty(),"the source parser already owns this exact regex");
     }
     #[test]
+    fn a_source_replacement_cannot_duplicate_its_alternative_as_an_addition(){
+        let source=existing_regex_rules().into_iter().find(|row|
+            row["field"]=="codec" &&row["transform"]=="value('hevc')"
+            &&row["pattern"].is_string()
+        ).unwrap();
+        let index=source["index"].as_u64().unwrap() as usize;
+        let original=source["pattern"].as_str().unwrap().to_owned();
+        let extra=r"(?i)(?:^|[._ -])FUTUREHEVC(?:$|[._ -])";
+        let patch=HandlerPatch{index,original_pattern:original.clone(),
+            replacement_pattern:format!("(?:{original})|(?:{extra})")};
+        let add=HandlerAddition{source_index:index,pattern:extra.into()};
+        assert!(effective_handler_additions(&[patch],&[add],&[]).is_empty());
+    }
+    #[test]
     fn a_noop_learned_addition_has_the_same_effective_revision(){
         let source=existing_regex_rules().into_iter().find(|entry|
             entry["field"]=="codec" &&entry["pattern"]==r"\bavc\b"
