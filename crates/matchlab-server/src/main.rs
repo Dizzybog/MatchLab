@@ -3104,7 +3104,7 @@ mod tests {
             INSERT INTO titles VALUES('tt7654321','Example Show','exampleshow',2020,
                 'series','',1,0,'tvSeries');
             INSERT INTO seasons VALUES('tt1234567',1);
-            INSERT INTO seasons VALUES('tt7654321',1);
+            INSERT INTO seasons VALUES('tt7654321',2);
             INSERT INTO season_episodes VALUES('tt1234567',1,10,10);
             INSERT INTO season_episodes VALUES('tt7654321',1,12,12);
             INSERT INTO anime_series_map VALUES('tt1234567','123','456',0);
@@ -3151,6 +3151,20 @@ mod tests {
         assert_eq!(public["sid_start"],"tt7654321:1:1");
         assert_eq!(public["sid_end"],"tt7654321:1:7");
         assert!(public["asid_start"].is_null());
+
+        // The imported IMDb episode snapshot has no season-2 row.
+        // Preserve the explicit season, but never invent E01-E12.
+        let missing_episode_table=diagnose(&path,&MatchRequest{
+            title:"Example Show S02E01-E12".into(),year:None,series:None}).unwrap();
+        let missing=missing_episode_table.selected.expect("IMDb series found");
+        assert_eq!(missing["season"],2);
+        assert_eq!(missing["season_end"],2);
+        assert!(missing["episode"].is_null());
+        assert!(missing["episode_end"].is_null());
+        assert_eq!(public_match_response(Some(missing)),json!({
+            "sid_start":"tt7654321","sid_end":"tt7654321",
+            "asid_start":null,"asid_end":null
+        }));
 
         let season_anime=diagnose(&path,&MatchRequest{
             title:"Spy x Family S01E01-E07".into(),year:None,series:None}).unwrap();
