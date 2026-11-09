@@ -248,6 +248,62 @@ fn extraction_review(raw:&str,parsed:&Value)->Vec<Value>{
     }
     issues
 }
+/// A parsed field can also be wrong while nonempty. Only compare
+/// unambiguous, independently readable raw markers, and never turn these
+/// comparisons into corrected values.
+fn explicit_marker_disagreements(raw:&str,parsed:&Value)->Vec<Value>{
+    let t=tokens(raw);
+    let mut out=Vec::new();
+    let unique=|values:Vec<String>|{
+        let mut values=values;
+        values.sort();
+        values.dedup();
+        (values.len()==1).then(||values.into_iter().next()).flatten()
+    };
+    let resolutions=t.iter().filter(|word|supported_pixel_height(word))
+        .cloned().collect::<Vec<_>>();
+    if let Some(marker)=unique(resolutions)
+        &&let Some(value)=parsed["resolution"].as_str()
+        &&!value.is_empty()&&!value.eq_ignore_ascii_case(&marker)
+    {
+        out.push(json!({"code":"field_mismatch_resolution",
+            "field":"resolution","confidence":"review",
+            "signal":"explicit_resolution_disagrees","severity":"review",
+            "message":"Parsed resolution differs from a single explicit release marker"}));
+    }
+    let codecs=t.iter().filter_map(|v|match v.as_str(){
+        "x264"|"h264"|"avc"=>Some("avc".to_owned()),
+        "x265"|"h265"|"hevc"=>Some("hevc".to_owned()),
+        "av1"=>Some("av1".to_owned()),_=>None
+    }).collect::<Vec<_>>();
+    if let Some(marker)=unique(codecs)
+        &&let Some(value)=parsed["codec"].as_str()
+        &&!value.is_empty()&&!value.eq_ignore_ascii_case(&marker)
+    {
+        out.push(json!({"code":"field_mismatch_codec",
+            "field":"codec","confidence":"review",
+            "signal":"explicit_codec_disagrees","severity":"review",
+            "message":"Parsed codec differs from a single explicit release marker"}));
+    }
+    let quality=t.iter().filter_map(|v|match v.as_str(){
+        "webdl"=>Some("webdl".to_owned()),
+        "webrip"=>Some("webrip".to_owned()),
+        "bluray"=>Some("bluray".to_owned()),
+        "hdtv"=>Some("hdtv".to_owned()),_=>None
+    }).collect::<Vec<_>>();
+    if let Some(marker)=unique(quality)
+        &&let Some(value)=parsed["quality"].as_str()
+        &&!value.is_empty()
+        &&value.chars().filter(char::is_ascii_alphanumeric)
+            .collect::<String>().to_ascii_lowercase()!=marker
+    {
+        out.push(json!({"code":"field_mismatch_quality",
+            "field":"quality","confidence":"review",
+            "signal":"explicit_quality_disagrees","severity":"review",
+            "message":"Parsed release quality differs from a single explicit marker"}));
+    }
+    out
+}
 /// Skip suspicious canonical outputs when training the advisory online model.
 /// Review evidence is retained independently; a misparse must not become
 /// a positive training label simply because the parser emitted it.
@@ -358,6 +414,7 @@ pub fn audit(raw:&str,parsed:&Value,selected:&Value)->Vec<Value>{
             "message":"Parsed absolute anime episode candidate has no verified selected anime coordinate"}));
     }
     out.extend(extraction_review(name,parsed));
+    out.extend(explicit_marker_disagreements(name,parsed));
     out.extend(compare_parsed_to_selected(parsed,selected));
     out
 }
@@ -463,6 +520,24 @@ mod tests{
             json!({"title":"Show","episodes":[7,8]}),Value::Null);
         assert!(excessive.contains(
             &"field_overextracted_episodes".to_owned()));
+    }
+    #[test]
+    fn nonempty_but_wrong_technical_fields_become_review_evidence(){
+        let flags=codes("Movie.1080p.x265.WEB-DL",
+            json!({"title":"Movie","resolution":"720p",
+                "codec":"avc","quality":"WEBRip"}),Value::Null);
+        for field in ["resolution","codec","quality"] {
+            assert!(flags.contains(&format!("field_mismatch_{field}")));
+        }
+        let correct=codes("Movie.1080p.x265.WEB-DL",
+            json!({"title":"Movie","resolution":"1080p",
+                "codec":"hevc","quality":"WEB-DL"}),Value::Null);
+        assert!(!correct.iter().any(|v|v.starts_with("field_mismatch_")));
+        let ambiguous=codes("Movie.1080p.720p.x265.x264",
+            json!({"title":"Movie","resolution":"480p",
+                "codec":"mpeg"}),Value::Null);
+        assert!(!ambiguous.iter().any(|v|v=="field_mismatch_resolution"
+            ||v=="field_mismatch_codec"));
     }
     #[test]
     fn does_not_use_suspicious_field_values_as_training_truth(){
