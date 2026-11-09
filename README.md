@@ -232,7 +232,7 @@ The native Rust release parser now includes AIOStreams-inspired TV/anime episode
 
 ## Metadata and settings
 
-IMDb basics, alternative titles, episodes, ratings, animeApi, Anime-Lists, and AniDB titles are refreshed by default **every seven days**. Metadata is persisted in `/data`; the active Tantivy index survives container restarts.
+IMDb basics, alternative titles, episodes, ratings, animeApi, Anime-Lists, and AniDB titles are refreshed by default **every seven days**. Metadata is persisted in `/data`; the active Tantivy index survives container restarts. The bundled `data/anime-list.override.xml` corrections are automatically merged into the normal Anime-Lists episode mappings **during every full refresh**, replacing conflicting rows for the listed AniDB IDs. The next successful metadata refresh activates changes to this list; no extra Compose setting is required.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
