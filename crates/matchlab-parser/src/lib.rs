@@ -3213,6 +3213,9 @@ pub fn verify_live_regression_corpus(
     patches:&[HandlerPatch],additions:&[HandlerAddition],
     corrections:&[HandlerCorrection]
 )->Result<(),ParseError>{
+    // Shadow-training mode must never block queue progression or publish
+    // anything. Candidate replay still performs its own evidence checks.
+    if !learned_regex_publication_enabled(){return Ok(());}
     const PROTECTED:&[&str]=&[
         "Dune.2021.1080p.BluRay.x265",
         "Dune.1984.1080p.BluRay",
