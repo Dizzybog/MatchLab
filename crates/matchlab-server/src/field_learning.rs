@@ -327,6 +327,17 @@ fn context_valid_with_re(raw:&str,field:&str,re:&Regex)->bool{
             return false;
         }
     }
+    if matches!(field,"audio"|"hdr"|"subbed"|"dubbed") {
+        // A word such as "Dubbed", "Atmos" or "HDR" in an ordinary title
+        // is not independent release metadata. Require technical context
+        // before treating it as a trustworthy ML training reference.
+        let lower=title.to_ascii_lowercase();
+        if !["1080p","2160p","720p","480p","web-dl","webdl",
+            "webrip","bluray","bdrip","x264","x265","h264","h265"]
+            .iter().any(|marker|lower.contains(marker)){
+            return false;
+        }
+    }
     if field == "channels" {
         let lower=title.to_ascii_lowercase();
         let audio=["aac","ac3","eac3","ddp","dts","flac","truehd","opus"];
@@ -949,17 +960,21 @@ mod tests {
         assert_eq!(strong[0].pattern,weak[0].pattern);
     }
     #[test]
-    fn context_sensitive_tags_stay_review_only() {
-        for (field,signal,value) in [
-            ("languages","german",json!(["de"])),
-            ("channels","5.1",json!("5.1")),
-            ("audio","aac",json!("AAC")),
-            ("subbed","subbed",json!(true)),
-            ("dubbed","dubbed",json!(true)),
-        ] {
-            assert!(source_handler_additions(&[
-                rule(field,signal,value,40,10)]).is_empty());
-        }
+    fn context_sensitive_markers_require_raw_release_evidence(){
+        assert!(!independent_context_valid(
+            "The.Danish.Girl.2015.1080p","languages","danish"));
+        assert!(!independent_context_valid(
+            "Show.Name.5.1.1080p","channels","5.1"));
+        assert!(independent_context_valid(
+            "Example.Show.1080p.AAC.5.1","channels","5.1"));
+        assert!(!independent_context_valid(
+            "The.Dubbed.Movie.2024","dubbed","dubbed"));
+        assert!(!independent_context_valid(
+            "HDR.Explained.2024","hdr","hdr10"));
+        assert!(!independent_context_valid(
+            "AAC.Anthology.2024","audio","aac"));
+        assert!(independent_context_valid(
+            "Example.Show.1080p.AAC","audio","aac"));
     }
     #[test]
     fn independently_verified_array_fields_can_generate_native_regex_rules(){
@@ -991,8 +1006,8 @@ mod tests {
         // No discovered marker may install a rule without an independently
         // validated label with a native parser transform.
         assert!(independent_marker_value("audio","mystery_audio").is_none());
-        assert!(source_handler_additions(&[rule(
-            "title","show",json!("Show"),24,8)]).is_empty());
+        assert!(pattern_for("title","show").is_none(),
+            "unverified title labels must never become live regex");
     }
     #[test]
     fn conservative_language_and_number_validation() {
@@ -1000,9 +1015,11 @@ mod tests {
         assert!(!consistent("languages","norwegian",&json!(["en"])));
         assert!(consistent("bit_depth","10bit",&json!(10)));
         assert!(!validated_value("title","bleach",&json!("Other")));
-        assert!(source_handler_additions(&[
+        assert_eq!(source_handler_additions(&[
             rule("languages","german",json!(["de"]),32,10)
-        ]).is_empty());
+        ]).len(),1);
+        assert!(!independent_context_valid(
+            "The.German.Connection.2005.1080p","languages","german"));
     }
     #[test]
     fn learned_codec_values_follow_the_original_parser_api() {
@@ -1123,12 +1140,12 @@ mod tests {
         for n in 0..16 {
             db.execute("INSERT INTO learned_field_gap_evidence(
                 field,signal,example_hash,identity_hash,canonical,source_build,first_seen)
-                VALUES('extension','mkv',?1,?2,'\"mkv\"',?3,1)",
+                VALUES('hdr','hdr10',?1,?2,'[\"HDR10\"]',?3,1)",
                 params![format!("sample{n}"),format!("series{n}"),build()]
             ).unwrap();
         }
         assert!(select_rules(&db).unwrap().is_empty(),
-            "a marker with no native handler addition is review-only");
+            "a pattern-dependent native transform remains review-only");
     }
     #[test]
     fn unsupported_field_gaps_still_reach_human_review_proposals(){
@@ -1137,15 +1154,15 @@ mod tests {
         for n in 0..16{
             db.execute("INSERT INTO learned_field_gap_evidence(
                 field,signal,example_hash,identity_hash,canonical,source_build,first_seen)
-                VALUES('extension','mkv',?1,?2,'\"mkv\"',?3,1)",
+                VALUES('hdr','hdr10',?1,?2,'[\"HDR10\"]',?3,1)",
                 params![format!("gap{n}"),format!("title{n}"),build()]
             ).unwrap();
         }
         assert!(select_rules(&db).unwrap().is_empty());
         let proposals=community_proposals(&db).unwrap();
         assert!(proposals.iter().any(|p|
-            p["field"]=="extension"
-                &&p["signal"]=="mkv"
+            p["field"]=="hdr"
+                &&p["signal"]=="hdr10"
                 &&p["verification"]=="review_only_no_native_handler"),
             "unsupported field improvements must remain shareable for human review");
     }
