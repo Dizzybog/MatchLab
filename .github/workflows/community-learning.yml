@@ -89,8 +89,8 @@ jobs:
             --seen-out "$RUNNER_TEMP/fingerprints-final.txt"
       - name: Recover durable community proposal backlog
         env:
-          GH_TOKEN: ${ { github.token } }
-          GH_REPO: ${ { github.repository } }
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           if gh release view community-learning-backlog --repo "$GH_REPO" >/dev/null 2>&1; then
@@ -111,8 +111,8 @@ jobs:
             --daily "$RUNNER_TEMP/community-daily-review.json"
       - name: Persist backlog before screening, so failed PRs cannot lose reports
         env:
-          GH_TOKEN: ${ { github.token } }
-          GH_REPO: ${ { github.repository } }
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           cp "$RUNNER_TEMP/backlog-prepared.json" "$RUNNER_TEMP/backlog.json"
@@ -223,8 +223,8 @@ jobs:
           PY
       - name: Finalize acknowledged review backlog
         env:
-          GH_TOKEN: ${ { github.token } }
-          GH_REPO: ${ { github.repository } }
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
