@@ -2971,9 +2971,9 @@ pub fn install_learned_handler_regex(
     for addition in &ordered_additions{
         let mut raw=rows.get(addition.source_index).cloned().ok_or_else(||
             ParseError::Data("unknown addition source handler".into()))?;
-        let field=raw["name"].as_str().unwrap_or("");
+        let field=raw["name"].as_str().unwrap_or("").to_owned();
         if raw["kind"]!="regex" ||
-           !matches!(field,"resolution"|"codec"|"quality"|"audio"|"bit_depth"|
+           !matches!(field.as_str(),"resolution"|"codec"|"quality"|"audio"|"bit_depth"|
                 "hdr"|"channels"|"languages"|"subbed"|"dubbed"|"extension"|
                 "seasons"|"episodes"){
             return Err(ParseError::Data("unsafe addition source".into()));
