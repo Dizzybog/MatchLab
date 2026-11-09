@@ -1812,16 +1812,18 @@ fn public_match_response(selected: Option<Value>) -> Value {
     // SxxExx/ASID for a fractional recap or special without a dedicated
     // metadata crosswalk for the fraction itself.
     if winner.pointer("/parsed/half_episode").and_then(Value::as_bool)==Some(true) {
-        return json!({"sid_start":imdb,"sid_end":imdb,
+        // A fractional episode is unverified, but its explicitly parsed
+        // season is still safe to expose without inventing an episode.
+        let sid=winner["season"].as_i64()
+            .filter(|season|(0..=9999).contains(season))
+            .map_or_else(||imdb.to_owned(),|season|format!("{imdb}:{season}"));
+        return json!({"sid_start":sid,"sid_end":sid,
             "asid_start":null,"asid_end":null});
     }
     let has_range=winner.get("episode_range").is_some();
-    // The public four-field SID protocol has no season-only encoding.
-    // Keep a bare IMDb ID (not a fictitious :S:0 episode) when an
-    // incomplete interval has neither episode endpoint. Season remains
-    // visible in /debug/match/strict and the independent /parse output.
-    let unscoped_range=has_range && winner["episode"].as_i64().is_none()
-        && winner["episode_end"].as_i64().is_none();
+    // SID depth is explicit: ttID (title), ttID:season (season only),
+    // ttID:season:episode (verified episode). Never manufacture E00/E01
+    // just to represent an explicit season with no verified episode.
     let start_season=winner["season"].as_i64();
     let start_episode=winner["episode"].as_i64();
     let end_season=winner["season_end"].as_i64()
@@ -1833,18 +1835,23 @@ fn public_match_response(selected: Option<Value>) -> Value {
     // make the public /match API rejectable by StremThru.
     let invalid_coordinates=[(start_season,start_episode),(end_season,end_episode)]
         .into_iter().any(|(season,episode)|{
-            matches!((season,episode),(Some(se),Some(ep)) if !valid_sid_coordinate(se,ep))
+            season.is_some_and(|s|!(0..=9999).contains(&s))
+                || matches!((season,episode),(Some(se),Some(ep)) if !valid_sid_coordinate(se,ep))
         });
     let sid_start=if invalid_coordinates{json!(imdb)}
         else if imdb.is_empty(){Value::Null}
         else if let (Some(se),Some(ep))=(start_season,start_episode){
             json!(format!("{imdb}:{se}:{ep}"))
-        }else if has_range && !unscoped_range{Value::Null}else{json!(imdb)};
+        }else if let Some(se)=start_season{
+            json!(format!("{imdb}:{se}"))
+        }else if has_range{Value::Null}else{json!(imdb)};
     let sid_end=if invalid_coordinates{json!(imdb)}
         else if imdb.is_empty(){Value::Null}
         else if let (Some(se),Some(ep))=(end_season,end_episode){
             json!(format!("{imdb}:{se}:{ep}"))
-        }else if has_range && !unscoped_range{Value::Null}else{json!(imdb)};
+        }else if let Some(se)=end_season{
+            json!(format!("{imdb}:{se}"))
+        }else if has_range{Value::Null}else{json!(imdb)};
     // An explicit second season without a corresponding last episode is
     // *not* a complete multi-season range. Previously the start episode
     // was silently reused as the last episode, or the end degraded to a
@@ -1853,20 +1860,21 @@ fn public_match_response(selected: Option<Value>) -> Value {
     let missing_cross_season_end=matches!((start_season,end_season),
         (Some(start),Some(end)) if end!=start)
         && winner["episode_end"].as_i64().is_none();
-    if missing_cross_season_end {
+    if missing_cross_season_end
+        && (start_episode.is_some() || end_episode.is_some()) {
         return json!({"sid_start":sid_start,"sid_end":null,
             "asid_start":null,"asid_end":null});
     }
-    // StremThru accepts a pair only when both sides have the same ID,
-    // both are either bare titles or episode coordinates, and coordinate
-    // end is not before coordinate start. A malformed range must never
-    // poison an entire torrent's deferred mapping batch.
-    let sid_components=|raw:&str|->Option<(i64,i64)>{
+    // Both endpoints must use the same SID depth and a nondecreasing
+    // season/episode ordering. A season-only pair can represent a
+    // multi-season pack, but never an unverified episode interval.
+    let sid_components=|raw:&str|->Option<(i64,Option<i64>)>{
         let mut parts=raw.split(':');
         if parts.next()!=Some(imdb){return None;}
         let season=parts.next()?.parse::<i64>().ok()?;
-        let episode=parts.next()?.parse::<i64>().ok()?;
-        if parts.next().is_some() || !valid_sid_coordinate(season,episode){
+        let episode=parts.next().map(str::parse::<i64>).transpose().ok()?;
+        if parts.next().is_some() || !(0..=9999).contains(&season)
+            || episode.is_some_and(|ep|!valid_sid_coordinate(season,ep)){
             return None;
         }
         Some((season,episode))
@@ -1878,7 +1886,8 @@ fn public_match_response(selected: Option<Value>) -> Value {
             start!=end
         }else{
             match (start_coords,end_coords){
-                (Some(a),Some(b))=>b<a,
+                (Some((s,None)),Some((e,None)))=>e<s,
+                (Some((s,Some(se))),Some((e,Some(ee))))=>(e,ee)<(s,se),
                 _=>true,
             }
         };
@@ -1886,7 +1895,7 @@ fn public_match_response(selected: Option<Value>) -> Value {
             // Retain a verified range start if the end is missing/bad.
             // Do not infer an end episode or attach a potentially
             // mismatched ASID to this partial range.
-            let (safe_start,safe_end)=if has_range && start_coords.is_some(){
+            let (safe_start,safe_end)=if start_coords.is_some(){
                 (sid_start,Value::Null)
             }else{(json!(imdb),json!(imdb))};
             return json!({"sid_start":safe_start,"sid_end":safe_end,
@@ -2306,6 +2315,55 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_sid_preserves_season_without_fabricating_episode() {
+        let season_only=json!({"imdb_id":"tt1234567","category":"series",
+            "season":17,"episode":null,"season_end":17,"episode_end":null});
+        assert_eq!(public_match_response(Some(season_only)),json!({
+            "sid_start":"tt1234567:17","sid_end":"tt1234567:17",
+            "asid_start":null,"asid_end":null
+        }));
+
+        let incomplete_range=json!({"imdb_id":"tt1234567","category":"series",
+            "season":2,"episode":null,"season_end":2,"episode_end":null,
+            "episode_range":{"complete":false}});
+        let response=public_match_response(Some(incomplete_range));
+        assert_eq!(response["sid_start"],"tt1234567:2");
+        assert_eq!(response["sid_end"],"tt1234567:2");
+
+        let multi_season=json!({"imdb_id":"tt1234567","category":"series",
+            "season":1,"episode":null,"season_end":3,"episode_end":null,
+            "episode_range":{"complete":false}});
+        let response=public_match_response(Some(multi_season));
+        assert_eq!(response["sid_start"],"tt1234567:1");
+        assert_eq!(response["sid_end"],"tt1234567:3");
+
+        let mixed_depth=json!({"imdb_id":"tt1234567","category":"series",
+            "season":1,"episode":4,"season_end":2,"episode_end":null,
+            "episode_range":{"complete":false}});
+        let response=public_match_response(Some(mixed_depth));
+        assert_eq!(response["sid_start"],"tt1234567:1:4");
+        assert!(response["sid_end"].is_null());
+
+        let no_season=json!({"imdb_id":"tt1234567","category":"series",
+            "season":null,"episode":null});
+        let response=public_match_response(Some(no_season));
+        assert_eq!(response["sid_start"],"tt1234567");
+        assert_eq!(response["sid_end"],"tt1234567");
+
+        let movie=json!({"imdb_id":"tt1234567","category":"movie"});
+        let response=public_match_response(Some(movie));
+        assert_eq!(response["sid_start"],"tt1234567");
+        assert_eq!(response["sid_end"],"tt1234567");
+
+        let invalid=json!({"imdb_id":"tt1234567","category":"series",
+            "season":10000,"episode":null});
+        let response=public_match_response(Some(invalid));
+        assert_eq!(response["sid_start"],"tt1234567");
+        assert_eq!(response["sid_end"],"tt1234567");
+    }
+
     #[test]
     fn season_only_anime_packs_expose_complete_imdb_and_anidb_ranges() {
         let stamp=std::time::SystemTime::now()
@@ -2736,7 +2794,7 @@ mod tests {
             "season":1,"episode":12,"anime":{"asid":"123:12"},
             "parsed":{"half_episode":true,"episodes":[12]}});
         assert_eq!(public_match_response(Some(fractional)),json!({
-            "sid_start":"tt1234567","sid_end":"tt1234567",
+            "sid_start":"tt1234567:1","sid_end":"tt1234567:1",
             "asid_start":null,"asid_end":null
         }));
         let ordinary=json!({"imdb_id":"tt1234567","category":"series",
@@ -3180,7 +3238,7 @@ mod tests {
         assert!(missing["episode"].is_null());
         assert!(missing["episode_end"].is_null());
         assert_eq!(public_match_response(Some(missing)),json!({
-            "sid_start":"tt7654321","sid_end":"tt7654321",
+            "sid_start":"tt7654321:2","sid_end":"tt7654321:2",
             "asid_start":null,"asid_end":null
         }));
 
