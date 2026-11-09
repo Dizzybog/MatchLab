@@ -580,3 +580,50 @@ commits and GitHub issues. An API consumer must have a network route to the
 service; deploying this endpoint does not itself make an unreachable hostname
 accessible. Reviewers or automation can use the feed to prepare and verify PRs,
 but no unattended polling or PR creation is started merely by enabling it.
+
+## Local Machine Learning status
+
+`GET /api/ml/status` reports whether the local learning worker is
+enabled, the number of currently active field-specific technical regex
+overlays, counts grouped by technical field, and the rule-generation hash.
+It returns **no torrent names, IMDb IDs, history, private hashes, or model
+inputs**. No GitHub token is required. This is a monitoring endpoint, not a
+control for enabling learning or approving rules.
+
+The JSON fields include `enabled`, `active_rule_count`,
+`active_rules_by_field`, `revision`, `training_source`, `model`,
+and `identity_and_coordinate_override`. The `training_source` value
+now distinguishes the canonical Rust parser and independently allowlisted
+raw filename markers for missing technical fields. The `model` value is
+`rust_ftrl_proximal`; `online_learner` exposes only the bounded model
+type, parameter size and trusted label counts (no release names or IDs).
+The native online model trains in the background but its score remains
+shadow-only and never authorizes an IMDb, episode or regex override.
+The in-memory status does not query SQLite or run inference.
+
+`online_learner` is a privacy-safe object describing the native FTRL
+classifier, its 128 KiB parameter state, accepted independent labels,
+counterfactual negatives, title-group holdout pairs, pairwise accuracy,
+recent pairwise accuracy and the conservative `drift_review_suggested`
+flag. These are **shadow evaluation statistics**, not calibrated scores or
+actual IMDb parsing/matching accuracy. The model is never run on an HTTP
+request and can never authorize a regex or identifier change.
+
+`training_and_cache` reports the configured corpus evidence limit
+(`training_max_examples`), shared disk budget, persistent cache row limit,
+positive and no-match TTLs, and in-process cache hits/misses. The cache
+reuses repeated exact parse/match requests only within the current
+source/rules/metadata namespace; obsolete results are always re-parsed and
+re-matched on demand. It is never a substitute for new verification.
+
+`candidate_discovery` exposes only grouped counts of unknown release
+markers eligible for human review. The underlying marker strings, titles,
+hashes and model candidate predictions do not leave the local opt-in
+SQLite corpus; these candidates cannot automatically become active
+regexes or GitHub proposals.
+
+Set `MATCHLAB_ML_ENABLED=true` on the MatchLab container to opt in.
+Absolute-anime episode rules and technical-field overlays operate under
+separate validators; this endpoint enumerates the technical-field rules.
+See [Community Learning](COMMUNITY_LEARNING.md) for evidence thresholds,
+limitations, privacy and the separate GitHub sharing opt-in.

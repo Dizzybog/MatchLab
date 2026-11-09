@@ -1,0 +1,210 @@
+name: Community learning review
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 0 * * *"
+
+# Trusted default branch only; untrusted issue text is data, never code.
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: matchlab-community-learning-daily
+  cancel-in-progress: false
+
+jobs:
+  review:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test intake and historical-version validation
+        run: python3 -m unittest discover -s scripts/tests -v
+      - name: Create or reuse ONE daily GitHub Issue; collect yesterday's comments
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TODAY="$(date -u +%F)"
+          YESTERDAY="$(date -u -d 'yesterday' +%F)"
+          gh api "/repos/${GH_REPO}/issues?state=all&sort=created&direction=desc&per_page=100" > "$RUNNER_TEMP/recent-issues.json"
+          today_number="$(jq -r --arg title "[community-learning] $TODAY" '.[] | select(.title==$title and .user.login=="github-actions[bot]") | .number' "$RUNNER_TEMP/recent-issues.json" | head -n1)"
+          if [ -z "$today_number" ]; then
+            gh issue create --repo "$GH_REPO" \
+              --title "[community-learning] $TODAY" \
+              --body "One shared daily thread for opt-in MatchLab reports. Candidate batches are not ground truth."
+          fi
+          yesterday_number="$(jq -r --arg title "[community-learning] $YESTERDAY" '.[] | select(.title==$title and .user.login=="github-actions[bot]") | .number' "$RUNNER_TEMP/recent-issues.json" | head -n1)"
+          if [ -z "$yesterday_number" ]; then
+            echo '[]' > "$RUNNER_TEMP/community-comments.json"
+          else
+            gh api --paginate --slurp "/repos/${GH_REPO}/issues/$yesterday_number/comments?per_page=100" \
+              > "$RUNNER_TEMP/community-comments.json"
+          fi
+      - name: Load persistent fingerprint ledger (GitHub Release asset)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh release view community-learning-ledger --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release download community-learning-ledger --repo "$GH_REPO" \
+              --pattern fingerprints.txt --dir "$RUNNER_TEMP"
+          else
+            touch "$RUNNER_TEMP/fingerprints.txt"
+          fi
+      - name: Build latest Rust parser for safe replay
+        run: cargo build --release -p matchlab-parser --example community_replay
+      - name: Replay historical reports, dedup globally, train verified-only shadow model
+        env:
+          LATEST_SHA: ${{ github.sha }}
+        run: |
+          python3 scripts/community_learning.py \
+            --comments "$RUNNER_TEMP/community-comments.json" \
+            --verified learning/verified.jsonl \
+            --sha "$LATEST_SHA" \
+            --parser-bin target/release/examples/community_replay \
+            --seen "$RUNNER_TEMP/fingerprints.txt" \
+            --seen-output "$RUNNER_TEMP/fingerprints-updated.txt" \
+            --review-output "$RUNNER_TEMP/community-review.jsonl" \
+            --model-output "$RUNNER_TEMP/community-shadow-model.json"
+      - name: Validate opt-in rule proposals (schema and source ancestry)
+        env:
+          LATEST_SHA: ${{ github.sha }}
+        run: |
+          python3 scripts/community_rule_intake.py \
+            --comments "$RUNNER_TEMP/community-comments.json" \
+            --seen "$RUNNER_TEMP/fingerprints-updated.txt" \
+            --sha "$LATEST_SHA" \
+            --out "$RUNNER_TEMP/community-rule-candidates.json" \
+            --seen-out "$RUNNER_TEMP/fingerprints-final.txt"
+      - name: Screen at most one rule against latest trusted Rust parser
+        run: |
+          cp learning/community_rules.json "$RUNNER_TEMP/community-rules-before.json"
+          cp learning/community_regex_proposals.json "$RUNNER_TEMP/community-extended-before.json"
+          cargo run --release --locked -p matchlab-parser \
+            --example screen_community_rules -- \
+            "$RUNNER_TEMP/community-rule-candidates.json" \
+            learning/community_rules.json \
+            "$RUNNER_TEMP/curated-rules-next.json"
+          cp "$RUNNER_TEMP/curated-rules-next.json" learning/community_rules.json
+          # Source-aware field and TV proposals are reviewed as DATA first.
+          # Never execute an Issue-supplied regex or update handlers.json
+          # without independent verification by a maintainer.
+          python3 scripts/review_community_regex.py \
+            "$RUNNER_TEMP/community-rule-candidates.json" \
+            learning/community_regex_proposals.json \
+            "$RUNNER_TEMP/community-regex-next.json"
+          cp "$RUNNER_TEMP/community-regex-next.json" learning/community_regex_proposals.json
+          if git diff --quiet -- learning/community_rules.json learning/community_regex_proposals.json; then
+            echo "COMMUNITY_RULE_CHANGED=false" >> "$GITHUB_ENV"
+          else
+            echo "COMMUNITY_RULE_CHANGED=true" >> "$GITHUB_ENV"
+          fi
+      - name: Test candidate against full Rust regression suite
+        if: env.COMMUNITY_RULE_CHANGED == 'true'
+        run: |
+          RUSTFLAGS="-D warnings" cargo test --workspace --locked
+          RUSTFLAGS="-D warnings" cargo check --workspace --all-targets --locked
+      - name: Open at most one human-review regex PR per daily run
+        if: env.COMMUNITY_RULE_CHANGED == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          branch="bot/community-regex-$(date -u +%Y%m%d)"
+          if gh pr list --repo "$GH_REPO" --state open \
+            --json headRefName --jq '.[] | .headRefName' | grep -Fxq "$branch"; then
+            echo "A daily community rule review PR already exists"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add learning/community_rules.json learning/community_regex_proposals.json
+          git commit -m "feat(parser): propose a verified community regex rule"
+          git push origin "HEAD:refs/heads/$branch"
+          cat > "$RUNNER_TEMP/community-pr-body.md" <<'EOF'
+          ## Automatically proposed regex rule — human review required
+
+          This PR was generated by the trusted Community Learning GitHub Action
+          from an opt-in, diverse local learning proposal. All submitted examples
+          were treated as **untrusted data**, and the current Rust parser,
+          negative-pattern checks, and full Rust regression suite were run.
+
+          **Do not merge without independently confirming representative IMDb
+          and AniDB/TVDB mappings.** The originating user supplied those mapping
+          claims; a GitHub issue is not source attestation.
+
+          A merge includes the safe rule in the next MatchLab image, with
+          crosswalk verification on matching. The parser and matcher remain
+          fully functional without any ML opt-in or GitHub connection.
+
+          Regex additions and proposed changes to existing handlers use
+          strict trusted grammars and carry the exact original/new regex.
+          Technical/TV/source-handler proposals are REVIEW DATA ONLY until
+          a maintainer independently validates and integrates them. They
+          cannot modify production merely by appearing in this PR.
+          EOF
+          gh pr create --repo "$GH_REPO" \
+            --base main --head "$branch" \
+            --title "feat(parser): review high-evidence community regex" \
+            --body-file "$RUNNER_TEMP/community-pr-body.md"
+          echo "COMMUNITY_PR_CREATED=true" >> "$GITHUB_ENV"
+      - name: Dedup only rules actually placed into a review PR
+        if: env.COMMUNITY_PR_CREATED == 'true'
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          temp = Path(os.environ["RUNNER_TEMP"])
+          before = json.loads((temp / "community-rules-before.json").read_text())
+          after = json.loads(Path("learning/community_rules.json").read_text())
+          old_markers = {r["marker"] for r in before}
+          before_extended = json.loads((temp / "community-extended-before.json").read_text())
+          after_extended = json.loads(Path("learning/community_regex_proposals.json").read_text())
+          old_extended = {r["fingerprint"] for r in before_extended}
+          ledger = temp / "fingerprints-final.txt"
+          seen = set(ledger.read_text().splitlines())
+          for rule in after:
+              if rule["marker"] not in old_markers:
+                  seen.add(hashlib.sha256(("community-regex:" + rule["marker"]).encode()).hexdigest())
+          for proposal in after_extended:
+              if proposal["fingerprint"] not in old_extended:
+                  seen.add(proposal["fingerprint"])
+          ledger.write_text("\n".join(sorted(seen)) + ("\n" if seen else ""))
+          PY
+      - name: Persist global dedup ledger (no changes to main or production)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cp "$RUNNER_TEMP/fingerprints-final.txt" "$RUNNER_TEMP/fingerprints.txt"
+          if ! gh release view community-learning-ledger --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release create community-learning-ledger --repo "$GH_REPO" \
+              --title "Community learning dedup ledger" \
+              --notes "Machine-maintained report hashes; no training labels." \
+              --latest=false
+          fi
+          gh release upload community-learning-ledger "$RUNNER_TEMP/fingerprints.txt" \
+            --repo "$GH_REPO" --clobber
+      - name: Publish bounded review artifact; no automatic model activation
+        uses: actions/upload-artifact@v4
+        with:
+          name: community-learning-review
+          path: |
+            ${{ runner.temp }}/community-review.jsonl
+            ${{ runner.temp }}/community-shadow-model.json
+          retention-days: 7
+          if-no-files-found: error

@@ -15,6 +15,15 @@ mod anime_title;
 mod country_aliases;
 mod dashboard_history;
 mod debug_feed;
+mod field_audit;
+mod field_learning;
+mod tv_learning;
+mod community_learning;
+mod local_learning;
+mod online_model;
+mod candidate_discovery;
+mod learning_cache;
+mod learned_regex;
 mod query_cache;
 use axum::{extract::{Query, State}, http::{StatusCode,header}, routing::{get,post}, Json, Router};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -68,7 +77,7 @@ struct MatchRequest {
     series: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Candidate {
     imdb_id: String,
     title: String,
@@ -76,10 +85,10 @@ struct Candidate {
     media_type: String,
     matched_title: String,
     anime_ids: std::collections::BTreeMap<String,String>,
-    source: &'static str,
+    source: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Diagnostic {
     parsed: Value,
     normalized_title: String,
@@ -90,39 +99,71 @@ struct Diagnostic {
     reason: String,
 }
 
-// Shared, bounded 30-second parser cache for /parse and /match.
+// Shared, bounded 30-second parser cache for /parse and /match. Each entry
+// belongs to an exact active regex generation; obsolete entries are NEVER
+// returned. When rules change, a request performs a fresh base parse.
 const PARSE_TTL:Duration=Duration::from_secs(30);
-static PARSE_CACHE:OnceLock<Mutex<HashMap<String,(Instant,Value)>>>=OnceLock::new();
+static PARSE_CACHE:OnceLock<Mutex<HashMap<String,(Instant,u64,Value)>>>=OnceLock::new();
+fn cache_generation_current(saved:u64,at:Instant,current:u64)->bool{
+    saved==current && at.elapsed()<PARSE_TTL
+}
+fn parse_rules_revision()->u64{
+    learned_regex::revision().rotate_left(1) ^ field_learning::revision().rotate_left(17)
+        ^ tv_learning::revision().rotate_left(33)
+        ^ matchlab_parser::handler_patch_revision().rotate_left(49)
+}
 fn parse_cached(title:&str)->Result<Value,String>{
     if title.trim().is_empty()||title.len()>4096 {
         return Err("title must be 1–4096 bytes".into());
     }
+    let generation=parse_rules_revision();
     let cache=PARSE_CACHE.get_or_init(||Mutex::new(HashMap::new()));
-    if let Ok(guard)=cache.lock(){
-        if let Some((at,value))=guard.get(title){
-            if at.elapsed()<PARSE_TTL{return Ok(value.clone());}
-        }
+    // Clone only the base cached value under the lock, then release it
+    // before running learned regex checks. Concurrent API requests must
+    // never serialize behind the potentially expensive rule validation.
+    let cached=cache.lock().ok().and_then(|guard|{
+        guard.get(title).and_then(|(at,saved_generation,value)|
+            cache_generation_current(*saved_generation,*at,generation)
+                .then(||value.clone()))
+    });
+    if let Some(value)=cached {
+        if parse_rules_revision()==generation {return Ok(value);}
+        // A concurrent source-regex update requires a fresh parser run.
     }
-    let value=Value::Object(matchlab_parser::parse_title(title,false).map_err(|e|e.to_string())?);
+    // Persisted hits are likewise strict current-namespace only. On a
+    // parser/image/regex change, an old result can remain as historical
+    // learning evidence but cannot become a live parse result.
+    let mut value=if let Some(cached)=learning_cache::get_parser(title){
+        cached
+    }else{
+        Value::Object(matchlab_parser::parse_title(title,false)
+            .map_err(|e|e.to_string())?)
+    };
+    if parse_rules_revision()!=generation {
+        // A new local rule was installed while loading. Do not cache or
+        // return a base parse computed in an older rule generation.
+        value=Value::Object(matchlab_parser::parse_title(title,false)
+            .map_err(|e|e.to_string())?);
+    }
+    // The base parser output is stored, not an ML-decorated response. This
+    // ensures retired learned patterns never survive as cached coordinates.
+    learning_cache::put_parser(title,&value);
     if let Ok(mut guard)=cache.lock(){
-        // Avoid O(cache size) cleanup on every previously unseen title.
-        // Under pressure, remove expired entries before evicting only the
-        // oldest live entry instead of wiping the entire warm cache.
         const CAPACITY:usize=1024;
         if guard.len()>=CAPACITY {
-            guard.retain(|_,(at,_)|at.elapsed()<PARSE_TTL);
+            let latest=parse_rules_revision();
+            guard.retain(|_,(at,old,_)|cache_generation_current(*old,*at,latest));
             if guard.len()>=CAPACITY {
                 if let Some(oldest)=guard.iter()
-                    .min_by_key(|(_, (at,_))|*at).map(|(key,_)|key.clone()){
+                    .min_by_key(|(_, (at,_,_))|*at).map(|(key,_)|key.clone()){
                     guard.remove(&oldest);
                 }
             }
         }
-        guard.insert(title.to_string(),(Instant::now(),value.clone()));
+        guard.insert(title.to_string(),(Instant::now(),parse_rules_revision(),value.clone()));
     }
     Ok(value)
 }
-
 fn numbers(v: Option<&Value>) -> Vec<i64> {
     match v {
         Some(Value::Number(n)) => n.as_i64().into_iter().collect(),
@@ -705,6 +746,42 @@ fn diagnose_with_policy(
             }
         }
     }
+    // The ML subsystem supplies a compiled regex candidate, never a parsed
+    // field value. Only MatchLab's matcher may reinterpret an episode after
+    // independently verifying the current AniDB/TVDB crosswalk.
+    let learned_candidate=learned_regex::candidate(&req.title,&parsed_value);
+    if req.series!=Some(false)
+        && parsed_value.get("episode_end").is_none()
+        && parsed_value.get("season_end").is_none()
+        && parsed_value.get("anime_episode_range_candidate").is_none()
+        && let Some(candidate)=learned_candidate.as_ref()
+        && let (Some(candidate_title),Some(absolute))=(
+            candidate["title"].as_str(),candidate["episode"].as_i64())
+        && (1..=99_999).contains(&absolute)
+    {
+        let proposed_title=candidate_title.to_owned();
+        let proposed_key=imdb_matcher::clean_title(&proposed_title);
+        if let Some(verified_imdb)=verified_unmarked_anime_range_imdb(
+            &db,&proposed_key,absolute,absolute
+        )?
+            && let Some(parsed)=parsed_value.as_object_mut()
+        {
+            let previous=json!({
+                "title":parsed.get("title"),
+                "seasons":parsed.get("seasons"),
+                "episodes":parsed.get("episodes")
+            });
+            parsed.insert("title".into(),json!(proposed_title));
+            parsed.insert("seasons".into(),json!([]));
+            parsed.insert("episodes".into(),json!([absolute]));
+            parsed.insert("anime_title_verified".into(),json!(true));
+            parsed.insert("learned_regex_override_verified".into(),json!({
+                "imdb_id":verified_imdb,
+                "absolute_episode":absolute,
+                "previous_parser":previous
+            }));
+        }
+    }
     let parsed=parsed_value.as_object().ok_or("parser returned no object")?;
     let parsed_title = parsed.get("title").and_then(Value::as_str).unwrap_or("");
     let title_owned = if explicit_absolute_episode(&req.title).is_some() && numbers(parsed.get("seasons")).is_empty() {
@@ -841,7 +918,7 @@ fn diagnose_with_policy(
     }
     let imdb: Vec<Candidate> = imdb.into_iter().map(|m|Candidate{
         imdb_id:m.imdb_id,title:m.title,year:m.year,media_type:m.media_type,
-        matched_title:m.matched_title,anime_ids:m.anime_ids,source:"imdb"}).collect();
+        matched_title:m.matched_title,anime_ids:m.anime_ids,source:"imdb".into()}).collect();
     // Normal titles remain leaf-driven; an exact, verified AniDB alias from
     // the *nearest* anime subfolder may provide more specific part/season
     // context for the crosswalk resolver.
@@ -1396,21 +1473,61 @@ fn enrich_selected_anime_episode(
 
 fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result<Diagnostic,String>{
     let start=Instant::now();
-    let result=if matches!(policy,MatchPolicy::PublicApi){
-        diagnose(&state.db,req)
+    // Dashboard-only exploratory diagnostics deliberately bypass matching
+    // caches. /match and strict /debug/match use the identical PublicApi
+    // eligibility policy and may share verified cache entries.
+    let cacheable=matches!(policy,MatchPolicy::PublicApi);
+    let mut generation=if cacheable{
+        learning_cache::match_namespace(&state.db)
+    }else{None};
+    let mut result=if cacheable{
+        if let Some(snapshot)=learning_cache::get_match(
+            &req.title,req.year,req.series,&state.db){
+            match serde_json::from_value::<Diagnostic>(snapshot){
+                Ok(diagnostic)=>Ok(diagnostic),
+                Err(_)=>diagnose(&state.db,req),
+            }
+        }else{diagnose(&state.db,req)}
     }else{
         diagnose_with_policy(&state.db,req,policy)
     };
+    // A metadata, index or learned regex generation can change mid-request.
+    // Recheck the strict production outcome against the latest generation.
+    if cacheable && generation!=learning_cache::match_namespace(&state.db){
+        generation=learning_cache::match_namespace(&state.db);
+        result=diagnose(&state.db,req);
+    }
+    if cacheable && generation!=learning_cache::match_namespace(&state.db){
+        return Err("matching metadata or learned regex changed during request; retry".into());
+    }
+    if cacheable
+        && let Ok(ref diagnostic)=result
+        && let Ok(snapshot)=serde_json::to_value(diagnostic){
+        learning_cache::put_match(
+            &req.title,req.year,req.series,&state.db,&snapshot);
+    }
     let elapsed=start.elapsed().as_millis() as u64;
-    match &result {
+    match &result{
         Ok(d)=>{
             let status=if d.selected.is_some(){"matched"}else{"unmatched"};
             let details=serde_json::to_value(d).unwrap_or(Value::Null);
-            dashboard_history::record_async(&state.history,&req.title,status,d.selected.as_ref(),&details,elapsed);
-        }
-        Err(error)=>dashboard_history::record_async(&state.history,&req.title,"error",None,&json!({"error":error}),elapsed),
+            dashboard_history::record_async(
+                &state.history,&req.title,status,d.selected.as_ref(),&details,elapsed);
+        },
+        Err(error)=>dashboard_history::record_async(
+            &state.history,&req.title,"error",None,&json!({"error":error}),elapsed),
     }
     result
+}
+
+async fn ml_status()->Json<Value>{
+    let mut report=field_learning::status();
+    if let Some(object)=report.as_object_mut(){
+        object.insert("training_and_cache".into(),learning_cache::status());
+        object.insert("online_model".into(),online_model::OnlineModel::status());
+        object.insert("unknown_markers".into(),candidate_discovery::status());
+    }
+    Json(report)
 }
 
 async fn dashboard()->([(header::HeaderName,&'static str);1],&'static str){
@@ -1729,6 +1846,17 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_|"matchlab_server=info".into())).init();
     let args:Vec<String>=env::args().collect();
+    if args.get(1).is_some_and(|arg|arg=="verify-native-ml") {
+        local_learning::verify_native_model().map_err(std::io::Error::other)?;
+        println!("native Rust FTRL model self-test passed");
+        return Ok(());
+    }
+    if args.get(1).is_some_and(|arg|arg=="benchmark-native-ml") {
+        let stats=local_learning::benchmark_native_model()
+            .map_err(std::io::Error::other)?;
+        println!("{stats}");
+        return Ok(());
+    }
     if args.get(1).is_some_and(|arg|arg=="import-imdb") {
         if args.len()!=6 {
             return Err("usage: matchlab-server import-imdb <database.sqlite3> <title.basics.tsv.gz> <title.akas.tsv.gz> <title.episode.tsv.gz>".into());
@@ -1928,6 +2056,10 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
             }
         });
     }
+    if history_ready {
+        community_learning::start(PathBuf::from(&history_db),PathBuf::from(&db));
+        local_learning::start(PathBuf::from(&history_db),PathBuf::from(&db));
+    }
     // A pre-existing volume may need a fresh Tantivy schema generation.
     // Start this in the blocking pool only after all service configuration is
     // validated. /health/live and the dashboard remain reachable throughout.
@@ -1962,6 +2094,8 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
     let app = Router::new().route("/",get(dashboard))
         .route("/api/dashboard/history",get(dashboard_history_request))
         .route("/api/dashboard/stats",get(dashboard_stats_request))
+        .route("/api/community/status",get(community_learning::status))
+        .route("/api/ml/status",get(ml_status))
         .route("/api/debug/parsing",get(debug_feed::list))
         .route("/api/debug/parsing/status",get(debug_feed::status))
         .route("/api/debug/parsing/{id}",get(debug_feed::detail))
@@ -3616,6 +3750,32 @@ mod tests {
         })));
         assert_eq!(valid["sid_start"],"tt1663145:1:1");
         assert_eq!(valid["sid_end"],"tt1663145:1:1");
+    }
+    #[test]
+    fn cached_diagnostics_roundtrip_without_static_string_lifetimes(){
+        let sample=Diagnostic{
+            parsed:json!({"title":"Example","seasons":[1],"episodes":[7]}),
+            normalized_title:"example".into(),
+            imdb_candidates:vec![Candidate{
+                imdb_id:"tt1234567".into(),title:"Example".into(),year:2022,
+                media_type:"tvSeries".into(),matched_title:"Example".into(),
+                anime_ids:std::collections::BTreeMap::new(),source:"imdb".into()
+            }],
+            anime_candidate:None,anidb_candidate:None,selected:Some(json!({
+                "imdb_id":"tt1234567","season":1,"episode":7
+            })),reason:"Verified".into(),
+        };
+        let restored:Diagnostic=serde_json::from_value(
+            serde_json::to_value(&sample).unwrap()).unwrap();
+        assert_eq!(restored.selected,sample.selected);
+        assert_eq!(restored.imdb_candidates[0].source,"imdb");
+    }
+    #[test]
+    fn changed_regex_generation_invalidates_30_second_parser_memory_cache(){
+        let at=Instant::now();
+        assert!(cache_generation_current(4,at,4));
+        assert!(!cache_generation_current(4,at,5),
+            "a cached parse from an obsolete regex generation must be recomputed");
     }
     #[test]
     fn parse_cache_returns_full_parser_fields() {

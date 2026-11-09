@@ -1,4 +1,6 @@
 use std::borrow::Cow;
+use std::cell::Cell;
+use std::sync::{Arc,RwLock};
 use std::collections::{HashMap, HashSet};
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
@@ -59,6 +61,8 @@ struct HandlerDefRaw {
     #[serde(default)]
     function: Option<String>,
     options: HandlerOptionsRaw,
+    #[serde(default)]
+    learned_tv_guard: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -131,11 +135,38 @@ enum MatchGuard {
     SitePrefix,
     UnmarkedSeason,
     AnchoredEpisode,
+    LearnedTv,
 }
 
 struct ParserEngine {
     handlers: Vec<RuntimeHandler>,
     prefilter: Prefilter,
+}
+
+fn learned_tv_ambiguous(title:&str)->bool{
+    static RANGES:Lazy<regex::Regex>=Lazy::new(|| regex::Regex::new(
+        r"(?i)(?:s[0-9]{1,3}[ ._-]*e[0-9]{1,5}|[0-9]{1,3}x[0-9]{1,5}|season[ ._-]+[0-9]{1,3}[ ._-]+episode[ ._-]+[0-9]{1,5})[ ._-]*(?:-|to|through)[ ._-]*(?:e(?:p(?:isode)?)?[ ._-]*)?[0-9]{1,5}(?:$|[ ._-])"
+    ).expect("bounded learned TV pack guard"));
+    static MARKERS:Lazy<regex::Regex>=Lazy::new(|| regex::Regex::new(
+        r"(?i)(?:^|[ ._-])(?:s[0-9]{1,3}[ ._-]*e[0-9]{1,5}|[0-9]{1,3}x[0-9]{1,5}|season[ ._-]+[0-9]{1,3}[ ._-]+episode[ ._-]+[0-9]{1,5})(?:$|[ ._-])"
+    ).expect("bounded learned TV multiple-marker guard"));
+    if title.len()>240 || RANGES.is_match(title) {return true;}
+    // Patterns include the separating character on both sides. Rescan
+    // the shared boundary so S02E07.S03E08 counts as two markers.
+    let mut tail=title;
+    let mut markers=0usize;
+    for _ in 0..3 {
+        let Some(m)=MARKERS.find(tail)else{break;};
+        markers+=1;
+        if markers>1 {return true;}
+        let mut advance=m.end();
+        if m.as_str().ends_with([' ','.','_','-']) {
+            advance=advance.saturating_sub(1);
+        }
+        if advance==0||advance>=tail.len(){break;}
+        tail=&tail[advance..];
+    }
+    false
 }
 
 fn compile_regex(pattern: &str, ignore_case: bool) -> Result<PcreRegex, ParseError> {
@@ -265,7 +296,8 @@ impl ParserEngine {
         for mut raw in table.handlers {
             // Keep the generated upstream snapshot intact; these are deliberate
             // parser corrections applied before compiling both regexes and gates.
-            let guard = match (raw.name.as_str(), raw.pattern.as_deref()) {
+            let guard = if raw.learned_tv_guard { MatchGuard::LearnedTv } else {
+                match (raw.name.as_str(), raw.pattern.as_deref()) {
                 ("hdr", _) | ("bit_depth", Some(r"\bhdr10\b")) => MatchGuard::AmbiguousMetadata,
                 ("dubbed", Some(r"\bdual\b(?![ .-]*sub)")) => MatchGuard::AmbiguousMetadata,
                 ("site", Some(pattern)) if pattern.contains("com|org|net") => {
@@ -279,6 +311,7 @@ impl ParserEngine {
                 // Require a token boundary, except after an Sxx season marker.
                 ("episodes", Some(r"E(\d+)\b")) => MatchGuard::AnchoredEpisode,
                 _ => MatchGuard::None,
+                }
             };
             let is_hdr_format =
                 raw.name == "hdr" && raw.pattern.as_deref() == Some(r"\bHDR(?:10)?\b");
@@ -522,6 +555,14 @@ impl ParserEngine {
                     && !standalone_domain
                     && (m0.start() == 0 || raw_match.contains(char::is_whitespace))
                 {
+                    return Ok(None);
+                }
+            }
+            MatchGuard::LearnedTv => {
+                // The original parser handles ranges and season packs first.
+                // Never let a learned single-coordinate grammar silently
+                // reinterpret a range or several conflicting markers.
+                if learned_tv_ambiguous(title) {
                     return Ok(None);
                 }
             }
@@ -1669,7 +1710,7 @@ fn unmarked_anime_episode_candidate(
             .and_then(|caps|caps.get(0))
             .map(|marker|clean_prefix[..marker.start()].trim())
             .filter(|title|!title.is_empty()).unwrap_or(clean_prefix);
-        let candidate_title=ENGINE.parse(title_prefix,translate_languages)?
+        let candidate_title=engine_parse(title_prefix,translate_languages)?
             .get("title").and_then(Value::as_str).unwrap_or(title_prefix).trim().to_owned();
         if candidate_title.is_empty(){continue;}
         return Ok(Some(json!({
@@ -1707,7 +1748,7 @@ fn fansub_season_dash_episode_candidate(
     if name.chars().filter(|ch| ch.is_alphabetic()).count() < 4 {
         return Ok(None);
     }
-    let title = ENGINE.parse(name, translate_languages)?
+    let title = engine_parse(name, translate_languages)?
         .get("title").and_then(Value::as_str).unwrap_or(name).trim().to_owned();
     if title.chars().filter(|ch| ch.is_alphabetic()).count() < 4 {
         return Ok(None);
@@ -1982,7 +2023,7 @@ fn set_title_from_release_prefix(
     if prefix.is_empty() {
         return Ok(());
     }
-    let clean = ENGINE.parse(prefix, translate_languages)?;
+    let clean = engine_parse(prefix, translate_languages)?;
     if let Some(title) = clean.get("title").and_then(Value::as_str)
         && title.chars().filter(|c| c.is_alphabetic()).count() >= 3
     {
@@ -2487,7 +2528,7 @@ fn unmarked_single_anime_episode_candidate(
     }
     // There is no additional regex scan or metadata lookup for ordinary
     // names; parse the prefix only after a cheap trailing-number candidate.
-    let title = ENGINE.parse(name,translate_languages)?
+    let title = engine_parse(name,translate_languages)?
         .get("title").and_then(Value::as_str).unwrap_or(name).trim().to_owned();
     if title.chars().filter(|c| c.is_alphabetic()).count() < 4 {
         return Ok(None);
@@ -2502,7 +2543,7 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
     let original_raw = raw;
     let normalized = normalize_release_confusables(raw);
     let raw = normalized.as_ref();
-    let mut result=ENGINE.parse(raw,translate_languages)?;
+    let mut result=engine_parse(raw,translate_languages)?;
     // The generic handler engine can miss non-ASCII release resolutions
     // even after normalization. Preserve the explicit numeric marker.
     if original_raw.contains(['р', 'Р'])
@@ -2709,7 +2750,7 @@ pub fn parse_title_context(
     raw_title: &str,
     translate_languages: bool,
 ) -> Result<ParseContext, ParseError> {
-    ENGINE.parse_context(raw_title, translate_languages)
+    engine_parse_context(raw_title, translate_languages)
 }
 
 pub fn parse_many<'a, I>(
@@ -2784,8 +2825,245 @@ pub fn languages_translation_table() -> Vec<(String, String)> {
 }
 
 static HANDLERS_JSON: &str = include_str!("generated/handlers.json");
+
+thread_local! {
+    // Training labels and regression checks must bypass live learned rules.
+    static CANONICAL_ONLY: Cell<bool> = const { Cell::new(false) };
+}
+static LIVE_ENGINE: Lazy<RwLock<Option<Arc<ParserEngine>>>> =
+    Lazy::new(|| RwLock::new(None));
+static LIVE_REVISION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[derive(Clone,Debug)]
+pub struct HandlerPatch {
+    pub index: usize,
+    pub original_pattern: String,
+    pub replacement_pattern: String,
+}
+
+/// All original generated parser handlers, including years, seasons,
+/// episodes, technical fields and title rules. This is read only on the
+/// learning worker, never during normal request parsing.
+pub fn existing_regex_rules() -> Vec<Value> {
+    let Ok(doc) = serde_json::from_str::<Value>(HANDLERS_JSON) else {
+        return Vec::new();
+    };
+    doc["handlers"].as_array().into_iter().flatten().enumerate()
+        .filter_map(|(index, raw)| {
+            let source = raw["pattern"].as_str()?;
+            Some(json!({"index":index,"field":raw["name"],
+                "pattern":source,"transform":raw["transform"],
+                "flags":raw["flags"],"options":raw["options"],
+                "kind":raw["kind"],"origin":"generated_handler"}))
+        }).collect()
+}
+pub fn handler_patch_revision() -> u64 {
+    LIVE_REVISION.load(std::sync::atomic::Ordering::Acquire)
+}
+fn parse_engine_active() -> Option<Arc<ParserEngine>> {
+    if CANONICAL_ONLY.with(Cell::get) { return None; }
+    LIVE_ENGINE.read().ok().and_then(|guard|guard.clone())
+}
+fn engine_parse(raw:&str,translate:bool)->Result<Map<String,Value>,ParseError>{
+    if let Some(override_engine)=parse_engine_active(){
+        override_engine.parse(raw,translate)
+    }else{
+        ENGINE.parse(raw,translate)
+    }
+}
+fn engine_parse_context(raw:&str,translate:bool)->Result<ParseContext,ParseError>{
+    if let Some(override_engine)=parse_engine_active(){
+        override_engine.parse_context(raw,translate)
+    }else{
+        ENGINE.parse_context(raw,translate)
+    }
+}
+/// Reparse with the original bundled rules regardless of active ML overlays.
+/// Never use a previously learned parse result as a training label.
+pub fn parse_title_canonical(
+    name:&str,translate_languages:bool
+)->Result<Map<String,Value>,ParseError>{
+    CANONICAL_ONLY.with(|flag|{
+        let previous=flag.replace(true);
+        let result=parse_title(name,translate_languages);
+        flag.set(previous);
+        result
+    })
+}
+/// A learned pattern reuses a trusted parser handler's field,
+/// transform, options and priority semantics. The learner supplies only regex.
+#[derive(Clone,Debug)]
+pub struct HandlerAddition {
+    pub source_index: usize,
+    pub pattern: String,
+}
+
+fn stable_patch_hash(patches:&[HandlerPatch],additions:&[HandlerAddition])->u64{
+    let mut value=0xcbf29ce484222325u64;
+    let mut lines=patches.iter().map(|rule|
+        format!("patch:{}:{}:{}\n",rule.index,
+            rule.original_pattern,rule.replacement_pattern)).collect::<Vec<_>>();
+    lines.extend(additions.iter().map(|rule|
+        format!("add:{}:{}\n",rule.source_index,rule.pattern)));
+    lines.sort();
+    for line in lines {
+        for byte in line.bytes() {
+            value^=u64::from(byte);
+            value=value.wrapping_mul(0x100000001b3);
+        }
+    }
+    value.max(1)
+}
+
+/// Backwards-compatible parser source-replacement entry point.
+pub fn install_handler_patches(patches:&[HandlerPatch])->Result<(),ParseError>{
+    install_learned_handler_regex(patches,&[])
+}
+
+/// Compile additions and replacements on the learning worker and publish
+/// one immutable engine. MatchLab, not the learner, extracts all field values.
+pub fn install_learned_handler_regex(
+    patches:&[HandlerPatch],additions:&[HandlerAddition]
+)->Result<(),ParseError>{
+    let mut sorted=patches.to_vec();
+    sorted.sort_by_key(|p|p.index);
+    if sorted.windows(2).any(|w|w[0].index==w[1].index){
+        return Err(ParseError::Data("duplicate handler patch".into()));
+    }
+    if sorted.len()>32||additions.len()>96{
+        return Err(ParseError::Data("too many live regex rules".into()));
+    }
+    let mut ordered_additions=additions.to_vec();
+    ordered_additions.sort_by(|a,b|(&a.source_index,&a.pattern)
+        .cmp(&(&b.source_index,&b.pattern)));
+    if ordered_additions.windows(2).any(|w|
+        w[0].source_index==w[1].source_index && w[0].pattern==w[1].pattern){
+        return Err(ParseError::Data("duplicate handler addition".into()));
+    }
+    let fingerprint=stable_patch_hash(&sorted,&ordered_additions);
+    if LIVE_REVISION.load(std::sync::atomic::Ordering::Acquire)==fingerprint {
+        return Ok(());
+    }
+    if patches.is_empty()&&additions.is_empty(){
+        let mut lock=LIVE_ENGINE.write().map_err(|_|ParseError::Data(
+            "live handler lock unavailable".into()))?;
+        *lock=None;
+        LIVE_REVISION.store(fingerprint,std::sync::atomic::Ordering::Release);
+        return Ok(());
+    }
+    let mut document:Value=serde_json::from_str(HANDLERS_JSON)
+        .map_err(|e|ParseError::Data(e.to_string()))?;
+    let rows=document["handlers"].as_array_mut().ok_or_else(||
+        ParseError::Data("missing handlers".into()))?;
+    for patch in &sorted{
+        let raw=rows.get_mut(patch.index).ok_or_else(||
+            ParseError::Data("unknown handler index".into()))?;
+        if raw["kind"]!="regex" || raw["pattern"].as_str()!=Some(&patch.original_pattern){
+            return Err(ParseError::Data("original handler changed".into()));
+        }
+        verify_learned_regex(&patch.replacement_pattern)?;
+        raw["pattern"]=Value::String(patch.replacement_pattern.clone());
+    }
+    // Additions are appended so normal bundled handlers have precedence.
+    // Their original field, options and transform are preserved exactly.
+    // The learner cannot inject arbitrary field values, scripts or transforms.
+    for addition in &ordered_additions{
+        let mut raw=rows.get(addition.source_index).cloned().ok_or_else(||
+            ParseError::Data("unknown addition source handler".into()))?;
+        let field=raw["name"].as_str().unwrap_or("").to_owned();
+        if raw["kind"]!="regex" ||
+           !matches!(field.as_str(),"resolution"|"codec"|"quality"|"audio"|"bit_depth"|
+                "hdr"|"channels"|"languages"|"subbed"|"dubbed"|"extension"|
+                "seasons"|"episodes"){
+            return Err(ParseError::Data("unsafe addition source".into()));
+        }
+        verify_learned_regex(&addition.pattern)?;
+        raw["pattern"]=Value::String(addition.pattern.clone());
+        if field=="seasons"||field=="episodes" {
+            raw["learned_tv_guard"]=Value::Bool(true);
+        }
+        rows.push(raw);
+    }
+    let candidate=ParserEngine::from_json(&document.to_string())?;
+    let mut lock=LIVE_ENGINE.write().map_err(|_|
+        ParseError::Data("live handler lock unavailable".into()))?;
+    *lock=Some(Arc::new(candidate));
+    LIVE_REVISION.store(fingerprint,std::sync::atomic::Ordering::Release);
+    Ok(())
+}
+fn verify_learned_regex(pattern:&str)->Result<(),ParseError>{
+    if !(4..=512).contains(&pattern.len()){
+        return Err(ParseError::Data("invalid learned regex length".into()));
+    }
+    // Require the Rust linear-time regex subset even though trusted
+    // legacy MatchLab handlers may use PCRE2-specific constructs.
+    let safe=regex::RegexBuilder::new(pattern)
+        .size_limit(256*1024).build()
+        .map_err(|e|ParseError::Regex(e.to_string()))?;
+    if safe.is_match("") {
+        return Err(ParseError::Data("zero-width learned regex prohibited".into()));
+    }
+    Ok(())
+}
+
 static ENGINE: Lazy<ParserEngine> =
     Lazy::new(|| ParserEngine::from_json(HANDLERS_JSON).expect("valid generated handler table"));
+
+#[cfg(test)]
+mod live_handler_catalog_tests {
+    use super::*;
+    #[test]
+    fn full_handler_catalog_exposes_original_rules_and_all_field_families(){
+        let rules=existing_regex_rules();
+        assert!(rules.len()>400);
+        for field in ["title","year","seasons","episodes","resolution",
+            "codec","quality","languages","network","edition"]{
+            assert!(rules.iter().any(|r|r["field"]==field),
+                "source parser catalogue missing {field}");
+        }
+    }
+    #[test]
+    fn learned_regex_addition_uses_native_matchlab_field_transform(){
+        let sources=existing_regex_rules();
+        let original=sources.iter().find(|entry|
+            entry["field"]=="codec" &&entry["transform"]=="value('hevc')"
+        ).expect("trusted hevc parser handler");
+        let index=original["index"].as_u64().unwrap() as usize;
+        let mut doc:Value=serde_json::from_str(HANDLERS_JSON).unwrap();
+        let handlers=doc["handlers"].as_array_mut().unwrap();
+        let mut extra=handlers[index].clone();
+        extra["pattern"]=json!(r"(?i)(?:^|[._ -])FUTUREHEVC(?:$|[._ -])");
+        handlers.push(extra);
+        let engine=ParserEngine::from_json(&doc.to_string()).unwrap();
+        let before=ENGINE.parse("Example.FUTUREHEVC.1080p",false).unwrap();
+        let result=engine.parse("Example.FUTUREHEVC.1080p",false).unwrap();
+        assert!(before.get("codec").is_none());
+        assert_eq!(result["codec"],"hevc");
+        assert_eq!(result["resolution"],"1080p");
+    }
+    #[test]
+    fn learned_tv_guards_reject_overlapping_coordinates_and_packs(){
+        assert!(!learned_tv_ambiguous("Series.S02E07.1080p"));
+        assert!(learned_tv_ambiguous("Series.S02E07.S03E08.1080p"));
+        assert!(learned_tv_ambiguous("Series.S02E07-E08.1080p"));
+        assert!(learned_tv_ambiguous("Series.02x07-08.1080p"));
+        assert!(learned_tv_ambiguous("Series.Season.2.Episode.7-8.1080p"));
+    }
+    #[test]
+    fn unsafe_replacement_is_rejected_before_live_publication(){
+        let old=handler_patch_revision();
+        let rules=existing_regex_rules();
+        let first=&rules[0];
+        let patch=HandlerPatch{
+            index:first["index"].as_u64().unwrap() as usize,
+            original_pattern:first["pattern"].as_str().unwrap().to_owned(),
+            replacement_pattern:"(?=cat).*".to_owned()
+        };
+        assert!(install_handler_patches(&[patch]).is_err());
+        assert_eq!(handler_patch_revision(),old);
+    }
+}
 
 static BEFORE_TITLE_MATCH_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^\[([^\[\]]+)\]").expect("valid regex"));

@@ -1,7 +1,11 @@
-# Native Rust API — default production image.
+# Single multi-arch Rust image. The native FTRL learner is built-in,
+# operates offline, and is never initialized unless MATCHLAB_ML_ENABLED=true.
+# No ONNX Runtime, Python, downloaded model, GPU or external AI process.
 FROM rust:1-bookworm AS builder
 WORKDIR /build
 ARG RUSTFLAGS="-D warnings"
+ARG MATCHLAB_BUILD_SHA=""
+ENV MATCHLAB_BUILD_SHA=$MATCHLAB_BUILD_SHA
 ENV RUSTFLAGS=$RUSTFLAGS
 COPY . .
 RUN cargo build --release -p matchlab-server
@@ -10,10 +14,13 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini curl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --create-home app \
-    && mkdir -p /data && chown app:app /data
+    && mkdir -p /data \
+    && chown app:app /data
 COPY --from=builder /build/target/release/matchlab-server /usr/local/bin/matchlab-server
 USER app
-ENV MATCHLAB_DB=/data/metadata.sqlite3 MATCHLAB_HOST=0.0.0.0:8765
+ENV MATCHLAB_DB=/data/metadata.sqlite3 \
+    MATCHLAB_HOST=0.0.0.0:8765 \
+    MATCHLAB_ML_ENABLED=false
 VOLUME ["/data"]
 EXPOSE 8765
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \

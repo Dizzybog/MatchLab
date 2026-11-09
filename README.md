@@ -1,77 +1,14 @@
 # MatchLab
 
-**MatchLab** is a self-hosted Rust service that recognizes movies, TV series, and anime from torrent filenames. Send a release name to its HTTP API to get an **IMDb ID**, verified episode coordinates, and—when available—an **AniDB ID**.
+**MatchLab** is a self-hosted API that identifies movies, TV shows and anime from torrent release names. It extracts the title and episode information, finds the corresponding IMDb title and, where verified, maps anime episodes to AniDB.
 
-It can parse names such as `Breaking.Bad.S02E03.1080p.WEB-DL`, recognize season packs, and handle anime episode mapping. It **does not** search for or download torrents.
+For example, `Breaking.Bad.S02E03.1080p.WEB-DL` contains a series title, season 2, episode 3 and video-quality tags. MatchLab parses those parts and searches its local metadata index. **It does not find or download torrents.**
 
-## Features
+MatchLab is written in Rust. It uses **Tantivy** to search titles and **SQLite** for metadata. It provides an HTTP API and a web dashboard.
 
-- **Fast title matching:** Tantivy indexes IMDb titles, alternate titles, and AniDB aliases. The independent `imdb_matcher` ranks exact titles, country aliases, year, and media type using deterministic rules.
-- **Anime support:** AniDB, animeApi, and Anime-Lists provide verified identities and episode conversions, including split seasons and absolute episode numbering.
-- **Full release parsing:** Extracts title, year, season, episodes, resolution, languages, release tags, and more. Supports filenames inside folder paths.
-- **Easy deployment:** Native Rust server with Docker, an HTTP API, a dashboard, and automatic metadata refresh.
-- **Safe updates:** SQLite stores metadata relationships; Tantivy generations are built and validated before metadata is switched.
+## Get started
 
-## Independent IMDb and AniDB matchers
-
-MatchLab runs two independent identity lanes after parsing a release:
-
-1. **`imdb_matcher`** ranks IMDb title identities using its existing deterministic
-   Tantivy lookup, year/type rules, season eligibility and tie breakers. It
-   never needs to discover an AniDB identity first.
-2. **`anidb_matcher`** finds exact AniDB title aliases directly in the
-   Tantivy index, including anime without any IMDb links, and verifies
-   absolute or season-relative episode coordinates using Anime-Lists'
-   relational `episode_map`. Only explicit episode pairs or finite,
-   bounded ranges are proof; generic open-ended defaults are not. Several
-   IMDb links to the *same* AniDB work count as one anime identity, while
-   multiple distinct AniDB works with equally verified episodes remain
-   ambiguous.
-3. **Existing anime compatibility and crosswalk rules** remain active.
-   The original anime-priority rules, named sequel/part handling, absolute
-   episode offsets, split seasons, and partial/complete range validation
-   still determine which verified IMDb candidate is eligible. The new
-   AniDB-only lane does **not** replace these protections or arbitrarily
-   change their ranking. Independently confirmed AniDB IDs are preserved
-   even if IMDb has no match. Conflicting crosswalk identities are not
-   silently combined.
-
-
-**Compatibility guarantee:** The Rust release parser and its existing regex
-rules are unchanged by this refactor. `episode_crosswalk` retains the prior
-IMDb↔AniDB algorithms, including sparse explicit maps, special episode
-numbering, split cours and verified partial ranges. For unmarked filenames,
-the independent AniDB check runs alongside the legacy verified IMDb
-crosswalk; failure of the stricter AniDB-only check must not erase a
-previously valid IMDb episode or season-pack result. Season names such as
-`JoJo's Bizarre Adventure Stone Ocean` continue to be resolved through
-their exact AniDB part alias and TVDB season mapping.
-
-A single verified anime episode can therefore produce an **ASID without
-an IMDb SID**: `sid_start` and `sid_end` are `null`, while
-`asid_start` and `asid_end` contain the canonical `anidb:episode`.
-This is deliberate and follows the existing four-field API contract. If
-the IMDb matcher finds a valid title, its SID is reported separately.
-ASID-only matches require an exact AniDB alias and bounded metadata
-evidence, never a guessed season or unverified bare number.
-
-An unmarked anime batch must pass an independent completeness check
-for **every** episode in the advertised range and must stay within one
-AniDB work before ASID endpoints are published. This avoids treating
-incomplete `320–400` packs as fully verified.
-
-`POST /debug/match` includes a separate additive
-`anidb_candidate` field to explain the independent AniDB decision;
-`anime_candidate` is retained for older crosswalk-oriented consumers.
-
-## Dashboard
-
-<img width="1434" height="4096" alt="1000502509" src="https://github.com/user-attachments/assets/e46326cc-3ce7-40ac-be87-4d14bf3ad952" />
-
-
-## Quick start
-
-Requires Docker and Docker Compose. Save the following as `compose.yaml` (or use the [compose.yaml](compose.yaml) included in this repository):
+Install Docker with Docker Compose. Create a `compose.yaml` file:
 
 ```yaml
 services:
@@ -83,23 +20,19 @@ services:
     mem_limit: 6g
     pids_limit: 256
     environment:
-      RUST_LOG: matchlab_server=info
+      MATCHLAB_DB: /data/metadata.sqlite3
+      MATCHLAB_HOST: 0.0.0.0:8765
       MATCHLAB_MAX_CONCURRENT_MATCHES: "2"
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
       - metadata:/data
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
 
 volumes:
   metadata:
 ```
 
-Start and check the service:
+Start the service:
 
 ```bash
 docker compose up -d
@@ -107,36 +40,17 @@ docker compose logs -f matchlab
 curl http://127.0.0.1:8765/health
 ```
 
-On first startup, MatchLab downloads **seven public metadata feeds** and builds its local SQLite database and Tantivy index. This requires outbound HTTPS access and sufficient free disk space. The HTTP listener and dashboard are available while Tantivy is indexing, so `/health/live` can return **200** before matching is ready. `/health` and `/health/ready` return JSON with **503** and status `initializing`, `indexing` or `error` until the index is ready, then **200** and `ready`. The dashboard displays the phase. Matching and alias lookups are gated until ready; the client does not mistake proxy HTML for JSON. Later metadata refreshes preserve the last published data if an import fails.
+The first run downloads public IMDb and anime metadata and builds the local index. This needs an internet connection, disk space and time. `/health` returns **503** until the index is ready and **200** when matching is available. Later metadata refreshes normally run every seven days. The dashboard is at `http://127.0.0.1:8765/`.
 
-For updates, run `docker compose pull && docker compose up -d`.
+The example is limited to two CPUs and 6 GB RAM; these are starting limits, not guaranteed minimum requirements. To update, run `docker compose pull && docker compose up -d`. A full configuration is available in [compose.yaml](compose.yaml).
 
-> **Resource limits:** The example restricts MatchLab to **2 CPUs, 6 GB RAM, and 256 processes/threads**, with up to **2 simultaneous matching operations**. These are conservative starting values, not verified minimum requirements. Increase the RAM/CPU limits if full metadata imports exceed them. Disk space must cover both the active and incoming metadata/index generations.
+## Use the API
 
-## HTTP API
-
-MatchLab listens on port **8765**. Both `GET` and `POST` accept `title` (or `t_title`), and matching works without calling the parser first.
-
-| Endpoint | Description |
-| --- | --- |
-| `GET /match`, `POST /match` | Match a release to IMDb and optional AniDB coordinates |
-| `GET /alias`, `POST /alias` | Exact title/ID lookup across IMDb, AniDB, TVDB, MAL, AniList and Kitsu |
-| `GET /episode/resolve`, `POST /episode/resolve` | Verified IMDb season/episode ↔ AniDB episode conversion |
-| `GET /parse`, `POST /parse` | Parse the full release name without metadata lookups |
-| `POST /debug/match` | **Same strict production identity and ranking as `/match`**, with diagnostics and verified range segments |
-| `POST /api/dashboard/diagnose` | Permissive title exploration for the built-in interactive dashboard (not for integrations) |
-| `GET /api/debug/parsing/status` | Authenticated read-only history cursor and retention information |
-| `GET /api/debug/parsing` | Authenticated incremental parser diagnostics and anomaly hints |
-| `GET /api/debug/parsing/{id}` | Authenticated full diagnostics for one retained request |
-| `GET /health` | Check whether indexed metadata is ready |
-| `GET /health/live` | Lightweight liveness check |
-| `GET /` | Open the dashboard and search history |
-
-### Match a release
+Match a release name:
 
 ```bash
 curl -X POST http://127.0.0.1:8765/match \
-  -H "Content-Type: application/json" \
+  -H 'Content-Type: application/json' \
   -d '{"title":"Supernatural.S01E01-E22.1080p"}'
 ```
 
@@ -151,133 +65,104 @@ Example response:
 }
 ```
 
-**Strict production year on `/match` and `/debug/match`:** Parsed torrent years must match the IMDb
-production year **exactly**, not within ±1. When the year is missing or
-different, a candidate requires a parsed series season, linked anime
-identity, or the parser's explicit **quality** field (for example WEB-DL,
-WEBRip or BluRay). **Resolution alone is insufficient**: 1080p/2160p,
-codecs and file extensions do not qualify. Anime filenames with only a local
-episode number can default to a tentative first-season SID when the
-crosswalk cannot resolve it, but never claim an unverified ASID.
-Verified absolute numbering and named anime parts take priority.
+A **SID** is an IMDb title ID, optionally followed by season and episode. An **ASID** identifies an AniDB anime episode; it is returned only when the mapping can be verified. Unmatched values are `null`.
 
-**Dashboard behavior:** The dashboard tester (`POST /api/dashboard/diagnose`) intentionally
-does not apply the public API's production-year/quality eligibility gate.
-Entering `Fight Club` alone will still return ranked title matches without
-requiring a year, season, anime identity or release-quality tag. The public
-`GET/POST /match` and `POST /debug/match` endpoints retain all the strict checks.
+| Endpoint | Purpose |
+| --- | --- |
+| `GET/POST /match` | Match a release to IMDb and optional AniDB episodes |
+| `GET/POST /parse` | Extract release fields without matching |
+| `GET/POST /alias` | Look up alternate titles and related IDs |
+| `GET/POST /episode/resolve` | Convert verified IMDb and AniDB episode coordinates |
+| `POST /debug/match` | Inspect matching with the same strict checks as `/match` |
+| `POST /api/dashboard/diagnose` | Explore title-only matches without production API eligibility checks |
+| `GET /health` | Check whether matching is ready |
+| `GET /` | Open the dashboard |
 
-`/match` **always returns exactly these four fields**. Movies use the IMDb title ID in both SID fields; TV episodes add season/episode coordinates. Verified anime episodes may also include AniDB IDs. If nothing can be matched reliably, the corresponding values are `null`.
+The public `/match` and `/debug/match` endpoints have identical strict matching requirements. The dashboard's diagnostic endpoint is intentionally more permissive. If metadata is missing or conflicting, MatchLab avoids inventing a match. See [API documentation](docs/API.md) for request options, full responses and other endpoints.
 
-### Find all anime names and third-party IDs
+## Optional Machine Learning
 
-```bash
-curl -G --data-urlencode 'imdb_id=tt0388629' http://127.0.0.1:8765/alias
-curl -G --data-urlencode 'anidb_id=69' http://127.0.0.1:8765/alias
-curl -G --data-urlencode 'kitsu_id=987' http://127.0.0.1:8765/alias
-curl -G --data-urlencode 'mal_id=21' http://127.0.0.1:8765/alias
-curl -G --data-urlencode 'query=One Piece' http://127.0.0.1:8765/alias
+**MatchLab works normally without Machine Learning (ML).** When enabled, a small Rust model learns patterns from release names in the background. It can add new regex patterns or suggest replacements for existing ones. **ML never sets or overwrites parsed fields.** MatchLab's own parser interprets the compiled rules, and its matcher verifies IMDb/AniDB identities as usual. The model is not run on each request.
+
+The learning process is:
+
+1. Examine new release names for **four error types**: missing values, excessive extraction, incomplete extraction, and values assigned to the wrong fields (for example, swapped seasons and episodes). These are learning signals, not automatic corrections.
+2. Group recurring patterns and train a small **FTRL-Proximal** model.
+3. Test proposed regex rules against known values, conflicting patterns and negative examples.
+4. Activate eligible rules in memory without restarting. More uncertain changes are kept for review.
+
+**ML learns from every field that MatchLab parses**, including titles, years, seasons, episodes, languages, video and audio details, release groups, and other metadata. It looks for recurring naming patterns and can propose **new regex rules or improvements to existing ones** for any field. A rule is activated in the live parser **without restarting** only when sufficient independent evidence and field-specific safety checks support it; otherwise it remains inactive for further validation or review. Anime episode patterns still require verified metadata mappings. **ML changes regex only: MatchLab performs all field extraction and IMDb/AniDB matching.** With community sharing enabled, the exact regex additions and replacements can be proposed on GitHub. An ML score alone never activates a rule.
+
+Enable learning in the Compose environment:
+
+```yaml
+environment:
+  MATCHLAB_ML_ENABLED: "true"
+  MATCHLAB_ML_TRAINING_MAX_EXAMPLES: "500000"
+  MATCHLAB_ML_MAX_STORAGE_GB: "10"
+  MATCHLAB_ML_CACHE_ENABLED: "true"
+  MATCHLAB_ML_CACHE_MAX_ENTRIES: "200000"
 ```
 
-`/alias` returns all matching `imdb_ids` and `anidb_ids`, plus
-original aliases with language, source and optional year. Search is
-**exact after MatchLab normalization** (not fuzzy or prefix search).
-`GET` and `POST` accept the same fields; use `q` for automatic ID
-or text detection. Alias objects are paginated; use `limit`/`offset`
-with `total`/`has_more` for large result sets. See
-[API documentation](docs/API.md#alias-lookup-get-alias-post-alias).
+Only `MATCHLAB_ML_ENABLED` is required; the other settings are optional limits. The training limit counts retained observations, **not RAM usage**. The local SQLite cache speeds up repeated requests, but after parser, rule or metadata changes, old answers are ignored and the next request is parsed and matched again. Learning evidence is never treated as a completed match.
 
-### Automatic SID + ASID in a normal match
+Check `GET /api/ml/status` to see local model and rule statistics. No separate AI server, GPU or online AI service is required.
 
-```bash
-curl -G --data-urlencode 'title=One Piece S21E03' \
-  http://127.0.0.1:8765/match
+### Share improvements with the community (optional)
+
+GitHub sharing is **off by default**, even when local ML is on. To contribute, create a GitHub token with permission to comment on this repository's Issues, store it privately, and set:
+
+```yaml
+environment:
+  MATCHLAB_ML_ENABLED: "true"
+  MATCHLAB_COMMUNITY_LEARNING_ENABLED: "true"
+  MATCHLAB_COMMUNITY_GITHUB_TOKEN: ${MATCHLAB_COMMUNITY_GITHUB_TOKEN}
 ```
 
-With a verified One Piece crosswalk this returns
-`sid_start=sid_end=tt0388629:21:3` and `asid_start=asid_end=69:894`.
-The same crosswalk is applied automatically after late episode
-identification (such as date matches); no second lookup is required.
+MatchLab can then submit opted-in learning reports and proposed regex changes for maintainer review. **Nothing is merged automatically.** Technical/TV/source-regex suggestions first enter a non-executable review queue; independently verified rules must be integrated before other users receive them. Reports can include sanitized release filenames, so only enable sharing if you accept publishing that information.
 
-### Convert IMDb ↔ AniDB episode coordinates
+See [Machine Learning and Community Learning](docs/COMMUNITY_LEARNING.md) for supported patterns, limitations, privacy considerations, validation rules and contributor setup.
 
-```bash
-curl -G -d 'imdb_id=tt0388629' -d 'season=21' -d 'episode=1' \
-  http://127.0.0.1:8765/episode/resolve
-curl -G -d 'anidb_id=69' -d 'episode=892' \
-  http://127.0.0.1:8765/episode/resolve
-```
+## Configuration and security
 
-Only verified crosswalk data produces a result. Ambiguous reverse matches
-return all candidates, with `selected: null`, rather than guessing.
-
-### Parse or debug
-
-```bash
-curl 'http://127.0.0.1:8765/parse?title=Breaking.Bad.S02E03.1080p'
-curl -X POST http://127.0.0.1:8765/debug/match \
-  -H "Content-Type: application/json" \
-  -d '{"title":"One.Piece.E768-E1064"}'
-```
-
-The full parser exposes all recognized release details. Debug output explains the selected title, alternatives, and episode conversions. MatchLab also supports title inheritance from folder paths and airdate-based TV matching via Cinemeta when verified episode information is available.
-
-Unmarked numeric anime releases, such as `Jojo's bizarre adventure stone ocean 27`, now expose an **unverified** candidate in `/parse`. `/match` promotes it only after an exact, unambiguous anime alias is found in the Tantivy index and reuses the existing canonical IMDb/AniDB episode checks. Movie titles with trailing numbers are not treated as verified episodes by the parser alone.
-
-The optional Torrentio-inspired parsing compatibility layer recognizes selective Unicode release-marker variants (`S01Е02`, `720р`), written Chinese season ordinals and conservatively detected fractional anime episodes (`12.5`), without changing the native Rust engine or adding runtime dependencies. A `half_episode` flag is descriptive and does not itself prove a canonical IMDb/AniDB episode.
-
-The native Rust release parser now includes AIOStreams-inspired TV/anime episode-title extraction, Rakun fansub release conventions, extra network/provider tags, accessibility/description metadata and extended language guards. It keeps the existing parser/matcher split, without a JavaScript runtime. See the [full parser audit](docs/RELEASE_PARSER_AUDIT.md) and [anime research](docs/ANIME_PARSER_RESEARCH.md) for exact coverage and documented exceptions.
-
-**[Detailed API documentation](docs/API.md)** covers response fields, season packs, episode ranges, anime, airdate matching, and missing/ambiguous metadata.
-
-## Metadata and settings
-
-IMDb basics, alternative titles, episodes, ratings, animeApi, Anime-Lists, and AniDB titles are refreshed by default **every seven days**. Metadata is persisted in `/data`; the active Tantivy index survives container restarts. The bundled `data/anime-list.override.xml` corrections are automatically merged into the normal Anime-Lists episode mappings **during every full refresh**, replacing conflicting rows for the listed AniDB IDs. When the embedded list changes, startup automatically schedules a full metadata refresh to activate it; no extra Compose setting is required.
-
-| Variable | Default | Purpose |
+| Setting | Default | Description |
 | --- | --- | --- |
-| `MATCHLAB_HISTORY_DB` | `/data/history.sqlite3` | Separate history database; latest 1,000 request details and independent 14-day statistics |
-| `MATCHLAB_DB` | `/data/metadata.sqlite3` | Metadata SQLite file |
-| `MATCHLAB_HOST` | `0.0.0.0:8765` in Docker | HTTP listener |
-| `MATCHLAB_METADATA_REFRESH_HOURS` | `168` | Refresh every 1–720 hours |
-| `MATCHLAB_MAX_CONCURRENT_MATCHES` | `4` | Limit simultaneous match operations (1–64) |
-| `MATCHLAB_DEBUG_API_TOKEN` | Unset (disabled) | Enable authenticated, read-only parsing diagnostics with a random token of at least 32 bytes |
-| `MATCHLAB_METADATA_URLS` | Built-in HTTPS feeds | Optional seven-source override; legacy six-source lists are supported |
-| `RUST_LOG` | `matchlab_server=info` | Logging verbosity |
+| `MATCHLAB_DB` | `/data/metadata.sqlite3` | Local metadata database |
+| `MATCHLAB_HOST` | `0.0.0.0:8765` in Docker | API listener |
+| `MATCHLAB_METADATA_REFRESH_HOURS` | `168` | Metadata refresh interval |
+| `MATCHLAB_MAX_CONCURRENT_MATCHES` | `4` | Maximum concurrent matches (example uses 2) |
+| `MATCHLAB_ML_ENABLED` | `false` | Enable local background learning |
+| `MATCHLAB_ML_TRAINING_MAX_EXAMPLES` | `12000` | Maximum retained training observations |
+| `MATCHLAB_ML_MAX_STORAGE_GB` | `1` | Best-effort local learning and cache disk budget |
+| `MATCHLAB_ML_CACHE_ENABLED` | `true` when ML is on | Cache repeat requests |
+| `MATCHLAB_ML_CACHE_MAX_ENTRIES` | `100000` | Maximum persistent cache entries |
+| `MATCHLAB_COMMUNITY_LEARNING_ENABLED` | `false` | Enable optional GitHub reporting |
+| `MATCHLAB_COMMUNITY_GITHUB_TOKEN` | Unset | Token used only for opted-in sharing |
 
-**Request latency:** Request history is now submitted to a bounded, single-writer background queue so SQLite metric locks never delay `/match` or `/debug/match`. When the queue is full, only telemetry is dropped (with a throttled warning); the matched identity and HTTP response are unaffected. `/debug/match` and `/match` now apply identical strict candidate filtering. Do not use the intentionally loose dashboard-only endpoint for StremThru identity validation.
+More settings are documented in [Metadata lifecycle](docs/LOCAL_METADATA.md), [API reference](docs/API.md) and [Community Learning](docs/COMMUNITY_LEARNING.md).
 
-**CPU and timeout tuning:** On a CPU-limited ARM host, keep `MATCHLAB_MAX_CONCURRENT_MATCHES` close to the service CPU quota (for example `2` match operations with `cpus: 2.0`). Previously the example configured 40 matching operations with only one CPU, which could cause excessive contention and client timeouts. StremThru's client timeout is controlled by StremThru and cannot be extended by MatchLab; check the server-side CPU quota and its 10-second client deadline before increasing concurrency.
-
-**History and statistics retention:** The dashboard keeps at most **1,000 latest individual requests** (including full diagnostics), regardless of age. Its **Requests, Matched, Unmatched, Errors, and average latency** statistics cover all requests from the **last 14 days (UTC, minute precision)**, not just those 1,000 rows. A separate SQLite `request_minute_stats` table accumulates counters by minute; the dashboard activity chart groups them into daily totals. During the first startup after upgrading, the last 14 days are backfilled from any existing legacy request history **before** old request rows are removed. An indexed SQLite trigger evicts only the oldest request detail row on each insert once the 1,000-row cap is reached; it never alters aggregate statistics. A background maintenance task additionally runs at startup and every five minutes to remove bulk legacy history and expire aggregate buckets older than 14 days, off the asynchronous HTTP executor. This does not modify IMDb metadata. SQLite generally reuses freed pages instead of immediately shrinking the existing file; run `VACUUM` during a maintenance window once after upgrading if reclaiming disk space is important. Back up a live SQLite database using a consistent backup method, not a direct file copy.
-
-For importer options and the exact source URLs, see [Metadata lifecycle](docs/LOCAL_METADATA.md). For index internals and crash-safety considerations, see [Tantivy architecture](docs/TANTIVY_RUNTIME.md).
-
-**Security:** The optional parsing debug feed requires its own bearer token and is unavailable when `MATCHLAB_DEBUG_API_TOKEN` is absent or shorter than 32 bytes. The remaining API and dashboard have no built-in authentication. This example binds the port to **localhost**; put the service behind an authenticated HTTPS reverse proxy before exposing it over a network. Debug history may contain private torrent filenames. Use HTTPS, protect the other endpoints at the proxy, and never put the token in a URL. The debug feed is a polling surface, not an autonomous reviewer or a scheduled PR author. [Feed usage and cursor semantics](docs/API.md#read-only-parsing-diagnostics-feed).
+**The API and dashboard have no built-in login.** The example only binds the port to localhost. Use an authenticated HTTPS reverse proxy before exposing it publicly. Learning and diagnostic history can contain private release names; protect the Docker volume and never commit the GitHub token.
 
 ## Build and test
 
 ```bash
 git clone https://github.com/Dizzybog/MatchLab.git
 cd MatchLab
-RUSTFLAGS="-D warnings" cargo test --workspace
+RUSTFLAGS="-D warnings" cargo test --workspace --locked
 docker build -t matchlab:local .
 ```
 
-CI runs the Rust workspace tests and builds the production Docker image. Performance on a full IMDb dataset must still be checked on the target host.
+For parser details and compatibility tests, see [Release parser audit](docs/RELEASE_PARSER_AUDIT.md). For anime-specific cases, see [Anime parser research](docs/ANIME_PARSER_RESEARCH.md).
 
 ## Credits and license
 
-MatchLab is an independent project informed by these open-source projects:
+MatchLab is an independent Rust project informed by:
 
-- **[Comet](https://github.com/g0ldyy/comet)** — release parsing and airdate concepts.
-- **[StremThru](https://github.com/MunifTanjim/stremthru)** — metadata ingestion and matching architecture.
-- **[AIOStreams](https://github.com/Viren070/AIOStreams)** and its **[@aiostreams/release-parser](https://github.com/AIOStreams/release-parser)** (MIT) — comprehensive release-name handling, ordered parser handlers, match validators, season/episode safeguards, title cleanup, and file/folder metadata merging.
-- **[TheBeastLT / parse-torrent-title](https://github.com/TheBeastLT/parse-torrent-title)** (MIT) — the Rust release-name parser used by [Torrentio](https://github.com/TheBeastLT/torrentio-scraper); reference for fractional anime-episode flags, Cyrillic episode-marker normalization, East Asian season notation and false-positive regression tests. MatchLab ports selected parsing ideas independently; it does not bundle the upstream crate or copy its runtime implementation.
-- **[Rakun](https://github.com/lowlighter/rakun)** (MIT) — anime fansub naming conventions, `#episode` markers, multilingual labelled episode ranges, bracketed group/CRC metadata, and distinction between seasons, parts, volumes, and episodes.
+- [StremThru](https://github.com/MunifTanjim/stremthru) — metadata and matching ideas.
+- [Comet](https://github.com/g0ldyy/comet) — release parsing and airdate concepts.
+- [AIOStreams release parser](https://github.com/AIOStreams/release-parser) (MIT) — parsing patterns and release-name validation.
+- [TheBeastLT / parse-torrent-title](https://github.com/TheBeastLT/parse-torrent-title) (MIT) — Torrentio-related parsing cases.
+- [Rakun](https://github.com/lowlighter/rakun) (MIT) — anime naming conventions.
+- [FTRL-Proximal research](https://research.google/pubs/ad-click-prediction-a-view-from-the-trenches/) — approach used by the local Rust learner.
 
-The anime-specific improvements in this repository are **independently implemented in Rust**, not copied TypeScript code. See the [parser research and regression coverage](docs/ANIME_PARSER_RESEARCH.md) for the techniques studied, changes implemented, and intentionally excluded heuristics.
-
-Original authors and their projects retain their respective licenses and credit. MatchLab is **not officially affiliated** with these projects or maintainers.
-
-Licensed under **GPL-3.0-or-later**. External metadata sources have their own terms.
+MatchLab is not affiliated with these projects. Their authors retain their respective credits and licenses. MatchLab is licensed under **GPL-3.0-or-later**; metadata sources have their own terms.
