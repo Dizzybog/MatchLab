@@ -193,7 +193,7 @@ See [Machine Learning and Community Learning](docs/COMMUNITY_LEARNING.md) for su
 | `MATCHLAB_MAX_CONCURRENT_MATCHES` | `4` | Maximum concurrent matches (example uses 2) |
 | `MATCHLAB_ML_ENABLED` | `false` | Enable local background learning |
 | `MATCHLAB_ML_TRAINING_MAX_EXAMPLES` | `12000` | Maximum retained training observations |
-| `MATCHLAB_ML_MAX_STORAGE_GB` | `1` | Best-effort per-database budget for ML learning data and the isolated cache; provision disk space for both |
+| `MATCHLAB_ML_MAX_STORAGE_GB` | `1` | Cache SQLite disk budget; the learning corpus is separately bounded by the training-example limit |
 | `MATCHLAB_ML_CACHE_ENABLED` | `true` when ML is on | Cache repeat requests |
 | `MATCHLAB_ML_CACHE_STATE_FILE` | `/data/local-learning-cache.sqlite3` | Independent SQLite file for cache; keeps cache writes from locking ML model training |
 
