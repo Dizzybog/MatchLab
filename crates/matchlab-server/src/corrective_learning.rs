@@ -483,6 +483,41 @@ mod tests {
         assert!(expected("Example.Show.S01E04-E03").is_none());
     }
     #[test]
+    fn saved_evidence_is_relabelled_from_fresh_parser_not_trusted_as_old_truth(){
+        let db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        let title="Example.Show.S02E07.1080p";
+        let key=hash(&format!("sxe:{title}"));
+        db.execute("INSERT INTO ml_corrective_observations
+            (example_hash,identity_hash,family,error_class,release_name,
+             source_build,observed_at)
+            VALUES(?1,'stale-identity','sxe','incorrect',?2,'old-parser:0',1)",
+            params![key,title]).unwrap();
+        assert_eq!(revalidate_previous_build(&db).unwrap(),1);
+        let (build_id,label):(String,String)=db.query_row(
+            "SELECT source_build,error_class FROM ml_corrective_observations
+            WHERE example_hash=?1",[key],
+            |row|Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(build_id,build());
+        assert_eq!(label,"aligned","old incorrect labels must not become authority");
+    }
+    #[test]
+    fn correct_regex_replay_is_not_an_improvement(){
+        let db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        let names=["Example.Show.S02E07.1080p","Second.Show.S02E07.1080p"];
+        for title in names {
+            let parsed=json!(matchlab_parser::parse_title_canonical(title,false).unwrap());
+            let mut count=0;
+            observe(&db,title,&parsed,&mut count).unwrap();
+        }
+        // A new syntax must fix an existing documented error, not merely
+        // repeat an already-correct parser result.
+        assert!(eligible(&db).unwrap().is_empty());
+        let candidate=candidate("sxe").unwrap();
+        assert!(review_candidate(&db,"sxe",&candidate).unwrap().is_none());
+    }
+    #[test]
     fn corrective_regex_uses_only_fixed_native_handlers(){
         for family in ["sxe","x","words","sxe_range"]{
             let rules=candidate(family).expect("native field handler");
