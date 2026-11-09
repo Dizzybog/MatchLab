@@ -170,6 +170,36 @@ mod tests{
         assert_eq!(history[0]["evidence_count"],20);
     }
     #[test]
+    fn old_field_and_tv_proposals_are_migrated_before_build_reconciliation(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE learned_field_rules(
+            field TEXT,signal TEXT,canonical TEXT,verified_build TEXT,
+            example_count INTEGER,identity_count INTEGER);
+            INSERT INTO learned_field_rules VALUES(
+               'codec','x266','\"hevc\"','1111111111111111111111111111111111111111:5',20,8);
+        ").unwrap();
+        crate::tv_learning::init(&db).unwrap();
+        let old=format!("{}:2","2".repeat(40));
+        for i in 0..12 {
+            db.execute("INSERT INTO learned_tv_regex_evidence(
+                example_hash,family,identity_hash,canonical_aligned,source_build,observed_at)
+                VALUES(?1,'sxe',?2,1,?3,1)",
+                params![format!("example-{i}"),format!("series-{}",i%4),old])
+                .unwrap();
+        }
+        let migrated=migrate_existing(&db,Path::new("/nonexistent-matchlab-metadata.sqlite3"))
+            .unwrap();
+        assert_eq!(migrated,2);
+        let saved=load(&db).unwrap();
+        assert_eq!(saved.len(),2);
+        assert!(saved.iter().any(|rule|rule["kind"]=="learned_field_regex"));
+        assert!(saved.iter().any(|rule|rule["kind"]=="learned_tv_regex"));
+        // Runtime may subsequently rewrite its active tables: archive stays.
+        db.execute("DELETE FROM learned_field_rules",[]).unwrap();
+        db.execute("DELETE FROM learned_tv_regex_evidence",[]).unwrap();
+        assert_eq!(load(&db).unwrap().len(),2);
+    }
+    #[test]
     fn archived_regexes_survive_without_any_github_opt_in(){
         let db=Connection::open_in_memory().unwrap();
         assert_eq!(ingest(&db,&[sample(&"b".repeat(64),
