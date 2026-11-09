@@ -38,6 +38,8 @@ pub fn queue_status()->Value{
         "processed_since_start":JOBS_PROCESSED.load(Ordering::Relaxed),
         "available_at_last_scan":JOBS_AVAILABLE.load(Ordering::Relaxed),
         "sqlite_busy_retries":SQLITE_BUSY_RETRIES.load(Ordering::Relaxed),
+        "queue_retention_evictions":crate::dashboard_history::ml_queue_evicted(),
+        "history_telemetry_dropped":crate::dashboard_history::history_telemetry_dropped(),
         "retry_policy":"exponential_backoff_at_least_once",
         "hot_path_blocking":false,
     })
