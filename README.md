@@ -16,13 +16,13 @@ services:
     image: ghcr.io/dizzybog/matchlab:latest
     container_name: matchlab
     restart: unless-stopped
-    cpus: 1.0
+    cpus: 2.0
     mem_limit: 6g
     pids_limit: 256
     environment:
       MATCHLAB_DB: /data/metadata.sqlite3
       MATCHLAB_HOST: 0.0.0.0:8765
-      MATCHLAB_MAX_CONCURRENT_MATCHES: "40"
+      MATCHLAB_MAX_CONCURRENT_MATCHES: "2"
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
@@ -42,7 +42,7 @@ curl http://127.0.0.1:8765/health
 
 The first run downloads public IMDb and anime metadata and builds the local index. This needs an internet connection, disk space and time. `/health` returns **503** until the index is ready and **200** when matching is available. Later metadata refreshes normally run every seven days. The dashboard is at `http://127.0.0.1:8765/`.
 
-The example is limited to one CPU and 6 GB RAM; these are starting limits, not guaranteed minimum requirements. To update, run `docker compose pull && docker compose up -d`. A full configuration is available in [compose.yaml](compose.yaml).
+The example is limited to two CPUs and 6 GB RAM; these are starting limits, not guaranteed minimum requirements. To update, run `docker compose pull && docker compose up -d`. A full configuration is available in [compose.yaml](compose.yaml).
 
 ## Use the API
 
@@ -73,11 +73,12 @@ A **SID** is an IMDb title ID, optionally followed by season and episode. An **A
 | `GET/POST /parse` | Extract release fields without matching |
 | `GET/POST /alias` | Look up alternate titles and related IDs |
 | `GET/POST /episode/resolve` | Convert verified IMDb and AniDB episode coordinates |
-| `POST /debug/match` | Inspect ranking and episode mapping in the dashboard |
+| `POST /debug/match` | Inspect matching with the same strict checks as `/match` |
+| `POST /api/dashboard/diagnose` | Explore title-only matches without production API eligibility checks |
 | `GET /health` | Check whether matching is ready |
 | `GET /` | Open the dashboard |
 
-The public `/match` endpoint has stricter matching requirements than the dashboard's diagnostic endpoint. If metadata is missing or conflicting, MatchLab avoids inventing a match. See [API documentation](docs/API.md) for request options, full responses and other endpoints.
+The public `/match` and `/debug/match` endpoints have identical strict matching requirements. The dashboard's diagnostic endpoint is intentionally more permissive. If metadata is missing or conflicting, MatchLab avoids inventing a match. See [API documentation](docs/API.md) for request options, full responses and other endpoints.
 
 ## Optional Machine Learning
 
@@ -129,7 +130,7 @@ See [Machine Learning and Community Learning](docs/COMMUNITY_LEARNING.md) for su
 | `MATCHLAB_DB` | `/data/metadata.sqlite3` | Local metadata database |
 | `MATCHLAB_HOST` | `0.0.0.0:8765` in Docker | API listener |
 | `MATCHLAB_METADATA_REFRESH_HOURS` | `168` | Metadata refresh interval |
-| `MATCHLAB_MAX_CONCURRENT_MATCHES` | `4` | Maximum concurrent matches (example uses 40) |
+| `MATCHLAB_MAX_CONCURRENT_MATCHES` | `4` | Maximum concurrent matches (example uses 2) |
 | `MATCHLAB_ML_ENABLED` | `false` | Enable local background learning |
 | `MATCHLAB_ML_TRAINING_MAX_EXAMPLES` | `12000` | Maximum retained training observations |
 | `MATCHLAB_ML_MAX_STORAGE_GB` | `1` | Best-effort local learning and cache disk budget |

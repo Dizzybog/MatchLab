@@ -1,6 +1,6 @@
 //! Canonical, verified episode crosswalk in both directions.
 //! GET/POST /episode/resolve
-use crate::{anime_resolver,open_db,AppState};
+use crate::{episode_crosswalk,open_db,AppState};
 use axum::{extract::{Query,State},http::StatusCode,Json};
 use serde::Deserialize;
 use serde_json::{json,Value};
@@ -38,14 +38,14 @@ fn validated(req:ResolveRequest)->Result<Request,String>{
 fn resolve(db:&rusqlite::Connection,req:Request)->Result<Value,String>{
     let (direction,input,found)=match req{
         Request::Imdb{id,season,episode}=>{
-            let result=anime_resolver::resolve_season(db,&id,season,episode)
+            let result=episode_crosswalk::resolve_season(db,&id,season,episode)
                 .map_err(|e|e.to_string())?;
             ("imdb_to_anidb",json!({
                 "imdb_id":id,"season":season,"episode":episode,
             }),result.into_iter().collect::<Vec<_>>())
         },
         Request::Anidb{id,episode}=>{
-            let results=anime_resolver::resolve_anidb(db,&id,episode)
+            let results=episode_crosswalk::resolve_anidb(db,&id,episode)
                 .map_err(|e|e.to_string())?;
             ("anidb_to_imdb",json!({
                 "anidb_id":id,"episode":episode,

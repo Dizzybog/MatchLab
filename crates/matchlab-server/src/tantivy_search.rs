@@ -49,6 +49,7 @@ static TITLE_LOOKUPS:OnceLock<QueryCache<Vec<TitleAlias>>>=OnceLock::new();
 static ANIME_LOOKUPS:OnceLock<QueryCache<Vec<AnimeAlias>>>=OnceLock::new();
 static DUPLICATE_LOOKUPS:OnceLock<QueryCache<bool>>=OnceLock::new();
 static ANIME_ID_LOOKUPS:OnceLock<QueryCache<Vec<String>>>=OnceLock::new();
+static ANIDB_EXACT_LOOKUPS:OnceLock<QueryCache<BTreeSet<String>>>=OnceLock::new();
 
 fn lookup_cache_key(db:&Connection,kind:&str,key:&str)->Option<String>{
     // In-memory SQLite connections may share the same ':memory:' label but
@@ -533,6 +534,36 @@ pub fn aliases_for_imdb_ids(
     Ok(out.into_iter().collect())
 }
 
+/// IMDb-independent AniDB identity lookup. Collect only AniDB ID postings
+/// (including works without an IMDb link) instead of rehydrating full title
+/// aliases. The cache key is tied to the immutable Tantivy generation.
+fn anidb_ids_exact_uncached(db:&Connection,key:&str)->Result<BTreeSet<String>,String>{
+    if key.len()<4{return Ok(BTreeSet::new());}
+    let (search,memory_dir)=open_search(db)?;
+    let reader=search.reader.searcher();
+    let query=TermQuery::new(
+        Term::from_field_text(search.anime,key),IndexRecordOption::Basic);
+    let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
+    let mut result=BTreeSet::new();
+    for addr in hits{
+        let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
+        if let Some(id)=doc.get_first(search.anime_id).and_then(|v|v.as_str()){
+            result.insert(id.to_owned());
+        }
+    }
+    drop(reader);drop(search);
+    if let Some(dir)=memory_dir{let _=std::fs::remove_dir_all(dir);}
+    Ok(result)
+}
+
+pub fn anidb_ids_exact(db:&Connection,key:&str)->Result<BTreeSet<String>,String>{
+    if let Some(cache_key)=lookup_cache_key(db,"anidb_exact",key){
+        ANIDB_EXACT_LOOKUPS.get_or_init(||QueryCache::new(LOOKUP_CAP,LOOKUP_TTL))
+            .get_or_compute(cache_key,||anidb_ids_exact_uncached(db,key),
+                |ids|ids.len()<=LOOKUP_MAX_ALIASES)
+    }else{anidb_ids_exact_uncached(db,key)}
+}
+
 /// Resolve AniDB aliases through exact Tantivy term lookups, including aliases
 /// that are prefixes of a release. SQLite is only used later for mapping data.
 fn anime_aliases_uncached(db:&Connection,key:&str,min_prefix:usize)->Result<Vec<AnimeAlias>,String>{
@@ -604,7 +635,7 @@ fn title_aliases_exact_uncached(db:&Connection,key:&str)->Result<Vec<TitleAlias>
     Ok(aliases)
 }
 
-/// Complete prefix/suffix search. All candidates are retained until the V4
+/// Complete prefix/suffix search. All candidates are retained until the IMDb
 /// ranker applies its deterministic rules; no top-N cutoff is introduced.
 fn title_aliases_uncached(db:&Connection,key:&str,suffix:bool)->Result<Vec<TitleAlias>,String>{
     if key.is_empty(){return Ok(Vec::new());}
@@ -674,9 +705,9 @@ fn has_duplicate_title_uncached(db:&Connection,key:&str)->Result<bool,String>{
 
 /// Returns candidate IMDb IDs; the deterministic MatchLab ranker remains authoritative.
 /// Uses exhaustive document collection before ID deduplication.
-/// Year is intentionally not a hard filter: V4 ranks year proximity and
+/// Year is intentionally not a hard filter: IMDb ranks year proximity and
 /// permits matches outside a one-year window.
-/// The limit parameter is retained for API compatibility; V4 ranking must
+/// The limit parameter is retained for API compatibility; IMDb ranking must
 /// receive the complete matching set, so it does not truncate this result.
 #[cfg(test)]
 pub fn candidates(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,limit:usize)->Result<Vec<String>,String>{
@@ -705,7 +736,7 @@ fn candidates_internal(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,lim
     let mut ids=Vec::new();
     let mut seen=std::collections::HashSet::new();
     // Exhaustive candidate collection prevents arbitrary TopDocs truncation
-    // from discarding a valid year or longer alias before V4 ranking.
+    // from discarding a valid year or longer alias before IMDb ranking.
     let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
     for addr in hits {
         let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
@@ -715,7 +746,7 @@ fn candidates_internal(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,lim
             if anime_only && !crate::metadata_import::valid_imdb_id(imdb){continue;}
             if seen.insert(imdb.to_string()){ids.push(imdb.to_string());}
         }
-        // Do not truncate candidates before deterministic V4 ranking.
+        // Do not truncate candidates before deterministic IMDb ranking.
     }
     if let Some(directory)=memory_dir {
         drop(search);

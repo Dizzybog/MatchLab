@@ -1,6 +1,6 @@
 //! Indexed IMDb/AniDB alias discovery; independent of ranked matching.
 //! Public endpoint: GET or POST /alias with one of imdb_id, anidb_id, query, q.
-use crate::{AppState, matchlab_matcher, open_db, tantivy_search};
+use crate::{AppState, imdb_matcher, open_db, tantivy_search};
 use axum::{extract::{Query, State}, http::StatusCode, Json};
 use serde::Deserialize;
 use serde_json::{json,Value};
@@ -146,7 +146,7 @@ fn validated(request:AliasRequest)->Result<Validated,String>{
             }else{payload.to_owned()}
         },
         Mode::Title=>{
-            let clean=matchlab_matcher::clean_title(payload);
+            let clean=imdb_matcher::clean_title(payload);
             if clean.is_empty()||clean.len()>512{
                 return Err("title must contain a normalizable letter or digit".into());
             }

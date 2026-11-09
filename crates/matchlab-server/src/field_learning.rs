@@ -295,7 +295,7 @@ fn observed_identity(parsed: &Value, selected: &Value) -> Option<String> {
     // The exact same title under five different encodes is only one title
     // identity, not five independent proofs of a regex.
     let name = parsed["title"].as_str()?;
-    let normalized = crate::matchlab_matcher::clean_title(name);
+    let normalized = crate::imdb_matcher::clean_title(name);
     if !(4..=140).contains(&normalized.len()) { return None; }
     if let Some(imdb) = selected["imdb_id"].as_str()
         && imdb.starts_with("tt")

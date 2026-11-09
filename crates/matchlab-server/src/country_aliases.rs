@@ -1,6 +1,6 @@
 //! MatchLab country-qualified TV-series alias expansion.
 //! Only an explicit trailing country marker is expanded; language tags are not countries.
-use crate::matchlab_matcher::clean_title;
+use crate::imdb_matcher::clean_title;
 use std::collections::HashSet;
 
 const COUNTRIES:&[(&str,&[&str])]=&[

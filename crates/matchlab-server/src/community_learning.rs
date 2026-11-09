@@ -94,7 +94,7 @@ fn proven_coordinate_gap(meta:&Connection,parsed:&Value,selected:&Value,code:&st
     if matches!(code,"field_missing_anime_episode"|"unresolved_absolute_anime_episode"){
         let Some(ep)=parsed["anime_episode_candidate"]["episode"].as_i64()
             .filter(|n|(1..=99_999).contains(n))else{return false;};
-        return crate::anime_resolver::resolve_absolute(meta,imdb,ep)
+        return crate::episode_crosswalk::resolve_absolute(meta,imdb,ep)
             .ok().flatten().is_some()
             &&selected["anime"].is_null();
     }
@@ -115,7 +115,7 @@ fn proven_coordinate_gap(meta:&Connection,parsed:&Value,selected:&Value,code:&st
             ||selected["episode"].as_i64()!=Some(episode),
         _=>false,
     };
-    mismatch && crate::anime_resolver::resolve_season(meta,imdb,season,episode)
+    mismatch && crate::episode_crosswalk::resolve_season(meta,imdb,season,episode)
         .ok().flatten().is_some()
 }
 fn safe_issue_code(code:&str,meta:Option<&Connection>,parsed:&Value,selected:&Value)->bool{

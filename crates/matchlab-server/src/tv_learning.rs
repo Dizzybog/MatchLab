@@ -95,7 +95,7 @@ pub(crate) fn explicit_coordinates(name:&str)->Option<(i64,i64)>{
 }
 fn identity(parsed:&Value)->Option<String>{
     let raw=parsed["title"].as_str()?;
-    let normalized=crate::matchlab_matcher::clean_title(raw);
+    let normalized=crate::imdb_matcher::clean_title(raw);
     (4..=140).contains(&normalized.len()).then(||hash(&normalized))
 }
 fn aligned(parsed:&Value,c:&Coordinates)->bool{

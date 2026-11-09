@@ -260,7 +260,7 @@ fn metadata_revision(metadata:&Connection)->Result<String,String>{
 }
 fn check_verified(metadata:&Connection,imdb:&str,absolute:i64,
     season:i64,episode:i64,anidb:&str,anidb_ep:i64)->bool{
-    let Ok(Some(found))=crate::anime_resolver::resolve_absolute(metadata,imdb,absolute)
+    let Ok(Some(found))=crate::episode_crosswalk::resolve_absolute(metadata,imdb,absolute)
         else{return false;};
     found.imdb_id==imdb && found.season==season && found.episode==episode
         && found.anidb_id==anidb && found.anidb_episode==anidb_ep
@@ -284,7 +284,7 @@ fn validate_examples(db:&Connection,metadata:&Connection,marker:&str)->Result<bo
         // but never let them authorize a live override or GitHub proposal.
         if title.is_empty(){return Ok(false);}
         let Some((base,num))=match_release(&regex,&title)else{return Ok(false);};
-        if num!=abs || crate::matchlab_matcher::clean_title(base).is_empty(){
+        if num!=abs || crate::imdb_matcher::clean_title(base).is_empty(){
             return Ok(false);
         }
         if !check_verified(metadata,&imdb,abs,season,episode,&anidb,anidb_ep){
@@ -567,7 +567,7 @@ pub fn observe(db:&Connection,metadata:&Connection,title:&str,
             continue;
         };
         if name.len()<2 {continue;}
-        let expected=crate::matchlab_matcher::clean_title(name);
+        let expected=crate::imdb_matcher::clean_title(name);
         // Exact Tantivy anime alias identity, not an expensive SQLite
         // text query. This also lets *unmatched* releases supply independent
         // learning examples when their name and episode mapping are unique.
@@ -581,7 +581,7 @@ pub fn observe(db:&Connection,metadata:&Connection,title:&str,
         if identities.len()!=1{continue;}
         let imdb=&identities[0];
         if selected_imdb.is_some_and(|old|old!=imdb){continue;}
-        let Some(mapped)=crate::anime_resolver::resolve_absolute(
+        let Some(mapped)=crate::episode_crosswalk::resolve_absolute(
             metadata,imdb,absolute).map_err(|e|e.to_string())?
             else{continue;};
         if mapped.imdb_id!=*imdb {continue;}
