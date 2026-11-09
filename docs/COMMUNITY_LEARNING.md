@@ -87,6 +87,37 @@ single-release **TV season/episode** evidence:
 - **ADD:** Missing technical markers and missing single TV coordinates
   remain handled by existing additive evidence gates.
 
+### Rule lifecycle: add, replace, reject, retain
+
+A candidate is not installed because it looks like a plausible regex or
+collects many repetitions. The native parser must replay a bounded local
+corpus with **the entire already-installed handler catalogue and learned
+technical/TV additions**. Before publication, the worker confirms that:
+
+- At least four independently observed parser errors are **actually repaired**
+  and every candidate field matches an independently recognizable syntax.
+- Correctly parsed releases retain their **entire** original result, including
+  episode ranges, title boundaries and unrelated metadata fields.
+- Other TV regex families remain correct **when all accepted corrections are
+  compiled together**; a safe isolated regex can still fail the combined test.
+- A rule that produces **identical parse results** is a no-op: it stays in
+  local training evidence but is not a second active regex or a cache change.
+- Learned additions are deduplicated by native field, regex and transform.
+  A high-priority correction never also gets appended as a lower-priority
+  duplicate. When the exact existing native handler is reusable, it is
+  repositioned instead of copied.
+- Active corrections and observed repair counts are materialized in local
+  SQLite. After a parser upgrade, historical raw release evidence is reparsed
+  against the new canonical parser before any previously learned regex can
+  be activated again. A previously useful regex retires automatically if
+  the new parser already solves the cases it addressed.
+
+The learner therefore performs **ADD** for genuinely new patterns,
+**REPLACE/reprioritize** where independently safe, and **REJECT** for no-ops,
+ambiguous cases or regressions. It does not accumulate redundant rules.
+Current live corrections remain narrowly scoped to verifiable TV grammars;
+unverified suggestions for other parser fields remain review-only.
+
 Corrective rules **do not directly set parsed field values**. They reuse
 the original Rust parser's existing field, transform and option semantics.
 The proposed regex must pass at least eight examples from four distinct
