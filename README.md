@@ -117,6 +117,12 @@ environment:
   MATCHLAB_ML_TRAINING_BATCH_SIZE: "64"
 ```
 
+**Safe observation mode:** set `MATCHLAB_ML_LIVE_REGEX_ENABLED: "false"` to keep
+collecting/training locally while preventing learned regex rules from changing
+the live parser. This is an emergency opt-out for native regex publication,
+not a switch to disable the canonical parser. Re-enable only after examining
+`GET /api/ml/status` and the local regression report.
+
 Only `MATCHLAB_ML_ENABLED` is required; the other settings are optional limits. The training limit counts retained observations, **not RAM usage**. A separate bounded SQLite ML job queue stores observations after matching, and the trainer processes 64 jobs at a time with retry and backoff. Cache hits use a small in-memory tier: HTTP parsing/matching never opens the cache SQLite file. Cache writes run in their own background worker and separate database, avoiding lock contention with training. After parser, rule or metadata changes, old cached answers are ignored and requests are parsed/matched again. Learning evidence is never treated as a completed match.
 
 Check `GET /api/ml/status` to see local model and rule statistics. No separate AI server, GPU or online AI service is required.
@@ -205,6 +211,7 @@ See [Machine Learning and Community Learning](docs/COMMUNITY_LEARNING.md) for su
 | `MATCHLAB_METADATA_REFRESH_HOURS` | `168` | Metadata refresh interval |
 | `MATCHLAB_MAX_CONCURRENT_MATCHES` | `4` | Maximum concurrent matches (example uses 2) |
 | `MATCHLAB_ML_ENABLED` | `false` | Enable local background learning |
+| `MATCHLAB_ML_LIVE_REGEX_ENABLED` | `true` | Explicitly set `false` to keep training but serve only canonical native regexes |
 | `MATCHLAB_ML_TRAINING_MAX_EXAMPLES` | `12000` | Maximum retained training observations |
 | `MATCHLAB_ML_MAX_STORAGE_GB` | `1` | Local learning evidence budget (separate from cache) |
 | `MATCHLAB_ML_QUEUE_MAX_ITEMS` | `20000` | Bounded durable ML observation queue; oldest observations are dropped only if overwhelmed |
