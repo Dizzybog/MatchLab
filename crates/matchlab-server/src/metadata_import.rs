@@ -386,6 +386,12 @@ pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>
 /// ordinary Anime-Lists matches. The XML is embedded in the production Rust
 /// binary, so no extra download, file mount, or runtime configuration is needed.
 pub(crate) fn apply_bundled_animelists_overrides(db_path:&Path)->Result<u64,Box<dyn Error>>{
+    // Build this lookup index only after bulk Anime-Lists import. Override
+    // updates can then preserve IMDb links without a table scan per AniDB ID.
+    let db=Connection::open(db_path)?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS anime_series_by_anidb
+        ON anime_series_map(anidb_id);")?;
+    drop(db);
     import_animelists_reader(db_path,std::io::Cursor::new(
         include_str!("../../../data/anime-list.override.xml").as_bytes()),true)
 }
