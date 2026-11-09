@@ -891,6 +891,17 @@ pub fn reconcile(db: &Connection) -> Result<(), String> {
         old == by_rule
     });
     if already_installed && revision()!=0 { return Ok(()); }
+    // Validate the fully assembled candidate BEFORE marking rules as
+    // verified in persistent SQLite state.
+    let patches=source_handler_patches(&active);
+    let mut additions=source_handler_additions(&active);
+    additions.extend(crate::tv_learning::handler_additions());
+    additions.extend(crate::general_learning::handler_additions());
+    let mut corrections=crate::corrective_learning::handler_corrections();
+    corrections.extend(crate::general_learning::handler_corrections());
+    matchlab_parser::verify_live_regression_corpus(
+        &patches,&additions,&corrections)
+        .map_err(|e|format!("learned regex regression rejected: {e}"))?;
     let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
     tx.execute("DELETE FROM learned_field_rules",[])
         .map_err(|e| e.to_string())?;
@@ -904,15 +915,6 @@ pub fn reconcile(db: &Connection) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())?;
-    let patches=source_handler_patches(&active);
-    let mut additions=source_handler_additions(&active);
-    additions.extend(crate::tv_learning::handler_additions());
-    additions.extend(crate::general_learning::handler_additions());
-    let mut corrections=crate::corrective_learning::handler_corrections();
-    corrections.extend(crate::general_learning::handler_corrections());
-    matchlab_parser::verify_live_regression_corpus(
-        &patches,&additions,&corrections)
-        .map_err(|e|format!("learned regex regression rejected: {e}"))?;
     matchlab_parser::install_learned_handler_regex_with_corrections(
         &patches,&additions,&corrections)
         .map_err(|e|format!("learned parser regex rejected: {e}"))?;
