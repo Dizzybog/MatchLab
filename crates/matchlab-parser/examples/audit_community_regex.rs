@@ -209,6 +209,7 @@ fn audit_one(item:&Value,fixtures:&[Value],catalog:&[Value])->Value{
     };
     let mut improvements=0usize;
     let mut improved_fixture_indexes=Vec::new();
+    let mut distinct_title_identities=HashSet::new();
     let mut synthetic_changes=0usize;
     let mut regressions=0usize;
     let mut changes=0usize;
@@ -238,6 +239,9 @@ fn audit_one(item:&Value,fixtures:&[Value],catalog:&[Value])->Value{
                     if verified!=a.get(key){
                         improvements+=1;
                         improved_fixture_indexes.push(i);
+                        if let Some(title)=b.get("title").and_then(Value::as_str){
+                            distinct_title_identities.insert(title.to_ascii_lowercase());
+                        }
                     }
                 }else if verified.is_some(){
                     regressions+=1;
@@ -256,6 +260,7 @@ fn audit_one(item:&Value,fixtures:&[Value],catalog:&[Value])->Value{
     }
     report["verified_improvements"]=json!(improvements);
     report["verified_fixture_indexes"]=json!(improved_fixture_indexes);
+    report["distinct_verified_titles"]=json!(distinct_title_identities.len());
     report["synthetic_changes"]=json!(synthetic_changes);
     report["regressions"]=json!(regressions);
     report["parser_output_changes"]=json!(changes);
@@ -263,8 +268,8 @@ fn audit_one(item:&Value,fixtures:&[Value],catalog:&[Value])->Value{
         ("regression","candidate changes unrelated or previously verified fields")
     }else if changes==0{
         ("no_effect","existing parser already returns identical results for all review titles")
-    }else if improvements>=2{
-        ("ready_for_source_diff","two or more independently labeled fixtures improve with zero regressions")
+    }else if improvements>=2 && distinct_title_identities.len()>=2{
+        ("ready_for_source_diff","two or more independently labeled series identities improve with zero regressions")
     }else{
         ("needs_independent_evidence","parser changes on titles, but not enough trusted positive labels")
     };
