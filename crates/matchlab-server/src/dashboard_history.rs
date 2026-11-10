@@ -25,20 +25,29 @@ fn ml_queue_max_items()->i64{
 /// O(number of evicted rows), not O(capacity) per write: a trigger-maintained
 /// counter avoids a deep OFFSET scan on every history batch. A large cap
 /// reduction is trimmed gradually to keep foreground logging responsive.
-fn trim_ml_queue(tx:&rusqlite::Transaction<'_>,capacity:i64)->rusqlite::Result<usize>{
+fn trim_ml_queue_with_budget(
+    tx:&rusqlite::Transaction<'_>,capacity:i64,byte_budget:u64
+)->rusqlite::Result<usize>{
     let (queued,payload_bytes):(i64,i64)=tx.query_row(
         "SELECT total,payload_bytes FROM ml_queue_metrics WHERE only_row=1",[],
         |row|Ok((row.get(0)?,row.get(1)?)))?;
-    let byte_budget=crate::ml_config::get().queue_storage_bytes;
-    let over_budget=byte_budget>0 && (payload_bytes as u64)>byte_budget;
-    // One oldest-row eviction per batch under byte pressure, or at most
-    // 4096 under count pressure. This keeps the HTTP history writer bounded.
-    let excess=queued.saturating_sub(capacity)
-        .max(if over_budget{1}else{0}).min(4_096);
+    // One approximate average-size calculation replaces a deep OFFSET scan.
+    // If the queue is oversize after changing budgets, prune up to 4096 old
+    // jobs per transaction and resume on the next history batch.
+    let excess_count=queued.saturating_sub(capacity);
+    let excess_bytes=if byte_budget>0 && (payload_bytes as u64)>byte_budget{
+        let average=(payload_bytes/queued.max(1)).max(1);
+        (payload_bytes-(byte_budget.min(i64::MAX as u64) as i64))
+            .saturating_add(average-1)/average
+    }else{0};
+    let excess=excess_count.max(excess_bytes).min(4_096);
     if excess==0{return Ok(0);}
     tx.execute("DELETE FROM ml_training_queue WHERE id IN (
         SELECT id FROM ml_training_queue ORDER BY id ASC LIMIT ?1
     )",[excess])
+}
+fn trim_ml_queue(tx:&rusqlite::Transaction<'_>,capacity:i64)->rusqlite::Result<usize>{
+    trim_ml_queue_with_budget(tx,capacity,crate::ml_config::get().queue_storage_bytes)
 }
 
 fn connect(path: &Path) -> rusqlite::Result<Connection> {
@@ -590,6 +599,38 @@ mod tests {
         let queued:i64=db.query_row("SELECT total FROM ml_queue_metrics WHERE only_row=1",
             [],|row|row.get(0)).unwrap();
         assert_eq!(queued,2);
+        drop(db);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn queue_byte_budget_reclaims_oldest_jobs(){
+        let path=path();
+        initialize(&path).unwrap();
+        let mut db=connect(&path).unwrap();
+        db.execute_batch("INSERT INTO ml_training_queue(id,title_hash,title,details)
+            VALUES (1,'one','long episode one','{}'),
+                   (2,'two','long episode two','{}'),
+                   (3,'three','long episode three','{}');").unwrap();
+        let payload:i64=db.query_row(
+            "SELECT payload_bytes FROM ml_queue_metrics WHERE only_row=1",[],
+            |row|row.get(0)).unwrap();
+        let tx=db.transaction().unwrap();
+        let removed=trim_ml_queue_with_budget(&tx,100,(payload/2) as u64)
+            .unwrap();
+        assert!(removed>0);
+        tx.commit().unwrap();
+        let first:i64=db.query_row(
+            "SELECT MIN(id) FROM ml_training_queue",[],|row|row.get(0))
+            .unwrap();
+        assert!(first>1,"oldest job must be evicted under byte pressure");
+        let count:i64=db.query_row(
+            "SELECT total FROM ml_queue_metrics WHERE only_row=1",[],
+            |row|row.get(0)).unwrap();
+        let actual:i64=db.query_row(
+            "SELECT count(*) FROM ml_training_queue",[],|row|row.get(0))
+            .unwrap();
+        assert_eq!(count,actual);
         drop(db);
         cleanup(&path);
     }
