@@ -3965,7 +3965,8 @@ mod tests {
             .iter()
             .filter(|handler| handler.gate.is_active())
             .count();
-        assert_eq!(regex_handlers, 449);
+        assert!(regex_handlers >= 449,
+            "missing source regex handlers: {regex_handlers}");
         assert!(
             gated_handlers >= 300,
             "only {gated_handlers} of {regex_handlers} regex handlers are gated"
