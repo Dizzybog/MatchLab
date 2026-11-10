@@ -2764,7 +2764,7 @@ fn normalize_slash_date_format<'a>(
         if separated&&named&&trailing
             &&parse_date_with_formats(&normalized,&[format.to_owned()]).is_some()
         {
-            m.as_str().replace('/','.')
+            m.as_str().replace('/', ".")
         }else{m.as_str().to_owned()}
     })
 }
