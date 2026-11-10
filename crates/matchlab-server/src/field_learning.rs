@@ -927,15 +927,20 @@ enum FieldReplayOutcome{Improved,NoGain,Unverifiable}
 /// is not a replayable improvement. The release name stays local.
 fn replayed_field_gain(db:&Connection,rule:&FieldRule,
     existing:&[FieldRule])->Result<FieldReplayOutcome,String>{
-    let mut stmt=db.prepare("SELECT r.release_title,r.example_hash,
-            r.identity_hash,e.canonical
-        FROM learned_field_gap_replay r
-        JOIN learned_field_gap_evidence e ON
-            e.field=r.field AND e.signal=r.signal
-            AND e.example_hash=r.example_hash
-            AND e.source_build=r.source_build
-        WHERE r.field=?1 AND r.signal=?2 AND r.source_build=?3
-        ORDER BY r.identity_hash,r.example_hash LIMIT 128")
+    let mut stmt=db.prepare("SELECT release_title,example_hash,
+            identity_hash,canonical FROM (
+            SELECT r.release_title,r.example_hash,r.identity_hash,e.canonical,
+                ROW_NUMBER() OVER (
+                    PARTITION BY r.identity_hash ORDER BY r.example_hash
+                ) AS identity_rank
+            FROM learned_field_gap_replay r
+            JOIN learned_field_gap_evidence e ON
+                e.field=r.field AND e.signal=r.signal
+                AND e.example_hash=r.example_hash
+                AND e.source_build=r.source_build
+            WHERE r.field=?1 AND r.signal=?2 AND r.source_build=?3
+        ) WHERE identity_rank<=2
+          ORDER BY identity_rank,identity_hash LIMIT 64")
         .map_err(|e|e.to_string())?;
     let rows=stmt.query_map(params![rule.field,rule.signal,build()],|row|Ok((
         row.get::<_,String>(0)?,row.get::<_,String>(1)?,
@@ -950,8 +955,10 @@ fn replayed_field_gain(db:&Connection,rule:&FieldRule,
     for (name,example_hash,_identity,serialized) in rows{
         if titles.len()>=MAX_REPLAY_EXAMPLES{break;}
         if !safe_title(&name){continue;}
-        // The original observation hashes the lowercased release name.
-        if digest(&name.to_ascii_lowercase())!=example_hash{continue;}
+        // Recompute the exact original evidence identity from the raw
+        // release, field, and marker; do not trust a manipulated stored row.
+        if digest(&format!("{}:{}:{}",name.to_ascii_lowercase(),
+            rule.field,rule.signal))!=example_hash{continue;}
         let Ok(reference)=serde_json::from_str::<Value>(&serialized)else{continue;};
         if reference!=rule.value{continue;}
         let Ok(original)=matchlab_parser::parse_title_canonical(&name,false)
