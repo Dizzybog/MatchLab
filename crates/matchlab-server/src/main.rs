@@ -924,11 +924,14 @@ fn diagnose_with_policy(
         }
         filtered.join(" ")
     }else{parsed_title.to_string()};
-    let dated=airdate::extract(&req.title);
+    // The Rust parser owns all date regexes and ISO normalization. Do not
+    // maintain a second date recognizer in the IMDb matcher: its grammar
+    // would drift from /parse and from ML-enhanced native date handlers.
+    let dated=parsed.get("date").and_then(Value::as_str)
+        .map(|date| date.to_owned());
     let airdate_only=dated.is_some() && numbers(parsed.get("seasons")).is_empty()
         && numbers(parsed.get("episodes")).is_empty();
-    let title=if airdate_only{dated.as_ref().map(|(name,_)|name.as_str()).unwrap_or(&title_owned)}
-        else{title_owned.as_str()};
+    let title=title_owned.as_str();
     let key = imdb_matcher::clean_title(title);
     let season_range=explicit_season_range(&req.title);
     let seasons = season_range.map(|(start,end)|vec![start,end])
@@ -1272,7 +1275,7 @@ fn diagnose_with_policy(
     }
     // Date-only releases use Cinemeta; explicit SxxExx coordinates take precedence.
     if airdate_only {
-        if let (Some((_,date)),Some(winner))=(dated.as_ref(),selected.as_mut()){
+        if let (Some(date),Some(winner))=(dated.as_ref(),selected.as_mut()){
             if let Some(id)=winner["imdb_id"].as_str().map(str::to_owned){
                 match airdate::resolve(db_path,&id,date){
                     Ok(Some((season,episode,actual_air_date)))=>{
@@ -2370,11 +2373,21 @@ mod tests {
                 "tt0115147:27:45","cinemeta_airdate"),
             ("The_Daily_Show_2022-01-20.1080p.WEB-DL",
                 "tt0115147:27:45","cinemeta_airdate"),
+            ("The.Daily.Show.20.January.2022.1080p.WEB-DL",
+                "tt0115147:27:45","cinemeta_airdate"),
+            ("The.Daily.Show.January.20.2022.1080p.WEB-DL",
+                "tt0115147:27:45","cinemeta_airdate"),
+            ("The.Daily.Show.2022-01-20.1080p.WEB-DL",
+                "tt0115147:27:45","cinemeta_airdate"),
             ("The.Daily.Show.2022.01.23.1080p.WEB-DL",
                 "tt0115147:27:47","cinemeta_airdate_1day"),
         ] {
             let result=diagnose(&path,&MatchRequest{
                 title:release.into(),year:None,series:None}).unwrap();
+            assert_eq!(result.parsed["date"],json!("2022-01-20").as_str()
+                .filter(|_|!release.contains("2022.01.23"))
+                .map_or_else(||"2022-01-23".to_owned(),str::to_owned),
+                "{release}: {:?}",result.parsed);
             let winner=result.selected.expect("dated IMDb series match");
             assert_eq!(winner["imdb_id"],"tt0115147","{release}: {winner}");
             assert_eq!(winner["match_source"],source,"{release}: {winner}");
