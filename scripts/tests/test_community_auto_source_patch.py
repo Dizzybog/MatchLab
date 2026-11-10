@@ -42,9 +42,11 @@ class AutoSourcePatchTests(unittest.TestCase):
         self.assertEqual(changed,[entry["proposal"]["handler_index"]])
         self.assertEqual(len(tests),2)
         self.assertEqual(summary["verified_improvements"],2)
-        # Every source byte outside a single pattern is unchanged.
-        self.assertEqual(amended.replace(entry["proposal"]["proposed_regex"],""),
-                         amended.replace(entry["proposal"]["proposed_regex"],""))
+        # Exactly ONE line of the generated catalogue is modified.
+        old_lines=source.splitlines()
+        new_lines=amended.splitlines()
+        self.assertEqual(len(old_lines),len(new_lines))
+        self.assertEqual(sum(a!=b for a,b in zip(old_lines,new_lines)),1)
 
     def test_without_two_independent_labels_never_writes_source(self):
         source,entry,audit,fixtures=fixture_candidate()
@@ -53,17 +55,15 @@ class AutoSourcePatchTests(unittest.TestCase):
             {"regressions":1},
             {"promotion_eligible":False},
             {"status":"needs_independent_evidence"},
-            {"verified_fixture_indexes":[0,0]},
         ]:
             other={**audit,**change}
             output,tests,summary=apply.apply([], [entry], [other],fixtures,source,[])
-            if change.get("verified_fixture_indexes") == [0,0]:
-                # Forged proof is rejected instead of silently accepted.
-                self.assertIsNone(summary) if other.get("status")!="ready_for_source_diff" else self.assertIsNone(summary)
-            else:
-                self.assertEqual(output,source)
-                self.assertEqual(tests,[])
-                self.assertIsNone(summary)
+            self.assertEqual(output,source)
+            self.assertEqual(tests,[])
+            self.assertIsNone(summary)
+        forged={**audit,"verified_fixture_indexes":[0,0]}
+        with self.assertRaises(ValueError):
+            apply.apply([], [entry], [forged],fixtures,source,[])
 
     def test_a_rule_without_source_identity_is_never_merged(self):
         source,entry,audit,fixtures=fixture_candidate()
