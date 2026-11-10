@@ -101,6 +101,7 @@ fn audit_one(item:&Value,fixtures:&[Value],catalog:&[Value])->Value{
         "status":"review_only",
         "promotion_eligible":false,
         "verified_improvements":0,
+        "verified_fixture_indexes":[],
         "synthetic_changes":0,
         "regressions":0,
         "source_handler_index":item["handler_index"],
@@ -147,6 +148,7 @@ fn audit_one(item:&Value,fixtures:&[Value],catalog:&[Value])->Value{
         return report;
     };
     let mut improvements=0usize;
+    let mut improved_fixture_indexes=Vec::new();
     let mut synthetic_changes=0usize;
     let mut regressions=0usize;
     let mut changes=0usize;
@@ -173,7 +175,10 @@ fn audit_one(item:&Value,fixtures:&[Value],catalog:&[Value])->Value{
             let verified=expected.get(key.as_str());
             if key.as_str()==field {
                 if verified==b.get(key){
-                    if verified!=a.get(key){improvements+=1;}
+                    if verified!=a.get(key){
+                        improvements+=1;
+                        improved_fixture_indexes.push(i);
+                    }
                 }else if verified.is_some(){
                     regressions+=1;
                 }
@@ -190,6 +195,7 @@ fn audit_one(item:&Value,fixtures:&[Value],catalog:&[Value])->Value{
         }
     }
     report["verified_improvements"]=json!(improvements);
+    report["verified_fixture_indexes"]=json!(improved_fixture_indexes);
     report["synthetic_changes"]=json!(synthetic_changes);
     report["regressions"]=json!(regressions);
     report["parser_output_changes"]=json!(changes);
