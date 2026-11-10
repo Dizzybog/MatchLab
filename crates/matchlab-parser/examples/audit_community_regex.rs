@@ -107,6 +107,66 @@ fn audit_one(item:&Value,fixtures:&[Value],catalog:&[Value])->Value{
         "source_handler_index":item["handler_index"],
         "reason":"requires independently verified field labels or a supported source handler"
     });
+    // For field and TV proposals that have no unambiguous native handler
+    // mapping, still quantify present coverage. Never infer labels from ML
+    // output or auto-patch unrelated handler transforms/options.
+    if kind=="learned_field_regex"{
+        let field=item["field"].as_str().unwrap_or_default();
+        let signal=item["signal"].as_str().unwrap_or_default();
+        if (2..=24).contains(&signal.len()) && signal.bytes().all(|byte|
+            byte.is_ascii_lowercase()||byte.is_ascii_digit()||byte==b'.'||byte==b'_')
+            && !field.is_empty() && !item["canonical"].is_null()
+        {
+            let samples=[
+                format!("Example.Show.S01E02.{signal}.WEB-DL"),
+                format!("Another.Movie.2024.{signal}.BluRay"),
+                format!("Different.Show.S02E04.1080p.{signal}.mkv"),
+            ];
+            let matched=samples.iter().filter(|title|
+                parse_title_canonical(title,false).ok().is_some_and(|parsed|
+                    parsed.get(field)==Some(&item["canonical"])))
+                .count();
+            report["native_marker_hits"]=json!(matched);
+            report["native_marker_cases"]=json!(samples.len());
+            report["reason"]=json!(if matched==samples.len(){
+                "canonical parser already resolves all checked marker forms; source novelty unproven"
+            }else{
+                "not all field variants are resolved; needs exact handler identity and trusted labels"
+            });
+        }
+        return report;
+    }
+    if kind=="learned_tv_regex"{
+        let patterns:&[(&str,i64,i64)]=match item["family"].as_str(){
+            Some("sxe")=>&[("Example.Show.S01E02",1,2),("Example.Show.s02e18",2,18)],
+            Some("x")=>&[("Example.Show.1x02",1,2),("Example.Show.2x18",2,18)],
+            Some("words")=>&[("Example.Show.Season.1.Episode.2",1,2),
+                ("Example.Show.Season.2.Episode.18",2,18)],
+            _=>&[]
+        };
+        if !patterns.is_empty(){
+            let matched=patterns.iter().filter(|(title,season,episode)|
+                parse_title_canonical(title,false).ok().is_some_and(|parsed|
+                    parsed["seasons"]==json!([season])&&parsed["episodes"]==json!([episode])))
+                .count();
+            report["native_marker_hits"]=json!(matched);
+            report["native_marker_cases"]=json!(patterns.len());
+            report["reason"]=json!(if matched==patterns.len(){
+                "canonical parser already resolves tested TV coordinates; independent novelty needed"
+            }else{"TV format has gaps; mapping and full-field regression tests required"});
+        }
+        return report;
+    }
+    if kind=="learned_general_regex_review" {
+        let same=item["handler_index"].as_u64().and_then(|index|
+            catalog.iter().find(|r|r["index"].as_u64()==Some(index))
+        ).is_some_and(|row|row["field"]==item["field"]&&row["pattern"]==item["regex"]);
+        if same{
+            report["status"]=json!("no_effect");
+            report["reason"]=json!("identical regex already exists on the same native handler");
+        }
+        return report;
+    }
     if kind!="learned_source_regex_patch"{return report;}
     let patch=match anchored_patch(item,catalog){
         Ok(p)=>p,
