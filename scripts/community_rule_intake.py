@@ -405,8 +405,9 @@ def parse_batch(comment,current_sha,ancestor=git_ancestor):
         len(batch["rules"])>MAX_RULES or
         len(batch["reports"])+len(batch["rules"])>16):
         return None
-    # Authenticate the complete batch before isolating individual invalid
-    # children. A malicious entry cannot alter the signed fingerprint set.
+    # Check integrity of the complete batch before validating individual
+    # children. The SHA-256 batch ID is a consistency checksum, NOT an
+    # authenticated signature. Every candidate still needs independent review.
     all_items=batch["rules"]+batch["reports"]
     fingerprints=[r.get("fingerprint") for r in all_items if isinstance(r,dict)]
     if len(fingerprints)!=len(all_items):
