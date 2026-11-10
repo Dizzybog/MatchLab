@@ -3265,6 +3265,18 @@ fn compile_learned_engine(
 // six generations; normal API parses never acquire this mutex.
 static REPLAY_ENGINE_CACHE: Lazy<Mutex<VecDeque<(String,Arc<ParserEngine>)>>> =
     Lazy::new(|| Mutex::new(VecDeque::new()));
+static REPLAY_CACHE_HITS:std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static REPLAY_CACHE_BUILDS:std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+/// Background-only cache instrumentation, exposed via /api/ml/status.
+pub fn replay_cache_status()->Value{
+    use std::sync::atomic::Ordering;
+    json!({"entries":REPLAY_ENGINE_CACHE.lock().map(|c|c.len()).unwrap_or(0),
+        "max_entries":6,
+        "hits":REPLAY_CACHE_HITS.load(Ordering::Relaxed),
+        "compiled_generations":REPLAY_CACHE_BUILDS.load(Ordering::Relaxed)})
+}
 fn compiled_replay_engine(
     patches:&[HandlerPatch],additions:&[HandlerAddition],
     corrections:&[HandlerCorrection]
@@ -3275,6 +3287,7 @@ fn compiled_replay_engine(
             if let Some(entry)=cache.remove(index){
                 let engine=Arc::clone(&entry.1);
                 cache.push_back(entry);
+                REPLAY_CACHE_HITS.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
                 return Ok(engine);
             }
         }
@@ -3282,6 +3295,7 @@ fn compiled_replay_engine(
     // Compile without holding the cache lock. A concurrent compile is safe;
     // only immutable, successfully compiled generations enter the cache.
     let engine=Arc::new(compile_learned_engine(patches,additions,corrections)?);
+    REPLAY_CACHE_BUILDS.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
     if let Ok(mut cache)=REPLAY_ENGINE_CACHE.lock(){
         if !cache.iter().any(|(stored,_)|stored==&key){
             if cache.len()>=6{cache.pop_front();}
