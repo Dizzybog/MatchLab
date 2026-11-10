@@ -50,7 +50,7 @@ the real ordered native engine.
 | Array `uniq_concat(value(...))` | language, audio, HDR, channels, extras | Dedicated independently validated marker learner may ADD; general self-supervised promotion is blocked for additive array transforms |
 | `lowercase`, `uppercase`, `none` | extension, site, region, group | ADD only when the transformed capture is independently verified; never assume a changed spelling is equivalent |
 | `integer`, `first_integer`, `array(integer)`, `range_func` | year, seasons, episodes, volumes | Must preserve numeric captures, limits, ordering and episode ranges |
-| Dates and resolution-specific transformation | date, resolution | Candidate-only until full converted value is proved; unsafe fallbacks remain inactive |
+| Dates and resolution-specific transformation | date, resolution | The native `date(...)` transform emits validated ISO `YYYY-MM-DD`. ML can observe date-handler successes and missed separator variants; candidate changes are review-only until independently verified and full-parser replay proves correctness. No inferred dates or arbitrary ML values are published. |
 | Native Rust function | adult, group, episode postprocessing, language inference | Observe downstream effects, but do **not** manufacture a regex to replace function logic |
 
 The catalogue is *not* a list of field-specific ML exceptions. It is the
