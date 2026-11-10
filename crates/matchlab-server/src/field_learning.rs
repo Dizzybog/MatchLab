@@ -920,11 +920,13 @@ pub fn publish_parser_rules_with_tv_and_corrections(
         .map_err(|e|format!("learned parser regex rejected: {e}"))
 }
 
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+enum FieldReplayOutcome{Improved,NoGain,Unverifiable}
 /// Validate the ACTUAL collected failures against the complete native
 /// parser before and after ONE new rule. A hash or aggregate counter alone
 /// is not a replayable improvement. The release name stays local.
 fn replayed_field_gain(db:&Connection,rule:&FieldRule,
-    existing:&[FieldRule])->Result<bool,String>{
+    existing:&[FieldRule])->Result<FieldReplayOutcome,String>{
     let mut stmt=db.prepare("SELECT r.release_title,r.example_hash,
             r.identity_hash,e.canonical
         FROM learned_field_gap_replay r
@@ -947,11 +949,7 @@ fn replayed_field_gain(db:&Connection,rule:&FieldRule,
     let mut per_work=BTreeMap::<String,usize>::new();
     for (name,example_hash,_identity,serialized) in rows{
         if titles.len()>=MAX_REPLAY_EXAMPLES{break;}
-        if !safe_title(&name)
-            ||digest(&format!("{}:{}:{}",
-                rule.field,rule.signal,name.to_ascii_lowercase()))=="" {
-            continue;
-        }
+        if !safe_title(&name){continue;}
         // The original observation hashes the lowercased release name.
         if digest(&name.to_ascii_lowercase())!=example_hash{continue;}
         let Ok(reference)=serde_json::from_str::<Value>(&serialized)else{continue;};
@@ -975,7 +973,7 @@ fn replayed_field_gain(db:&Connection,rule:&FieldRule,
     }
     if titles.len()<MIN_REPLAY_REPAIRS
         ||per_work.len()<MIN_REPLAY_TITLES{
-        return Ok(false);
+        return Ok(FieldReplayOutcome::Unverifiable);
     }
 
     // Both engines contain the same TV/general rules. The ONLY difference
@@ -1006,18 +1004,22 @@ fn replayed_field_gain(db:&Connection,rule:&FieldRule,
             ||matches!(rule.field.as_str(),"subbed"|"dubbed")
                 &&old_value==Some(&Value::Bool(false));
         if old==new ||!old_missing {continue;}
-        if new.get(&rule.field)!=Some(&rule.value){return Ok(false);}
+        if new.get(&rule.field)!=Some(&rule.value){
+            return Ok(FieldReplayOutcome::NoGain);
+        }
         // All previously correct fields, including the extracted title,
         // must remain unchanged. Title cleanup is review-only until an
         // independent title reference verifies the new name.
         let mut expected=old.clone();
         expected.insert(rule.field.clone(),rule.value.clone());
-        if *new!=expected{return Ok(false);}
+        if *new!=expected{return Ok(FieldReplayOutcome::NoGain);}
         repaired+=1;
         fixed_works.insert(work);
     }
-    Ok(repaired>=MIN_REPLAY_REPAIRS
-        &&fixed_works.len()>=MIN_REPLAY_TITLES)
+    Ok(if repaired>=MIN_REPLAY_REPAIRS
+        &&fixed_works.len()>=MIN_REPLAY_TITLES{
+        FieldReplayOutcome::Improved
+    }else{FieldReplayOutcome::NoGain})
 }
 
 pub fn reconcile(db: &Connection) -> Result<(), String> {
