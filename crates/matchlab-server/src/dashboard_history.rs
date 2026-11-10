@@ -517,6 +517,9 @@ mod tests {
             "SELECT COUNT(*),MAX(id),MAX(details) FROM ml_training_queue",
             [],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
         assert_eq!(count,1);
+        let queued:i64=db.query_row("SELECT total FROM ml_queue_metrics WHERE only_row=1",
+            [],|row|row.get(0)).unwrap();
+        assert_eq!(queued,1);
         assert_eq!(id,2);
         assert_eq!(serde_json::from_str::<Value>(&details).unwrap()
             ["selected"]["imdb_id"],"tt0000002");
@@ -526,35 +529,47 @@ mod tests {
 
     #[test]
     fn ml_queue_retention_counts_rows_not_gapped_request_ids(){
-        // Simulate a large request-ID gap caused by repeated-title
-        // coalescing; the oldest pending work must survive below capacity.
-        let db=Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE ml_training_queue(
-            id INTEGER PRIMARY KEY,title TEXT NOT NULL,details TEXT NOT NULL);
-            INSERT INTO ml_training_queue VALUES(1,'old','{}');
-            INSERT INTO ml_training_queue VALUES(10001,'old2','{}');
-            INSERT INTO ml_training_queue VALUES(40000,'new','{}');").unwrap();
-        let retention=|cap:i64|{
-            db.execute("DELETE FROM ml_training_queue WHERE id < COALESCE((
-                SELECT id FROM ml_training_queue ORDER BY id DESC
-                LIMIT 1 OFFSET ?1
-            ),0)",[cap-1]).unwrap();
+        // Coalescing produces large ID gaps. The count is actual queued rows.
+        let path=path();
+        initialize(&path).unwrap();
+        let mut db=connect(&path).unwrap();
+        db.execute_batch("INSERT INTO ml_training_queue(id,title_hash,title,details)
+            VALUES(1,'a','old','{}'),(10001,'b','old2','{}'),(40000,'c','new','{}');").unwrap();
+        let retention=|db:&mut Connection,cap:i64|{
+            let tx=db.transaction().unwrap();
+            let removed=trim_ml_queue(&tx,cap).unwrap();
+            tx.commit().unwrap();
+            removed
         };
-        retention(3);
+        assert_eq!(retention(&mut db,3),0);
         let ids=db.prepare("SELECT id FROM ml_training_queue ORDER BY id").unwrap()
             .query_map([],|row|row.get::<_,i64>(0)).unwrap()
             .collect::<rusqlite::Result<Vec<_>>>().unwrap();
-        assert_eq!(ids,vec![1,10001,40000],
-            "gaps from duplicate titles cannot cause premature eviction");
-        retention(2);
+        assert_eq!(ids,vec![1,10001,40000]);
+        assert_eq!(retention(&mut db,2),1);
         let ids=db.prepare("SELECT id FROM ml_training_queue ORDER BY id").unwrap()
             .query_map([],|row|row.get::<_,i64>(0)).unwrap()
             .collect::<rusqlite::Result<Vec<_>>>().unwrap();
         assert_eq!(ids,vec![10001,40000]);
-        retention(5);
-        let count:i64=db.query_row("SELECT COUNT(*) FROM ml_training_queue",[],
-            |row|row.get(0)).unwrap();
-        assert_eq!(count,2);
+        assert_eq!(retention(&mut db,5),0);
+        let queued:i64=db.query_row("SELECT total FROM ml_queue_metrics WHERE only_row=1",
+            [],|row|row.get(0)).unwrap();
+        assert_eq!(queued,2);
+        // A duplicate title updates its ID without increasing the count.
+        db.execute("INSERT INTO ml_training_queue(id,title_hash,title,details)
+            VALUES(50000,'c','new','{}')
+            ON CONFLICT(title_hash) DO UPDATE SET id=excluded.id",[]).unwrap();
+        let queued:i64=db.query_row("SELECT total FROM ml_queue_metrics WHERE only_row=1",
+            [],|row|row.get(0)).unwrap();
+        assert_eq!(queued,2);
+        drop(db);
+        initialize(&path).unwrap(); // repeated migration must not re-count
+        let db=connect(&path).unwrap();
+        let queued:i64=db.query_row("SELECT total FROM ml_queue_metrics WHERE only_row=1",
+            [],|row|row.get(0)).unwrap();
+        assert_eq!(queued,2);
+        drop(db);
+        cleanup(&path);
     }
 
     #[test]
