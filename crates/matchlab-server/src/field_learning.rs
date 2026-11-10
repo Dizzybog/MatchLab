@@ -1004,7 +1004,11 @@ fn replayed_field_gain(db:&Connection,rule:&FieldRule,
         let old_missing=empty_field(old_value)
             ||matches!(rule.field.as_str(),"subbed"|"dubbed")
                 &&old_value==Some(&Value::Bool(false));
-        if old==new ||!old_missing {continue;}
+        if old==new{continue;}
+        // An addition that changes an already-populated field (or changes
+        // title/other metadata without fixing a missing field) is a
+        // regression, not a measured improvement.
+        if !old_missing{return Ok(FieldReplayOutcome::NoGain);}
         if new.get(&rule.field)!=Some(&rule.value){
             return Ok(FieldReplayOutcome::NoGain);
         }
@@ -1418,6 +1422,50 @@ mod tests {
         let rules=select_rules(&db).unwrap();
         assert_eq!(rules[0].canonical_examples,2);
         assert!(may_override(&rules[0]));
+    }
+    #[test]
+    fn persisted_hash_only_gaps_cannot_restore_an_old_noop_regex(){
+        let db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        for n in 0..12{
+            db.execute("INSERT INTO learned_field_gap_evidence(
+                field,signal,example_hash,identity_hash,canonical,
+                source_build,first_seen)
+                VALUES('quality','bluray',?1,?2,'\"BluRay\"',?3,1)",
+                params![format!("legacy{n}"),format!("show{n}"),build()]
+            ).unwrap();
+        }
+        let learned=select_rules(&db).unwrap();
+        assert!(learned.iter().any(|r|r.field=="quality"&&r.signal=="bluray"),
+            "legacy aggregate thresholds can still propose the rule");
+        let rule=rule("quality","bluray",json!("BluRay"),12,6);
+        assert_eq!(replayed_field_gain(&db,&rule,&[]).unwrap(),
+            FieldReplayOutcome::Unverifiable,
+            "hashed historical evidence is not enough to activate a regex");
+    }
+    #[test]
+    fn blue_ray_native_success_is_not_promoted_from_fabricated_gap_labels(){
+        let db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        let mut budget=0;
+        for i in 0..8{
+            let title=format!("Example.Movie.{i}.1080p.BluRay");
+            let native=matchlab_parser::parse_title_canonical(&title,false)
+                .unwrap();
+            assert_eq!(native.get("quality"),Some(&json!("BluRay")));
+            let fake_base=json!({"title":format!("Example Movie {i}")});
+            observe_with_budget(&db,&title,
+                &json!({"selected":{"imdb_id":"tt1234567"}}),
+                &fake_base,&mut budget).unwrap();
+        }
+        let saved:i64=db.query_row("SELECT count(*)
+            FROM learned_field_gap_replay WHERE field='quality'
+              AND signal='bluray'",[],|r|r.get(0)).unwrap();
+        assert!(saved>=MIN_REPLAY_REPAIRS as i64);
+        let candidate=rule("quality","bluray",json!("BluRay"),8,8);
+        assert_eq!(replayed_field_gain(&db,&candidate,&[]).unwrap(),
+            FieldReplayOutcome::Unverifiable,
+            "original native BluRay matches are not real improvements");
     }
     #[test]
     fn conflicting_gap_and_canonical_evidence_quarantines_rule() {
