@@ -31,7 +31,7 @@ fn read_number(name:&str,min:u64,max:u64)->Option<u64>{
 }
 fn gib_for(examples:u64,bytes_per_example:u64)->u64{
     examples.saturating_mul(bytes_per_example)
-        .saturating_add(GIB-1).saturating_div(GIB).clamp(1,128)
+        .saturating_add(GIB-1)/GIB.clamp(1,128)
 }
 impl MlConfig{
     /// Pure derivation lets the scaling contract be tested without mutating
