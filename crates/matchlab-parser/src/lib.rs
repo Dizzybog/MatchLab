@@ -2741,7 +2741,7 @@ fn generic_path_title(title:&str)->bool{
 // (Show/Season.2/...) into an invented airdate.
 static SLASH_YMD_DATE_RE: Lazy<regex::Regex> = Lazy::new(|| {
     regex::Regex::new(
-        r"(?:19[0-9]{2}|20[0-9]{2}|2100)/(?:0?[1-9]|1[0-2])/(?:0?[1-9]|[12][0-9]|3[01])"
+        r"(?:19[0-9]{2}|20[0-9]{2}|2100)/(?:0?[1-9]|1[0-2])/(?:0?[1-9]|[12][0-9]|3[01])\b"
     ).expect("valid slash year-first date grammar")
 });
 static SLASH_DMY_DATE_RE: Lazy<regex::Regex> = Lazy::new(|| {
@@ -3679,6 +3679,8 @@ mod tests {
             ("The_Daily_Show_2026_11_10_WEB-DL", "2026-11-10"),
             ("The.Daily.Show.2026-11-10.1080p.WEB-DL", "2026-11-10"),
             ("The.Daily.Show.2026/11/10.1080p.WEB-DL", "2026-11-10"),
+            ("The.Daily.Show.2026/11/30.1080p.WEB-DL", "2026-11-30"),
+            ("The.Daily.Show.2026/2/9.1080p.WEB-DL", "2026-02-09"),
             ("The.Daily.Show.10/11/2026.1080p.WEB-DL", "2026-11-10"),
             ("The.Daily.Show.2026.2.9.1080p.WEB-DL", "2026-02-09"),
             ("The.Daily.Show.10.11.2026.1080p.WEB-DL", "2026-11-10"),
@@ -3693,7 +3695,7 @@ mod tests {
         ];
         for (release, expected) in cases {
             let parsed=parse_title(release,false).unwrap();
-            assert_eq!(parsed["date"],expected,
+            assert_eq!(parsed.get("date").and_then(Value::as_str),Some(expected),
                 "{release} => {parsed:?}");
             assert_eq!(parsed["seasons"],json!([]),"{release}");
             assert_eq!(parsed["episodes"],json!([]),"{release}");
