@@ -118,6 +118,7 @@ impl TitleFeatureContext{
         features
     }
 }
+#[cfg(test)]
 fn features(field:&str,signal:&str,title:&str)->Vec<usize>{
     TitleFeatureContext::new(title).features(field,signal)
 }
@@ -356,9 +357,10 @@ impl OnlineModel{
         // the positive. A mismatched field is a safe counterfactual negative,
         // not an inferred claim about the film or the final match.
         let sample=digest(&format!("{EPOCH}:{field}:{signal}:{title}"));
-        let inserted=db.execute(
+        let inserted=db.prepare_cached(
             "INSERT OR IGNORE INTO online_model_seen(sample_hash,seen_at)
-             VALUES(?1,strftime('%s','now'))",[sample])
+             VALUES(?1,strftime('%s','now'))")
+            .map_err(|e|e.to_string())?.execute([sample])
             .map_err(|e|e.to_string())?;
         if inserted==0{return Ok(false);}
         if self.positives>0&&self.positives%10_000==0{
