@@ -503,7 +503,8 @@ pub fn observe_with_budget(db:&Connection,title:&str,details:&Value,
                  WHERE field=?1 AND signal=?2 AND example_hash=?3
                    AND source_build=?4"
             };
-            let known:i64=db.query_row(lookup,params![field,signal,key,source_build],
+            let known:i64=db.prepare_cached(lookup).map_err(|e|e.to_string())?
+                .query_row(params![field,signal,key,source_build],
                 |row|row.get(0)).map_err(|e|e.to_string())?;
             if known==0{
                 let removed=reclaim_unpromoted(db,capacity)?;
@@ -528,7 +529,7 @@ pub fn observe_with_budget(db:&Connection,title:&str,details:&Value,
                 identity_hash=excluded.identity_hash,canonical=excluded.canonical,
                 source_build=excluded.source_build,first_seen=excluded.first_seen"
         };
-        let previously_known:i64=db.query_row(
+        let previously_known:i64=db.prepare_cached(
             if from_gap {
                 "SELECT EXISTS(SELECT 1 FROM learned_field_gap_evidence
                  WHERE field=?1 AND signal=?2 AND example_hash=?3
@@ -537,20 +538,24 @@ pub fn observe_with_budget(db:&Connection,title:&str,details:&Value,
                 "SELECT EXISTS(SELECT 1 FROM learned_field_evidence
                  WHERE field=?1 AND signal=?2 AND example_hash=?3
                    AND source_build=?4)"
-            },params![field,signal,key,source_build],|row|row.get(0)).map_err(|e|e.to_string())?;
-        db.execute(sql,params![field,signal,key,identity,canonical,source_build])
+            }).map_err(|e|e.to_string())?
+            .query_row(params![field,signal,key,source_build],|row|row.get(0))
+            .map_err(|e|e.to_string())?;
+        db.prepare_cached(sql).map_err(|e|e.to_string())?
+            .execute(params![field,signal,key,identity,canonical,source_build])
             .map_err(|e|e.to_string())?;
         if from_gap {
             // Only the trusted ML worker may see these local release names.
             // The replay record shares the same bounded evidence identity.
-            db.execute("INSERT INTO learned_field_gap_replay(
+            db.prepare_cached("INSERT INTO learned_field_gap_replay(
                 field,signal,example_hash,identity_hash,release_title,source_build)
                 VALUES(?1,?2,?3,?4,?5,?6)
                 ON CONFLICT(field,signal,example_hash) DO UPDATE SET
                     identity_hash=excluded.identity_hash,
                     release_title=excluded.release_title,
-                    source_build=excluded.source_build",
-                params![field,signal,key,identity,title,source_build])
+                    source_build=excluded.source_build")
+                .map_err(|e|e.to_string())?
+                .execute(params![field,signal,key,identity,title,source_build])
                 .map_err(|e|e.to_string())?;
         }
         if previously_known==0{
