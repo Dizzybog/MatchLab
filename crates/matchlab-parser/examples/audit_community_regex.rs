@@ -171,7 +171,7 @@ fn audit_one(item:&Value,fixtures:&[Value],catalog:&[Value])->Value{
         for key in keys{
             if a.get(key)==b.get(key){continue;}
             let verified=expected.get(key.as_str());
-            if key==field {
+            if key.as_str()==field {
                 if verified==b.get(key){
                     if verified!=a.get(key){improvements+=1;}
                 }else if verified.is_some(){
@@ -245,7 +245,9 @@ mod tests{
         });
         let catalogue=existing_regex_rules();
         assert!(anchored_patch(&item,&catalogue).is_ok());
-        assert!(anchored_patch(&json!({"original_regex":"wrong",..}),&catalogue).is_err());
+        let mut forged=item.clone();
+        forged["original_regex"]=json!("wrong");
+        assert!(anchored_patch(&forged,&catalogue).is_err());
     }
     #[test]
     fn no_evidence_never_authorizes_source_change(){
