@@ -1,0 +1,113 @@
+[
+  {
+    "title": "Example.Show.S01E02.1080p.WEB-DL.x264",
+    "expected": {
+      "seasons": [
+        1
+      ],
+      "episodes": [
+        2
+      ],
+      "codec": "avc"
+    }
+  },
+  {
+    "title": "Example.Show.S02E18.720p.WEB-DL.H.264",
+    "expected": {
+      "seasons": [
+        2
+      ],
+      "episodes": [
+        18
+      ],
+      "codec": "avc"
+    }
+  },
+  {
+    "title": "Another.Movie.2024.1080p.BluRay.x265",
+    "expected": {
+      "codec": "hevc"
+    }
+  },
+  {
+    "title": "Example.Show.S00E18.1080p.WEB-DL",
+    "expected": {
+      "seasons": [
+        0
+      ],
+      "episodes": [
+        18
+      ]
+    }
+  },
+  {
+    "title": "Example.Show.S10E05.WEB-DL.x264",
+    "expected": {
+      "seasons": [
+        10
+      ],
+      "episodes": [
+        5
+      ],
+      "codec": "avc"
+    }
+  },
+  {
+    "title": "Example.Show.S01E01.2160p.WEB-DL.AV1",
+    "expected": {
+      "seasons": [
+        1
+      ],
+      "episodes": [
+        1
+      ],
+      "codec": "av1"
+    }
+  },
+  {
+    "title": "Example.Show.S01E03.1080p.WEB-DL.x265",
+    "expected": {
+      "seasons": [
+        1
+      ],
+      "episodes": [
+        3
+      ],
+      "codec": "hevc"
+    }
+  },
+  {
+    "title": "Example.Show.S17E01.1080p.WEB-DL.x264",
+    "expected": {
+      "seasons": [
+        17
+      ],
+      "episodes": [
+        1
+      ],
+      "codec": "avc"
+    }
+  },
+  {
+    "title": "Example.Show.1x02.1080p.WEB-DL",
+    "expected": {
+      "seasons": [
+        1
+      ],
+      "episodes": [
+        2
+      ]
+    }
+  },
+  {
+    "title": "Example.Show.s02e18.720p.WEB-DL",
+    "expected": {
+      "seasons": [
+        2
+      ],
+      "episodes": [
+        18
+      ]
+    }
+  }
+]
