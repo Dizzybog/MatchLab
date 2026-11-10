@@ -8,7 +8,7 @@ use rusqlite::{params,Connection};
 use serde_json::{json,Value};
 use sha2::{Digest,Sha256};
 use std::collections::BTreeMap;
-use std::sync::{OnceLock,RwLock,atomic::{AtomicU64,Ordering}};
+use std::sync::{Mutex,OnceLock,RwLock,atomic::{AtomicU64,Ordering}};
 
 const EPOCH:u32=1;
 const MIN_FIXES:usize=4;
@@ -54,6 +54,14 @@ static REVISION:AtomicU64=AtomicU64::new(0);
 static REJECTED:AtomicU64=AtomicU64::new(0);
 static CURSOR:AtomicU64=AtomicU64::new(0);
 static OBSERVED:AtomicU64=AtomicU64::new(0);
+// SQLite owns the authoritative revision; the in-process cache is an
+// accelerator only. It never bypasses the promotion/replay safety checks.
+static CANDIDATE_CACHE:OnceLock<Mutex<Option<(u64,Vec<Active>)>>>=OnceLock::new();
+fn evidence_revision(db:&Connection)->Result<u64,String>{
+    let number:i64=db.query_row("SELECT revision FROM ml_general_evidence_revision
+        WHERE id=1",[],|row|row.get(0)).map_err(|e|e.to_string())?;
+    u64::try_from(number).map_err(|_|"invalid general evidence revision".to_owned())
+}
 
 fn active()->&'static RwLock<Vec<Active>>{
     ACTIVE.get_or_init(||RwLock::new(Vec::new()))
@@ -334,7 +342,22 @@ pub fn init(db:&Connection)->Result<(),String>{
         fixed_examples INTEGER NOT NULL,
         checked_examples INTEGER NOT NULL,
         verified_at INTEGER NOT NULL
-    );").map_err(|e|e.to_string())
+    );
+    CREATE TABLE IF NOT EXISTS ml_general_evidence_revision(
+        id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL);
+    INSERT OR IGNORE INTO ml_general_evidence_revision VALUES(1,1);
+    CREATE TRIGGER IF NOT EXISTS ml_general_revision_insert
+        AFTER INSERT ON ml_general_examples BEGIN
+        UPDATE ml_general_evidence_revision SET revision=revision+1 WHERE id=1;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ml_general_revision_delete
+        AFTER DELETE ON ml_general_examples BEGIN
+        UPDATE ml_general_evidence_revision SET revision=revision+1 WHERE id=1;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ml_general_revision_update
+        AFTER UPDATE ON ml_general_examples BEGIN
+        UPDATE ml_general_evidence_revision SET revision=revision+1 WHERE id=1;
+    END;").map_err(|e|e.to_string())
 }
 pub fn count(db:&Connection)->Result<i64,String>{
     init(db)?;
@@ -399,6 +422,13 @@ fn migrate(db:&Connection)->Result<(),String>{
     Ok(())
 }
 fn candidates(db:&Connection)->Result<Vec<Active>,String>{
+    let revision=evidence_revision(db)?;
+    let cache=CANDIDATE_CACHE.get_or_init(||Mutex::new(None));
+    if let Ok(guard)=cache.lock(){
+        if let Some((seen,ready))=guard.as_ref(){
+            if *seen==revision{return Ok(ready.clone());}
+        }
+    }
     let mut stmt=db.prepare("SELECT rule_key,field,source_index,pattern,mode,
         count(*) AS n,count(DISTINCT identity_hash) AS titles
         FROM ml_general_examples WHERE source_build=?1
@@ -418,7 +448,9 @@ fn candidates(db:&Connection)->Result<Vec<Active>,String>{
         .map_err(|e|e.to_string())?;
     // Invalid persisted rules and arbitrary field overwrites cannot become
     // executable even if a local SQLite database was imported or modified.
-    Ok(proposals.into_iter().filter(promotable).collect())
+    let eligible=proposals.into_iter().filter(promotable).collect::<Vec<_>>();
+    if let Ok(mut guard)=cache.lock(){*guard=Some((revision,eligible.clone()));}
+    Ok(eligible)
 }
 fn read_examples(db:&Connection,key:&str,limit:usize)->Result<Vec<Evidence>,String>{
     let mut stmt=db.prepare("SELECT field,source_index,pattern,mode,
