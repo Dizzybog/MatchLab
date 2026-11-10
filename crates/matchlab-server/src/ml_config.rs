@@ -88,13 +88,14 @@ impl MlConfig{
         let old_n=read_number("MATCHLAB_ML_TRAINING_MAX_EXAMPLES",100,MAX_EXAMPLES)
             .unwrap_or(12_000);
         c.max_examples=old_n as i64;
-        c.general_examples=(old_n/6).clamp(1_024,131_072).min(old_n) as i64;
-        c.corrective_examples=(old_n/100).clamp(128,16_384).min(old_n) as i64;
-        c.unknown_examples=(old_n/8).clamp(256,262_144).min(old_n) as i64;
+        c.general_examples=old_n.min(16_384) as i64;
+        c.corrective_examples=1_024;
+        c.unknown_examples=old_n.min(12_000) as i64;
         c.legacy_overrides.push("MATCHLAB_ML_ENABLED");
         c.legacy_overrides.push("MATCHLAB_ML_TRAINING_MAX_EXAMPLES");
         // Existing caps did not share a unified GB limit; retain historical
         // independent defaults for cache, queue and background batch.
+        c.learning_storage_bytes=old_gb*GIB;
         c.queue_max_items=20_000;
         c.cache_max_entries=100_000;
         c.training_batch_size=64;
