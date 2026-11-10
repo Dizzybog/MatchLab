@@ -2379,14 +2379,17 @@ mod tests {
                 "tt0115147:27:45","cinemeta_airdate"),
             ("The.Daily.Show.2022-01-20.1080p.WEB-DL",
                 "tt0115147:27:45","cinemeta_airdate"),
+            ("The.Daily.Show.2022/01/20.1080p.WEB-DL",
+                "tt0115147:27:45","cinemeta_airdate"),
             ("The.Daily.Show.2022.01.23.1080p.WEB-DL",
                 "tt0115147:27:47","cinemeta_airdate_1day"),
         ] {
             let result=diagnose(&path,&MatchRequest{
                 title:release.into(),year:None,series:None}).unwrap();
-            assert_eq!(result.parsed["date"],json!("2022-01-20").as_str()
-                .filter(|_|!release.contains("2022.01.23"))
-                .map_or_else(||"2022-01-23".to_owned(),str::to_owned),
+            let expected_date=if release.contains("2022.01.23"){
+                "2022-01-23"
+            }else{"2022-01-20"};
+            assert_eq!(result.parsed["date"],expected_date,
                 "{release}: {:?}",result.parsed);
             let winner=result.selected.expect("dated IMDb series match");
             assert_eq!(winner["imdb_id"],"tt0115147","{release}: {winner}");
