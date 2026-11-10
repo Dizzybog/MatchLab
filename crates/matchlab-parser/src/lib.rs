@@ -173,16 +173,59 @@ fn learned_tv_ambiguous(title:&str)->bool{
     false
 }
 
+#[derive(Default)]
+struct CompiledRegexCache{
+    entries:HashMap<(String,bool),(PcreRegex,u64)>,
+    tick:u64,
+}
+// A single immutable compiled PCRE2 pattern can serve many candidate
+// generations. Clone creates thread-local matching scratch while sharing
+// compiled code. Keep this separate from the six complete replay engines:
+// distinct candidates still reuse hundreds of unchanged native patterns.
+static COMPILED_REGEX_CACHE:Lazy<Mutex<CompiledRegexCache>>=
+    Lazy::new(||Mutex::new(CompiledRegexCache::default()));
+static REGEX_CACHE_HITS:std::sync::atomic::AtomicU64=
+    std::sync::atomic::AtomicU64::new(0);
+static REGEX_CACHE_BUILDS:std::sync::atomic::AtomicU64=
+    std::sync::atomic::AtomicU64::new(0);
 fn compile_regex(pattern: &str, ignore_case: bool) -> Result<PcreRegex, ParseError> {
+    let key=(pattern.to_owned(),ignore_case);
+    if let Ok(mut cache)=COMPILED_REGEX_CACHE.lock(){
+        cache.tick=cache.tick.wrapping_add(1);
+        let now=cache.tick;
+        if let Some((compiled,last_used))=cache.entries.get_mut(&key){
+            *last_used=now;
+            REGEX_CACHE_HITS.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+            return Ok(compiled.clone());
+        }
+    }
     let normalized_pattern = normalize_pattern_for_pcre2(pattern);
     let mut builder = PcreRegexBuilder::new();
     builder.utf(true);
     builder.ucp(true);
     builder.caseless(ignore_case);
     builder.jit_if_available(true);
-    builder.build(&normalized_pattern).map_err(|error| {
+    let compiled=builder.build(&normalized_pattern).map_err(|error| {
         ParseError::Regex(format!("Error compiling regex: {error}; pattern={pattern}"))
-    })
+    })?;
+    REGEX_CACHE_BUILDS.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut cache)=COMPILED_REGEX_CACHE.lock(){
+        cache.tick=cache.tick.wrapping_add(1);
+        let now=cache.tick;
+        // Cache at most 768 patterns: enough for the bundled source handlers
+        // plus a bounded number of learned variants, with no unbounded RAM.
+        if !cache.entries.contains_key(&key){
+            if cache.entries.len()>=768{
+                if let Some(oldest)=cache.entries.iter()
+                    .min_by_key(|(_,(_,seen))|*seen)
+                    .map(|(key,_)|key.clone()){
+                    cache.entries.remove(&oldest);
+                }
+            }
+            cache.entries.insert(key,(compiled.clone(),now));
+        }
+    }
+    Ok(compiled)
 }
 
 fn normalize_pattern_for_pcre2(pattern: &str) -> String {
@@ -3275,7 +3318,12 @@ pub fn replay_cache_status()->Value{
     json!({"entries":REPLAY_ENGINE_CACHE.lock().map(|c|c.len()).unwrap_or(0),
         "max_entries":6,
         "hits":REPLAY_CACHE_HITS.load(Ordering::Relaxed),
-        "compiled_generations":REPLAY_CACHE_BUILDS.load(Ordering::Relaxed)})
+        "compiled_generations":REPLAY_CACHE_BUILDS.load(Ordering::Relaxed),
+        "regex_cache_entries":COMPILED_REGEX_CACHE.lock()
+            .map(|cache|cache.entries.len()).unwrap_or(0),
+        "regex_cache_max_entries":768,
+        "regex_cache_hits":REGEX_CACHE_HITS.load(Ordering::Relaxed),
+        "regex_compilations":REGEX_CACHE_BUILDS.load(Ordering::Relaxed)})
 }
 fn compiled_replay_engine(
     patches:&[HandlerPatch],additions:&[HandlerAddition],
