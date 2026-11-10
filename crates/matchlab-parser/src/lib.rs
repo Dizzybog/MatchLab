@@ -1783,7 +1783,7 @@ static X_COORDS_IN_TITLE_RE: Lazy<Regex> = Lazy::new(|| {
         .expect("valid x notation title suffix regex")
 });
 static S_E_COORDS_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)(?:^|[ ._-])s([1-9]\d{0,2})[ ._-]*e(\d{1,4})(?=$|[^0-9])")
+    Regex::new(r"(?i)(?:^|[ ._-])s(0?[1-9]\d{0,2})[ ._-]*e(\d{1,4})(?=$|[^0-9])")
         .expect("valid explicit SxxExxx regex")
 });
 // Spanish CAP shorthand: Cap.103 -> S01E03; Cap.1004 -> S10E04.
@@ -2599,6 +2599,18 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
             // "3 - 08" in this release form is not an absolute batch.
             result.insert("anime_season_episode_candidate".into(),candidate);
         } else if let Some(candidate)=unmarked_anime_episode_candidate(raw,translate_languages)? {
+            // A literal S2 before a bracketed anime batch is explicit season
+            // metadata, even though 01-12 remains an *unverified absolute*
+            // episode range. Do not guess IMDb episodes from this marker.
+            // This uses the already validated pack suffix grammar rather
+            // than introducing a second broad season-number regex.
+            if let Some(season)=candidate.get("season_hint").and_then(Value::as_i64)
+                && (1..=99).contains(&season)
+                && result.get("seasons").and_then(Value::as_array)
+                    .is_some_and(Vec::is_empty)
+            {
+                result.insert("seasons".into(),json!([season]));
+            }
             // The generic parser may have consumed the final endpoint as a
             // standalone episode. Do not expose a contradictory episode 400
             // while the unverified candidate actually describes 320..400.
