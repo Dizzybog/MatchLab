@@ -50,8 +50,7 @@ fn max_examples()->i64{
     crate::ml_config::get().max_examples
 }
 pub(crate) fn active()->bool{
-    env::var("MATCHLAB_ML_ENABLED").ok()
-        .is_some_and(|v|v.eq_ignore_ascii_case("true"))
+    crate::ml_config::get().enabled
 }
 fn digest(raw:&str)->String{format!("{:x}",Sha256::digest(raw.as_bytes()))}
 fn normalized(title:&str)->String{
