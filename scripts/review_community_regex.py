@@ -14,10 +14,12 @@ ALLOWED={"learned_field_regex","learned_tv_regex","learned_source_regex_patch","
     "learned_field_regex_review","historical_regex_review"}
 MAX_QUEUE=4096
 
-def screen(incoming,old):
+def screen(incoming,old,audits=None):
     if not isinstance(incoming,list) or not isinstance(old,list) or len(old)>MAX_QUEUE:
         raise ValueError("invalid review candidates")
     fingerprints={item.get("fingerprint") for item in old if isinstance(item,dict)}
+    audit_by_fp={r.get("fingerprint"):r for r in (audits or [])
+        if isinstance(r,dict)}
     for candidate in incoming[:24]:
         if not isinstance(candidate,dict) or candidate.get("kind") not in ALLOWED:
             continue
@@ -26,6 +28,11 @@ def screen(incoming,old):
         sha=source.split(":",1)[0]
         if valid_extended_rule(candidate,sha) is None:continue
         if candidate["fingerprint"] in fingerprints:continue
+        audit=audit_by_fp.get(candidate["fingerprint"],{})
+        # Proven no-ops and conflicts do not deserve another PR. They stay
+        # visible in the daily audit artifact and original Issue comment.
+        if audit.get("status") in {"no_effect","invalid_source","regression"}:
+            continue
         # Self-reported evidence is never independent attestation.
         # Propose precisely the source regex change, but DO NOT load the
         # untrusted comment as an active handler or execute its pattern.
@@ -35,6 +42,8 @@ def screen(incoming,old):
             "automatic_activation":False,
             "source_sha":sha,
             "proposal":candidate,
+            "audit_status":audit.get("status","not_audited"),
+            "audit_reason":audit.get("reason","source and field validation required"),
             "review_checks":[
                 "confirm independent original-parser replay with true labels",
                 "check false positives, titles with numbers and episode packs",
@@ -46,11 +55,12 @@ def screen(incoming,old):
     return old,False
 
 def main():
-    if len(sys.argv)!=4:
-        raise SystemExit("usage: review_community_regex.py incoming.json existing.json output.json")
+    if len(sys.argv) not in (4,5):
+        raise SystemExit("usage: review_community_regex.py incoming.json existing.json output.json [audit.json]")
     incoming=json.loads(Path(sys.argv[1]).read_text(encoding="utf8"))
     existing=json.loads(Path(sys.argv[2]).read_text(encoding="utf8"))
-    accepted,changed=screen(incoming,existing)
+    audits=json.loads(Path(sys.argv[4]).read_text(encoding="utf8")) if len(sys.argv)==5 else None
+    accepted,changed=screen(incoming,existing,audits)
     Path(sys.argv[3]).write_text(json.dumps(accepted,indent=2,ensure_ascii=False)+"\n",encoding="utf8")
     print("community_extended_regex="+("human_review_pr" if changed else "none"))
 
