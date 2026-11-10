@@ -62,6 +62,54 @@ fn evidence_revision(db:&Connection)->Result<u64,String>{
         WHERE id=1",[],|row|row.get(0)).map_err(|e|e.to_string())?;
     u64::try_from(number).map_err(|_|"invalid general evidence revision".to_owned())
 }
+// Negative candidate reviews and positive active-set safety are memoized
+// only for the complete evidence AND external native/ML rule generation.
+// This retains every existing proof requirement and candidate rotation,
+/// but avoids compiling/replaying unchanged cohorts on every small batch.
+static SAFE_GENERATION:OnceLock<Mutex<Option<String>>>=OnceLock::new();
+static REJECTED_REPLAYS:OnceLock<Mutex<(String,std::collections::HashSet<String>)>>=
+    OnceLock::new();
+fn validation_generation(db:&Connection,rules:&[Active])->Result<String,String>{
+    Ok(format!("{}:{}:{}:{}:{}:{rules:?}",
+        evidence_revision(db)?,
+        matchlab_parser::handler_patch_revision(),
+        crate::field_learning::revision(),
+        crate::tv_learning::revision(),
+        crate::corrective_learning::revision()))
+}
+fn active_safe_cached(db:&Connection,rules:&[Active])->Result<bool,String>{
+    let generation=validation_generation(db,rules)?;
+    let cache=SAFE_GENERATION.get_or_init(||Mutex::new(None));
+    if cache.lock().ok().is_some_and(|saved|saved.as_ref()==Some(&generation)){
+        return Ok(true);
+    }
+    let valid=active_safe(db,rules)?;
+    if valid{
+        if let Ok(mut saved)=cache.lock(){*saved=Some(generation);}
+    }
+    Ok(valid)
+}
+fn previously_rejected(generation:&str,key:&str)->bool{
+    let cache=REJECTED_REPLAYS.get_or_init(||
+        Mutex::new((String::new(),std::collections::HashSet::new())));
+    let Ok(mut seen)=cache.lock()else{return false;};
+    if seen.0!=generation{
+        seen.0=generation.to_owned();
+        seen.1.clear();
+    }
+    seen.1.contains(key)
+}
+fn remember_rejected(generation:&str,key:&str){
+    let cache=REJECTED_REPLAYS.get_or_init(||
+        Mutex::new((String::new(),std::collections::HashSet::new())));
+    if let Ok(mut seen)=cache.lock(){
+        if seen.0!=generation{
+            seen.0=generation.to_owned();
+            seen.1.clear();
+        }
+        seen.1.insert(key.to_owned());
+    }
+}
 
 fn active()->&'static RwLock<Vec<Active>>{
     ACTIVE.get_or_init(||RwLock::new(Vec::new()))
@@ -666,7 +714,7 @@ pub fn reconcile(db:&Connection)->Result<(),String>{
     // A formerly active rule is never grandfathered in when fresh
     // evidence invalidates it or other rules change. Remove the newest
     // corrections until the complete parser is safe again.
-    while !ready.is_empty()&&!active_safe(db,&ready)?{
+    while !ready.is_empty()&&!active_safe_cached(db,&ready)?{
         ready.pop();
         rejected+=1;
     }
@@ -678,16 +726,21 @@ pub fn reconcile(db:&Connection)->Result<(),String>{
             if ready.len()>=MAX_ACTIVE{break;}
             let rule=pool[(start+offset)%pool.len()].clone();
             if ready.iter().any(|old|old.key==rule.key){continue;}
+            let generation=validation_generation(db,&ready)?;
+            if previously_rejected(&generation,&rule.key){continue;}
             let mut candidate=ready.clone();
-        candidate.push(rule.clone());
-        match replay(db,&ready,&candidate,&rule.key)?{
+            candidate.push(rule.clone());
+            match replay(db,&ready,&candidate,&rule.key)?{
             Some((checked,fixed)) if fixed>=
                 (if rule.mode=="correct"{MIN_CORRECTION_FIXES}else{MIN_FIXES})=>{
                 let Some(last)=candidate.last_mut()else{continue;};
                 last.fixes=fixed;last.checked=checked;
                 ready=candidate;
             }
-            _=>rejected+=1
+            _=>{
+                rejected+=1;
+                remember_rejected(&generation,&rule.key);
+            }
             }
         }
     }
