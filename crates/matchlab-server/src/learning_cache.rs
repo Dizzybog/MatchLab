@@ -14,7 +14,6 @@ use std::sync::{Mutex,OnceLock,RwLock,mpsc::{sync_channel,SyncSender,TrySendErro
 use sha2::{Digest,Sha256};
 use std::{env,fs,path::{Path,PathBuf},time::{Duration,SystemTime,UNIX_EPOCH}};
 
-const GIB:u64=1024*1024*1024;
 const MAX_ENTRY_BYTES:usize=512*1024;
 const CACHE_TTL_SECS:i64=30*24*3600;
 static CACHE_HITS:AtomicU64=AtomicU64::new(0);
@@ -128,11 +127,11 @@ fn hot_lookup(key:&str,ns:&str,time:i64)->Option<Value>{
 }
 /// Cache now has its own database and quota. Sharing a writer with training
 /// caused repeated SQLITE_BUSY, stalled local learning and saturated writes.
-fn cache_storage_gb()->u64{
-    crate::ml_config::get().cache_storage_gb
+fn cache_storage_bytes()->u64{
+    crate::ml_config::get().cache_storage_bytes
 }
-pub fn storage_gb()->u64{
-    crate::ml_config::get().learning_storage_gb
+fn learning_storage_bytes()->u64{
+    crate::ml_config::get().learning_storage_bytes
 }
 /// The number of unique, validated field observations retained for each
 /// current source build. This is deliberately separate from on-disk GiB:
@@ -157,8 +156,9 @@ fn miss_ttl_secs()->i64{
         .ok().as_deref(),30,1,24*60)*60
 }
 pub fn status()->Value{
-    json!({"enabled":enabled(),"learning_storage_limit_gb":storage_gb(),
-        "cache_storage_limit_gb":cache_storage_gb(),
+    json!({"enabled":enabled(),
+        "learning_storage_limit_mib":learning_storage_bytes()/(1024*1024),
+        "cache_storage_limit_mib":cache_storage_bytes()/(1024*1024),
         "cache_isolated_sqlite":true,
         "cache_lookup":"nonblocking_in_memory",
         "hot_cache_entries":HOT_CACHE.get().and_then(|cache|cache.try_read().ok())
@@ -371,7 +371,7 @@ fn cache_worker()->Option<SyncSender<CacheEvent>>{
                     if let Some(metadata)=CACHE_MAINTENANCE_METADATA.get(){
                         if let Some(db)=connection.as_ref(){
                             if let Err(error)=maintain_with_budget(
-                                db,metadata,cache_storage_gb()*GIB){
+                                db,metadata,cache_storage_bytes()){
                                 tracing::debug!(%error,
                                     "ML cache maintenance will retry");
                                 CACHE_MAINTENANCE_REQUESTED
@@ -477,7 +477,7 @@ fn used_bytes(db:&Connection)->Result<u64,String>{
 /// only after all shareable historical rules have been archived. Active
 /// rules are protected: evict obsolete candidates, then oldest samples.
 pub fn maintain_learning(db:&Connection)->Result<(),String>{
-    let budget=storage_gb()*GIB;
+    let budget=learning_storage_bytes();
     let mut occupied=used_bytes(db)?;
     if occupied<=budget{return Ok(());}
     for _ in 0..16{
