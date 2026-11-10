@@ -1194,7 +1194,10 @@ fn transform_resolution(input: &str) -> String {
 }
 
 fn parse_date_with_formats(input: &str, formats: &[String]) -> Option<String> {
-    let sanitized = NON_WORD_RE.replace_all(input, " ").trim().to_owned();
+    // Underscores are word characters in regex, but date separators in
+    // release names (e.g. 2026_11_10). Normalize before parsing.
+    let cleaned=input.replace('_', " ");
+    let sanitized = NON_WORD_RE.replace_all(&cleaned, " ").trim().to_owned();
     if sanitized.is_empty() {
         return None;
     }
@@ -1227,6 +1230,27 @@ fn parse_date(input: &str, fmt: &str) -> Option<NaiveDate> {
             let y = tokens[0].parse::<i32>().ok()?;
             let m = tokens[1].parse::<u32>().ok()?;
             let d = tokens[2].parse::<u32>().ok()?;
+            NaiveDate::from_ymd_opt(y, m, d)
+        }
+        "MM DD YYYY" => {
+            if tokens.len() < 3 { return None; }
+            let m = tokens[0].parse::<u32>().ok()?;
+            let d = tokens[1].parse::<u32>().ok()?;
+            let y = tokens[2].parse::<i32>().ok()?;
+            NaiveDate::from_ymd_opt(y, m, d)
+        }
+        "MMM DD YYYY" => {
+            if tokens.len() < 3 { return None; }
+            let m = month_to_num(tokens[0])?;
+            let d = parse_day(tokens[1])?;
+            let y = tokens[2].parse::<i32>().ok()?;
+            NaiveDate::from_ymd_opt(y, m, d)
+        }
+        "YYYY MMM DD" => {
+            if tokens.len() < 3 { return None; }
+            let y = tokens[0].parse::<i32>().ok()?;
+            let m = month_to_num(tokens[1])?;
+            let d = parse_day(tokens[2])?;
             NaiveDate::from_ymd_opt(y, m, d)
         }
         "DD MM YYYY" => {
@@ -2711,6 +2735,46 @@ fn generic_path_title(title:&str)->bool{
     ].contains(&lowercase.as_str())
 }
 
+// Slash is a path delimiter, but it is also common in broadcast dates.
+// Normalize only calendar-valid slash triples embedded in a named release
+// component (Show.2026/11/10); never join ordinary numeric directories
+// (Show/Season.2/...) into an invented airdate.
+static SLASH_YMD_DATE_RE: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(
+        r"(?:19[0-9]{2}|20[0-9]{2}|2100)/(?:0?[1-9]|1[0-2])/(?:0?[1-9]|[12][0-9]|3[01])\b"
+    ).expect("valid slash year-first date grammar")
+});
+static SLASH_DMY_DATE_RE: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(
+        r"(?:0?[1-9]|[12][0-9]|3[01])/(?:0?[1-9]|1[0-2])/(?:19[0-9]{2}|20[0-9]{2}|2100)"
+    ).expect("valid slash day-first date grammar")
+});
+fn normalize_slash_date_format<'a>(
+    input:&'a str,re:&regex::Regex,format:&str,
+)->Cow<'a,str>{
+    re.replace_all(input,|caps:&regex::Captures<'_>|{
+        let m=caps.get(0).expect("slash regex always has full match");
+        let before=input[..m.start()].rsplit(['/', '\\']).next().unwrap_or_default();
+        let separated=before.as_bytes().last()
+            .is_some_and(|c|matches!(*c,b'.'|b'_'|b'-'|b' '));
+        let named=before.bytes().any(|c|c.is_ascii_alphabetic());
+        let trailing=input[m.end()..].chars().next()
+            .is_none_or(|c|!c.is_ascii_alphanumeric());
+        let normalized=m.as_str().replace('/'," ");
+        if separated&&named&&trailing
+            &&parse_date_with_formats(&normalized,&[format.to_owned()]).is_some()
+        {
+            m.as_str().replace('/', ".")
+        }else{m.as_str().to_owned()}
+    })
+}
+fn normalize_slash_dates(input:&str)->Cow<'_,str>{
+    if !input.contains('/') {return Cow::Borrowed(input);}
+    let year=normalize_slash_date_format(input,&SLASH_YMD_DATE_RE,"YYYY MM DD");
+    let day=normalize_slash_date_format(&year,&SLASH_DMY_DATE_RE,"DD MM YYYY");
+    if day==input {Cow::Borrowed(input)} else{Cow::Owned(day.into_owned())}
+}
+
 /// Parse a hierarchical torrent path from ancestor to leaf. Any explicit,
 /// non-empty metadata value on a deeper level overrides the same field from
 /// an ancestor (year, season, episode, quality, resolution, codec, etc.).
@@ -2720,6 +2784,8 @@ pub fn parse_title(
     raw_title: &str,
     translate_languages: bool,
 ) -> Result<Map<String, Value>, ParseError> {
+    let date_normalized=normalize_slash_dates(raw_title);
+    let raw_title=date_normalized.as_ref();
     let components:Vec<&str>=raw_title.split(&['/','\\'][..])
         .filter(|part|!part.is_empty() && *part!="." && *part!="..").collect();
     let mut merged=Map::new();
@@ -3605,6 +3671,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn date_field_normalizes_release_formats_without_inventing_episodes() {
+        // All dates are published in one ISO-8601 date field. The matcher,
+        // not the parser, resolves the date to IMDb season/episode.
+        let cases = [
+            ("The.Daily.Show.2026.11.10.1080p.WEB-DL", "2026-11-10"),
+            ("The_Daily_Show_2026_11_10_WEB-DL", "2026-11-10"),
+            ("The.Daily.Show.2026-11-10.1080p.WEB-DL", "2026-11-10"),
+            ("The.Daily.Show.2026/11/10.1080p.WEB-DL", "2026-11-10"),
+            ("The.Daily.Show.2026/11/30.1080p.WEB-DL", "2026-11-30"),
+            ("The.Daily.Show.2026/2/9.1080p.WEB-DL", "2026-02-09"),
+            ("The.Daily.Show.10/11/2026.1080p.WEB-DL", "2026-11-10"),
+            ("The.Daily.Show.2026.2.9.1080p.WEB-DL", "2026-02-09"),
+            ("The.Daily.Show.10.11.2026.1080p.WEB-DL", "2026-11-10"),
+            ("The.Daily.Show.9-2-2026.1080p.WEB-DL", "2026-02-09"),
+            ("The.Daily.Show.November.10.2026.1080p.WEB-DL", "2026-11-10"),
+            ("The.Daily.Show.2026-Nov-10.1080p.WEB-DL", "2026-11-10"),
+            ("The.Daily.Show.10th.November.2026.1080p.WEB-DL", "2026-11-10"),
+            ("The.Daily.Show.20261110.1080p.WEB-DL", "2026-11-10"),
+            ("The.Daily.Show.11.30.2026.1080p.WEB-DL", "2026-11-30"),
+            ("The.Daily.Show.2024.02.29.1080p.WEB-DL", "2024-02-29"),
+            ("The.Daily.Show.2031.12.31.1080p.WEB-DL", "2031-12-31"),
+        ];
+        for (release, expected) in cases {
+            let parsed=parse_title(release,false).unwrap();
+            assert_eq!(parsed.get("date").and_then(Value::as_str),Some(expected),
+                "{release} => {parsed:?}");
+            assert_eq!(parsed["seasons"],json!([]),"{release}");
+            assert_eq!(parsed["episodes"],json!([]),"{release}");
+            assert!(parsed["title"].as_str().is_some_and(|s|
+                s.to_ascii_lowercase().contains("daily")),
+                "date handler damaged title: {release} => {parsed:?}");
+        }
+        let directory=parse_title(
+            "The.Daily.Show/Season.27/Show.S27E45.1080p.WEB-DL",false).unwrap();
+        assert!(directory.get("date").is_none(),
+            "path separators must not create an airdate");
+        assert_eq!(directory["seasons"],json!([27]));
+        assert_eq!(directory["episodes"],json!([45]));
+        for release in [
+            "The.Daily.Show.2026.02.30.1080p.WEB-DL",
+            "The.Daily.Show.2025.02.29.1080p.WEB-DL",
+            "The.Daily.Show.2026.13.01.1080p.WEB-DL",
+            "The.Daily.Show.20261301.WEB-DL",
+            "Breaking.Bad.S02E03.1080p.WEB-DL",
+            "Movie.Title.2026.1080p.BluRay",
+        ] {
+            let parsed=parse_title(release,false).unwrap();
+            assert!(parsed.get("date").is_none(),
+                "invalid date should not be exposed: {release} => {parsed:?}");
+        }
+    }
+
+    #[test]
     fn unmarked_anime_batch_does_not_claim_only_its_last_episode(){
         let parsed=parse_title("bleach_320 - 400",false).unwrap();
         let candidate=&parsed["anime_episode_range_candidate"];
@@ -3898,7 +4017,8 @@ mod tests {
             .iter()
             .filter(|handler| handler.gate.is_active())
             .count();
-        assert_eq!(regex_handlers, 449);
+        assert!(regex_handlers >= 449,
+            "missing source regex handlers: {regex_handlers}");
         assert!(
             gated_handlers >= 300,
             "only {gated_handlers} of {regex_handlers} regex handlers are gated"

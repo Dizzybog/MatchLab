@@ -104,7 +104,7 @@ curl -X POST http://127.0.0.1:8765/parse \
   -d '{"title":"Supernatural.S02E03.1080p.WEB-DL"}'
 ```
 
-The JSON contains every field the parser recognizes, such as `title`, `seasons`, `episodes`, `year`, `resolution`, `quality`, `codec`, `languages` and release metadata. A trailing unmarked number, for example `Jojo's bizarre adventure stone ocean 27`, may produce an `anime_episode_candidate` object with `title`, `episode`, `numbering: "absolute"` and `verified: false`. This is **not** a confirmed episode in `/parse`. During `/match`, MatchLab promotes the candidate only when Tantivy resolves the shortened title to a unique exact anime alias; the existing IMDb/AniDB crosswalk still determines whether any canonical SID/ASID can be published. Titles such as `District 9`, numbers in movie titles, production years and technical markers never become verified anime episodes merely by ending in digits. The same verification applies to names with and without a separating dash.
+The JSON contains every field the parser recognizes, such as `title`, `seasons`, `episodes`, `year`, `date`, `resolution`, `quality`, `codec`, `languages` and release metadata. A trailing unmarked number, for example `Jojo's bizarre adventure stone ocean 27`, may produce an `anime_episode_candidate` object with `title`, `episode`, `numbering: "absolute"` and `verified: false`. This is **not** a confirmed episode in `/parse`. During `/match`, MatchLab promotes the candidate only when Tantivy resolves the shortened title to a unique exact anime alias; the existing IMDb/AniDB crosswalk still determines whether any canonical SID/ASID can be published. Titles such as `District 9`, numbers in movie titles, production years and technical markers never become verified anime episodes merely by ending in digits. The same verification applies to names with and without a separating dash.
 
 The native parser additionally exposes `half_episode: true` for conservatively recognized fractional anime episode notation such as `S01E06.5` or a verified fansub-style `12.5v2`. The numeric `episodes` field holds the integer portion; the half-episode flag is **descriptive only** and does not manufacture an IMDb or AniDB fractional episode ID. Explicit `第...季` season ordinals, Russian `<number> сезон <number> серия` and Cyrillic-confusable `S01Е02` markers are handled as native release-name syntax. East Asian absolute episode numbers remain unverified hints unless authoritative episode metadata confirms a mapping.
 
@@ -245,8 +245,21 @@ name parser.
 ### Airdate matching (no API key)
 
 When a TV release contains a date instead of explicit SxxExx coordinates, MatchLab
-identifies the IMDb series from the title preceding the date, then looks up
-the episode's premiere date in Cinemeta's public episode feed.
+uses the **same native Rust parser `date` field** exposed by `/parse`.
+Regex handlers normalize matched release dates to ISO `YYYY-MM-DD`, and the
+matcher resolves that date against the series' Cinemeta episode metadata.
+There is no second, independent date regex in the IMDb matching path.
+
+The bundled grammar accepts common `YYYY.MM.DD`, `YYYY-MM-DD`,
+`YYYY_MM_DD`, `YYYYMMDD`, `DD.MM.YYYY`, named-month day-first,
+month-first and year-first forms, and unambiguous US month-first numeric
+dates where the day exceeds 12. Values are validated as real calendar dates,
+including leap years; invalid dates are omitted. Numeric DD/MM/YYYY versus
+MM/DD/YYYY is inherently ambiguous when both numbers are <= 12, so the
+native parser defaults to day-first interpretation, not locale inference.
+A completely arbitrary date notation is not guaranteed to be recognized.
+Date-only releases are **never expanded into full IMDb season packs**, even
+if a date lookup fails. Explicit SxxExx coordinates always win.
 
 ```text
 The.Daily.Show.2022.01.20.Francis.Ngannou.1080p

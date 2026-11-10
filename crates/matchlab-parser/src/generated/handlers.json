@@ -819,6 +819,97 @@
       "transform": "date('YYYYMMDD')"
     },
     {
+      "name": "date",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": false,
+        "remove": true
+      },
+      "kind": "regex",
+      "flags": 2,
+      "pattern": "(?:^|[^A-Za-z0-9])((?:19[0-9]{2}|20[0-9]{2}|2100)[._ -]+(?:0?[1-9]|1[0-2])[._ -]+(?:0?[1-9]|[12][0-9]|3[01]))(?=$|[^A-Za-z0-9])",
+      "transform": "date('YYYY MM DD')"
+    },
+    {
+      "name": "date",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": false,
+        "remove": true
+      },
+      "kind": "regex",
+      "flags": 2,
+      "pattern": "(?:^|[^A-Za-z0-9])((?:0?[1-9]|[12][0-9]|3[01])[._ -]+(?:0?[1-9]|1[0-2])[._ -]+(?:19[0-9]{2}|20[0-9]{2}|2100))(?=$|[^A-Za-z0-9])",
+      "transform": "date('DD MM YYYY')"
+    },
+    {
+      "name": "date",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": false,
+        "remove": true
+      },
+      "kind": "regex",
+      "flags": 2,
+      "pattern": "(?:^|[^A-Za-z0-9])((?:0?[1-9]|1[0-2])[._ -]+(?:1[3-9]|2[0-9]|3[01])[._ -]+(?:19[0-9]{2}|20[0-9]{2}|2100))(?=$|[^A-Za-z0-9])",
+      "transform": "date('MM DD YYYY')"
+    },
+    {
+      "name": "date",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": false,
+        "remove": true
+      },
+      "kind": "regex",
+      "flags": 2,
+      "pattern": "(?:^|[^A-Za-z0-9])((?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)[._ -]+(?:0?[1-9]|[12][0-9]|3[01])(?:st|nd|rd|th)?[._ -]+(?:19[0-9]{2}|20[0-9]{2}|2100))(?=$|[^A-Za-z0-9])",
+      "transform": "date('MMM DD YYYY')"
+    },
+    {
+      "name": "date",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": false,
+        "remove": true
+      },
+      "kind": "regex",
+      "flags": 2,
+      "pattern": "(?:^|[^A-Za-z0-9])((?:19[0-9]{2}|20[0-9]{2}|2100)[._ -]+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)[._ -]+(?:0?[1-9]|[12][0-9]|3[01]))(?=$|[^A-Za-z0-9])",
+      "transform": "date('YYYY MMM DD')"
+    },
+    {
+      "name": "date",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": false,
+        "remove": true
+      },
+      "kind": "regex",
+      "flags": 2,
+      "pattern": "(?:^|[^A-Za-z0-9])((?:0?[1-9]|[12][0-9]|3[01])(?:st|nd|rd|th)?[._ -]+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)[._ -]+(?:19[0-9]{2}|20[0-9]{2}|2100))(?=$|[^A-Za-z0-9])",
+      "transform": "date('DD MMM YYYY')"
+    },
+    {
+      "name": "date",
+      "options": {
+        "skipIfAlreadyFound": true,
+        "skipFromTitle": false,
+        "skipIfFirst": false,
+        "remove": true
+      },
+      "kind": "regex",
+      "flags": 2,
+      "pattern": "(?:^|[^A-Za-z0-9])((?:19[0-9]{2}|20[0-9]{2}|2100)(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01]))(?=$|[^A-Za-z0-9])",
+      "transform": "date('YYYYMMDD')"
+    },
+    {
       "name": "complete",
       "options": {
         "skipIfAlreadyFound": true,

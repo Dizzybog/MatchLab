@@ -70,7 +70,7 @@ A **SID** is an IMDb title ID, optionally followed by season and episode. An **A
 | Endpoint | Purpose |
 | --- | --- |
 | `GET/POST /match` | Match a release to IMDb and optional AniDB episodes |
-| `GET/POST /parse` | Extract release fields without matching |
+| `GET/POST /parse` | Extract release fields, including normalized ISO `date`, without matching |
 | `GET/POST /alias` | Look up alternate titles and related IDs |
 | `GET/POST /episode/resolve` | Convert verified IMDb and AniDB episode coordinates |
 | `POST /debug/match` | Inspect matching with the same strict checks as `/match` |
@@ -91,8 +91,8 @@ The learning process is:
 3. Test proposed regex rules against known values, conflicting patterns and negative examples.
 4. Activate eligible rules in memory without restarting. More uncertain changes are kept for review.
 
-The generated parser contains **458 ordered handlers across 48 field families**
-(449 regex handlers and nine Rust functions). The new *field-general*
+The generated parser contains **465 ordered handlers across 48 field families**
+(456 regex handlers and nine Rust functions). The new *field-general*
 learner can derive safe regex candidates from existing native handler
 provenance and meaning-preserving release-tag variants. It must prove
 **incremental improvement**, preserve complete parser results, reject
@@ -102,7 +102,7 @@ establish a reliable result. See the [complete parser and ML regex audit](docs/M
 for field families, transform safety, title-removal interactions, rule
 lifecycle and remaining limitations.
 
-**ML learns from every field that MatchLab parses**, including titles, years, seasons, episodes, languages, video and audio details, release groups, and other metadata. It looks for recurring naming patterns and can propose **new regex rules or improvements to existing ones** for any field. A rule is activated in the live parser **without restarting** only when sufficient independent evidence and field-specific safety checks support it; otherwise it remains inactive for further validation or review. Anime episode patterns still require verified metadata mappings. **ML changes regex only: MatchLab performs all field extraction and IMDb/AniDB matching.** With community sharing enabled, the exact regex additions and replacements can be proposed on GitHub. An ML score alone never activates a rule.
+**ML learns from every field that MatchLab parses**, including titles, years, seasons, episodes, languages, video and audio details, release groups, and other metadata. It looks for recurring naming patterns and can propose **new regex rules or improvements to existing ones** for any field. A rule is activated in the live parser **without restarting** only when sufficient independent evidence and field-specific safety checks support it; otherwise it remains inactive for further validation or review. Anime episode patterns still require verified metadata mappings. **ML changes regex only: MatchLab performs all field extraction and IMDb/AniDB matching. The existing `date` field participates in the native ML handler catalog, so new date syntaxes can be observed and proposed; unlike fixed technical labels, date changes require calendar and full-parser verification before they can become live rules.** With community sharing enabled, the exact regex additions and replacements can be proposed on GitHub. An ML score alone never activates a rule.
 
 Enable learning with **one ML environment variable**:
 

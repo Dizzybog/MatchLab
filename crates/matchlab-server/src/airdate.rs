@@ -7,30 +7,6 @@ use std::{path::{Path,PathBuf},time::{SystemTime,UNIX_EPOCH,Duration}};
 const TTL:i64=7*24*3600;
 const MAX_BYTES:usize=16*1024*1024;
 
-pub fn extract(input:&str)->Option<(String,String)> {
-    // Recognize YYYY.MM.DD, YYYY-MM-DD, YYYY_MM_DD without confusing SxxExx.
-    let leaf=input.rsplit(['/', '\\']).next()?;
-    let parts:Vec<(usize,&str)>=leaf.match_indices(|c:char|!c.is_ascii_digit())
-        .map(|(i,_)|i).chain(std::iter::once(leaf.len()))
-        .scan(0,|start,end|{let p=(*start,end);*start=end+1;Some(p)})
-        .filter_map(|(a,b)|leaf.get(a..b).filter(|s|!s.is_empty()).map(|s|(a,s)))
-        .collect();
-    for w in parts.windows(3){
-        let (offset,y)=w[0];let (_,m)=w[1];let (_,d)=w[2];
-        if y.len()!=4||m.len()!=2||d.len()!=2{continue;}
-        let (Ok(y),Ok(m),Ok(d))=(y.parse::<i32>(),m.parse::<u32>(),d.parse::<u32>())else{continue;};
-        if !(1900..=2100).contains(&y)||!(1..=12).contains(&m){continue;}
-        let leap=y%4==0&&(y%100!=0||y%400==0);
-        let max=[31,if leap{29}else{28},31,30,31,30,31,31,30,31,30,31][m as usize-1];
-        if d==0||d>max{continue;}
-        let title=leaf[..offset].trim_end_matches(|c:char|!c.is_ascii_alphanumeric())
-            .replace(['.','_','-']," ");
-        if title.trim().is_empty(){continue;}
-        return Some((title,format!("{y:04}-{m:02}-{d:02}")));
-    }
-    None
-}
-
 fn cache_path(metadata:&Path)->PathBuf{
     metadata.with_file_name("matchlab_airdates.sqlite3")
 }
@@ -192,16 +168,6 @@ mod tests{
         assert_eq!(lookup_with_day_tolerance(&db,"tt1","2022-01-20").unwrap(),Some((27,45,"2022-01-20".into())));
         drop(db);
         std::fs::remove_dir_all(folder).unwrap();
-    }
-    #[test]fn date_and_title(){
-        assert_eq!(extract("The.Daily.Show.2022.01.20.Francis.Ngannou.1080p"),
-            Some(("The Daily Show".into(),"2022-01-20".into())));
-        assert_eq!(extract("The_Daily_Show_2022-01-20.mkv"),
-            Some(("The Daily Show".into(),"2022-01-20".into())));
-        assert!(extract("The.Daily.Show.2022.02.30").is_none());
-        assert!(extract("Supernatural.S02E03.1080p").is_none());
-        assert_eq!(extract("Jimmy.Kimmel.2024-09-16.WEB.x264-TORRENTGALAXY"),
-            Some(("Jimmy Kimmel".into(),"2024-09-16".into())));
     }
     #[test]
     fn exact_airdate_precedes_timezone_fallback_and_never_overrides_ambiguity(){
