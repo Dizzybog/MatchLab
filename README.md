@@ -152,6 +152,14 @@ TV families require three distinct missing-coordinate observations, two distinct
 
 GitHub sharing is **off by default**, even when local ML is on. MatchLab only posts proposed regex changes and selected diagnostics as comments on Issues in [Dizzybog/MatchLab](https://github.com/Dizzybog/MatchLab). It does **not** create Issues or merge PRs.
 
+The trusted **Community Learning GitHub Action** now independently tests proposed
+source-handler regex changes against the original Rust parser, known-good
+torrent titles and maintainer-verified expected fields. It flags redundant and
+regressive rules; only independently proven extensions can stage an exact
+source-regex union and new Rust regression tests in a **human-review PR**. 
+Neither an ML score nor an Issue comment can directly edit the parser or
+automatically merge a PR. See [the automated regex impact reviewer](docs/COMMUNITY_LEARNING.md#automatic-native-regex-impact-review).
+
 #### 1. Create the right GitHub token
 
 **If you own the upstream MatchLab repository** (or it is selectable in your GitHub token settings), use a **fine-grained personal access token**:
