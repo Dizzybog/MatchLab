@@ -230,6 +230,31 @@ jobs:
           This Action NEVER merges its own PR into main; source diffs require
           maintainer approval.
           EOF
+          # The report contains counters and fingerprints only.
+          python3 - "$RUNNER_TEMP/community-regex-impact.json" \
+            "$RUNNER_TEMP/community-promotion-summary.json" \
+            >> "$RUNNER_TEMP/community-pr-body.md" <<'PY'
+          import json,sys
+          with open(sys.argv[1],encoding="utf8") as fh:
+              audits=json.load(fh)
+          with open(sys.argv[2],encoding="utf8") as fh:
+              promotion=json.load(fh)
+          print("\n### Native Rust regex audit")
+          for row in audits:
+              fingerprint=str(row.get("fingerprint",""))[:12]
+              kind=str(row.get("kind","unknown"))
+              status=str(row.get("status","unknown"))
+              gains=int(row.get("verified_improvements",0))
+              synthetic=int(row.get("synthetic_changes",0))
+              regressions=int(row.get("regressions",0))
+              print(f"- {fingerprint} ({kind}): {status}; "
+                    f"verified gains={gains}, synthetic changes={synthetic}, "
+                    f"regressions={regressions}")
+          if promotion:
+              print("\nSource merge proposal: handler "
+                    f"{int(promotion['handler_index'])}; "
+                    "trusted fixtures promoted to Rust regression tests.")
+          PY
           gh pr create --repo "$GH_REPO" \
             --base main --head "$branch" \
             --title "feat(parser): review high-evidence community regex" \
@@ -312,5 +337,7 @@ jobs:
           path: |
             ${{ runner.temp }}/community-review.jsonl
             ${{ runner.temp }}/community-shadow-model.json
+            ${{ runner.temp }}/community-regex-impact.json
+            ${{ runner.temp }}/community-promotion-summary.json
           retention-days: 7
           if-no-files-found: error
