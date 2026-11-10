@@ -3768,6 +3768,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cached_pcre2_preserves_case_flags_and_parser_results(){
+        let sensitive=compile_regex(r"\\bBR\\b",false).unwrap();
+        let insensitive=compile_regex(r"\\bBR\\b",true).unwrap();
+        let same=compile_regex(r"\\bBR\\b",true).unwrap();
+        assert!(!sensitive.is_match(b"br").unwrap());
+        assert!(insensitive.is_match(b"br").unwrap());
+        assert_eq!(same.is_match(b"br").unwrap(),
+            insensitive.is_match(b"br").unwrap());
+        let titles=vec!["Bleach.S17E01.1080p.WEB-DL".to_owned(),
+            "The.Daily.Show.2018.02.13.1080p.WEB-DL".to_owned(),
+            "Movie.2025.2160p.BluRay".to_owned()];
+        let expected=replay_handler_rules(&[],&[],&[],&titles).unwrap();
+        let cached=replay_handler_rules(&[],&[],&[],&titles).unwrap();
+        assert_eq!(expected,cached,"compiled generation cache changed parser semantics");
+    }
+
+    #[test]
     fn date_field_normalizes_release_formats_without_inventing_episodes() {
         // All dates are published in one ISO-8601 date field. The matcher,
         // not the parser, resolves the date to IMDb season/episode.
