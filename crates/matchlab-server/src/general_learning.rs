@@ -56,7 +56,7 @@ static CURSOR:AtomicU64=AtomicU64::new(0);
 static OBSERVED:AtomicU64=AtomicU64::new(0);
 // SQLite owns the authoritative revision; the in-process cache is an
 // accelerator only. It never bypasses the promotion/replay safety checks.
-static CANDIDATE_CACHE:OnceLock<Mutex<Option<(u64,Vec<Active>)>>>=OnceLock::new();
+static CANDIDATE_CACHE:OnceLock<Mutex<Option<(String,Vec<Active>)>>>=OnceLock::new();
 fn evidence_revision(db:&Connection)->Result<u64,String>{
     let number:i64=db.query_row("SELECT revision FROM ml_general_evidence_revision
         WHERE id=1",[],|row|row.get(0)).map_err(|e|e.to_string())?;
@@ -70,14 +70,17 @@ static SAFE_GENERATION:OnceLock<Mutex<Option<String>>>=OnceLock::new();
 static REJECTED_REPLAYS:OnceLock<Mutex<(String,std::collections::HashSet<String>)>>=
     OnceLock::new();
 fn validation_generation(db:&Connection,rules:&[Active])->Result<String,String>{
-    Ok(format!("{}:{}:{}:{}:{}:{rules:?}",
-        evidence_revision(db)?,
+    Ok(format!("{}:{}:{}:{}:{}:{}:{rules:?}",
+        db.path().unwrap_or(":memory:"),evidence_revision(db)?,
         matchlab_parser::handler_patch_revision(),
         crate::field_learning::revision(),
         crate::tv_learning::revision(),
         crate::corrective_learning::revision()))
 }
 fn active_safe_cached(db:&Connection,rules:&[Active])->Result<bool,String>{
+    if db.path().is_none_or(|p|p.is_empty()||p==":memory:"){
+        return active_safe(db,rules);
+    }
     let generation=validation_generation(db,rules)?;
     let cache=SAFE_GENERATION.get_or_init(||Mutex::new(None));
     if cache.lock().ok().is_some_and(|saved|saved.as_ref()==Some(&generation)){
@@ -471,10 +474,16 @@ fn migrate(db:&Connection)->Result<(),String>{
 }
 fn candidates(db:&Connection)->Result<Vec<Active>,String>{
     let revision=evidence_revision(db)?;
+    let memo_path=db.path().filter(|p|!p.is_empty()&&*p!=":memory:");
+    // In-memory test databases may share an empty SQLite path. Never reuse
+    // a candidate cohort across distinct independent connections.
+    let memo_key=memo_path.map(|path|format!("{path}:{revision}"));
     let cache=CANDIDATE_CACHE.get_or_init(||Mutex::new(None));
-    if let Ok(guard)=cache.lock(){
-        if let Some((seen,ready))=guard.as_ref(){
-            if *seen==revision{return Ok(ready.clone());}
+    if let Some(ref key)=memo_key{
+        if let Ok(guard)=cache.lock(){
+            if let Some((seen,ready))=guard.as_ref(){
+                if *seen==key{return Ok(ready.clone());}
+            }
         }
     }
     let mut stmt=db.prepare("SELECT rule_key,field,source_index,pattern,mode,
@@ -497,7 +506,9 @@ fn candidates(db:&Connection)->Result<Vec<Active>,String>{
     // Invalid persisted rules and arbitrary field overwrites cannot become
     // executable even if a local SQLite database was imported or modified.
     let eligible=proposals.into_iter().filter(promotable).collect::<Vec<_>>();
-    if let Ok(mut guard)=cache.lock(){*guard=Some((revision,eligible.clone()));}
+    if let Some(key)=memo_key{
+        if let Ok(mut guard)=cache.lock(){*guard=Some((key,eligible.clone()));}
+    }
     Ok(eligible)
 }
 fn read_examples(db:&Connection,key:&str,limit:usize)->Result<Vec<Evidence>,String>{
@@ -727,7 +738,8 @@ pub fn reconcile(db:&Connection)->Result<(),String>{
             let rule=pool[(start+offset)%pool.len()].clone();
             if ready.iter().any(|old|old.key==rule.key){continue;}
             let generation=validation_generation(db,&ready)?;
-            if previously_rejected(&generation,&rule.key){continue;}
+            if db.path().is_some_and(|p|!p.is_empty()&&p!=":memory:")
+                &&previously_rejected(&generation,&rule.key){continue;}
             let mut candidate=ready.clone();
             candidate.push(rule.clone());
             match replay(db,&ready,&candidate,&rule.key)?{
@@ -739,7 +751,9 @@ pub fn reconcile(db:&Connection)->Result<(),String>{
             }
             _=>{
                 rejected+=1;
-                remember_rejected(&generation,&rule.key);
+                if db.path().is_some_and(|p|!p.is_empty()&&p!=":memory:"){
+                    remember_rejected(&generation,&rule.key);
+                }
             }
             }
         }
