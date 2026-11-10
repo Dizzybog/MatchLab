@@ -619,17 +619,18 @@ mod tests {
         db.execute("INSERT INTO ml_corrective_observations
             (example_hash,identity_hash,family,error_class,release_name,source_build,observed_at)
             VALUES('a','work','sxe','missing','Example.S01E02', 'build',1)",[]).unwrap();
-        assert_ne!(evidence_revision(&db).unwrap(),start);
+        let inserted=evidence_revision(&db).unwrap();
+        assert_ne!(inserted,start);
         db.execute("UPDATE ml_corrective_observations SET observed_at=2
             WHERE example_hash='a'",[]).unwrap();
-        assert_ne!(evidence_revision(&db).unwrap(),start);
+        assert_eq!(evidence_revision(&db).unwrap(),inserted);
         let tx=db.transaction().unwrap();
         tx.execute("UPDATE ml_corrective_observations SET error_class='aligned'
             WHERE example_hash='a'",[]).unwrap();
         let updated=evidence_revision(&tx).unwrap();
-        assert_ne!(updated,evidence_revision(&db).unwrap());
+        assert_ne!(updated,inserted);
         tx.rollback().unwrap();
-        assert_ne!(evidence_revision(&db).unwrap(),start);
+        assert_eq!(evidence_revision(&db).unwrap(),inserted);
         db.execute("DELETE FROM ml_corrective_observations WHERE example_hash='a'",[])
             .unwrap();
         assert_ne!(evidence_revision(&db).unwrap(),start);
