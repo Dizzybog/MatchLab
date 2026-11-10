@@ -104,18 +104,24 @@ lifecycle and remaining limitations.
 
 **ML learns from every field that MatchLab parses**, including titles, years, seasons, episodes, languages, video and audio details, release groups, and other metadata. It looks for recurring naming patterns and can propose **new regex rules or improvements to existing ones** for any field. A rule is activated in the live parser **without restarting** only when sufficient independent evidence and field-specific safety checks support it; otherwise it remains inactive for further validation or review. Anime episode patterns still require verified metadata mappings. **ML changes regex only: MatchLab performs all field extraction and IMDb/AniDB matching.** With community sharing enabled, the exact regex additions and replacements can be proposed on GitHub. An ML score alone never activates a rule.
 
-Enable learning in the Compose environment:
+Enable learning with **one ML environment variable**:
 
 ```yaml
 environment:
-  MATCHLAB_ML_ENABLED: "true"
-  MATCHLAB_ML_TRAINING_MAX_EXAMPLES: "500000"
-  MATCHLAB_ML_MAX_STORAGE_GB: "10"
-  MATCHLAB_ML_CACHE_ENABLED: "true"
-  MATCHLAB_ML_CACHE_MAX_ENTRIES: "200000"
-  MATCHLAB_ML_QUEUE_MAX_ITEMS: "20000"
-  MATCHLAB_ML_TRAINING_BATCH_SIZE: "64"
+  MATCHLAB_ML_SIZE_GB: "10"
 ```
+
+`0` (the default) disables local ML; `1` to `128` enables it with that
+many GiB reserved as a **best-effort total ML budget**, not an operating-system
+filesystem quota. MatchLab splits this into **50% training evidence, 30% result
+cache and 20% observation queue/history**. A 10 GiB budget derives up to
+500,000 training examples, 500,000 cached responses and 900,000 queued
+observations. Actual disk usage is governed independently by occupied SQLite
+pages and estimated queue bytes. Safety/regex activation thresholds and CPU
+concurrency do not grow with the budget.
+
+See [ML capacity and scaling](docs/ML_SCALING.md) for size profiles, migration
+from the older ML variables and what is excluded from the budget.
 
 **Safe observation mode:** set `MATCHLAB_ML_LIVE_REGEX_ENABLED: "false"` to keep
 collecting/training locally while preventing learned regex rules from changing
@@ -123,7 +129,14 @@ the live parser. This is an emergency opt-out for native regex publication,
 not a switch to disable the canonical parser. Re-enable only after examining
 `GET /api/ml/status` and the local regression report.
 
-Only `MATCHLAB_ML_ENABLED` is required; the other settings are optional limits. The training limit counts retained observations, **not RAM usage**. A separate bounded SQLite ML job queue stores observations after matching, and the trainer processes 64 jobs at a time with retry and backoff. Cache hits use a small in-memory tier: HTTP parsing/matching never opens the cache SQLite file. Cache writes run in their own background worker and separate database, avoiding lock contention with training. After parser, rule or metadata changes, old cached answers are ignored and requests are parsed/matched again. Learning evidence is never treated as a completed match.
+Only `MATCHLAB_ML_SIZE_GB` is needed for local ML. The training and queue
+limits are estimated numbers of retained observations, not RAM reservations;
+training batches are chosen automatically. The separate bounded SQLite ML job
+queue stores observations after matching. Cache hits use a small in-memory
+tier: HTTP parsing/matching never opens the cache SQLite file. Cache writes run
+in their own background worker, separately from training. After parser, rule
+or metadata changes, old cached answers are ignored and requests are parsed/
+matched again. Learning evidence is never treated as a completed match.
 
 Check `GET /api/ml/status` to see local model and rule statistics. No separate AI server, GPU or online AI service is required.
 
@@ -210,16 +223,10 @@ See [Machine Learning and Community Learning](docs/COMMUNITY_LEARNING.md) for su
 | `MATCHLAB_HOST` | `0.0.0.0:8765` in Docker | API listener |
 | `MATCHLAB_METADATA_REFRESH_HOURS` | `168` | Metadata refresh interval |
 | `MATCHLAB_MAX_CONCURRENT_MATCHES` | `4` | Maximum concurrent matches (example uses 2) |
-| `MATCHLAB_ML_ENABLED` | `false` | Enable local background learning |
-| `MATCHLAB_ML_LIVE_REGEX_ENABLED` | `true` | Explicitly set `false` to keep training but serve only canonical native regexes |
-| `MATCHLAB_ML_TRAINING_MAX_EXAMPLES` | `12000` | Maximum retained training observations |
-| `MATCHLAB_ML_MAX_STORAGE_GB` | `1` | Local learning evidence budget (separate from cache) |
-| `MATCHLAB_ML_QUEUE_MAX_ITEMS` | `20000` | Bounded durable ML observation queue; oldest observations are dropped only if overwhelmed |
-| `MATCHLAB_ML_TRAINING_BATCH_SIZE` | `64` | Training jobs consumed per transaction (8–128) |
-| `MATCHLAB_ML_CACHE_STATE_FILE` | `/data/ml-result-cache.sqlite3` | Separate SQLite cache, never the local training database |
-| `MATCHLAB_ML_CACHE_MAX_STORAGE_GB` | `1` | Independent cache disk budget |
-| `MATCHLAB_ML_CACHE_ENABLED` | `true` when ML is on | Cache repeat requests |
-| `MATCHLAB_ML_CACHE_MAX_ENTRIES` | `100000` | Maximum persistent cache entries |
+| `MATCHLAB_ML_SIZE_GB` | `0` | Single local ML control: 0=off, 1–128 GiB total budget; automatically scales examples, cache and queue |
+| `MATCHLAB_ML_LIVE_REGEX_ENABLED` | `true` | Optional emergency opt-out: train without activating new regex rules |
+| `MATCHLAB_ML_CACHE_ENABLED` | `true` when ML is on | Optional opt-out for cached results |
+| `MATCHLAB_ML_CACHE_STATE_FILE` | `/data/ml-result-cache.sqlite3` | Advanced cache-path override |
 | `MATCHLAB_COMMUNITY_LEARNING_ENABLED` | `false` | Enable optional GitHub reporting |
 | `MATCHLAB_COMMUNITY_GITHUB_TOKEN` | Unset | Fine-grained PAT with Issues Read/write on upstream (owner), or classic `public_repo` PAT for external contributors; validated on startup |
 
