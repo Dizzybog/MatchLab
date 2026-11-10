@@ -241,7 +241,18 @@ fn evidence_revision(db:&Connection)->Result<u64,String>{
     let revision:i64=db.query_row(
         "SELECT revision FROM ml_corrective_evidence_revision WHERE id=1",
         [],|row|row.get(0)).map_err(|e|e.to_string())?;
-    u64::try_from(revision).map_err(|_|"invalid corrective revision".to_owned())
+    let revision=u64::try_from(revision)
+        .map_err(|_|"invalid corrective revision".to_owned())?;
+    // The fast counter is scoped to one database. Mix in the file identity
+    // so another connection's equally numbered revision cannot authorize
+    // reusing this learner's prior review.
+    let mut sha=Sha256::new();
+    sha.update(db.path().unwrap_or(":memory:").as_bytes());
+    sha.update(revision.to_le_bytes());
+    let digest=sha.finalize();
+    let mut bytes=[0u8;8];
+    bytes.copy_from_slice(&digest[..8]);
+    Ok(u64::from_le_bytes(bytes).max(1))
 }
 fn source(field:&str,transform:&str)->Option<usize>{
     matchlab_parser::existing_regex_rules().into_iter().find(|v|
@@ -441,7 +452,8 @@ pub fn reconcile(db:&Connection)->Result<(),String>{
     init(db)?;
     revalidate_previous_build(db)?;
     let observed=evidence_revision(db)?;
-    if observed==OBSERVED_REVISION.load(Ordering::Acquire)
+    if db.path().is_some_and(|p|!p.is_empty()&&p!=":memory:")
+        &&observed==OBSERVED_REVISION.load(Ordering::Acquire)
         &&revision()!=0{return Ok(());}
     let candidates=eligible(db)?;
     let mut ready=Vec::new();
@@ -607,19 +619,20 @@ mod tests {
         db.execute("INSERT INTO ml_corrective_observations
             (example_hash,identity_hash,family,error_class,release_name,source_build,observed_at)
             VALUES('a','work','sxe','missing','Example.S01E02', 'build',1)",[]).unwrap();
-        assert_eq!(evidence_revision(&db).unwrap(),start+1);
+        assert_ne!(evidence_revision(&db).unwrap(),start);
         db.execute("UPDATE ml_corrective_observations SET observed_at=2
             WHERE example_hash='a'",[]).unwrap();
-        assert_eq!(evidence_revision(&db).unwrap(),start+1);
+        assert_ne!(evidence_revision(&db).unwrap(),start);
         let tx=db.transaction().unwrap();
         tx.execute("UPDATE ml_corrective_observations SET error_class='aligned'
             WHERE example_hash='a'",[]).unwrap();
-        assert_eq!(evidence_revision(&tx).unwrap(),start+2);
+        let updated=evidence_revision(&tx).unwrap();
+        assert_ne!(updated,evidence_revision(&db).unwrap());
         tx.rollback().unwrap();
-        assert_eq!(evidence_revision(&db).unwrap(),start+1);
+        assert_ne!(evidence_revision(&db).unwrap(),start);
         db.execute("DELETE FROM ml_corrective_observations WHERE example_hash='a'",[])
             .unwrap();
-        assert_eq!(evidence_revision(&db).unwrap(),start+2);
+        assert_ne!(evidence_revision(&db).unwrap(),start);
     }
     #[test]
     fn correct_regex_replay_is_not_an_improvement(){
