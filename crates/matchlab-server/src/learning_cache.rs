@@ -15,14 +15,8 @@ use sha2::{Digest,Sha256};
 use std::{env,fs,path::{Path,PathBuf},time::{Duration,SystemTime,UNIX_EPOCH}};
 
 const GIB:u64=1024*1024*1024;
-const DEFAULT_GB:u64=1;
-const MAX_GB:u64=128;
 const MAX_ENTRY_BYTES:usize=512*1024;
 const CACHE_TTL_SECS:i64=30*24*3600;
-const DEFAULT_TRAINING_EXAMPLES:i64=12_000;
-const MAX_TRAINING_EXAMPLES:i64=2_000_000;
-const DEFAULT_CACHE_ENTRIES:i64=100_000;
-const MAX_CACHE_ENTRIES:i64=2_000_000;
 static CACHE_HITS:AtomicU64=AtomicU64::new(0);
 static CACHE_MISSES:AtomicU64=AtomicU64::new(0);
 // Updated by background maintenance, never by individual request writes.
@@ -97,9 +91,9 @@ impl HotStore{
         self.fifo.push_back((key,stamp));
         // A repeated key can leave obsolete FIFO markers. Ignore them, but
         // also cap marker count so identical requests cannot leak memory.
-        while self.rows.len()>crate::ml_config::get().hot_cache_max_entries
+        while self.rows.len()>crate::ml_config::get().hot_cache_max_entries.min(HOT_MAX_ENTRIES)
             ||self.occupied>HOT_MAX_BYTES
-            ||self.fifo.len()>crate::ml_config::get().hot_cache_max_entries*2
+            ||self.fifo.len()>crate::ml_config::get().hot_cache_max_entries.min(HOT_MAX_ENTRIES)*2
         {
             let Some((old_key,old_stamp))=self.fifo.pop_front()else{break;};
             if self.rows.get(&old_key).is_some_and(|v|v.sequence==old_stamp){
