@@ -48,10 +48,25 @@ fn unmarked_batches_remain_tentative_and_seasonless_without_explicit_s_marker(){
 }
 
 #[test]
-fn invalid_zero_season_and_technical_dimensions_cannot_be_tv_coordinates(){
+fn specials_season_zero_remains_valid_and_dimensions_are_not_coordinates(){
+    // S00E18 is valid TV special-episode notation. Do not make the parser
+    // mistake of rejecting specials when fixing positive season prefixes.
     let p=parse_title("Example.Show.S00E18.WEB-DL",false).unwrap();
-    assert_ne!(p["seasons"],json!([0]),"{p:?}");
+    assert_eq!(p["seasons"],json!([0]),"{p:?}");
+    assert_eq!(p["episodes"],json!([18]),"{p:?}");
     let technical=parse_title("Example.Show.1920x1080.WEB-DL",false).unwrap();
     assert_eq!(technical["seasons"],json!([]),"{technical:?}");
     assert_eq!(technical["episodes"],json!([]),"{technical:?}");
+}
+
+#[test]
+fn existing_native_codec_patterns_do_not_need_duplicate_ml_regex(){
+    for release in [
+        "Example.Show.S01E02.H 264.WEB-DL.mkv",
+        "Example.Show.S01E02.x 264.WEB-DL.mkv",
+        "Example.Show.S01E02.H.264.BluRay.mp4",
+    ]{
+        let p=parse_title(release,false).unwrap();
+        assert_eq!(p["codec"],json!("avc"),"{release}: {p:?}");
+    }
 }
