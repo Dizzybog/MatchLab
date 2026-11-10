@@ -378,6 +378,17 @@ pub fn init(db: &Connection) -> Result<(), String> {
              PRIMARY KEY(field,signal,example_hash));
          CREATE INDEX IF NOT EXISTS learned_field_gap_build_cohort
              ON learned_field_gap_evidence(source_build,field,signal,canonical,identity_hash);
+         -- The previous evidence schema stores only hashes, which cannot be
+         -- replayed. Hold bounded raw *gap-only* release names locally so
+         -- promotion can prove a real improvement on the original failures.
+         -- No raw examples are included in logs or community proposals.
+         CREATE TABLE IF NOT EXISTS learned_field_gap_replay(
+             field TEXT NOT NULL,signal TEXT NOT NULL,example_hash TEXT NOT NULL,
+             identity_hash TEXT NOT NULL,release_title TEXT NOT NULL,
+             source_build TEXT NOT NULL,
+             PRIMARY KEY(field,signal,example_hash));
+         CREATE INDEX IF NOT EXISTS learned_field_replay_cohort
+             ON learned_field_gap_replay(source_build,field,signal,identity_hash);
          CREATE TABLE IF NOT EXISTS learned_field_rules(
             field TEXT NOT NULL,signal TEXT NOT NULL,canonical TEXT NOT NULL,
             verified_build TEXT NOT NULL,example_count INTEGER NOT NULL,
@@ -427,6 +438,14 @@ fn reclaim_unpromoted(db:&Connection,limit:i64)->Result<i64,String>{
         removed+=db.execute(sql,params![current,left])
             .map_err(|e|e.to_string())? as i64;
     }
+    // Keep raw replay samples bounded by the same evidence retention policy.
+    db.execute("DELETE FROM learned_field_gap_replay WHERE
+        NOT EXISTS (SELECT 1 FROM learned_field_gap_evidence e
+            WHERE e.field=learned_field_gap_replay.field
+              AND e.signal=learned_field_gap_replay.signal
+              AND e.example_hash=learned_field_gap_replay.example_hash
+              AND e.source_build=learned_field_gap_replay.source_build)",[])
+        .map_err(|e|e.to_string())?;
     Ok(removed)
 }
 pub fn observe_with_budget(db:&Connection,title:&str,details:&Value,
@@ -493,6 +512,19 @@ pub fn observe_with_budget(db:&Connection,title:&str,details:&Value,
             },params![field,signal,key,source_build],|row|row.get(0)).map_err(|e|e.to_string())?;
         db.execute(sql,params![field,signal,key,identity,canonical,source_build])
             .map_err(|e|e.to_string())?;
+        if from_gap {
+            // Only the trusted ML worker may see these local release names.
+            // The replay record shares the same bounded evidence identity.
+            db.execute("INSERT INTO learned_field_gap_replay(
+                field,signal,example_hash,identity_hash,release_title,source_build)
+                VALUES(?1,?2,?3,?4,?5,?6)
+                ON CONFLICT(field,signal,example_hash) DO UPDATE SET
+                    identity_hash=excluded.identity_hash,
+                    release_title=excluded.release_title,
+                    source_build=excluded.source_build",
+                params![field,signal,key,identity,title,source_build])
+                .map_err(|e|e.to_string())?;
+        }
         if previously_known==0{
             *count+=1;
             labels.push((field,signal));
@@ -506,6 +538,9 @@ pub fn observe_with_budget(db:&Connection,title:&str,details:&Value,
 pub fn evict_obsolete(db: &Connection, limit: i64) -> Result<i64, String> {
     if limit <= 0 { return Ok(0); }
     init(db)?;
+    // Raw old-build release names provide no authorization after upgrades.
+    db.execute("DELETE FROM learned_field_gap_replay WHERE source_build<>?1",
+        [build()]).map_err(|e|e.to_string())?;
     let obsolete=db.execute(
         "DELETE FROM learned_field_gap_evidence WHERE rowid IN (
             SELECT rowid FROM learned_field_gap_evidence WHERE source_build<>?1
