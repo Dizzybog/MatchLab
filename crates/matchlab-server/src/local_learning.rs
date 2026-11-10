@@ -122,6 +122,27 @@ fn pattern(flag:&Value,parsed:&Value,selected:&Value)->Option<(String,String)>{
     };
     Some((code.to_owned(),digest(&format!("{code}:{feature}"))))
 }
+/// Dashboard writer maintains an exact O(1) queue count via SQLite
+/// triggers. When the learner is behind, count only already acknowledged
+/// rows, usually zero or the small bounded cleanup tail, rather than scanning
+/// millions of pending jobs every 200ms during catch-up.
+fn pending_training_jobs(db:&Connection,after:i64)->Result<i64,String>{
+    let total=db.query_row(
+        "SELECT total FROM ml_queue_metrics WHERE only_row=1",[],
+        |row|row.get::<_,i64>(0));
+    match total {
+        Ok(total)=>{
+            let acknowledged:i64=db.query_row(
+                "SELECT COUNT(*) FROM ml_training_queue WHERE id<=?1",
+                [after],|row|row.get(0)).map_err(|e|e.to_string())?;
+            Ok(total.saturating_sub(acknowledged).max(0))
+        },
+        // Support old history files before the queue-metrics migration.
+        Err(_)=>db.query_row(
+            "SELECT COUNT(*) FROM ml_training_queue WHERE id>?1",
+            [after],|row|row.get(0)).map_err(|e|e.to_string()),
+    }
+}
 fn scan(history:&Path,metadata:&Path,local:&mut Connection,
     revalidate:bool)->Result<usize,String>{
     // Revalidation is necessary at startup and during scheduled maintenance,
@@ -149,9 +170,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
     if cursor.is_none(){put(local,"after_id",&after.to_string())?;}
     // Exact queued row count, not an ID difference (IDs have gaps when
     // duplicate release names are coalesced or jobs are acknowledged).
-    let queued:i64=history_db.query_row(
-        "SELECT COUNT(*) FROM ml_training_queue WHERE id>?1",
-        [after],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let queued=pending_training_jobs(&history_db,after)?;
     JOBS_AVAILABLE.store(queued.max(0) as u64,Ordering::Relaxed);
     if newest<after{put(local,"after_id",&newest.to_string())?;return Ok(0);}
     if newest==after{
@@ -472,6 +491,30 @@ pub fn start(history:PathBuf,metadata:PathBuf){
 mod tests{
     use super::*;
     use serde_json::json;
+    #[test]
+    fn pending_jobs_use_trigger_count_and_exclude_acked_rows(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE ml_training_queue(
+            id INTEGER PRIMARY KEY,title_hash TEXT UNIQUE,title TEXT,details TEXT);
+            CREATE TABLE ml_queue_metrics(only_row INTEGER PRIMARY KEY,total INTEGER);
+            INSERT INTO ml_queue_metrics VALUES(1,0);
+            CREATE TRIGGER ml_queue_count_insert AFTER INSERT ON ml_training_queue BEGIN
+                UPDATE ml_queue_metrics SET total=total+1 WHERE only_row=1;
+            END;
+            CREATE TRIGGER ml_queue_count_delete AFTER DELETE ON ml_training_queue BEGIN
+                UPDATE ml_queue_metrics SET total=total-1 WHERE only_row=1;
+            END;").unwrap();
+        for id in 1..=100{
+            db.execute("INSERT INTO ml_training_queue VALUES(?1,?2,'a','{}')",
+                params![id,format!("{id}")]).unwrap();
+        }
+        assert_eq!(pending_training_jobs(&db,0).unwrap(),100);
+        assert_eq!(pending_training_jobs(&db,73).unwrap(),27);
+        db.execute("DELETE FROM ml_training_queue WHERE id<=73",[]).unwrap();
+        assert_eq!(pending_training_jobs(&db,73).unwrap(),27);
+        db.execute("DELETE FROM ml_training_queue WHERE id>90",[]).unwrap();
+        assert_eq!(pending_training_jobs(&db,73).unwrap(),17);
+    }
     #[test]
     fn stremthru_style_queue_pacing_is_bounded(){
         assert_eq!(retry_delay(0),Duration::from_millis(250));
