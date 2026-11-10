@@ -145,11 +145,15 @@ jobs:
             learning/community_regex_proposals.json \
             "$RUNNER_TEMP/community-regex-next.json"
           cp "$RUNNER_TEMP/community-regex-next.json" learning/community_regex_proposals.json
-          if git diff --quiet -- learning/community_rules.json learning/community_regex_proposals.json; then
-            echo "COMMUNITY_RULE_CHANGED=false" >> "$GITHUB_ENV"
-          else
-            echo "COMMUNITY_RULE_CHANGED=true" >> "$GITHUB_ENV"
-          fi
+          # The reviewer sometimes normalizes an empty array from "[\\n]" to
+          # "[]". A whitespace-only diff must NEVER create a no-op PR or
+          # consume a community fingerprint from the durable backlog.
+          python3 scripts/community_review_diff.py \
+            "$RUNNER_TEMP/community-rules-before.json" \
+            learning/community_rules.json \
+            "$RUNNER_TEMP/community-extended-before.json" \
+            learning/community_regex_proposals.json \
+            "$GITHUB_ENV"
       - name: Test candidate against full Rust regression suite
         if: env.COMMUNITY_RULE_CHANGED == 'true'
         run: |
