@@ -236,13 +236,15 @@ A participating installation sends at most **one confirmed batch comment every 2
 - Turning GitHub sharing on exports the entire archive over successive bounded daily batches. Current rules must pass the latest independent validation. Older or lower-evidence rules become `historical_regex_review` items, strictly **non-executable** until human review and new independent validation.
 - Pending and confirmed fingerprints persist in `/data/community-learning.sqlite3`. A delivery is recorded only on a GitHub HTTP 201 response or when the same batch ID is found in a recent official community Issue. A failed or ambiguous response leaves the batch retryable.
 - GitHub Actions deduplicates against its global fingerprint ledger, existing accepted rules and a persistent unprocessed-proposal backlog maintained as a GitHub Release asset. Review throughput is intentionally bounded; receiving a comment is **not** proof that a rule has passed independent screening or been merged.
+- A batch can contain reports and rules observed by **older builds** than the version sending the batch. The receiver checks that every source SHA is an actual Git **ancestor** of the batch SHA (itself an ancestor of trusted `main`), enforces the exact schema epoch and verifies the original full batch fingerprint list *before* inspecting individual entries. Invalid children are skipped without discarding correctly signed, independently reviewable siblings. None of these reports becomes a trusted label; all observations are reparsed with the current Rust parser.
+- A community PR is created only if the accepted rule JSON changes **semantically**. Formatting an empty `[]` differently must never create a review PR, advance a rule fingerprint or consume the pending review backlog. Historical rules and technical source patches are still review-only until separately tested.
 - `GET /api/community/status` provides local archive, pending and confirmed-delivery counts. A remote global duplicate is decided by GitHub; local status cannot assert whether a remote PR is merged.
 
 The trusted GitHub Action:
 
 1. Validates incoming data, build ancestry, deduplication fingerprints and allowed regex grammar.
 2. Replays relevant samples against the current Rust parser when the evidence is available.
-3. Creates at most one **human-review PR** for the daily run.
+3. Creates at most one **human-review PR** for the daily run, and **only** for a genuine rule-data change. A compiler/serializer rewrite of empty JSON is a no-op.
 4. Keeps technical, TV and source-handler suggestions in `learning/community_regex_proposals.json` as **non-executable review data**. Independently approved changes must be integrated before they affect other installations.
 5. Publishes independently reviewed anime marker rules through `learning/community_rules.json`.
 
