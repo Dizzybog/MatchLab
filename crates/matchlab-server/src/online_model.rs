@@ -39,15 +39,19 @@ pub struct OnlineModel{
     recent_count:u8,
 }
 fn digest(s:&str)->String{format!("{:x}",Sha256::digest(s.as_bytes()))}
-fn hash(s:&str)->usize{
-    // Deterministic 64-bit FNV-1a. The hash output, not raw text, is stored.
+fn hash_bytes(parts:&[&[u8]])->usize{
+    // Byte-exact FNV-1a over virtual concatenation: no String allocation
+    // for dozens of field/feature n-grams per model prediction.
     let mut h=0xcbf29ce484222325u64;
-    for &byte in s.as_bytes(){
-        h^=u64::from(byte);
-        h=h.wrapping_mul(0x100000001b3);
+    for part in parts{
+        for &byte in *part{
+            h^=u64::from(byte);
+            h=h.wrapping_mul(0x100000001b3);
+        }
     }
     (h as usize)&(DIM-1)
 }
+fn hash(s:&str)->usize{hash_bytes(&[s.as_bytes()])}
 fn identity_group(title:&str)->String{
     let mut group=Vec::new();
     for word in title.split(|c:char|!c.is_ascii_alphanumeric())
@@ -93,25 +97,32 @@ impl TitleFeatureContext{
         // so pretrained FTRL state and floating-point update order are stable.
         // A short Vec avoids a balanced-tree allocation for each feature.
         let mut features=Vec::with_capacity(110);
+        let field_bytes=field.as_bytes();
+        let signal_bytes=signal.as_bytes();
         features.push(hash("bias"));
-        features.push(hash(&format!("f:{field}")));
-        features.push(hash(&format!("s:{signal}")));
-        features.push(hash(&format!("fs:{field}:{signal}")));
-        for span in [2,3,4]{
-            for chunk in signal.as_bytes().windows(span).take(32){
-                if let Ok(token)=std::str::from_utf8(chunk){
-                    features.push(hash(&format!("g{span}:{field}:{token}")));
+        features.push(hash_bytes(&[b"f:",field_bytes]));
+        features.push(hash_bytes(&[b"s:",signal_bytes]));
+        features.push(hash_bytes(&[b"fs:",field_bytes,b":",signal_bytes]));
+        for (span,prefix) in [(2,&b"g2:"[..]),(3,&b"g3:"[..]),(4,&b"g4:"[..])]{
+            for chunk in signal_bytes.windows(span).take(32){
+                if std::str::from_utf8(chunk).is_ok(){
+                    features.push(hash_bytes(&[prefix,field_bytes,b":",chunk]));
                 }
             }
         }
-        let marker=signal.replace('_',".");
-        let index=self.lower.find(signal).or_else(||self.lower.find(&marker));
+        let index=self.lower.find(signal).or_else(||{
+            signal.contains('_').then(||signal.replace('_',"."))
+                .and_then(|marker|self.lower.find(&marker))
+        });
         if let Some(index)=index{
             let bucket=index.saturating_mul(8)/self.lower.len().max(1);
-            features.push(hash(&format!("position:{field}:{}",bucket.min(7))));
+            let position=[b'0'+bucket.min(7) as u8];
+            features.push(hash_bytes(&[b"position:",field_bytes,b":",&position]));
         }
         for (present,label) in self.contexts.into_iter().zip(["video","release","audio"]){
-            if present{features.push(hash(&format!("context:{field}:{label}")));}
+            if present{
+                features.push(hash_bytes(&[b"context:",field_bytes,b":",label.as_bytes()]));
+            }
         }
         features.sort_unstable();
         features.dedup();
