@@ -16,9 +16,7 @@ const MAX_BUSY_BACKOFF_MS:u64=15_000;
 // durable history IDs per transaction, preserving the committed cursor on
 // failures and pacing bursts rather than monopolizing a CPU.
 fn batch_size()->i64{
-    env::var("MATCHLAB_ML_TRAINING_BATCH_SIZE").ok()
-        .and_then(|v|v.parse::<i64>().ok())
-        .filter(|n|(8..=128).contains(n)).unwrap_or(64)
+    crate::ml_config::get().training_batch_size
 }
 fn retry_delay(failures:u32)->Duration{
     Duration::from_millis(
@@ -47,8 +45,9 @@ pub fn queue_status()->Value{
 
 const MIN_EXAMPLES:i64=5;
 fn max_examples()->i64{
-    (crate::learning_cache::storage_gb() as i64*20_000)
-        .min(crate::learning_cache::training_max_examples())
+    // Disk quota is enforced independently using measured SQLite pages.
+    // Do not silently shrink a 500k corpus to 200k because of GiB settings.
+    crate::ml_config::get().max_examples
 }
 pub(crate) fn active()->bool{
     env::var("MATCHLAB_ML_ENABLED").ok()
