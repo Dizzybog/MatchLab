@@ -64,6 +64,21 @@ functions, SQL code, or field values into the parser.
 verified successes. It can add native-source regex handlers or broaden
 selected old expressions when an independent marker proves the value.
 
+**Technical field learner no-op gate (PR #89):** Aggregate gap counts and
+a correct-looking marker are *not* sufficient to activate a regex. The
+worker retains a small amount of original failed-release text locally
+(never in logs, status, GitHub proposals, or HTTP responses) and runs
+the complete parser twice: existing verified rules alone, then the same
+rules plus exactly one candidate. The candidate needs **four actual
+missing-to-correct repairs across at least two different normalized
+titles**. All other fields, **including the extracted title**, must be
+identical before and after. Rules already handled by the original
+parser, including ordinary `BluRay`, therefore earn no activation even
+if training observations previously marked them as missing. Failed
+cohorts are memoized until more raw evidence or a new parser generation
+exists, preventing needless CPU work. Old hashed-only field rules retire
+until fresh reproducible examples reverify them.
+
 **Corrective learner (PR #87):** Tracks four error classes: missing,
 overextracted, underextracted, misassigned/incorrect. Exact TV coordinates
 provide independently readable reference values. New source handlers are

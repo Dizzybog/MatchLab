@@ -28,10 +28,38 @@ const MIN_GAP_TITLES: i64 = 2;
 const MIN_OVERRIDE_EXAMPLES: i64 = 16;
 const MIN_OVERRIDE_TITLES: i64 = 6;
 const MAX_RULES: usize = 96;
+const MIN_REPLAY_REPAIRS:usize=4;
+const MIN_REPLAY_TITLES:usize=2;
+const MAX_REPLAY_EXAMPLES:usize=16;
+// Leave the ARM64 worker available for parsing/matching; candidate
+// validation (two complete parser builds) is intentionally paced.
+const MAX_NEW_REPLAY_CHECKS:usize=4;
 const MAX_TITLE_BYTES: usize = 240;
 static ACTIVE:OnceLock<RwLock<ActiveRules>>=OnceLock::new();
 static REVISION: AtomicU64 = AtomicU64::new(0);
 static EVIDENCE_ONLY_CANDIDATES: AtomicU64 = AtomicU64::new(0);
+static RULES_REJECTED_NO_GAIN:AtomicU64=AtomicU64::new(0);
+static RULES_REJECTED_UNVERIFIABLE:AtomicU64=AtomicU64::new(0);
+static PROMOTION_REPLAY_CHECKS:AtomicU64=AtomicU64::new(0);
+static VALIDATION_CURSOR:AtomicU64=AtomicU64::new(0);
+static REPLAY_MEMO_SKIPS:AtomicU64=AtomicU64::new(0);
+static REJECTED_COHORTS:OnceLock<RwLock<BTreeMap<String,(i64,u64)>>> =
+    OnceLock::new();
+fn rejected_cohorts()->&'static RwLock<BTreeMap<String,(i64,u64)>>{
+    REJECTED_COHORTS.get_or_init(||RwLock::new(BTreeMap::new()))
+}
+/// A rejected candidate need not rebuild two parsers again until it gets
+/// additional raw failures or the live parser generation changes.
+fn replay_fingerprint(db:&Connection,rule:&FieldRule)
+    ->Result<(String,(i64,u64)),String>{
+    let count:i64=db.query_row("SELECT count(*) FROM learned_field_gap_replay
+        WHERE field=?1 AND signal=?2 AND source_build=?3",
+        params![rule.field,rule.signal,build()],
+        |row|row.get(0)).map_err(|e|e.to_string())?;
+    let key=format!("{}:{}:{}:{}:{}",
+        build(),rule.field,rule.signal,rule.value,may_override(rule));
+    Ok((key,(count,matchlab_parser::handler_patch_revision())))
+}
 static ORIGINAL_HANDLER_COUNT:OnceLock<usize>=OnceLock::new();
 
 #[derive(Clone)]
@@ -378,6 +406,17 @@ pub fn init(db: &Connection) -> Result<(), String> {
              PRIMARY KEY(field,signal,example_hash));
          CREATE INDEX IF NOT EXISTS learned_field_gap_build_cohort
              ON learned_field_gap_evidence(source_build,field,signal,canonical,identity_hash);
+         -- The previous evidence schema stores only hashes, which cannot be
+         -- replayed. Hold bounded raw *gap-only* release names locally so
+         -- promotion can prove a real improvement on the original failures.
+         -- No raw examples are included in logs or community proposals.
+         CREATE TABLE IF NOT EXISTS learned_field_gap_replay(
+             field TEXT NOT NULL,signal TEXT NOT NULL,example_hash TEXT NOT NULL,
+             identity_hash TEXT NOT NULL,release_title TEXT NOT NULL,
+             source_build TEXT NOT NULL,
+             PRIMARY KEY(field,signal,example_hash));
+         CREATE INDEX IF NOT EXISTS learned_field_replay_cohort
+             ON learned_field_gap_replay(source_build,field,signal,identity_hash);
          CREATE TABLE IF NOT EXISTS learned_field_rules(
             field TEXT NOT NULL,signal TEXT NOT NULL,canonical TEXT NOT NULL,
             verified_build TEXT NOT NULL,example_count INTEGER NOT NULL,
@@ -427,6 +466,14 @@ fn reclaim_unpromoted(db:&Connection,limit:i64)->Result<i64,String>{
         removed+=db.execute(sql,params![current,left])
             .map_err(|e|e.to_string())? as i64;
     }
+    // Keep raw replay samples bounded by the same evidence retention policy.
+    db.execute("DELETE FROM learned_field_gap_replay WHERE
+        NOT EXISTS (SELECT 1 FROM learned_field_gap_evidence e
+            WHERE e.field=learned_field_gap_replay.field
+              AND e.signal=learned_field_gap_replay.signal
+              AND e.example_hash=learned_field_gap_replay.example_hash
+              AND e.source_build=learned_field_gap_replay.source_build)",[])
+        .map_err(|e|e.to_string())?;
     Ok(removed)
 }
 pub fn observe_with_budget(db:&Connection,title:&str,details:&Value,
@@ -493,6 +540,19 @@ pub fn observe_with_budget(db:&Connection,title:&str,details:&Value,
             },params![field,signal,key,source_build],|row|row.get(0)).map_err(|e|e.to_string())?;
         db.execute(sql,params![field,signal,key,identity,canonical,source_build])
             .map_err(|e|e.to_string())?;
+        if from_gap {
+            // Only the trusted ML worker may see these local release names.
+            // The replay record shares the same bounded evidence identity.
+            db.execute("INSERT INTO learned_field_gap_replay(
+                field,signal,example_hash,identity_hash,release_title,source_build)
+                VALUES(?1,?2,?3,?4,?5,?6)
+                ON CONFLICT(field,signal,example_hash) DO UPDATE SET
+                    identity_hash=excluded.identity_hash,
+                    release_title=excluded.release_title,
+                    source_build=excluded.source_build",
+                params![field,signal,key,identity,title,source_build])
+                .map_err(|e|e.to_string())?;
+        }
         if previously_known==0{
             *count+=1;
             labels.push((field,signal));
@@ -506,6 +566,9 @@ pub fn observe_with_budget(db:&Connection,title:&str,details:&Value,
 pub fn evict_obsolete(db: &Connection, limit: i64) -> Result<i64, String> {
     if limit <= 0 { return Ok(0); }
     init(db)?;
+    // Raw old-build release names provide no authorization after upgrades.
+    db.execute("DELETE FROM learned_field_gap_replay WHERE source_build<>?1",
+        [build()]).map_err(|e|e.to_string())?;
     let obsolete=db.execute(
         "DELETE FROM learned_field_gap_evidence WHERE rowid IN (
             SELECT rowid FROM learned_field_gap_evidence WHERE source_build<>?1
@@ -875,22 +938,184 @@ pub fn publish_parser_rules_with_tv_and_corrections(
         .map_err(|e|format!("learned parser regex rejected: {e}"))
 }
 
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+enum FieldReplayOutcome{Improved,NoGain,Unverifiable}
+/// Validate the ACTUAL collected failures against the complete native
+/// parser before and after ONE new rule. A hash or aggregate counter alone
+/// is not a replayable improvement. The release name stays local.
+fn replayed_field_gain(db:&Connection,rule:&FieldRule,
+    existing:&[FieldRule])->Result<FieldReplayOutcome,String>{
+    let mut stmt=db.prepare("SELECT release_title,example_hash,
+            identity_hash,canonical FROM (
+            SELECT r.release_title,r.example_hash,r.identity_hash,e.canonical,
+                ROW_NUMBER() OVER (
+                    PARTITION BY r.identity_hash ORDER BY r.example_hash
+                ) AS identity_rank
+            FROM learned_field_gap_replay r
+            JOIN learned_field_gap_evidence e ON
+                e.field=r.field AND e.signal=r.signal
+                AND e.example_hash=r.example_hash
+                AND e.source_build=r.source_build
+            WHERE r.field=?1 AND r.signal=?2 AND r.source_build=?3
+        ) WHERE identity_rank<=2
+          ORDER BY identity_rank,identity_hash LIMIT 64")
+        .map_err(|e|e.to_string())?;
+    let rows=stmt.query_map(params![rule.field,rule.signal,build()],|row|Ok((
+        row.get::<_,String>(0)?,row.get::<_,String>(1)?,
+        row.get::<_,String>(2)?,row.get::<_,String>(3)?)))
+        .map_err(|e|e.to_string())?;
+    let rows=rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e|e.to_string())?;
+    let mut titles=Vec::new();
+    let mut identities=Vec::new();
+    let mut seen=BTreeSet::new();
+    let mut per_work=BTreeMap::<String,usize>::new();
+    for (name,example_hash,_identity,serialized) in rows{
+        if titles.len()>=MAX_REPLAY_EXAMPLES{break;}
+        if !safe_title(&name){continue;}
+        // Recompute the exact original evidence identity from the raw
+        // release, field, and marker; do not trust a manipulated stored row.
+        if digest(&format!("{}:{}:{}",name.to_ascii_lowercase(),
+            rule.field,rule.signal))!=example_hash{continue;}
+        let Ok(reference)=serde_json::from_str::<Value>(&serialized)else{continue;};
+        if reference!=rule.value{continue;}
+        let Ok(original)=matchlab_parser::parse_title_canonical(&name,false)
+            else{continue;};
+        let Some((validated,is_gap))=training_label(&name,&rule.field,
+            &rule.signal,&original)else{continue;};
+        if !is_gap||validated!=rule.value{continue;}
+        let Some(raw_title)=original.get("title").and_then(Value::as_str)
+            else{continue;};
+        let work=crate::imdb_matcher::clean_title(raw_title);
+        if !(4..=140).contains(&work.len()) ||!seen.insert(example_hash){
+            continue;
+        }
+        let counter=per_work.entry(work.clone()).or_default();
+        if *counter>=2{continue;}
+        *counter+=1;
+        titles.push(name);
+        identities.push(work);
+    }
+    if titles.len()<MIN_REPLAY_REPAIRS
+        ||per_work.len()<MIN_REPLAY_TITLES{
+        return Ok(FieldReplayOutcome::Unverifiable);
+    }
+
+    // Both engines contain the same TV/general rules. The ONLY difference
+    // is the new field rule; previous accepted field rules remain in place.
+    let old_patches=source_handler_patches(existing);
+    let new_rules=existing.iter().filter(|old|
+        old.field!=rule.field||old.signal!=rule.signal).cloned()
+        .chain(std::iter::once(rule.clone())).collect::<Vec<_>>();
+    let new_patches=source_handler_patches(&new_rules);
+    let mk_additions=|rules:&[FieldRule]|{
+        let mut additions=source_handler_additions(rules);
+        additions.extend(crate::tv_learning::handler_additions());
+        additions.extend(crate::general_learning::handler_additions());
+        additions
+    };
+    let mut corrections=crate::corrective_learning::handler_corrections();
+    corrections.extend(crate::general_learning::handler_corrections());
+    let before=matchlab_parser::replay_handler_rules(
+        &old_patches,&mk_additions(existing),&corrections,&titles)
+        .map_err(|e|format!("baseline field replay failed: {e}"))?;
+    let after=matchlab_parser::replay_handler_rules(
+        &new_patches,&mk_additions(&new_rules),&corrections,&titles)
+        .map_err(|e|format!("candidate field replay failed: {e}"))?;
+    let mut repaired=0usize;
+    let mut fixed_works=BTreeSet::new();
+    for ((old,new),work) in before.iter().zip(after.iter()).zip(&identities){
+        let old_value=old.get(&rule.field);
+        let old_missing=empty_field(old_value)
+            ||matches!(rule.field.as_str(),"subbed"|"dubbed")
+                &&old_value==Some(&Value::Bool(false));
+        if old==new{continue;}
+        // An addition that changes an already-populated field (or changes
+        // title/other metadata without fixing a missing field) is a
+        // regression, not a measured improvement.
+        if !old_missing{return Ok(FieldReplayOutcome::NoGain);}
+        if new.get(&rule.field)!=Some(&rule.value){
+            return Ok(FieldReplayOutcome::NoGain);
+        }
+        // All previously correct fields, including the extracted title,
+        // must remain unchanged. Title cleanup is review-only until an
+        // independent title reference verifies the new name.
+        let mut expected=old.clone();
+        expected.insert(rule.field.clone(),rule.value.clone());
+        if *new!=expected{return Ok(FieldReplayOutcome::NoGain);}
+        repaired+=1;
+        fixed_works.insert(work);
+    }
+    Ok(if repaired>=MIN_REPLAY_REPAIRS
+        &&fixed_works.len()>=MIN_REPLAY_TITLES{
+        FieldReplayOutcome::Improved
+    }else{FieldReplayOutcome::NoGain})
+}
+
 pub fn reconcile(db: &Connection) -> Result<(), String> {
     init(db)?;
     let current = build();
-    let active = select_rules(db)?;
-    // Publishing the same semantic rules every 15 seconds would cause
-    // unnecessary SQLite WAL churn, cache generation changes and CPU work.
+    let candidates=select_rules(db)?;
+    let previous=registry().read().map_err(|e|e.to_string())?
+        .rules.clone();
+    // Keep only previously *verified* identities while the evidence for
+    // those field/signals remains eligible in the current source build.
+    let mut active=previous.into_iter().filter(|old|
+        candidates.iter().any(|candidate|
+            candidate.field==old.field&&candidate.signal==old.signal))
+        .collect::<Vec<_>>();
+    let pending=candidates.into_iter().filter(|candidate|
+        !active.iter().any(|old|semantic_identity(old)==semantic_identity(candidate))
+    ).collect::<Vec<_>>();
+    // Prove each new rule against real local failures, NEVER merely counts
+    // or a synthetic marker. A saved rule without replayable evidence is
+    // not automatically restored after an upgrade or restart.
+    if !pending.is_empty(){
+        let offset=VALIDATION_CURSOR.fetch_add(MAX_NEW_REPLAY_CHECKS as u64,
+            Ordering::AcqRel) as usize%pending.len();
+        for i in 0..pending.len().min(MAX_NEW_REPLAY_CHECKS){
+            let candidate=&pending[(offset+i)%pending.len()];
+            let (key,signature)=replay_fingerprint(db,candidate)?;
+            if rejected_cohorts().read().ok().is_some_and(|memo|
+                memo.get(&key)==Some(&signature)){
+                REPLAY_MEMO_SKIPS.fetch_add(1,Ordering::Relaxed);
+                continue;
+            }
+            PROMOTION_REPLAY_CHECKS.fetch_add(1,Ordering::Relaxed);
+            match replayed_field_gain(db,candidate,&active)? {
+                FieldReplayOutcome::Improved=>{
+                    active.retain(|old|old.field!=candidate.field
+                        ||old.signal!=candidate.signal);
+                    active.push(candidate.clone());
+                    if let Ok(mut memo)=rejected_cohorts().write(){
+                        memo.remove(&key);
+                    }
+                },
+                FieldReplayOutcome::NoGain=>{
+                    RULES_REJECTED_NO_GAIN.fetch_add(1,Ordering::Relaxed);
+                    if let Ok(mut memo)=rejected_cohorts().write(){
+                        memo.insert(key,signature);
+                    }
+                },
+                FieldReplayOutcome::Unverifiable=>{
+                    RULES_REJECTED_UNVERIFIABLE.fetch_add(1,Ordering::Relaxed);
+                    if let Ok(mut memo)=rejected_cohorts().write(){
+                        memo.insert(key,signature);
+                    }
+                }
+            }
+        }
+    }
+    // Do not rewrite the materialized SQLite registry or invalidate a cache
+    // generation if no newly proven semantic rule was accepted.
+    let installed=registry().read().map_err(|e|e.to_string())?
+        .rules.iter().map(semantic_identity).collect::<Vec<_>>();
     let mut by_rule=active.iter().map(semantic_identity)
         .collect::<Vec<_>>();
-    by_rule.sort_by(|a,b| (&a.0,&a.1).cmp(&(&b.0,&b.1)));
-    let already_installed = registry().read().ok().is_some_and(|guard|{
-        let mut old=guard.rules.iter().map(semantic_identity)
-            .collect::<Vec<_>>();
-        old.sort_by(|a,b| (&a.0,&a.1).cmp(&(&b.0,&b.1)));
-        old == by_rule
-    });
-    if already_installed && revision()!=0 { return Ok(()); }
+    let mut previously=installed;
+    by_rule.sort_by(|a,b|(&a.0,&a.1).cmp(&(&b.0,&b.1)));
+    previously.sort_by(|a,b|(&a.0,&a.1).cmp(&(&b.0,&b.1)));
+    if by_rule==previously &&revision()!=0{return Ok(());}
     // Validate the fully assembled candidate BEFORE marking rules as
     // verified in persistent SQLite state.
     let patches=source_handler_patches(&active);
@@ -931,6 +1156,11 @@ pub fn status() -> Value {
         }
         return json!({"enabled":crate::local_learning::active(),
             "active_rule_count":active.rules.len(),"active_rules_by_field":fields,
+            "promotion_replay_checks":PROMOTION_REPLAY_CHECKS.load(Ordering::Relaxed),
+            "replay_skipped_unchanged_evidence":REPLAY_MEMO_SKIPS.load(Ordering::Relaxed),
+            "rejected_no_measurable_gain":RULES_REJECTED_NO_GAIN.load(Ordering::Relaxed),
+            "rejected_unverifiable":RULES_REJECTED_UNVERIFIABLE.load(Ordering::Relaxed),
+            "promotion_policy":"4 verified whole-parser repairs from 2 distinct titles; no other field changes",
             "evidence_only_candidates":EVIDENCE_ONLY_CANDIDATES.load(Ordering::Relaxed),
             "activation_policy":"requires_multiple_canonical_field_gaps_and_native_handler",
             "revision":format!("{:016x}",revision()),
@@ -945,6 +1175,10 @@ pub fn status() -> Value {
     }
     json!({"enabled":crate::local_learning::active(),
         "active_rule_count":0,"active_rules_by_field":{},
+        "promotion_replay_checks":PROMOTION_REPLAY_CHECKS.load(Ordering::Relaxed),
+        "replay_skipped_unchanged_evidence":REPLAY_MEMO_SKIPS.load(Ordering::Relaxed),
+        "rejected_no_measurable_gain":RULES_REJECTED_NO_GAIN.load(Ordering::Relaxed),
+        "rejected_unverifiable":RULES_REJECTED_UNVERIFIABLE.load(Ordering::Relaxed),
         "error":"rule_registry_unavailable"})
 }
 
@@ -1230,6 +1464,50 @@ mod tests {
         let rules=select_rules(&db).unwrap();
         assert_eq!(rules[0].canonical_examples,2);
         assert!(may_override(&rules[0]));
+    }
+    #[test]
+    fn persisted_hash_only_gaps_cannot_restore_an_old_noop_regex(){
+        let db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        for n in 0..12{
+            db.execute("INSERT INTO learned_field_gap_evidence(
+                field,signal,example_hash,identity_hash,canonical,
+                source_build,first_seen)
+                VALUES('quality','bluray',?1,?2,'\"BluRay\"',?3,1)",
+                params![format!("legacy{n}"),format!("show{n}"),build()]
+            ).unwrap();
+        }
+        let learned=select_rules(&db).unwrap();
+        assert!(learned.iter().any(|r|r.field=="quality"&&r.signal=="bluray"),
+            "legacy aggregate thresholds can still propose the rule");
+        let rule=rule("quality","bluray",json!("BluRay"),12,6);
+        assert_eq!(replayed_field_gain(&db,&rule,&[]).unwrap(),
+            FieldReplayOutcome::Unverifiable,
+            "hashed historical evidence is not enough to activate a regex");
+    }
+    #[test]
+    fn blue_ray_native_success_is_not_promoted_from_fabricated_gap_labels(){
+        let db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        let mut budget=0;
+        for i in 0..8{
+            let title=format!("Example.Movie.{i}.1080p.BluRay");
+            let native=matchlab_parser::parse_title_canonical(&title,false)
+                .unwrap();
+            assert_eq!(native.get("quality"),Some(&json!("BluRay")));
+            let fake_base=json!({"title":format!("Example Movie {i}")});
+            observe_with_budget(&db,&title,
+                &json!({"selected":{"imdb_id":"tt1234567"}}),
+                &fake_base,&mut budget).unwrap();
+        }
+        let saved:i64=db.query_row("SELECT count(*)
+            FROM learned_field_gap_replay WHERE field='quality'
+              AND signal='bluray'",[],|r|r.get(0)).unwrap();
+        assert!(saved>=MIN_REPLAY_REPAIRS as i64);
+        let candidate=rule("quality","bluray",json!("BluRay"),8,8);
+        assert_eq!(replayed_field_gain(&db,&candidate,&[]).unwrap(),
+            FieldReplayOutcome::Unverifiable,
+            "original native BluRay matches are not real improvements");
     }
     #[test]
     fn conflicting_gap_and_canonical_evidence_quarantines_rule() {
