@@ -10,7 +10,7 @@ use std::sync::{OnceLock,RwLock};
 
 const EPOCH:u32=2;
 const MAX_CANDIDATES:i64=256;
-const MAX_EXAMPLES:i64=12_000;
+
 const MAX_RAW_BYTES:usize=240;
 const MAX_TOKENS:usize=12;
 const MIN_RANK:f32=0.50;
@@ -138,8 +138,7 @@ pub fn observe(db:&Connection,title:&str,parsed:&Value,
     let source_build=build();
     let identity=hash(&format!("{source_build}:{name}"));
     for marker in unknown_tokens(title){
-        if remaining.examples>=MAX_EXAMPLES.min(
-            crate::learning_cache::training_max_examples())
+        if remaining.examples>=crate::ml_config::get().unknown_examples
             && !reclaim_unqualified(db,remaining)?{break;}
         // Learning predictions are only for review prioritization. The
         // actual value and regex are never used in a parser or matcher.
