@@ -186,7 +186,7 @@ Add these environment variables to the **existing** `matchlab` service, keeping 
 services:
   matchlab:
     environment:
-      MATCHLAB_ML_ENABLED: "true"
+      MATCHLAB_ML_SIZE_GB: "10"
       MATCHLAB_COMMUNITY_LEARNING_ENABLED: "true"
       MATCHLAB_COMMUNITY_GITHUB_TOKEN: "${MATCHLAB_COMMUNITY_GITHUB_TOKEN:?Set the token in .env}"
 ```
