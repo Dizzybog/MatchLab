@@ -26,9 +26,15 @@ fn ml_queue_max_items()->i64{
 /// counter avoids a deep OFFSET scan on every history batch. A large cap
 /// reduction is trimmed gradually to keep foreground logging responsive.
 fn trim_ml_queue(tx:&rusqlite::Transaction<'_>,capacity:i64)->rusqlite::Result<usize>{
-    let queued:i64=tx.query_row(
-        "SELECT total FROM ml_queue_metrics WHERE only_row=1",[],|row|row.get(0))?;
-    let excess=queued.saturating_sub(capacity).min(4_096);
+    let (queued,payload_bytes):(i64,i64)=tx.query_row(
+        "SELECT total,payload_bytes FROM ml_queue_metrics WHERE only_row=1",[],
+        |row|Ok((row.get(0)?,row.get(1)?)))?;
+    let byte_budget=crate::ml_config::get().queue_storage_bytes;
+    let over_budget=byte_budget>0 && (payload_bytes as u64)>byte_budget;
+    // One oldest-row eviction per batch under byte pressure, or at most
+    // 4096 under count pressure. This keeps the HTTP history writer bounded.
+    let excess=queued.saturating_sub(capacity)
+        .max(if over_budget{1}else{0}).min(4_096);
     if excess==0{return Ok(0);}
     tx.execute("DELETE FROM ml_training_queue WHERE id IN (
         SELECT id FROM ml_training_queue ORDER BY id ASC LIMIT ?1
@@ -94,17 +100,34 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         -- updates on inserts, deletes and duplicate-title coalescing.
         CREATE TABLE IF NOT EXISTS ml_queue_metrics(
             only_row INTEGER PRIMARY KEY CHECK(only_row=1),
-            total INTEGER NOT NULL DEFAULT 0 CHECK(total>=0)
+            total INTEGER NOT NULL DEFAULT 0 CHECK(total>=0),
+            payload_bytes INTEGER NOT NULL DEFAULT 0 CHECK(payload_bytes>=0)
         );
-        INSERT OR IGNORE INTO ml_queue_metrics(only_row,total)
-        SELECT 1,COUNT(*) FROM ml_training_queue;
+        INSERT OR IGNORE INTO ml_queue_metrics(only_row,total,payload_bytes)
+        SELECT 1,COUNT(*),COALESCE(SUM(
+            length(CAST(title AS BLOB))+length(CAST(details AS BLOB))+256
+        ),0) FROM ml_training_queue;
         CREATE TRIGGER IF NOT EXISTS ml_queue_insert_count
         AFTER INSERT ON ml_training_queue BEGIN
-            UPDATE ml_queue_metrics SET total=total+1 WHERE only_row=1;
+            UPDATE ml_queue_metrics SET total=total+1,
+                payload_bytes=payload_bytes+length(CAST(NEW.title AS BLOB))
+                    +length(CAST(NEW.details AS BLOB))+256
+            WHERE only_row=1;
         END;
         CREATE TRIGGER IF NOT EXISTS ml_queue_delete_count
         AFTER DELETE ON ml_training_queue BEGIN
-            UPDATE ml_queue_metrics SET total=total-1 WHERE only_row=1;
+            UPDATE ml_queue_metrics SET total=total-1,
+                payload_bytes=payload_bytes-length(CAST(OLD.title AS BLOB))
+                    -length(CAST(OLD.details AS BLOB))-256
+            WHERE only_row=1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS ml_queue_update_bytes
+        AFTER UPDATE OF title,details ON ml_training_queue BEGIN
+            UPDATE ml_queue_metrics SET
+                payload_bytes=payload_bytes
+                    +length(CAST(NEW.title AS BLOB))+length(CAST(NEW.details AS BLOB))
+                    -length(CAST(OLD.title AS BLOB))-length(CAST(OLD.details AS BLOB))
+            WHERE only_row=1;
         END;
 
         -- Backfill exactly once for existing installations. Other connections
@@ -208,9 +231,8 @@ fn persist_batch_with_learning(db:&mut Connection,items:&[HistoryEvent],
     tx.execute("DELETE FROM requests WHERE id < (
         SELECT id FROM requests ORDER BY id DESC LIMIT 1 OFFSET ?1
     )",[MAX_HISTORY-1])?;
-    // The counter tracks actual queued rows despite gaps in request IDs.
-    // Trimming removes at most 4,096 oldest rows per batch; it never scans
-    // 900k positions to find an OFFSET boundary on the hot writer path.
+    // Counter tracks actual rows and estimated payload bytes across dedup.
+    // Trim at most 4,096 oldest rows per batch; never scan a huge OFFSET.
     let evicted=if train{trim_ml_queue(&tx,ml_queue_max_items())?}else{0};
     tx.commit()?; 
     if evicted>0{
