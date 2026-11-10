@@ -58,7 +58,9 @@ impl MlConfig{
             training_batch_size:batch,
             learning_storage_bytes:total*50/100,
             cache_storage_bytes:total*30/100,
-            queue_storage_bytes:total*20/100,
+            // Give integer-rounding remainder to the queue, so every
+            // allocated byte is counted exactly once.
+            queue_storage_bytes:total-total*50/100-total*30/100,
             general_examples:(n/6).clamp(1_024,131_072).min(n) as i64,
             corrective_examples:(n/100).clamp(128,16_384).min(n) as i64,
             unknown_examples:(n/8).clamp(256,262_144).min(n) as i64,
