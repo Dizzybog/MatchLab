@@ -1719,6 +1719,7 @@ async fn ml_status()->Json<Value>{
         object.insert("regex_rules".into(),learning_rule_log::status());
         object.insert("corrective_regex".into(),corrective_learning::status());
         object.insert("general_regex".into(),general_learning::status());
+        object.insert("compiled_parser_replay".into(),matchlab_parser::replay_cache_status());
     }
     Json(report)
 }
