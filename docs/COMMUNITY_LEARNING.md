@@ -163,18 +163,18 @@ nor season/episode numbers are written directly by ML.
 
 ## Enable local learning
 
-Add these options to your Compose service's environment:
+Enable local learning with a single GiB budget in the Compose service:
 
 ```yaml
 environment:
-  MATCHLAB_ML_ENABLED: "true"
-  MATCHLAB_ML_TRAINING_MAX_EXAMPLES: "500000"
-  MATCHLAB_ML_MAX_STORAGE_GB: "10"
-  MATCHLAB_ML_CACHE_ENABLED: "true"
-  MATCHLAB_ML_CACHE_MAX_ENTRIES: "200000"
+  MATCHLAB_ML_SIZE_GB: "10"
 ```
 
-Only `MATCHLAB_ML_ENABLED` is required. The other values are optional limits. The example count is a maximum number of retained training **observations**, not RAM allocation or guaranteed unique torrent names.
+A value of `0` (default) disables ML; `1`–`128` enables it and sizes the
+training evidence, result cache, queue and worker buffers. The 10 GiB example
+derives up to 500,000 training observations, 500,000 cached entries and
+900,000 pending queue items. These are ceilings, not guaranteed retained rows;
+real SQLite disk usage can reduce them. See [ML scaling](ML_SCALING.md).
 
 The model, verified evidence and active rules persist in `/data/local-learning.sqlite3`. A separate bounded durable queue in `/data/history.sqlite3` stores post-match observations, independently of the dashboard's 1,000 detailed rows. Cached parse/match results are stored in `/data/ml-result-cache.sqlite3` (configurable with `MATCHLAB_ML_CACHE_STATE_FILE`), **not** alongside ML training writes. Old cache rows in the previous learning SQLite file are not migrated and never used as labels; it is safe to let the bounded cache rebuild. The worker publishes new compiled rules without restarting the server.
 
@@ -200,7 +200,16 @@ The optional cache stores exact-key results in its own SQLite database and keeps
 
 A new parser build, active regex change or metadata generation changes the cache namespace. **An obsolete completed parse or match is never reused.** The next request is parsed and matched again with the current code and rules. Training evidence can be retained, but cached answers and previously learned outputs do not become training truth.
 
-Successful results and no-matches have different expiration times. `MATCHLAB_ML_MAX_STORAGE_GB` applies to local learning evidence; `MATCHLAB_ML_CACHE_MAX_STORAGE_GB` separately limits the cache SQLite file (default 1 GiB). Neither is a strict OS filesystem quota. `MATCHLAB_ML_QUEUE_MAX_ITEMS` (default 20,000) bounds queued training records; overflow may discard optional observations but never successful API matching. `MATCHLAB_ML_TRAINING_BATCH_SIZE` (default 64, range 8–128) controls learning transaction size. Normal work is never delayed awaiting SQLite locks; failed jobs retry without advancing the committed cursor. The approach follows [StremThru's bounded persistent job queue](https://github.com/MunifTanjim/stremthru/tree/main/internal/job/job_queue): identity/dedup, bounded batches, delayed retry and independent workers.
+Successful results and no-matches have different expiration times. A single
+`MATCHLAB_ML_SIZE_GB` budget is allocated as 50% evidence, 30% cache and
+20% queue/history. SQLite page-accounting enforces the evidence and cache
+soft limits; a trigger-maintained queue counter tracks actual rows and
+estimated byte usage so queue pruning does not require deep `OFFSET` scans.
+Neither allocation constitutes a strict OS filesystem quota, particularly
+while SQLite WAL/checkpoint files are present. Queue overflow may discard
+optional observations, never a public match response. Training transaction
+size scales automatically (up to 128), and failed jobs retry without
+advancing the committed cursor. Normal work never waits for ML writer locks. The approach follows [StremThru's bounded persistent job queue](https://github.com/MunifTanjim/stremthru/tree/main/internal/job/job_queue): identity/dedup, bounded batches, delayed retry and independent workers.
 
 ## Share regex improvements through GitHub
 
@@ -208,7 +217,7 @@ Sharing is always optional. Provide a GitHub token that can comment on Issues in
 
 ```yaml
 environment:
-  MATCHLAB_ML_ENABLED: "true"
+  MATCHLAB_ML_SIZE_GB: "10"
   MATCHLAB_COMMUNITY_LEARNING_ENABLED: "true"
   MATCHLAB_COMMUNITY_GITHUB_TOKEN: ${MATCHLAB_COMMUNITY_GITHUB_TOKEN}
 ```
