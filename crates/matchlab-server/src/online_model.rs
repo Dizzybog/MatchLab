@@ -8,7 +8,6 @@ use rusqlite::{params,Connection,OptionalExtension};
 use sha2::{Digest,Sha256};
 use serde_json::{json,Value};
 use std::sync::atomic::{AtomicI64,Ordering};
-use std::collections::BTreeSet;
 
 const EPOCH:i64=2;
 fn current_build()->String{
@@ -70,39 +69,57 @@ fn identity_group(title:&str)->String{
     }
     group.into_iter().take(8).collect::<Vec<_>>().join(" ")
 }
-fn features(field:&str,signal:&str,title:&str)->Vec<usize>{
-    // Include no film-specific names: only structural features, field/tag
-    // n-grams, and position/technical context. Never persist raw filenames.
-    let mut set=BTreeSet::new();
-    set.insert(hash("bias"));
-    set.insert(hash(&format!("f:{field}")));
-    set.insert(hash(&format!("s:{signal}")));
-    set.insert(hash(&format!("fs:{field}:{signal}")));
-    let chars=signal.as_bytes();
-    for span in [2,3,4]{
-        for chunk in chars.windows(span).take(32){
-            if let Ok(token)=std::str::from_utf8(chunk){
-                set.insert(hash(&format!("g{span}:{field}:{token}")));
+// Per-release structural context: shared between up to 64 field observations
+// and between all candidate-discovery scores for a title. Never persisted.
+pub struct TitleFeatureContext{
+    lower:String,
+    contexts:[bool;3],
+    holdout:bool,
+}
+impl TitleFeatureContext{
+    pub fn new(title:&str)->Self{
+        let lower=title.to_ascii_lowercase();
+        let contexts=[
+            ["1080p","2160p","720p","4k","8k"].iter().any(|m|lower.contains(m)),
+            ["web","bluray","hdtv","bdrip"].iter().any(|m|lower.contains(m)),
+            ["aac","ac3","ddp","dts","opus"].iter().any(|m|lower.contains(m)),
+        ];
+        let group=identity_group(title);
+        let holdout=!group.is_empty() && hash(&format!("holdout:{group}"))%5==0;
+        Self{lower,contexts,holdout}
+    }
+    fn features(&self,field:&str,signal:&str)->Vec<usize>{
+        // Preserve the exact legacy FNV-1a feature IDs and sorted-unique order
+        // so pretrained FTRL state and floating-point update order are stable.
+        // A short Vec avoids a balanced-tree allocation for each feature.
+        let mut features=Vec::with_capacity(110);
+        features.push(hash("bias"));
+        features.push(hash(&format!("f:{field}")));
+        features.push(hash(&format!("s:{signal}")));
+        features.push(hash(&format!("fs:{field}:{signal}")));
+        for span in [2,3,4]{
+            for chunk in signal.as_bytes().windows(span).take(32){
+                if let Ok(token)=std::str::from_utf8(chunk){
+                    features.push(hash(&format!("g{span}:{field}:{token}")));
+                }
             }
         }
-    }
-    let lower=title.to_ascii_lowercase();
-    let marker=signal.replace('_',".");
-    let index=lower.find(signal).or_else(||lower.find(&marker));
-    if let Some(index)=index{
-        let bucket=index.saturating_mul(8)/lower.len().max(1);
-        set.insert(hash(&format!("position:{field}:{}",bucket.min(7))));
-    }
-    for (label,markers) in [
-        ("video", &["1080p","2160p","720p","4k","8k"][..]),
-        ("release",&["web","bluray","hdtv","bdrip"][..]),
-        ("audio",&["aac","ac3","ddp","dts","opus"][..]),
-    ]{
-        if markers.iter().any(|m|lower.contains(m)){
-            set.insert(hash(&format!("context:{field}:{label}")));
+        let marker=signal.replace('_',".");
+        let index=self.lower.find(signal).or_else(||self.lower.find(&marker));
+        if let Some(index)=index{
+            let bucket=index.saturating_mul(8)/self.lower.len().max(1);
+            features.push(hash(&format!("position:{field}:{}",bucket.min(7))));
         }
+        for (present,label) in self.contexts.into_iter().zip(["video","release","audio"]){
+            if present{features.push(hash(&format!("context:{field}:{label}")));}
+        }
+        features.sort_unstable();
+        features.dedup();
+        features
     }
-    set.into_iter().collect()
+}
+fn features(field:&str,signal:&str,title:&str)->Vec<usize>{
+    TitleFeatureContext::new(title).features(field,signal)
 }
 impl OnlineModel{
     pub fn new()->Self{
@@ -132,8 +149,12 @@ impl OnlineModel{
         if positive{self.positives+=1;}else{self.negatives+=1;}
     }
     pub fn score(&self,field:&str,signal:&str,title:&str)->Option<f32>{
+        self.score_prepared(field,signal,&TitleFeatureContext::new(title))
+    }
+    pub fn score_prepared(&self,field:&str,signal:&str,
+        context:&TitleFeatureContext)->Option<f32>{
         if self.positives<16||self.negatives<16{return None;}
-        Some(self.raw_score(&features(field,signal,title)))
+        Some(self.raw_score(&context.features(field,signal)))
     }
     #[cfg(test)]
     pub fn trained(&self)->(i64,i64){(self.positives,self.negatives)}
@@ -316,14 +337,19 @@ impl OnlineModel{
         if examples.is_empty(){return Ok(0);}
         let rotation=hash(title)%examples.len();
         examples.rotate_left(rotation);
+        let context=TitleFeatureContext::new(title);
         let mut seen=0;
         for (field,signal) in examples.into_iter().take(64){
-            if self.observe(db,title,field,&signal)?{seen+=1;}
+            if self.observe_prepared(db,title,field,&signal,&context)?{seen+=1;}
         }
         Ok(seen)
     }
     pub fn observe(&mut self,db:&Connection,title:&str,field:&str,
         signal:&str)->Result<bool,String>{
+        self.observe_prepared(db,title,field,signal,&TitleFeatureContext::new(title))
+    }
+    fn observe_prepared(&mut self,db:&Connection,title:&str,field:&str,
+        signal:&str,context:&TitleFeatureContext)->Result<bool,String>{
         if self.positives>=MAX_EXAMPLES||title.len()>240
             ||field.len()>40||signal.len()>32{return Ok(false);}
         // The original Rust parser and field validator already established
@@ -347,15 +373,14 @@ impl OnlineModel{
                     .map_err(|e|e.to_string())?;
             }
         }
-        let real=features(field,signal,title);
+        let real=context.features(field,signal);
         let false_field=if field=="codec"{"resolution"}else{"codec"};
-        let negative=features(false_field,signal,title);
-        let group=identity_group(title);
+        let negative=context.features(false_field,signal);
         // A deterministic title-group holdout prevents ordinary examples
         // for the same recognized work leaking between train and review.
         // This is an advisory pairwise check, NOT calibrated production
         // precision or independently verified IMDb matching accuracy.
-        if !group.is_empty() && hash(&format!("holdout:{group}"))%5==0{
+        if context.holdout{
             if self.positives>=16&&self.negatives>=16{
                 let passed=self.raw_score(&real)>self.raw_score(&negative);
                 self.holdout+=1;
@@ -373,6 +398,47 @@ impl OnlineModel{
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn prepared_features_preserve_original_ftrl_indices_and_scoring(){
+        use std::collections::BTreeSet;
+        for title in ["Film.2160p.WEB-DL.x265", "Jojo's Bizarre Adventure - 27",
+            "Série.2025.S02E01.1080p.AAC"]{
+            let context=TitleFeatureContext::new(title);
+            let lower=title.to_ascii_lowercase();
+            for (field,signal) in [("codec","x265"),("resolution","2160p"),
+                ("episodes","episode_coordinates"),("quality","WEB-DL"),
+                ("year","four_digit_year"),("audio","aac"),("group","part_2")]{
+                let mut legacy=BTreeSet::new();
+                legacy.insert(hash("bias"));
+                legacy.insert(hash(&format!("f:{field}")));
+                legacy.insert(hash(&format!("s:{signal}")));
+                legacy.insert(hash(&format!("fs:{field}:{signal}")));
+                for span in [2,3,4]{
+                    for chunk in signal.as_bytes().windows(span).take(32){
+                        if let Ok(token)=std::str::from_utf8(chunk){
+                            legacy.insert(hash(&format!("g{span}:{field}:{token}")));
+                        }
+                    }
+                }
+                let marker=signal.replace('_',".");
+                if let Some(index)=lower.find(signal).or_else(||lower.find(&marker)){
+                    let bucket=index.saturating_mul(8)/lower.len().max(1);
+                    legacy.insert(hash(&format!("position:{field}:{}",bucket.min(7))));
+                }
+                for (label,markers) in [
+                    ("video",&["1080p","2160p","720p","4k","8k"][..]),
+                    ("release",&["web","bluray","hdtv","bdrip"][..]),
+                    ("audio",&["aac","ac3","ddp","dts","opus"][..]),
+                ]{
+                    if markers.iter().any(|m|lower.contains(m)){
+                        legacy.insert(hash(&format!("context:{field}:{label}")));
+                    }
+                }
+                assert_eq!(context.features(field,signal),
+                    legacy.into_iter().collect::<Vec<_>>());
+            }
+        }
+    }
     #[test]
     fn shadow_model_observes_all_field_categories_with_bounded_work(){
         let db=Connection::open_in_memory().unwrap();
