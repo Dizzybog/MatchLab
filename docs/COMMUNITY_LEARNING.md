@@ -18,7 +18,7 @@ There are two opt-in switches:
 
 | Mode | Setting | What it does |
 | --- | --- | --- |
-| Local learning | `MATCHLAB_ML_ENABLED=true` | Learns and activates eligible regex locally |
+| Local learning | `MATCHLAB_ML_SIZE_GB=10` | Enables learner and sizes local evidence/cache/queue with one 10 GiB budget |
 | Community sharing | `MATCHLAB_COMMUNITY_LEARNING_ENABLED=true` plus a GitHub token | Sends eligible regex proposals to GitHub for review |
 
 Both are disabled by default. Local learning works without community sharing.
