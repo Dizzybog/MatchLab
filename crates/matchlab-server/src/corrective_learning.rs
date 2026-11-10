@@ -141,7 +141,16 @@ pub fn init(db:&Connection)->Result<(),String>{
             UPDATE ml_corrective_evidence_revision SET revision=revision+1 WHERE id=1;
         END;
         CREATE TRIGGER IF NOT EXISTS ml_corrective_revision_update
-            AFTER UPDATE ON ml_corrective_observations BEGIN
+            AFTER UPDATE ON ml_corrective_observations
+            WHEN NEW.example_hash IS NOT OLD.example_hash
+                OR NEW.identity_hash IS NOT OLD.identity_hash
+                OR NEW.family IS NOT OLD.family
+                OR NEW.error_class IS NOT OLD.error_class
+                OR NEW.source_build IS NOT OLD.source_build
+                OR NEW.release_name IS NOT OLD.release_name
+            BEGIN
+            -- Merely refreshing observed_at cannot invalidate the parser
+            -- evidence or necessitate any expensive candidate replay.
             UPDATE ml_corrective_evidence_revision SET revision=revision+1 WHERE id=1;
         END;
         CREATE TRIGGER IF NOT EXISTS ml_corrective_revision_delete
@@ -598,6 +607,9 @@ mod tests {
         db.execute("INSERT INTO ml_corrective_observations
             (example_hash,identity_hash,family,error_class,release_name,source_build,observed_at)
             VALUES('a','work','sxe','missing','Example.S01E02', 'build',1)",[]).unwrap();
+        assert_eq!(evidence_revision(&db).unwrap(),start+1);
+        db.execute("UPDATE ml_corrective_observations SET observed_at=2
+            WHERE example_hash='a'",[]).unwrap();
         assert_eq!(evidence_revision(&db).unwrap(),start+1);
         let tx=db.transaction().unwrap();
         tx.execute("UPDATE ml_corrective_observations SET error_class='aligned'
