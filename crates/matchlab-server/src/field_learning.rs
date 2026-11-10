@@ -979,7 +979,8 @@ fn replayed_field_gain(db:&Connection,rule:&FieldRule,
     // Both engines contain the same TV/general rules. The ONLY difference
     // is the new field rule; previous accepted field rules remain in place.
     let old_patches=source_handler_patches(existing);
-    let new_rules=existing.iter().cloned()
+    let new_rules=existing.iter().filter(|old|
+        old.field!=rule.field||old.signal!=rule.signal).cloned()
         .chain(std::iter::once(rule.clone())).collect::<Vec<_>>();
     let new_patches=source_handler_patches(&new_rules);
     let mk_additions=|rules:&[FieldRule]|{
@@ -1025,19 +1026,52 @@ fn replayed_field_gain(db:&Connection,rule:&FieldRule,
 pub fn reconcile(db: &Connection) -> Result<(), String> {
     init(db)?;
     let current = build();
-    let active = select_rules(db)?;
-    // Publishing the same semantic rules every 15 seconds would cause
-    // unnecessary SQLite WAL churn, cache generation changes and CPU work.
+    let candidates=select_rules(db)?;
+    let previous=registry().read().map_err(|e|e.to_string())?
+        .rules.clone();
+    // Keep only previously *verified* identities while the evidence for
+    // those field/signals remains eligible in the current source build.
+    let mut active=previous.into_iter().filter(|old|
+        candidates.iter().any(|candidate|
+            candidate.field==old.field&&candidate.signal==old.signal))
+        .collect::<Vec<_>>();
+    let pending=candidates.into_iter().filter(|candidate|
+        !active.iter().any(|old|semantic_identity(old)==semantic_identity(candidate))
+    ).collect::<Vec<_>>();
+    // Prove each new rule against real local failures, NEVER merely counts
+    // or a synthetic marker. A saved rule without replayable evidence is
+    // not automatically restored after an upgrade or restart.
+    if !pending.is_empty(){
+        let offset=VALIDATION_CURSOR.fetch_add(MAX_NEW_REPLAY_CHECKS as u64,
+            Ordering::AcqRel) as usize%pending.len();
+        for i in 0..pending.len().min(MAX_NEW_REPLAY_CHECKS){
+            let candidate=&pending[(offset+i)%pending.len()];
+            PROMOTION_REPLAY_CHECKS.fetch_add(1,Ordering::Relaxed);
+            match replayed_field_gain(db,candidate,&active)? {
+                FieldReplayOutcome::Improved=>{
+                    active.retain(|old|old.field!=candidate.field
+                        ||old.signal!=candidate.signal);
+                    active.push(candidate.clone());
+                },
+                FieldReplayOutcome::NoGain=>{
+                    RULES_REJECTED_NO_GAIN.fetch_add(1,Ordering::Relaxed);
+                },
+                FieldReplayOutcome::Unverifiable=>{
+                    RULES_REJECTED_UNVERIFIABLE.fetch_add(1,Ordering::Relaxed);
+                }
+            }
+        }
+    }
+    // Do not rewrite the materialized SQLite registry or invalidate a cache
+    // generation if no newly proven semantic rule was accepted.
+    let installed=registry().read().map_err(|e|e.to_string())?
+        .rules.iter().map(semantic_identity).collect::<Vec<_>>();
     let mut by_rule=active.iter().map(semantic_identity)
         .collect::<Vec<_>>();
-    by_rule.sort_by(|a,b| (&a.0,&a.1).cmp(&(&b.0,&b.1)));
-    let already_installed = registry().read().ok().is_some_and(|guard|{
-        let mut old=guard.rules.iter().map(semantic_identity)
-            .collect::<Vec<_>>();
-        old.sort_by(|a,b| (&a.0,&a.1).cmp(&(&b.0,&b.1)));
-        old == by_rule
-    });
-    if already_installed && revision()!=0 { return Ok(()); }
+    let mut previously=installed;
+    by_rule.sort_by(|a,b|(&a.0,&a.1).cmp(&(&b.0,&b.1)));
+    previously.sort_by(|a,b|(&a.0,&a.1).cmp(&(&b.0,&b.1)));
+    if by_rule==previously &&revision()!=0{return Ok(());}
     // Validate the fully assembled candidate BEFORE marking rules as
     // verified in persistent SQLite state.
     let patches=source_handler_patches(&active);
@@ -1078,6 +1112,10 @@ pub fn status() -> Value {
         }
         return json!({"enabled":crate::local_learning::active(),
             "active_rule_count":active.rules.len(),"active_rules_by_field":fields,
+            "promotion_replay_checks":PROMOTION_REPLAY_CHECKS.load(Ordering::Relaxed),
+            "rejected_no_measurable_gain":RULES_REJECTED_NO_GAIN.load(Ordering::Relaxed),
+            "rejected_unverifiable":RULES_REJECTED_UNVERIFIABLE.load(Ordering::Relaxed),
+            "promotion_policy":"4 verified whole-parser repairs from 2 distinct titles; no other field changes",
             "evidence_only_candidates":EVIDENCE_ONLY_CANDIDATES.load(Ordering::Relaxed),
             "activation_policy":"requires_multiple_canonical_field_gaps_and_native_handler",
             "revision":format!("{:016x}",revision()),
@@ -1092,6 +1130,9 @@ pub fn status() -> Value {
     }
     json!({"enabled":crate::local_learning::active(),
         "active_rule_count":0,"active_rules_by_field":{},
+        "promotion_replay_checks":PROMOTION_REPLAY_CHECKS.load(Ordering::Relaxed),
+        "rejected_no_measurable_gain":RULES_REJECTED_NO_GAIN.load(Ordering::Relaxed),
+        "rejected_unverifiable":RULES_REJECTED_UNVERIFIABLE.load(Ordering::Relaxed),
         "error":"rule_registry_unavailable"})
 }
 
