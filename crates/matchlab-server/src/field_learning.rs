@@ -42,6 +42,24 @@ static RULES_REJECTED_NO_GAIN:AtomicU64=AtomicU64::new(0);
 static RULES_REJECTED_UNVERIFIABLE:AtomicU64=AtomicU64::new(0);
 static PROMOTION_REPLAY_CHECKS:AtomicU64=AtomicU64::new(0);
 static VALIDATION_CURSOR:AtomicU64=AtomicU64::new(0);
+static REPLAY_MEMO_SKIPS:AtomicU64=AtomicU64::new(0);
+static REJECTED_COHORTS:OnceLock<RwLock<BTreeMap<String,(i64,u64)>>> =
+    OnceLock::new();
+fn rejected_cohorts()->&'static RwLock<BTreeMap<String,(i64,u64)>>{
+    REJECTED_COHORTS.get_or_init(||RwLock::new(BTreeMap::new()))
+}
+/// A rejected candidate need not rebuild two parsers again until it gets
+/// additional raw failures or the live parser generation changes.
+fn replay_fingerprint(db:&Connection,rule:&FieldRule)
+    ->Result<(String,(i64,u64)),String>{
+    let count:i64=db.query_row("SELECT count(*) FROM learned_field_gap_replay
+        WHERE field=?1 AND signal=?2 AND source_build=?3",
+        params![rule.field,rule.signal,build()],
+        |row|row.get(0)).map_err(|e|e.to_string())?;
+    let key=format!("{}:{}:{}:{}:{}",
+        build(),rule.field,rule.signal,rule.value,may_override(rule));
+    Ok((key,(count,matchlab_parser::handler_patch_revision())))
+}
 static ORIGINAL_HANDLER_COUNT:OnceLock<usize>=OnceLock::new();
 
 #[derive(Clone)]
@@ -1057,18 +1075,33 @@ pub fn reconcile(db: &Connection) -> Result<(), String> {
             Ordering::AcqRel) as usize%pending.len();
         for i in 0..pending.len().min(MAX_NEW_REPLAY_CHECKS){
             let candidate=&pending[(offset+i)%pending.len()];
+            let (key,signature)=replay_fingerprint(db,candidate)?;
+            if rejected_cohorts().read().ok().is_some_and(|memo|
+                memo.get(&key)==Some(&signature)){
+                REPLAY_MEMO_SKIPS.fetch_add(1,Ordering::Relaxed);
+                continue;
+            }
             PROMOTION_REPLAY_CHECKS.fetch_add(1,Ordering::Relaxed);
             match replayed_field_gain(db,candidate,&active)? {
                 FieldReplayOutcome::Improved=>{
                     active.retain(|old|old.field!=candidate.field
                         ||old.signal!=candidate.signal);
                     active.push(candidate.clone());
+                    if let Ok(mut memo)=rejected_cohorts().write(){
+                        memo.remove(&key);
+                    }
                 },
                 FieldReplayOutcome::NoGain=>{
                     RULES_REJECTED_NO_GAIN.fetch_add(1,Ordering::Relaxed);
+                    if let Ok(mut memo)=rejected_cohorts().write(){
+                        memo.insert(key,signature);
+                    }
                 },
                 FieldReplayOutcome::Unverifiable=>{
                     RULES_REJECTED_UNVERIFIABLE.fetch_add(1,Ordering::Relaxed);
+                    if let Ok(mut memo)=rejected_cohorts().write(){
+                        memo.insert(key,signature);
+                    }
                 }
             }
         }
@@ -1124,6 +1157,7 @@ pub fn status() -> Value {
         return json!({"enabled":crate::local_learning::active(),
             "active_rule_count":active.rules.len(),"active_rules_by_field":fields,
             "promotion_replay_checks":PROMOTION_REPLAY_CHECKS.load(Ordering::Relaxed),
+            "replay_skipped_unchanged_evidence":REPLAY_MEMO_SKIPS.load(Ordering::Relaxed),
             "rejected_no_measurable_gain":RULES_REJECTED_NO_GAIN.load(Ordering::Relaxed),
             "rejected_unverifiable":RULES_REJECTED_UNVERIFIABLE.load(Ordering::Relaxed),
             "promotion_policy":"4 verified whole-parser repairs from 2 distinct titles; no other field changes",
@@ -1142,6 +1176,7 @@ pub fn status() -> Value {
     json!({"enabled":crate::local_learning::active(),
         "active_rule_count":0,"active_rules_by_field":{},
         "promotion_replay_checks":PROMOTION_REPLAY_CHECKS.load(Ordering::Relaxed),
+        "replay_skipped_unchanged_evidence":REPLAY_MEMO_SKIPS.load(Ordering::Relaxed),
         "rejected_no_measurable_gain":RULES_REJECTED_NO_GAIN.load(Ordering::Relaxed),
         "rejected_unverifiable":RULES_REJECTED_UNVERIFIABLE.load(Ordering::Relaxed),
         "error":"rule_registry_unavailable"})
