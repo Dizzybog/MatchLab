@@ -483,7 +483,7 @@ fn candidates(db:&Connection)->Result<Vec<Active>,String>{
     if let Some(ref key)=memo_key{
         if let Ok(guard)=cache.lock(){
             if let Some((seen,ready))=guard.as_ref(){
-                if *seen==key{return Ok(ready.clone());}
+                if seen==key{return Ok(ready.clone());}
             }
         }
     }
