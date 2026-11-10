@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::cell::{Cell,RefCell};
-use std::sync::{Arc,RwLock};
-use std::collections::{HashMap, HashSet};
+use std::sync::{Arc,Mutex,RwLock};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
 use chrono::NaiveDate;
@@ -2944,7 +2944,7 @@ pub struct HandlerCorrection {
 /// All original generated parser handlers, including years, seasons,
 /// episodes, technical fields and title rules. This is read only on the
 /// learning worker, never during normal request parsing.
-pub fn existing_regex_rules() -> Vec<Value> {
+static REGEX_CATALOGUE: Lazy<Vec<Value>> = Lazy::new(|| {
     let Ok(doc) = serde_json::from_str::<Value>(HANDLERS_JSON) else {
         return Vec::new();
     };
@@ -2956,6 +2956,9 @@ pub fn existing_regex_rules() -> Vec<Value> {
                 "flags":raw["flags"],"options":raw["options"],
                 "kind":raw["kind"],"origin":"generated_handler"}))
         }).collect()
+});
+pub fn existing_regex_rules() -> Vec<Value> {
+    REGEX_CATALOGUE.clone()
 }
 pub fn handler_patch_revision() -> u64 {
     LIVE_REVISION.load(std::sync::atomic::Ordering::Acquire)
@@ -3025,7 +3028,7 @@ fn effective_handler_additions(
     patches:&[HandlerPatch],additions:&[HandlerAddition],
     corrections:&[HandlerCorrection]
 )->Vec<HandlerAddition>{
-    let catalog=existing_regex_rules();
+    let catalog=&*REGEX_CATALOGUE;
     let mut seen=HashSet::new();
     let mut out=Vec::new();
     let by_index=|index:usize|catalog.iter().find(|entry|
@@ -3141,10 +3144,10 @@ pub fn install_learned_handler_regex_with_corrections(
         LIVE_REVISION.store(fingerprint,std::sync::atomic::Ordering::Release);
         return Ok(());
     }
-    let candidate=compile_learned_engine(patches,&additions,corrections)?;
+    let candidate=compiled_replay_engine(patches,&additions,corrections)?;
     let mut lock=LIVE_ENGINE.write().map_err(|_|
         ParseError::Data("live handler lock unavailable".into()))?;
-    *lock=Some(Arc::new(candidate));
+    *lock=Some(candidate);
     LIVE_REVISION.store(fingerprint,std::sync::atomic::Ordering::Release);
     Ok(())
 }
@@ -3256,6 +3259,38 @@ fn compile_learned_engine(
     ParserEngine::from_json(&document.to_string())
 }
 
+// Caches exact immutable candidate engines across repeated background evidence
+// replays. Keep the complete rule input as the key (not a 64-bit fingerprint)
+// so a hash collision cannot cause an incorrect validation result. Bounded to
+// six generations; normal API parses never acquire this mutex.
+static REPLAY_ENGINE_CACHE: Lazy<Mutex<VecDeque<(String,Arc<ParserEngine>)>>> =
+    Lazy::new(|| Mutex::new(VecDeque::new()));
+fn compiled_replay_engine(
+    patches:&[HandlerPatch],additions:&[HandlerAddition],
+    corrections:&[HandlerCorrection]
+)->Result<Arc<ParserEngine>,ParseError>{
+    let key=format!("{patches:?}|{additions:?}|{corrections:?}");
+    if let Ok(mut cache)=REPLAY_ENGINE_CACHE.lock(){
+        if let Some(index)=cache.iter().position(|(stored,_)|stored==&key){
+            if let Some(entry)=cache.remove(index){
+                let engine=Arc::clone(&entry.1);
+                cache.push_back(entry);
+                return Ok(engine);
+            }
+        }
+    }
+    // Compile without holding the cache lock. A concurrent compile is safe;
+    // only immutable, successfully compiled generations enter the cache.
+    let engine=Arc::new(compile_learned_engine(patches,additions,corrections)?);
+    if let Ok(mut cache)=REPLAY_ENGINE_CACHE.lock(){
+        if !cache.iter().any(|(stored,_)|stored==&key){
+            if cache.len()>=6{cache.pop_front();}
+            cache.push_back((key,Arc::clone(&engine)));
+        }
+    }
+    Ok(engine)
+}
+
 /// Test the COMPLETE candidate parser, including existing technical and
 /// TV overlays, before changing a live rule. New corrections must improve
 /// the actual installed parser combination, not merely a bare regex sample.
@@ -3266,7 +3301,7 @@ pub fn replay_handler_rules(
     if titles.len()>128{return Err(ParseError::Data(
         "corrective replay corpus too large".into()));}
     let additions=effective_handler_additions(patches,additions,corrections);
-    let candidate=Arc::new(compile_learned_engine(patches,&additions,corrections)?);
+    let candidate=compiled_replay_engine(patches,&additions,corrections)?;
     struct RestoreReplay;
     impl Drop for RestoreReplay{
         fn drop(&mut self){
