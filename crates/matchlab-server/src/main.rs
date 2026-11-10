@@ -1309,12 +1309,15 @@ fn diagnose_with_policy(
         winner["episode_range"]=json!({"start_season":start,"end_season":end,
             "source":"imdb_season_pack"});
     }
+    // Date-only releases have their own single-episode resolution above.
+    // Even when Cinemeta could not resolve the date, a dated release is
+    // never a season pack and must not expand to IMDb episode 1..N.
     // A season-only release needs both IMDb AND AniDB endpoints. Prior
     // code stopped at IMDb season_episodes, so /match always returned null
     // ASIDs for "Bleach_S02". Also support an exact, title-only anime pack
     // whose metadata verified season 1 (e.g. [Group][Chaos_Head][BDRip]).
     // A supplied episode or batch is never expanded to the entire season.
-    if episodes.is_empty() && !parsed.contains_key("episode_start")
+    if !airdate_only && episodes.is_empty() && !parsed.contains_key("episode_start")
         && !parsed.contains_key("anime_episode_candidate")
         && !parsed.contains_key("anime_episode_range_candidate")
         && !parsed.contains_key("anime_season_episode_candidate")
@@ -2313,6 +2316,111 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn airdate_releases_never_expand_to_season_packs() {
+        // Keep the airdate cache in an isolated directory so these tests
+        // never call Cinemeta or share cache state with parallel fixtures.
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let folder=std::env::temp_dir().join(format!(
+            "matchlab-airdate-pack-{}-{stamp}",std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path=folder.join("metadata.sqlite3");
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+                imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,
+                category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES
+                ('tt0115147','The Daily Show','thedailyshow',1996,
+                 'series','US',1,0,'tvSeries');
+            INSERT INTO seasons VALUES ('tt0115147',27);
+            INSERT INTO season_episodes VALUES ('tt0115147',27,50,50);").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        // A known date maps to exactly one episode, while two neighboring
+        // different episodes must never be chosen for an ambiguous date.
+        let cache=Connection::open(folder.join("matchlab_airdates.sqlite3")).unwrap();
+        cache.execute_batch("CREATE TABLE episode_airdates(
+                imdb_id TEXT NOT NULL,air_date TEXT NOT NULL,
+                season INTEGER NOT NULL,episode INTEGER NOT NULL,
+                PRIMARY KEY(imdb_id,air_date,season,episode));
+            CREATE TABLE episode_airdate_refresh(
+                imdb_id TEXT PRIMARY KEY,refreshed_at INTEGER NOT NULL);
+            INSERT INTO episode_airdates VALUES
+                ('tt0115147','2022-01-20',27,45),
+                ('tt0115147','2022-01-22',27,47);
+            INSERT INTO episode_airdate_refresh VALUES
+                ('tt0115147',CAST(strftime('%s','now') AS INTEGER));").unwrap();
+        drop(cache);
+
+        for (release, sid, source) in [
+            ("The.Daily.Show.2022.01.20.1080p.WEB-DL",
+                "tt0115147:27:45","cinemeta_airdate"),
+            ("The_Daily_Show_2022-01-20.1080p.WEB-DL",
+                "tt0115147:27:45","cinemeta_airdate"),
+            ("The.Daily.Show.2022.01.23.1080p.WEB-DL",
+                "tt0115147:27:47","cinemeta_airdate_1day"),
+        ] {
+            let result=diagnose(&path,&MatchRequest{
+                title:release.into(),year:None,series:None}).unwrap();
+            let winner=result.selected.expect("dated IMDb series match");
+            assert_eq!(winner["imdb_id"],"tt0115147","{release}: {winner}");
+            assert_eq!(winner["match_source"],source,"{release}: {winner}");
+            assert_eq!(winner["episode_range"],Value::Null,
+                "{release} was expanded into a season pack: {winner}");
+            assert_eq!(winner["release_date"].as_str().unwrap().len(),10);
+            assert_eq!(public_match_response(Some(winner)),json!({
+                "sid_start":sid,"sid_end":sid,
+                "asid_start":null,"asid_end":null
+            }),"{release}");
+        }
+
+        // Both a missing date and an ambiguous neighboring-day lookup must
+        // keep only the verified IMDb series identity (never S27E01-E50).
+        for release in [
+            "The.Daily.Show.2022.02.15.1080p.WEB-DL",
+            "The.Daily.Show.2022.01.21.1080p.WEB-DL",
+        ] {
+            let result=diagnose(&path,&MatchRequest{
+                title:release.into(),year:None,series:None}).unwrap();
+            let winner=result.selected.expect("dated series title still matches");
+            assert_eq!(winner["episode_range"],Value::Null,"{release}: {winner}");
+            assert!(winner["episode"].is_null(),"{release}: {winner}");
+            assert_eq!(public_match_response(Some(winner)),json!({
+                "sid_start":"tt0115147","sid_end":"tt0115147",
+                "asid_start":null,"asid_end":null
+            }),"{release}");
+        }
+
+        // Real season packs and explicitly labeled episodes are unchanged.
+        for (release, start, end) in [
+            ("The.Daily.Show.S27.1080p.WEB-DL",
+                "tt0115147:27:1","tt0115147:27:50"),
+            ("The.Daily.Show.S27E45.1080p.WEB-DL",
+                "tt0115147:27:45","tt0115147:27:45"),
+        ] {
+            let result=diagnose(&path,&MatchRequest{
+                title:release.into(),year:None,series:None}).unwrap();
+            let winner=result.selected.expect("regular series match");
+            let response=public_match_response(Some(winner));
+            assert_eq!(response["sid_start"],start,"{release}: {response}");
+            assert_eq!(response["sid_end"],end,"{release}: {response}");
+        }
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
     #[test]
     fn season_only_anime_packs_expose_complete_imdb_and_anidb_ranges() {
         let stamp=std::time::SystemTime::now()
