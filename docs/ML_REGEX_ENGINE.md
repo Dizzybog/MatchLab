@@ -11,7 +11,7 @@ The checked-in `crates/matchlab-parser/src/generated/handlers.json` contains:
 | Mechanism | Count | Why it matters |
 |---|---:|---|
 | Total handlers | 458 | Exact ordered processing pipeline |
-| Regex handlers | 449 | Eligible for native regex candidates |
+| Regex handlers | 456 | Eligible for native regex candidates |
 | Function handlers | 9 | Not safely editable as regex; may be affected indirectly |
 | Distinct output field families | 48 | All are visible to the field-general model |
 | Handlers that remove matched text | 253 | Can modify downstream matching and the final title |
