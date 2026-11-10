@@ -20,7 +20,8 @@ UNKNOWN="c"*40
 NOW=datetime.now(timezone.utc)
 
 def ancestor(source,target):
-    return (source,target) in {(OLD,BATCH)}
+    # git merge-base --is-ancestor accepts a commit as its own ancestor.
+    return source==target or (source,target)==(OLD,BATCH)
 
 def report(title="Example.Show.s02e18.WEB-DL",src=OLD):
     alert=["field_missing_seasons"]
@@ -82,7 +83,7 @@ class HistoricalBatches(unittest.TestCase):
         self.assertEqual(len(accepted),1)
         self.assertEqual(accepted[0]["source_build"],OLD+":5")
         self.assertEqual(rules.parse_batch(
-            entry,BATCH,lambda *_:False),[])
+            entry,BATCH,lambda source,target:source==target),[])
         self.assertIsNone(rules.valid_extended_rule(
             {**field(),"source_build":UNKNOWN+":5"},BATCH,ancestor))
 
