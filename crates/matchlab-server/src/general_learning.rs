@@ -110,6 +110,7 @@ fn remember_rejected(generation:&str,key:&str){
             seen.0=generation.to_owned();
             seen.1.clear();
         }
+        if seen.1.len()>=4_096{seen.1.clear();}
         seen.1.insert(key.to_owned());
     }
 }
@@ -888,6 +889,25 @@ pub fn community_proposals(db:&Connection)->Result<Vec<Value>,String>{
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn general_evidence_revision_changes_atomically_and_rolls_back(){
+        let mut db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        let initial=evidence_revision(&db).unwrap();
+        db.execute("INSERT INTO ml_general_examples(
+            rule_key,example_hash,identity_hash,field,source_index,pattern,mode,
+            source_release,variant_release,expected,source_build,observed_at)
+            VALUES('rule','sample','identity','edition',1,'(?i)web','add',
+                'Movie.WEB','Movie.WEBB','{}','build',1)",[]).unwrap();
+        let inserted=evidence_revision(&db).unwrap();
+        assert!(inserted>initial);
+        let tx=db.transaction().unwrap();
+        tx.execute("DELETE FROM ml_general_examples WHERE rule_key='rule'",[]).unwrap();
+        assert!(evidence_revision(&tx).unwrap()>inserted);
+        tx.rollback().unwrap();
+        assert_eq!(evidence_revision(&db).unwrap(),inserted);
+        assert!(candidates(&db).unwrap().is_empty());
+    }
     #[test]
     fn untrusted_and_ambiguous_rules_never_become_executable(){
         let native=catalogue().iter().find(|r|
