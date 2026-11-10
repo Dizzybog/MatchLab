@@ -150,6 +150,7 @@ impl OnlineModel{
         if positive{self.positives+=1;}else{self.negatives+=1;}
     }
     pub fn score(&self,field:&str,signal:&str,title:&str)->Option<f32>{
+        if self.positives<16||self.negatives<16{return None;}
         self.score_prepared(field,signal,&TitleFeatureContext::new(title))
     }
     pub fn score_prepared(&self,field:&str,signal:&str,
@@ -347,6 +348,8 @@ impl OnlineModel{
     }
     pub fn observe(&mut self,db:&Connection,title:&str,field:&str,
         signal:&str)->Result<bool,String>{
+        if self.positives>=MAX_EXAMPLES||title.len()>240
+            ||field.len()>40||signal.len()>32{return Ok(false);}
         self.observe_prepared(db,title,field,signal,&TitleFeatureContext::new(title))
     }
     fn observe_prepared(&mut self,db:&Connection,title:&str,field:&str,
