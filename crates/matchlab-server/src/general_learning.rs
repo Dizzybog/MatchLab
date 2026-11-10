@@ -16,9 +16,8 @@ const MIN_IDENTITIES:usize=2;
 const MIN_CORRECTION_FIXES:usize=8;
 const MIN_CORRECTION_IDENTITIES:usize=4;
 const MAX_ACTIVE:usize=16;
-const MAX_EXAMPLES:i64=16_384;
 fn capacity()->i64{
-    MAX_EXAMPLES.min(crate::learning_cache::training_max_examples())
+    crate::ml_config::get().general_examples
 }
 const MAX_CANDIDATES:usize=4;
 const REVALIDATE_BATCH:i64=128;

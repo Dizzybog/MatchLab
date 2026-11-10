@@ -73,7 +73,12 @@ fn activity_days_are_keyboard_accessible_and_show_exact_utc_request_totals(){
 fn ml_regex_inventory_is_conditional_and_uses_live_status(){
     // The lifetime rule inventory is separate from 14-day matching statistics.
     // A disabled ML worker must not leave a stale dashboard card visible.
-    assert!(DASHBOARD.contains(r#"id="ml-regex-stats" class="ml-regex-stats" aria-label="ML-generated regex statistics" hidden"#));
+    assert!(DASHBOARD.contains(r#"id="ml-regex-stats" class="ml-regex-stats" aria-label="Local ML capacity and regex statistics" hidden"#));
+    assert!(DASHBOARD.contains(r#"id="ml-size-gb""#));
+    assert!(DASHBOARD.contains(r#"id="ml-budget-split""#));
+    assert!(DASHBOARD.contains(r#"id="ml-example-count""#));
+    assert!(DASHBOARD.contains(r#"id="ml-derived-counts""#));
+    assert!(DASHBOARD.contains("const cap=state.capacity||{};"));
     assert!(DASHBOARD.contains(r#"id="ml-regex-count""#));
     assert!(DASHBOARD.contains(r#"id="ml-regex-archive""#));
     assert!(DASHBOARD.contains(".ml-regex-stats[hidden]{display:none}"));

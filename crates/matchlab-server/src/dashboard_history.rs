@@ -15,15 +15,39 @@ const PRUNE_BATCH: i64 = 1_000;
 const HISTORY_BATCH_SIZE:usize = 64;
 // Dedicated, bounded SQLite job spool (separate from the 1,000-row dashboard
 // retention window). Producers never synchronously touch this DB from API.
-const MAX_ML_QUEUE_ITEMS:i64 = 20_000;
 static ML_QUEUE_EVICTED:AtomicUsize=AtomicUsize::new(0);
 pub fn ml_queue_evicted()->usize{ML_QUEUE_EVICTED.load(Ordering::Relaxed)}
 pub fn history_telemetry_dropped()->usize{HISTORY_DROPPED.load(Ordering::Relaxed)}
 fn ml_queue_max_items()->i64{
-    std::env::var("MATCHLAB_ML_QUEUE_MAX_ITEMS").ok()
-        .and_then(|v|v.parse::<i64>().ok())
-        .filter(|n|(1_000..=100_000).contains(n))
-        .unwrap_or(MAX_ML_QUEUE_ITEMS)
+    crate::ml_config::get().queue_max_items
+}
+
+/// O(number of evicted rows), not O(capacity) per write: a trigger-maintained
+/// counter avoids a deep OFFSET scan on every history batch. A large cap
+/// reduction is trimmed gradually to keep foreground logging responsive.
+fn trim_ml_queue_with_budget(
+    tx:&rusqlite::Transaction<'_>,capacity:i64,byte_budget:u64
+)->rusqlite::Result<usize>{
+    let (queued,payload_bytes):(i64,i64)=tx.query_row(
+        "SELECT total,payload_bytes FROM ml_queue_metrics WHERE only_row=1",[],
+        |row|Ok((row.get(0)?,row.get(1)?)))?;
+    // One approximate average-size calculation replaces a deep OFFSET scan.
+    // If the queue is oversize after changing budgets, prune up to 4096 old
+    // jobs per transaction and resume on the next history batch.
+    let excess_count=queued.saturating_sub(capacity);
+    let excess_bytes=if byte_budget>0 && (payload_bytes as u64)>byte_budget{
+        let average=(payload_bytes/queued.max(1)).max(1);
+        (payload_bytes-(byte_budget.min(i64::MAX as u64) as i64))
+            .saturating_add(average-1)/average
+    }else{0};
+    let excess=excess_count.max(excess_bytes).min(4_096);
+    if excess==0{return Ok(0);}
+    tx.execute("DELETE FROM ml_training_queue WHERE id IN (
+        SELECT id FROM ml_training_queue ORDER BY id ASC LIMIT ?1
+    )",[excess])
+}
+fn trim_ml_queue(tx:&rusqlite::Transaction<'_>,capacity:i64)->rusqlite::Result<usize>{
+    trim_ml_queue_with_budget(tx,capacity,crate::ml_config::get().queue_storage_bytes)
 }
 
 fn connect(path: &Path) -> rusqlite::Result<Connection> {
@@ -81,6 +105,39 @@ pub fn initialize(path: &Path) -> Result<(), String> {
             title TEXT NOT NULL,
             details TEXT NOT NULL
         );
+        -- One-time O(N) count during migration, then constant-time counter
+        -- updates on inserts, deletes and duplicate-title coalescing.
+        CREATE TABLE IF NOT EXISTS ml_queue_metrics(
+            only_row INTEGER PRIMARY KEY CHECK(only_row=1),
+            total INTEGER NOT NULL DEFAULT 0 CHECK(total>=0),
+            payload_bytes INTEGER NOT NULL DEFAULT 0 CHECK(payload_bytes>=0)
+        );
+        INSERT OR IGNORE INTO ml_queue_metrics(only_row,total,payload_bytes)
+        SELECT 1,COUNT(*),COALESCE(SUM(
+            length(CAST(title AS BLOB))+length(CAST(details AS BLOB))+256
+        ),0) FROM ml_training_queue;
+        CREATE TRIGGER IF NOT EXISTS ml_queue_insert_count
+        AFTER INSERT ON ml_training_queue BEGIN
+            UPDATE ml_queue_metrics SET total=total+1,
+                payload_bytes=payload_bytes+length(CAST(NEW.title AS BLOB))
+                    +length(CAST(NEW.details AS BLOB))+256
+            WHERE only_row=1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS ml_queue_delete_count
+        AFTER DELETE ON ml_training_queue BEGIN
+            UPDATE ml_queue_metrics SET total=total-1,
+                payload_bytes=payload_bytes-length(CAST(OLD.title AS BLOB))
+                    -length(CAST(OLD.details AS BLOB))-256
+            WHERE only_row=1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS ml_queue_update_bytes
+        AFTER UPDATE OF title,details ON ml_training_queue BEGIN
+            UPDATE ml_queue_metrics SET
+                payload_bytes=payload_bytes
+                    +length(CAST(NEW.title AS BLOB))+length(CAST(NEW.details AS BLOB))
+                    -length(CAST(OLD.title AS BLOB))-length(CAST(OLD.details AS BLOB))
+            WHERE only_row=1;
+        END;
 
         -- Backfill exactly once for existing installations. Other connections
         -- cannot write while this transaction is active.
@@ -183,20 +240,9 @@ fn persist_batch_with_learning(db:&mut Connection,items:&[HistoryEvent],
     tx.execute("DELETE FROM requests WHERE id < (
         SELECT id FROM requests ORDER BY id DESC LIMIT 1 OFFSET ?1
     )",[MAX_HISTORY-1])?;
-    // StremThru-style bounded persistence: retain jobs independently of
-    // the dashboard history. Older overflow entries are dropped only from
-    // ML evidence, never from actual parsing/matching.
-    // Queue IDs are request sequence numbers, NOT queue row numbers.
-    // Deduplication removes rows and leaves large gaps. Subtracting the
-    // configured cap from MAX(id) would silently evict valid observations
-    // even when the queue contains far fewer than its permitted row count.
-    // Keep the newest N *actual rows*, deleting only older entries.
-    let evicted=if train{
-        tx.execute("DELETE FROM ml_training_queue WHERE id < COALESCE((
-            SELECT id FROM ml_training_queue
-            ORDER BY id DESC LIMIT 1 OFFSET ?1
-        ),0)",[ml_queue_max_items()-1])?
-    }else{0};
+    // Counter tracks actual rows and estimated payload bytes across dedup.
+    // Trim at most 4,096 oldest rows per batch; never scan a huge OFFSET.
+    let evicted=if train{trim_ml_queue(&tx,ml_queue_max_items())?}else{0};
     tx.commit()?; 
     if evicted>0{
         let total=ML_QUEUE_EVICTED.fetch_add(evicted,Ordering::Relaxed)+evicted;
@@ -502,6 +548,9 @@ mod tests {
             "SELECT COUNT(*),MAX(id),MAX(details) FROM ml_training_queue",
             [],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
         assert_eq!(count,1);
+        let queued:i64=db.query_row("SELECT total FROM ml_queue_metrics WHERE only_row=1",
+            [],|row|row.get(0)).unwrap();
+        assert_eq!(queued,1);
         assert_eq!(id,2);
         assert_eq!(serde_json::from_str::<Value>(&details).unwrap()
             ["selected"]["imdb_id"],"tt0000002");
@@ -511,35 +560,79 @@ mod tests {
 
     #[test]
     fn ml_queue_retention_counts_rows_not_gapped_request_ids(){
-        // Simulate a large request-ID gap caused by repeated-title
-        // coalescing; the oldest pending work must survive below capacity.
-        let db=Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE ml_training_queue(
-            id INTEGER PRIMARY KEY,title TEXT NOT NULL,details TEXT NOT NULL);
-            INSERT INTO ml_training_queue VALUES(1,'old','{}');
-            INSERT INTO ml_training_queue VALUES(10001,'old2','{}');
-            INSERT INTO ml_training_queue VALUES(40000,'new','{}');").unwrap();
-        let retention=|cap:i64|{
-            db.execute("DELETE FROM ml_training_queue WHERE id < COALESCE((
-                SELECT id FROM ml_training_queue ORDER BY id DESC
-                LIMIT 1 OFFSET ?1
-            ),0)",[cap-1]).unwrap();
+        // Coalescing produces large ID gaps. The count is actual queued rows.
+        let path=path();
+        initialize(&path).unwrap();
+        let mut db=connect(&path).unwrap();
+        db.execute_batch("INSERT INTO ml_training_queue(id,title_hash,title,details)
+            VALUES(1,'a','old','{}'),(10001,'b','old2','{}'),(40000,'c','new','{}');").unwrap();
+        let retention=|db:&mut Connection,cap:i64|{
+            let tx=db.transaction().unwrap();
+            let removed=trim_ml_queue(&tx,cap).unwrap();
+            tx.commit().unwrap();
+            removed
         };
-        retention(3);
+        assert_eq!(retention(&mut db,3),0);
         let ids=db.prepare("SELECT id FROM ml_training_queue ORDER BY id").unwrap()
             .query_map([],|row|row.get::<_,i64>(0)).unwrap()
             .collect::<rusqlite::Result<Vec<_>>>().unwrap();
-        assert_eq!(ids,vec![1,10001,40000],
-            "gaps from duplicate titles cannot cause premature eviction");
-        retention(2);
+        assert_eq!(ids,vec![1,10001,40000]);
+        assert_eq!(retention(&mut db,2),1);
         let ids=db.prepare("SELECT id FROM ml_training_queue ORDER BY id").unwrap()
             .query_map([],|row|row.get::<_,i64>(0)).unwrap()
             .collect::<rusqlite::Result<Vec<_>>>().unwrap();
         assert_eq!(ids,vec![10001,40000]);
-        retention(5);
-        let count:i64=db.query_row("SELECT COUNT(*) FROM ml_training_queue",[],
+        assert_eq!(retention(&mut db,5),0);
+        let queued:i64=db.query_row("SELECT total FROM ml_queue_metrics WHERE only_row=1",
+            [],|row|row.get(0)).unwrap();
+        assert_eq!(queued,2);
+        // A duplicate title updates its ID without increasing the count.
+        db.execute("INSERT INTO ml_training_queue(id,title_hash,title,details)
+            VALUES(50000,'c','new','{}')
+            ON CONFLICT(title_hash) DO UPDATE SET id=excluded.id",[]).unwrap();
+        let queued:i64=db.query_row("SELECT total FROM ml_queue_metrics WHERE only_row=1",
+            [],|row|row.get(0)).unwrap();
+        assert_eq!(queued,2);
+        drop(db);
+        initialize(&path).unwrap(); // repeated migration must not re-count
+        let db=connect(&path).unwrap();
+        let queued:i64=db.query_row("SELECT total FROM ml_queue_metrics WHERE only_row=1",
+            [],|row|row.get(0)).unwrap();
+        assert_eq!(queued,2);
+        drop(db);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn queue_byte_budget_reclaims_oldest_jobs(){
+        let path=path();
+        initialize(&path).unwrap();
+        let mut db=connect(&path).unwrap();
+        db.execute_batch("INSERT INTO ml_training_queue(id,title_hash,title,details)
+            VALUES (1,'one','long episode one','{}'),
+                   (2,'two','long episode two','{}'),
+                   (3,'three','long episode three','{}');").unwrap();
+        let payload:i64=db.query_row(
+            "SELECT payload_bytes FROM ml_queue_metrics WHERE only_row=1",[],
             |row|row.get(0)).unwrap();
-        assert_eq!(count,2);
+        let tx=db.transaction().unwrap();
+        let removed=trim_ml_queue_with_budget(&tx,100,(payload/2) as u64)
+            .unwrap();
+        assert!(removed>0);
+        tx.commit().unwrap();
+        let first:i64=db.query_row(
+            "SELECT MIN(id) FROM ml_training_queue",[],|row|row.get(0))
+            .unwrap();
+        assert!(first>1,"oldest job must be evicted under byte pressure");
+        let count:i64=db.query_row(
+            "SELECT total FROM ml_queue_metrics WHERE only_row=1",[],
+            |row|row.get(0)).unwrap();
+        let actual:i64=db.query_row(
+            "SELECT count(*) FROM ml_training_queue",[],|row|row.get(0))
+            .unwrap();
+        assert_eq!(count,actual);
+        drop(db);
+        cleanup(&path);
     }
 
     #[test]

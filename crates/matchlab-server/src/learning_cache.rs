@@ -1,6 +1,6 @@
 //! Opt-in persistent parser/matcher cache sharing a bounded local learning DB.
 //! Direct SQLite primary-key lookup only; no SQLite text search and no I/O
-//! whatsoever from this module when MATCHLAB_ML_ENABLED is disabled.
+//! whatsoever from this module when local ML is disabled.
 //!
 //! Cached results are never ground-truth training labels. A build change,
 //! a new verified local regex overlay or a metadata snapshot change gives
@@ -14,15 +14,8 @@ use std::sync::{Mutex,OnceLock,RwLock,mpsc::{sync_channel,SyncSender,TrySendErro
 use sha2::{Digest,Sha256};
 use std::{env,fs,path::{Path,PathBuf},time::{Duration,SystemTime,UNIX_EPOCH}};
 
-const GIB:u64=1024*1024*1024;
-const DEFAULT_GB:u64=1;
-const MAX_GB:u64=128;
 const MAX_ENTRY_BYTES:usize=512*1024;
 const CACHE_TTL_SECS:i64=30*24*3600;
-const DEFAULT_TRAINING_EXAMPLES:i64=12_000;
-const MAX_TRAINING_EXAMPLES:i64=2_000_000;
-const DEFAULT_CACHE_ENTRIES:i64=100_000;
-const MAX_CACHE_ENTRIES:i64=2_000_000;
 static CACHE_HITS:AtomicU64=AtomicU64::new(0);
 static CACHE_MISSES:AtomicU64=AtomicU64::new(0);
 // Updated by background maintenance, never by individual request writes.
@@ -97,9 +90,9 @@ impl HotStore{
         self.fifo.push_back((key,stamp));
         // A repeated key can leave obsolete FIFO markers. Ignore them, but
         // also cap marker count so identical requests cannot leak memory.
-        while self.rows.len()>HOT_MAX_ENTRIES
+        while self.rows.len()>crate::ml_config::get().hot_cache_max_entries.min(HOT_MAX_ENTRIES)
             ||self.occupied>HOT_MAX_BYTES
-            ||self.fifo.len()>HOT_MAX_ENTRIES*2
+            ||self.fifo.len()>crate::ml_config::get().hot_cache_max_entries.min(HOT_MAX_ENTRIES)*2
         {
             let Some((old_key,old_stamp))=self.fifo.pop_front()else{break;};
             if self.rows.get(&old_key).is_some_and(|v|v.sequence==old_stamp){
@@ -134,17 +127,11 @@ fn hot_lookup(key:&str,ns:&str,time:i64)->Option<Value>{
 }
 /// Cache now has its own database and quota. Sharing a writer with training
 /// caused repeated SQLITE_BUSY, stalled local learning and saturated writes.
-fn cache_storage_gb()->u64{
-    env::var("MATCHLAB_ML_CACHE_MAX_STORAGE_GB")
-        .ok().and_then(|raw|raw.parse::<u64>().ok())
-        .filter(|value|(1..=MAX_GB).contains(value))
-        .unwrap_or(DEFAULT_GB)
+fn cache_storage_bytes()->u64{
+    crate::ml_config::get().cache_storage_bytes
 }
-pub fn storage_gb()->u64 {
-    env::var("MATCHLAB_ML_MAX_STORAGE_GB")
-        .ok().and_then(|value|value.parse::<u64>().ok())
-        .filter(|value|(1..=MAX_GB).contains(value))
-        .unwrap_or(DEFAULT_GB)
+fn learning_storage_bytes()->u64{
+    crate::ml_config::get().learning_storage_bytes
 }
 /// The number of unique, validated field observations retained for each
 /// current source build. This is deliberately separate from on-disk GiB:
@@ -155,12 +142,10 @@ fn bounded_count(raw:Option<&str>,default:i64,min:i64,max:i64)->i64{
         .unwrap_or(default)
 }
 pub fn training_max_examples()->i64{
-    bounded_count(env::var("MATCHLAB_ML_TRAINING_MAX_EXAMPLES").ok().as_deref(),
-        DEFAULT_TRAINING_EXAMPLES,100,MAX_TRAINING_EXAMPLES)
+    crate::ml_config::get().max_examples
 }
 fn cache_max_entries()->i64{
-    bounded_count(env::var("MATCHLAB_ML_CACHE_MAX_ENTRIES").ok().as_deref(),
-        DEFAULT_CACHE_ENTRIES,100,MAX_CACHE_ENTRIES)
+    crate::ml_config::get().cache_max_entries
 }
 fn cache_ttl_secs()->i64{
     bounded_count(env::var("MATCHLAB_ML_CACHE_TTL_HOURS").ok().as_deref(),
@@ -171,8 +156,9 @@ fn miss_ttl_secs()->i64{
         .ok().as_deref(),30,1,24*60)*60
 }
 pub fn status()->Value{
-    json!({"enabled":enabled(),"learning_storage_limit_gb":storage_gb(),
-        "cache_storage_limit_gb":cache_storage_gb(),
+    json!({"enabled":enabled(),
+        "learning_storage_limit_mib":learning_storage_bytes()/(1024*1024),
+        "cache_storage_limit_mib":cache_storage_bytes()/(1024*1024),
         "cache_isolated_sqlite":true,
         "cache_lookup":"nonblocking_in_memory",
         "hot_cache_entries":HOT_CACHE.get().and_then(|cache|cache.try_read().ok())
@@ -317,7 +303,8 @@ fn put_batch(db:&mut Connection,events:&[CacheEvent])->rusqlite::Result<()>{
 /// Work is keyed/idempotent via cache_key, batched, and never makes the
 /// parsing/matching worker wait for a SQLite writer or checkpoint.
 fn cache_worker()->Option<SyncSender<CacheEvent>>{
-    let (tx,rx)=sync_channel::<CacheEvent>(CACHE_QUEUE_SIZE);
+    let (tx,rx)=sync_channel::<CacheEvent>(
+        crate::ml_config::get().cache_write_queue.min(CACHE_QUEUE_SIZE));
     let thread=std::thread::Builder::new()
         .name("matchlab-cache-writer".into()).spawn(move||{
             let path=state_file();
@@ -384,7 +371,7 @@ fn cache_worker()->Option<SyncSender<CacheEvent>>{
                     if let Some(metadata)=CACHE_MAINTENANCE_METADATA.get(){
                         if let Some(db)=connection.as_ref(){
                             if let Err(error)=maintain_with_budget(
-                                db,metadata,cache_storage_gb()*GIB){
+                                db,metadata,cache_storage_bytes()){
                                 tracing::debug!(%error,
                                     "ML cache maintenance will retry");
                                 CACHE_MAINTENANCE_REQUESTED
@@ -490,7 +477,7 @@ fn used_bytes(db:&Connection)->Result<u64,String>{
 /// only after all shareable historical rules have been archived. Active
 /// rules are protected: evict obsolete candidates, then oldest samples.
 pub fn maintain_learning(db:&Connection)->Result<(),String>{
-    let budget=storage_gb()*GIB;
+    let budget=learning_storage_bytes();
     let mut occupied=used_bytes(db)?;
     if occupied<=budget{return Ok(());}
     for _ in 0..16{

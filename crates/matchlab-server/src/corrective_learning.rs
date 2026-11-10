@@ -10,7 +10,7 @@ use std::collections::{BTreeMap,BTreeSet};
 use std::sync::{OnceLock,RwLock,atomic::{AtomicU64,Ordering}};
 
 const EPOCH:u32=1;
-const MAX_OBSERVATIONS:i64=1_024;
+
 const MIN_OBSERVATIONS:i64=8;
 const MIN_IDENTITIES:i64=4;
 const MIN_ERRORS:i64=4;
@@ -137,7 +137,7 @@ pub fn observe(db:&Connection,name:&str,parsed:&Value,
     budget:&mut i64)->Result<(),String>{
     let Some(reference)=expected(name)else{return Ok(());};
     let Some(identity)=independent_identity(parsed)else{return Ok(());};
-    if *budget>=MAX_OBSERVATIONS{
+    if *budget>=crate::ml_config::get().corrective_examples{
         // Protect the replay evidence behind active, previously validated
         // regexes: retaining the rule without proof after a restart would
         // be unsafe, while evicting its proof would silently disable it.
@@ -148,7 +148,7 @@ pub fn observe(db:&Connection,name:&str,parsed:&Value,
                 ORDER BY observed_at,example_hash LIMIT 32)",
             [build()]).map_err(|e|e.to_string())? as i64;
         *budget=budget.saturating_sub(old);
-        if *budget>=MAX_OBSERVATIONS{return Ok(());}
+        if *budget>=crate::ml_config::get().corrective_examples{return Ok(());}
     }
     let key=hash(&format!("{}:{name}",reference.family));
     let seen:i64=db.query_row("SELECT EXISTS(SELECT 1
@@ -182,7 +182,7 @@ fn revalidate_previous_build(db:&Connection)->Result<usize,String>{
         FROM ml_corrective_observations WHERE source_build<>?1
         ORDER BY observed_at DESC,example_hash LIMIT ?2")
         .map_err(|e|e.to_string())?;
-    let old=stmt.query_map(params![build(),MAX_OBSERVATIONS],
+    let old=stmt.query_map(params![build(),crate::ml_config::get().corrective_examples],
         |row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))
         .map_err(|e|e.to_string())?
         .collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;

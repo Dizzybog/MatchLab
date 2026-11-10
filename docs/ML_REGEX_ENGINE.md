@@ -174,9 +174,9 @@ data did not demonstrate a safe, measurable improvement.
   is captured only when background training explicitly requests it.
 - For each training title, consider at most **one** original source handler
   and three bounded punctuation/number variants per handler.
-- Store no more than 16,384 general counterfactual examples, further
-  restricted by `MATCHLAB_ML_TRAINING_MAX_EXAMPLES`; prefer evicting
-  unpromoted evidence over evidence behind verified rules.
+- Cap general counterfactual examples according to the shared
+  `MATCHLAB_ML_SIZE_GB` evidence allocation (with an internal hard cap);
+  prefer evicting unpromoted evidence over evidence behind verified rules.
 - Compile candidate rule sets only in the background. Rule revision
   changes invalidate parser cache automatically.
 - `GET /api/ml/status` includes `general_regex`, with native field
@@ -201,7 +201,7 @@ Operators requiring strict zero change can set
 `MATCHLAB_ML_LIVE_REGEX_ENABLED=false`. This preserves background
 training and evidence while ensuring the native live parser does not
 install learned regex generations. Alternatively
-`MATCHLAB_ML_ENABLED=false` disables local ML altogether. Both
+`MATCHLAB_ML_SIZE_GB=0` disables local ML altogether. Both
 controls require a container restart when changing Docker environment
 variables. The ordinary canonical parser and matcher remain functional
 without learned regexes. The separate verified AniDB episode-hint

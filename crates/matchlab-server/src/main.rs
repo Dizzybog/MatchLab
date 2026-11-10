@@ -27,6 +27,7 @@ mod local_learning;
 mod online_model;
 mod candidate_discovery;
 mod learning_cache;
+mod ml_config;
 mod learned_regex;
 mod query_cache;
 use axum::{extract::{Query, State}, http::{StatusCode,header}, routing::{get,post}, Json, Router};
@@ -1704,6 +1705,7 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result
 async fn ml_status()->Json<Value>{
     let mut report=field_learning::status();
     if let Some(object)=report.as_object_mut(){
+        object.insert("capacity".into(),ml_config::status());
         object.insert("training_and_cache".into(),learning_cache::status());
         object.insert("training_queue".into(),local_learning::queue_status());
         object.insert("online_model".into(),online_model::OnlineModel::status());
