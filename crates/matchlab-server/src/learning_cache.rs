@@ -1,6 +1,6 @@
 //! Opt-in persistent parser/matcher cache sharing a bounded local learning DB.
 //! Direct SQLite primary-key lookup only; no SQLite text search and no I/O
-//! whatsoever from this module when MATCHLAB_ML_ENABLED is disabled.
+//! whatsoever from this module when local ML is disabled.
 //!
 //! Cached results are never ground-truth training labels. A build change,
 //! a new verified local regex overlay or a metadata snapshot change gives
