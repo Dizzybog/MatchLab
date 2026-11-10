@@ -130,7 +130,7 @@ tr[data-id]:focus-visible{outline-offset:-2px}
 .index-notice[hidden]{display:none}
 .pill.bad{color:var(--red)}
 /* A separate lifetime ML indicator must not be mistaken for 14-day metrics. */
-.ml-regex-stats{display:grid;grid-template-columns:minmax(0,280px);margin:-8px 0 22px}
+.ml-regex-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin:-8px 0 22px}
 .ml-regex-stats[hidden]{display:none}
 .ml-regex-stats .stat{cursor:default}
 .ml-regex-stats .small{margin-top:4px}
@@ -163,7 +163,7 @@ tr[data-id]:focus-visible{outline-offset:-2px}
 <header class="top"><div class="brand">Match<span>Lab</span> <span class="small muted">/ Rust</span></div><nav class="nav"><a href="#tester">Matcher</a><a href="#history">History</a><a href="#statistics">Statistics</a></nav><div id="health" class="pill" role="status" aria-live="polite"><span class="health-full">Checking metadata…</span><span class="health-short">Checking…</span></div></header>
 <main><div id="index-notice" class="index-notice" role="status" aria-live="polite" hidden>Preparing search index…</div><h1>Overview</h1><p class="subtitle"><span class="copy-desktop">Torrent parsing, IMDb matching and diagnostics in one place. Statistics use the rolling last 14 days; search history is capped at 1,000 entries.</span><span class="copy-mobile">Parse torrents and inspect IMDb matches.</span></p>
 <h2><span class="section-heading-full">Matching statistics · last 14 days (UTC)</span><span class="section-heading-short">Last 14 days · UTC</span></h2><section class="stats" id="statistics"><button class="stat filter" type="button" data-filter="all" aria-pressed="true" aria-controls="history"><div class="label"><span class="stat-label-full">Requests · last 14 days</span><span class="stat-label-short">Requests</span></div><div class="value" id="total">—</div></button><button class="stat filter" type="button" data-filter="matched" aria-pressed="false" aria-controls="history"><div class="label"><span class="stat-label-full">Matched · last 14 days</span><span class="stat-label-short">Matched</span></div><div class="value good" id="matched">—</div></button><button class="stat filter" type="button" data-filter="unmatched" aria-pressed="false" aria-controls="history"><div class="label"><span class="stat-label-full">Unmatched · last 14 days</span><span class="stat-label-short">Unmatched</span></div><div class="value" id="unmatched">—</div></button><button class="stat filter" type="button" data-filter="error" aria-pressed="false" aria-controls="history"><div class="label"><span class="stat-label-full">Errors · last 14 days</span><span class="stat-label-short">Errors</span></div><div class="value bad" id="errors">—</div></button></section>
-<section id="ml-regex-stats" class="ml-regex-stats" aria-label="ML-generated regex statistics" hidden><div class="stat" role="status" aria-live="polite"><div class="label">ML-generated regex rules</div><div class="value good" id="ml-regex-count">—</div><div class="small muted" id="ml-regex-archive">Active rules: —</div></div></section>
+<section id="ml-regex-stats" class="ml-regex-stats" aria-label="Local ML capacity and regex statistics" hidden><div class="stat" role="status" aria-live="polite"><div class="label">ML-generated regex rules</div><div class="value good" id="ml-regex-count">—</div><div class="small muted" id="ml-regex-archive">Active rules: —</div></div><div class="stat" role="status"><div class="label">ML disk budget</div><div class="value" id="ml-size-gb">—</div><div class="small muted" id="ml-budget-split">Evidence / cache / queue: —</div></div><div class="stat" role="status"><div class="label">ML training capacity</div><div class="value" id="ml-example-count">—</div><div class="small muted" id="ml-derived-counts">Cache: — · Queue: —</div></div></section>
 <div class="grid"><section class="panel" id="tester"><h2>Test a torrent title</h2><p class="muted mobile-description"><span class="copy-desktop">Submit a raw t_title to inspect parsing, candidate ranking and selected IMDb ID.</span><span class="copy-mobile">Paste a torrent title to inspect matches.</span></p><form id="form"><label for="title">Torrent title</label><div class="field"><input id="title" required maxlength="4096" placeholder="Example.Show.S01E02.1080p.WEB-DL.x265" autocomplete="off"></div><div class="field options"><input id="year" type="number" min="1870" max="2100" placeholder="Year (optional)"><select id="series" aria-label="Content type"><option value="">Auto detect</option><option value="true">Series</option><option value="false">Movie</option></select><button class="btn" id="submit" type="submit">Parse & match</button></div></form><div id="result" class="result" aria-live="polite"><div class="empty">Submit a title to see the five highest-ranked matches.</div></div></section>
 <section class="panel"><div class="toolbar activity-toolbar"><h2><span class="section-heading-full">Activity · last 14 days (UTC)</span><span class="section-heading-short">Activity · 14 days</span></h2><span class="small muted" id="latency">Avg. latency: —</span></div><p class="muted activity-description">Daily totals are preserved independently of the 1,000 latest request details.</p><div id="chart" class="chart" role="group" aria-label="Daily request activity (UTC)"></div><p class="small muted">Select a bar to show requests on that UTC day.</p><p id="day-summary" class="day-summary small" role="status" aria-live="polite" aria-atomic="true" hidden></p></section></div>
 <section class="panel" id="history"><div class="toolbar history-toolbar"><h2><span class="history-heading-full">Latest 1,000 requests</span><span class="history-heading-short">Requests</span> <span class="small muted" id="active-filter">· All requests</span></h2><button class="btn secondary" id="refresh" type="button">Refresh</button></div><p class="table-hint" id="history-scroll-hint">Swipe sideways · Tap t_title to copy · Tap another column for details</p><div class="table-wrap" role="region" aria-label="Recent matching requests; scroll horizontally to view all columns" aria-describedby="history-scroll-hint" tabindex="0"><table><thead><tr><th>Time (UTC)</th><th>t_title</th><th>Status</th><th>IMDb ID</th><th>Source</th><th>ms</th></tr></thead><tbody id="rows"><tr><td colspan="6" class="muted">Loading…</td></tr></tbody></table></div><div class="toolbar history-footer" style="margin-top:14px"><span class="small muted history-note"><span class="history-note-full">Only the latest 1,000 requests retain individual diagnostics. Statistics above include all requests over the last 14 days. Click t_title to copy it; click elsewhere on a row for details.</span><span class="history-note-short">Tap t_title to copy; tap other cells for details.</span></span><div class="paging"><button class="btn secondary" id="prev" type="button">Previous</button><button class="btn secondary" id="next" type="button">Next</button></div></div><div id="history-details" class="result" hidden></div></section>
@@ -318,6 +318,25 @@ async function mlRegexStats(){
       ?'Active rules: '+active.toLocaleString()+
         (valid(compiled)?' · Compiled patterns: '+compiled.toLocaleString():'')
       :'Active rules: —';
+    const cap=state.capacity||{};
+    const gb=Number(cap.size_gb);
+    const examples=Number(cap.max_examples);
+    const cached=Number(cap.cache_max_entries);
+    const queue=Number(cap.queue_max_items);
+    const evidenceMiB=Number(cap.learning_storage_limit_mib);
+    const cacheMiB=Number(cap.cache_storage_limit_mib);
+    const queueMiB=Number(cap.queue_storage_limit_mib);
+    $('ml-size-gb').textContent=valid(gb)&&gb>0?gb+' GiB':'—';
+    $('ml-budget-split').textContent=
+      [evidenceMiB,cacheMiB,queueMiB].every(valid)
+      ?'Evidence: '+evidenceMiB+' MiB · Cache: '+cacheMiB+
+        ' MiB · Queue: '+queueMiB+' MiB'
+      :'Evidence / cache / queue: —';
+    $('ml-example-count').textContent=valid(examples)
+      ?examples.toLocaleString():'—';
+    $('ml-derived-counts').textContent=valid(cached)&&valid(queue)
+      ?'Cache: '+cached.toLocaleString()+' · Queue: '+queue.toLocaleString()
+      :'Cache: — · Queue: —';
   }catch{
     // Status cannot prove ML is enabled, so avoid displaying stale counts.
     section.hidden=true;
