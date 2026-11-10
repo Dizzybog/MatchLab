@@ -364,6 +364,23 @@ pub fn benchmark_native_model()->Result<Value,String>{
             .map_err(|e|e.to_string())?;
     }
     let parse_ms=start.elapsed().as_secs_f64()*1000.0;
+    // Measure the ML-only full-parser verification path as well. The first
+    // replay compiles a candidate generation; subsequent replays must reuse
+    // that exact immutable generation without changing any parsed fields.
+    let replay_titles=names.iter().map(|name|(*name).to_owned()).collect::<Vec<_>>();
+    let cold_start=std::time::Instant::now();
+    let expected=matchlab_parser::replay_handler_rules(&[],&[],&[],&replay_titles)
+        .map_err(|e|e.to_string())?;
+    let replay_cold_ms=cold_start.elapsed().as_secs_f64()*1000.0;
+    const REPLAY_ITERATIONS:usize=16;
+    let warm_start=std::time::Instant::now();
+    for _ in 0..REPLAY_ITERATIONS{
+        let actual=matchlab_parser::replay_handler_rules(&[],&[],&[],&replay_titles)
+            .map_err(|e|e.to_string())?;
+        if actual!=expected{return Err("compiled ML replay changed parser output".into());}
+    }
+    let replay_warm_average_ms=warm_start.elapsed().as_secs_f64()*1000.0
+        /REPLAY_ITERATIONS as f64;
     Ok(serde_json::json!({
         "benchmark":"synthetic_offline_single_thread",
         "warning":"not a representative dataset or a parser-accuracy claim",
@@ -371,6 +388,9 @@ pub fn benchmark_native_model()->Result<Value,String>{
         "ftrl_train_with_sqlite_dedup_ms":training_ms,
         "ftrl_inference_ms":inference_ms,
         "canonical_parse_ms":parse_ms,
+        "regex_replay_first_ms":replay_cold_ms,
+        "regex_replay_cached_average_ms":replay_warm_average_ms,
+        "compiled_replay_cache":matchlab_parser::replay_cache_status(),
         "ftrl_parameter_bytes":128*1024,
         "requires_real_arm64_corpus_validation":true
     }))
