@@ -130,7 +130,33 @@ pub fn init(db:&Connection)->Result<(),String>{
             repaired_examples INTEGER NOT NULL,
             unchanged_examples INTEGER NOT NULL,
             checked_examples INTEGER NOT NULL,
-            verified_at INTEGER NOT NULL);")
+            verified_at INTEGER NOT NULL);
+        -- Transactional revision tracks all evidence edits without repeatedly
+        -- hashing the entire observation table during every ML cycle.
+        CREATE TABLE IF NOT EXISTS ml_corrective_evidence_revision(
+            id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL);
+        INSERT OR IGNORE INTO ml_corrective_evidence_revision VALUES(1,1);
+        CREATE TRIGGER IF NOT EXISTS ml_corrective_revision_insert
+            AFTER INSERT ON ml_corrective_observations BEGIN
+            UPDATE ml_corrective_evidence_revision SET revision=revision+1 WHERE id=1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS ml_corrective_revision_update
+            AFTER UPDATE ON ml_corrective_observations
+            WHEN NEW.example_hash IS NOT OLD.example_hash
+                OR NEW.identity_hash IS NOT OLD.identity_hash
+                OR NEW.family IS NOT OLD.family
+                OR NEW.error_class IS NOT OLD.error_class
+                OR NEW.source_build IS NOT OLD.source_build
+                OR NEW.release_name IS NOT OLD.release_name
+            BEGIN
+            -- Merely refreshing observed_at cannot invalidate the parser
+            -- evidence or necessitate any expensive candidate replay.
+            UPDATE ml_corrective_evidence_revision SET revision=revision+1 WHERE id=1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS ml_corrective_revision_delete
+            AFTER DELETE ON ml_corrective_observations BEGIN
+            UPDATE ml_corrective_evidence_revision SET revision=revision+1 WHERE id=1;
+        END;")
         .map_err(|e|e.to_string())
 }
 pub fn observe(db:&Connection,name:&str,parsed:&Value,
@@ -207,27 +233,25 @@ fn revalidate_previous_build(db:&Connection)->Result<usize,String>{
     }
     Ok(kept)
 }
-/// Exact content fingerprint, rather than sample count alone: reclassifying
-/// an existing torrent is a material event even without a new row.
+/// The SQLite trigger-maintained revision changes atomically with every
+/// evidence INSERT/UPDATE/DELETE, including history migrations and pruning.
+/// Unlike a sample count, relabelling a row also invalidates the review.
+/// A new process starts with zero observed revision and always revalidates.
 fn evidence_revision(db:&Connection)->Result<u64,String>{
-    let mut stmt=db.prepare("SELECT example_hash,identity_hash,family,error_class
-        FROM ml_corrective_observations WHERE source_build=?1
-        ORDER BY example_hash").map_err(|e|e.to_string())?;
-    let entries=stmt.query_map([build()],|row|Ok((
-        row.get::<_,String>(0)?,row.get::<_,String>(1)?,
-        row.get::<_,String>(2)?,row.get::<_,String>(3)?)))
-        .map_err(|e|e.to_string())?;
+    let revision:i64=db.query_row(
+        "SELECT revision FROM ml_corrective_evidence_revision WHERE id=1",
+        [],|row|row.get(0)).map_err(|e|e.to_string())?;
+    let revision=u64::try_from(revision)
+        .map_err(|_|"invalid corrective revision".to_owned())?;
+    // The fast counter is scoped to one database. Mix in the file identity
+    // so another connection's equally numbered revision cannot authorize
+    // reusing this learner's prior review.
     let mut sha=Sha256::new();
-    for row in entries {
-        let (sample,id,family,kind)=row.map_err(|e|e.to_string())?;
-        for value in [sample,id,family,kind]{
-            use sha2::Digest as _;
-            sha.update((value.len() as u32).to_le_bytes());
-            sha.update(value.as_bytes());
-        }
-    }
+    sha.update(db.path().unwrap_or(":memory:").as_bytes());
+    sha.update(revision.to_le_bytes());
     let digest=sha.finalize();
-    let mut bytes=[0u8;8];bytes.copy_from_slice(&digest[..8]);
+    let mut bytes=[0u8;8];
+    bytes.copy_from_slice(&digest[..8]);
     Ok(u64::from_le_bytes(bytes).max(1))
 }
 fn source(field:&str,transform:&str)->Option<usize>{
@@ -428,7 +452,8 @@ pub fn reconcile(db:&Connection)->Result<(),String>{
     init(db)?;
     revalidate_previous_build(db)?;
     let observed=evidence_revision(db)?;
-    if observed==OBSERVED_REVISION.load(Ordering::Acquire)
+    if db.path().is_some_and(|p|!p.is_empty()&&p!=":memory:")
+        &&observed==OBSERVED_REVISION.load(Ordering::Acquire)
         &&revision()!=0{return Ok(());}
     let candidates=eligible(db)?;
     let mut ready=Vec::new();
@@ -585,6 +610,30 @@ mod tests {
             |row|Ok((row.get(0)?,row.get(1)?))).unwrap();
         assert_eq!(build_id,build());
         assert_eq!(label,"aligned","old incorrect labels must not become authority");
+    }
+    #[test]
+    fn corrective_revision_tracks_insert_update_and_rollback(){
+        let mut db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        let start=evidence_revision(&db).unwrap();
+        db.execute("INSERT INTO ml_corrective_observations
+            (example_hash,identity_hash,family,error_class,release_name,source_build,observed_at)
+            VALUES('a','work','sxe','missing','Example.S01E02', 'build',1)",[]).unwrap();
+        let inserted=evidence_revision(&db).unwrap();
+        assert_ne!(inserted,start);
+        db.execute("UPDATE ml_corrective_observations SET observed_at=2
+            WHERE example_hash='a'",[]).unwrap();
+        assert_eq!(evidence_revision(&db).unwrap(),inserted);
+        let tx=db.transaction().unwrap();
+        tx.execute("UPDATE ml_corrective_observations SET error_class='aligned'
+            WHERE example_hash='a'",[]).unwrap();
+        let updated=evidence_revision(&tx).unwrap();
+        assert_ne!(updated,inserted);
+        tx.rollback().unwrap();
+        assert_eq!(evidence_revision(&db).unwrap(),inserted);
+        db.execute("DELETE FROM ml_corrective_observations WHERE example_hash='a'",[])
+            .unwrap();
+        assert_ne!(evidence_revision(&db).unwrap(),start);
     }
     #[test]
     fn correct_regex_replay_is_not_an_improvement(){

@@ -122,6 +122,9 @@ concurrency do not grow with the budget.
 
 See [ML capacity and scaling](docs/ML_SCALING.md) for size profiles, migration
 from the older ML variables and what is excluded from the budget.
+For background training CPU efficiency, native parser replay caching,
+SQLite evidence revisions, FTRL feature reuse and the division of work
+between Tantivy and SQLite, see [ML runtime performance](docs/ML_PERFORMANCE.md).
 
 **Safe observation mode:** set `MATCHLAB_ML_LIVE_REGEX_ENABLED: "false"` to keep
 collecting/training locally while preventing learned regex rules from changing

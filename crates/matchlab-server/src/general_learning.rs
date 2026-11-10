@@ -8,7 +8,7 @@ use rusqlite::{params,Connection};
 use serde_json::{json,Value};
 use sha2::{Digest,Sha256};
 use std::collections::BTreeMap;
-use std::sync::{OnceLock,RwLock,atomic::{AtomicU64,Ordering}};
+use std::sync::{Mutex,OnceLock,RwLock,atomic::{AtomicU64,Ordering}};
 
 const EPOCH:u32=1;
 const MIN_FIXES:usize=4;
@@ -54,6 +54,66 @@ static REVISION:AtomicU64=AtomicU64::new(0);
 static REJECTED:AtomicU64=AtomicU64::new(0);
 static CURSOR:AtomicU64=AtomicU64::new(0);
 static OBSERVED:AtomicU64=AtomicU64::new(0);
+// SQLite owns the authoritative revision; the in-process cache is an
+// accelerator only. It never bypasses the promotion/replay safety checks.
+static CANDIDATE_CACHE:OnceLock<Mutex<Option<(String,Vec<Active>)>>>=OnceLock::new();
+fn evidence_revision(db:&Connection)->Result<u64,String>{
+    let number:i64=db.query_row("SELECT revision FROM ml_general_evidence_revision
+        WHERE id=1",[],|row|row.get(0)).map_err(|e|e.to_string())?;
+    u64::try_from(number).map_err(|_|"invalid general evidence revision".to_owned())
+}
+// Negative candidate reviews and positive active-set safety are memoized
+// only for the complete evidence AND external native/ML rule generation.
+// This retains every existing proof requirement and candidate rotation,
+/// but avoids compiling/replaying unchanged cohorts on every small batch.
+static SAFE_GENERATION:OnceLock<Mutex<Option<String>>>=OnceLock::new();
+static REJECTED_REPLAYS:OnceLock<Mutex<(String,std::collections::HashSet<String>)>>=
+    OnceLock::new();
+fn validation_generation(db:&Connection,rules:&[Active])->Result<String,String>{
+    Ok(format!("{}:{}:{}:{}:{}:{}:{rules:?}",
+        db.path().unwrap_or(":memory:"),evidence_revision(db)?,
+        matchlab_parser::handler_patch_revision(),
+        crate::field_learning::revision(),
+        crate::tv_learning::revision(),
+        crate::corrective_learning::revision()))
+}
+fn active_safe_cached(db:&Connection,rules:&[Active])->Result<bool,String>{
+    if db.path().is_none_or(|p|p.is_empty()||p==":memory:"){
+        return active_safe(db,rules);
+    }
+    let generation=validation_generation(db,rules)?;
+    let cache=SAFE_GENERATION.get_or_init(||Mutex::new(None));
+    if cache.lock().ok().is_some_and(|saved|saved.as_ref()==Some(&generation)){
+        return Ok(true);
+    }
+    let valid=active_safe(db,rules)?;
+    if valid{
+        if let Ok(mut saved)=cache.lock(){*saved=Some(generation);}
+    }
+    Ok(valid)
+}
+fn previously_rejected(generation:&str,key:&str)->bool{
+    let cache=REJECTED_REPLAYS.get_or_init(||
+        Mutex::new((String::new(),std::collections::HashSet::new())));
+    let Ok(mut seen)=cache.lock()else{return false;};
+    if seen.0!=generation{
+        seen.0=generation.to_owned();
+        seen.1.clear();
+    }
+    seen.1.contains(key)
+}
+fn remember_rejected(generation:&str,key:&str){
+    let cache=REJECTED_REPLAYS.get_or_init(||
+        Mutex::new((String::new(),std::collections::HashSet::new())));
+    if let Ok(mut seen)=cache.lock(){
+        if seen.0!=generation{
+            seen.0=generation.to_owned();
+            seen.1.clear();
+        }
+        if seen.1.len()>=4_096{seen.1.clear();}
+        seen.1.insert(key.to_owned());
+    }
+}
 
 fn active()->&'static RwLock<Vec<Active>>{
     ACTIVE.get_or_init(||RwLock::new(Vec::new()))
@@ -68,7 +128,13 @@ fn catalogue()->&'static Vec<Value>{
     SOURCE.get_or_init(matchlab_parser::existing_regex_rules)
 }
 fn source(index:usize)->Option<&'static Value>{
-    catalogue().iter().find(|v|v["index"].as_u64()==Some(index as u64))
+    // The generated catalog contains sparse original source IDs. Index
+    // positions once, instead of rescanning ~450 handlers per candidate.
+    static SOURCE_INDEX:OnceLock<std::collections::HashMap<usize,usize>>=OnceLock::new();
+    let offsets=SOURCE_INDEX.get_or_init(||catalogue().iter().enumerate()
+        .filter_map(|(offset,value)|Some((value["index"].as_u64()? as usize,offset)))
+        .collect());
+    offsets.get(&index).and_then(|offset|catalogue().get(*offset))
 }
 fn safe(name:&str)->bool{
     (12..=240).contains(&name.len())&&name.is_ascii()
@@ -244,9 +310,9 @@ fn derive(name:&str,ctx:&ParseContext)->Vec<Evidence>{
     // wrapper. Context parsing intentionally retains internal empty arrays
     // (e.g. languages=[]), while the public wrapper can omit them.
     // The comparison reference must therefore use the same output shape.
-    let Ok(expected_public)=matchlab_parser::parse_title_canonical(name,false)
-        else{return Vec::new();};
-    let expected_public=Value::Object(expected_public);
+    // Do not run the full path-level parser until we have a plausible,
+    // independently derived mutation. The canonical context was already
+    // parsed once by the worker for every incoming training title.
     let mut matches=ctx.matched.iter().filter_map(|(field,match_info)|{
         let index=match_info.source_index?;
         let template=source(index)?;
@@ -267,6 +333,10 @@ fn derive(name:&str,ctx:&ParseContext)->Vec<Evidence>{
         matches.rotate_left(position);
         matches.truncate(1);
     }
+    if matches.is_empty(){return Vec::new();}
+    let Ok(expected_public)=matchlab_parser::parse_title_canonical(name,false)
+        else{return Vec::new();};
+    let expected_public=Value::Object(expected_public);
     let mut out=Vec::new();
     for (index,field,pattern,mutants) in matches{
         let Some(reference)=ctx.result.get(&field)else{continue;};
@@ -324,7 +394,22 @@ pub fn init(db:&Connection)->Result<(),String>{
         fixed_examples INTEGER NOT NULL,
         checked_examples INTEGER NOT NULL,
         verified_at INTEGER NOT NULL
-    );").map_err(|e|e.to_string())
+    );
+    CREATE TABLE IF NOT EXISTS ml_general_evidence_revision(
+        id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL);
+    INSERT OR IGNORE INTO ml_general_evidence_revision VALUES(1,1);
+    CREATE TRIGGER IF NOT EXISTS ml_general_revision_insert
+        AFTER INSERT ON ml_general_examples BEGIN
+        UPDATE ml_general_evidence_revision SET revision=revision+1 WHERE id=1;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ml_general_revision_delete
+        AFTER DELETE ON ml_general_examples BEGIN
+        UPDATE ml_general_evidence_revision SET revision=revision+1 WHERE id=1;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ml_general_revision_update
+        AFTER UPDATE ON ml_general_examples BEGIN
+        UPDATE ml_general_evidence_revision SET revision=revision+1 WHERE id=1;
+    END;").map_err(|e|e.to_string())
 }
 pub fn count(db:&Connection)->Result<i64,String>{
     init(db)?;
@@ -389,6 +474,19 @@ fn migrate(db:&Connection)->Result<(),String>{
     Ok(())
 }
 fn candidates(db:&Connection)->Result<Vec<Active>,String>{
+    let revision=evidence_revision(db)?;
+    let memo_path=db.path().filter(|p|!p.is_empty()&&*p!=":memory:");
+    // In-memory test databases may share an empty SQLite path. Never reuse
+    // a candidate cohort across distinct independent connections.
+    let memo_key=memo_path.map(|path|format!("{path}:{revision}"));
+    let cache=CANDIDATE_CACHE.get_or_init(||Mutex::new(None));
+    if let Some(ref key)=memo_key{
+        if let Ok(guard)=cache.lock(){
+            if let Some((seen,ready))=guard.as_ref(){
+                if seen==key{return Ok(ready.clone());}
+            }
+        }
+    }
     let mut stmt=db.prepare("SELECT rule_key,field,source_index,pattern,mode,
         count(*) AS n,count(DISTINCT identity_hash) AS titles
         FROM ml_general_examples WHERE source_build=?1
@@ -408,7 +506,11 @@ fn candidates(db:&Connection)->Result<Vec<Active>,String>{
         .map_err(|e|e.to_string())?;
     // Invalid persisted rules and arbitrary field overwrites cannot become
     // executable even if a local SQLite database was imported or modified.
-    Ok(proposals.into_iter().filter(promotable).collect())
+    let eligible=proposals.into_iter().filter(promotable).collect::<Vec<_>>();
+    if let Some(key)=memo_key{
+        if let Ok(mut guard)=cache.lock(){*guard=Some((key,eligible.clone()));}
+    }
+    Ok(eligible)
 }
 fn read_examples(db:&Connection,key:&str,limit:usize)->Result<Vec<Evidence>,String>{
     let mut stmt=db.prepare("SELECT field,source_index,pattern,mode,
@@ -624,7 +726,7 @@ pub fn reconcile(db:&Connection)->Result<(),String>{
     // A formerly active rule is never grandfathered in when fresh
     // evidence invalidates it or other rules change. Remove the newest
     // corrections until the complete parser is safe again.
-    while !ready.is_empty()&&!active_safe(db,&ready)?{
+    while !ready.is_empty()&&!active_safe_cached(db,&ready)?{
         ready.pop();
         rejected+=1;
     }
@@ -636,16 +738,24 @@ pub fn reconcile(db:&Connection)->Result<(),String>{
             if ready.len()>=MAX_ACTIVE{break;}
             let rule=pool[(start+offset)%pool.len()].clone();
             if ready.iter().any(|old|old.key==rule.key){continue;}
+            let generation=validation_generation(db,&ready)?;
+            if db.path().is_some_and(|p|!p.is_empty()&&p!=":memory:")
+                &&previously_rejected(&generation,&rule.key){continue;}
             let mut candidate=ready.clone();
-        candidate.push(rule.clone());
-        match replay(db,&ready,&candidate,&rule.key)?{
+            candidate.push(rule.clone());
+            match replay(db,&ready,&candidate,&rule.key)?{
             Some((checked,fixed)) if fixed>=
                 (if rule.mode=="correct"{MIN_CORRECTION_FIXES}else{MIN_FIXES})=>{
                 let Some(last)=candidate.last_mut()else{continue;};
                 last.fixes=fixed;last.checked=checked;
                 ready=candidate;
             }
-            _=>rejected+=1
+            _=>{
+                rejected+=1;
+                if db.path().is_some_and(|p|!p.is_empty()&&p!=":memory:"){
+                    remember_rejected(&generation,&rule.key);
+                }
+            }
             }
         }
     }
@@ -779,6 +889,25 @@ pub fn community_proposals(db:&Connection)->Result<Vec<Value>,String>{
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn general_evidence_revision_changes_atomically_and_rolls_back(){
+        let mut db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        let initial=evidence_revision(&db).unwrap();
+        db.execute("INSERT INTO ml_general_examples(
+            rule_key,example_hash,identity_hash,field,source_index,pattern,mode,
+            source_release,variant_release,expected,source_build,observed_at)
+            VALUES('rule','sample','identity','edition',1,'(?i)web','add',
+                'Movie.WEB','Movie.WEBB','{}','build',1)",[]).unwrap();
+        let inserted=evidence_revision(&db).unwrap();
+        assert!(inserted>initial);
+        let tx=db.transaction().unwrap();
+        tx.execute("DELETE FROM ml_general_examples WHERE rule_key='rule'",[]).unwrap();
+        assert!(evidence_revision(&tx).unwrap()>inserted);
+        tx.rollback().unwrap();
+        assert_eq!(evidence_revision(&db).unwrap(),inserted);
+        assert!(candidates(&db).unwrap().is_empty());
+    }
     #[test]
     fn untrusted_and_ambiguous_rules_never_become_executable(){
         let native=catalogue().iter().find(|r|

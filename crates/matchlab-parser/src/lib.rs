@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::cell::{Cell,RefCell};
-use std::sync::{Arc,RwLock};
-use std::collections::{HashMap, HashSet};
+use std::sync::{Arc,Mutex,RwLock};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
 use chrono::NaiveDate;
@@ -173,16 +173,59 @@ fn learned_tv_ambiguous(title:&str)->bool{
     false
 }
 
+#[derive(Default)]
+struct CompiledRegexCache{
+    entries:HashMap<(String,bool),(PcreRegex,u64)>,
+    tick:u64,
+}
+// A single immutable compiled PCRE2 pattern can serve many candidate
+// generations. Clone creates thread-local matching scratch while sharing
+// compiled code. Keep this separate from the six complete replay engines:
+// distinct candidates still reuse hundreds of unchanged native patterns.
+static COMPILED_REGEX_CACHE:Lazy<Mutex<CompiledRegexCache>>=
+    Lazy::new(||Mutex::new(CompiledRegexCache::default()));
+static REGEX_CACHE_HITS:std::sync::atomic::AtomicU64=
+    std::sync::atomic::AtomicU64::new(0);
+static REGEX_CACHE_BUILDS:std::sync::atomic::AtomicU64=
+    std::sync::atomic::AtomicU64::new(0);
 fn compile_regex(pattern: &str, ignore_case: bool) -> Result<PcreRegex, ParseError> {
+    let key=(pattern.to_owned(),ignore_case);
+    if let Ok(mut cache)=COMPILED_REGEX_CACHE.lock(){
+        cache.tick=cache.tick.wrapping_add(1);
+        let now=cache.tick;
+        if let Some((compiled,last_used))=cache.entries.get_mut(&key){
+            *last_used=now;
+            REGEX_CACHE_HITS.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+            return Ok(compiled.clone());
+        }
+    }
     let normalized_pattern = normalize_pattern_for_pcre2(pattern);
     let mut builder = PcreRegexBuilder::new();
     builder.utf(true);
     builder.ucp(true);
     builder.caseless(ignore_case);
     builder.jit_if_available(true);
-    builder.build(&normalized_pattern).map_err(|error| {
+    let compiled=builder.build(&normalized_pattern).map_err(|error| {
         ParseError::Regex(format!("Error compiling regex: {error}; pattern={pattern}"))
-    })
+    })?;
+    REGEX_CACHE_BUILDS.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut cache)=COMPILED_REGEX_CACHE.lock(){
+        cache.tick=cache.tick.wrapping_add(1);
+        let now=cache.tick;
+        // Cache at most 768 patterns: enough for the bundled source handlers
+        // plus a bounded number of learned variants, with no unbounded RAM.
+        if !cache.entries.contains_key(&key){
+            if cache.entries.len()>=768{
+                if let Some(oldest)=cache.entries.iter()
+                    .min_by_key(|(_,(_,seen))|*seen)
+                    .map(|(key,_)|key.clone()){
+                    cache.entries.remove(&oldest);
+                }
+            }
+            cache.entries.insert(key,(compiled.clone(),now));
+        }
+    }
+    Ok(compiled)
 }
 
 fn normalize_pattern_for_pcre2(pattern: &str) -> String {
@@ -2944,7 +2987,7 @@ pub struct HandlerCorrection {
 /// All original generated parser handlers, including years, seasons,
 /// episodes, technical fields and title rules. This is read only on the
 /// learning worker, never during normal request parsing.
-pub fn existing_regex_rules() -> Vec<Value> {
+static REGEX_CATALOGUE: Lazy<Vec<Value>> = Lazy::new(|| {
     let Ok(doc) = serde_json::from_str::<Value>(HANDLERS_JSON) else {
         return Vec::new();
     };
@@ -2956,6 +2999,9 @@ pub fn existing_regex_rules() -> Vec<Value> {
                 "flags":raw["flags"],"options":raw["options"],
                 "kind":raw["kind"],"origin":"generated_handler"}))
         }).collect()
+});
+pub fn existing_regex_rules() -> Vec<Value> {
+    REGEX_CATALOGUE.clone()
 }
 pub fn handler_patch_revision() -> u64 {
     LIVE_REVISION.load(std::sync::atomic::Ordering::Acquire)
@@ -3025,7 +3071,7 @@ fn effective_handler_additions(
     patches:&[HandlerPatch],additions:&[HandlerAddition],
     corrections:&[HandlerCorrection]
 )->Vec<HandlerAddition>{
-    let catalog=existing_regex_rules();
+    let catalog=&*REGEX_CATALOGUE;
     let mut seen=HashSet::new();
     let mut out=Vec::new();
     let by_index=|index:usize|catalog.iter().find(|entry|
@@ -3141,10 +3187,10 @@ pub fn install_learned_handler_regex_with_corrections(
         LIVE_REVISION.store(fingerprint,std::sync::atomic::Ordering::Release);
         return Ok(());
     }
-    let candidate=compile_learned_engine(patches,&additions,corrections)?;
+    let candidate=compiled_replay_engine(patches,&additions,corrections)?;
     let mut lock=LIVE_ENGINE.write().map_err(|_|
         ParseError::Data("live handler lock unavailable".into()))?;
-    *lock=Some(Arc::new(candidate));
+    *lock=Some(candidate);
     LIVE_REVISION.store(fingerprint,std::sync::atomic::Ordering::Release);
     Ok(())
 }
@@ -3256,6 +3302,57 @@ fn compile_learned_engine(
     ParserEngine::from_json(&document.to_string())
 }
 
+// Caches exact immutable candidate engines across repeated background evidence
+// replays. Keep the complete rule input as the key (not a 64-bit fingerprint)
+// so a hash collision cannot cause an incorrect validation result. Bounded to
+// six generations; normal API parses never acquire this mutex.
+static REPLAY_ENGINE_CACHE: Lazy<Mutex<VecDeque<(String,Arc<ParserEngine>)>>> =
+    Lazy::new(|| Mutex::new(VecDeque::new()));
+static REPLAY_CACHE_HITS:std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static REPLAY_CACHE_BUILDS:std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+/// Background-only cache instrumentation, exposed via /api/ml/status.
+pub fn replay_cache_status()->Value{
+    use std::sync::atomic::Ordering;
+    json!({"entries":REPLAY_ENGINE_CACHE.lock().map(|c|c.len()).unwrap_or(0),
+        "max_entries":6,
+        "hits":REPLAY_CACHE_HITS.load(Ordering::Relaxed),
+        "compiled_generations":REPLAY_CACHE_BUILDS.load(Ordering::Relaxed),
+        "regex_cache_entries":COMPILED_REGEX_CACHE.lock()
+            .map(|cache|cache.entries.len()).unwrap_or(0),
+        "regex_cache_max_entries":768,
+        "regex_cache_hits":REGEX_CACHE_HITS.load(Ordering::Relaxed),
+        "regex_compilations":REGEX_CACHE_BUILDS.load(Ordering::Relaxed)})
+}
+fn compiled_replay_engine(
+    patches:&[HandlerPatch],additions:&[HandlerAddition],
+    corrections:&[HandlerCorrection]
+)->Result<Arc<ParserEngine>,ParseError>{
+    let key=format!("{patches:?}|{additions:?}|{corrections:?}");
+    if let Ok(mut cache)=REPLAY_ENGINE_CACHE.lock(){
+        if let Some(index)=cache.iter().position(|(stored,_)|stored==&key){
+            if let Some(entry)=cache.remove(index){
+                let engine=Arc::clone(&entry.1);
+                cache.push_back(entry);
+                REPLAY_CACHE_HITS.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+                return Ok(engine);
+            }
+        }
+    }
+    // Compile without holding the cache lock. A concurrent compile is safe;
+    // only immutable, successfully compiled generations enter the cache.
+    let engine=Arc::new(compile_learned_engine(patches,additions,corrections)?);
+    REPLAY_CACHE_BUILDS.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut cache)=REPLAY_ENGINE_CACHE.lock(){
+        if !cache.iter().any(|(stored,_)|stored==&key){
+            if cache.len()>=6{cache.pop_front();}
+            cache.push_back((key,Arc::clone(&engine)));
+        }
+    }
+    Ok(engine)
+}
+
 /// Test the COMPLETE candidate parser, including existing technical and
 /// TV overlays, before changing a live rule. New corrections must improve
 /// the actual installed parser combination, not merely a bare regex sample.
@@ -3266,7 +3363,7 @@ pub fn replay_handler_rules(
     if titles.len()>128{return Err(ParseError::Data(
         "corrective replay corpus too large".into()));}
     let additions=effective_handler_additions(patches,additions,corrections);
-    let candidate=Arc::new(compile_learned_engine(patches,&additions,corrections)?);
+    let candidate=compiled_replay_engine(patches,&additions,corrections)?;
     struct RestoreReplay;
     impl Drop for RestoreReplay{
         fn drop(&mut self){
@@ -3669,6 +3766,23 @@ static ADULT_KEYWORDS: Lazy<AhoCorasick> = Lazy::new(|| {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_pcre2_preserves_case_flags_and_parser_results(){
+        let sensitive=compile_regex(r"\bBR\b",false).unwrap();
+        let insensitive=compile_regex(r"\bBR\b",true).unwrap();
+        let same=compile_regex(r"\bBR\b",true).unwrap();
+        assert!(!sensitive.is_match(b"br").unwrap());
+        assert!(insensitive.is_match(b"br").unwrap());
+        assert_eq!(same.is_match(b"br").unwrap(),
+            insensitive.is_match(b"br").unwrap());
+        let titles=vec!["Bleach.S17E01.1080p.WEB-DL".to_owned(),
+            "The.Daily.Show.2018.02.13.1080p.WEB-DL".to_owned(),
+            "Movie.2025.2160p.BluRay".to_owned()];
+        let expected=replay_handler_rules(&[],&[],&[],&titles).unwrap();
+        let cached=replay_handler_rules(&[],&[],&[],&titles).unwrap();
+        assert_eq!(expected,cached,"compiled generation cache changed parser semantics");
+    }
 
     #[test]
     fn date_field_normalizes_release_formats_without_inventing_episodes() {
