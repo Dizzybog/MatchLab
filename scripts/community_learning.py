@@ -86,7 +86,7 @@ def git_ancestor(source_sha, current_sha):
         return False
 
 
-def validate_report(row, sha):
+def validate_report(row, sha, is_ancestor=git_ancestor):
     if not isinstance(row, dict) or set(row) != {
         "protocol", "learning_epoch", "build_sha", "source",
         "fingerprint", "title", "status", "alerts", "parsed", "selected",
@@ -94,7 +94,11 @@ def validate_report(row, sha):
     }:
         return None
     if (row["protocol"] not in (PROTOCOL, 3) or row["learning_epoch"] != EPOCH
-        or row["build_sha"] != sha or row["source"] != "matchlab-community"
+        or not isinstance(row["build_sha"], str)
+        or not valid_sha(row["build_sha"])
+        or not (row["build_sha"] == sha
+                or is_ancestor(row["build_sha"], sha))
+        or row["source"] != "matchlab-community"
         or row["verified"] is not False or not allowed_title(row["title"])
         or row["status"] not in ("matched", "unmatched", "error")):
         return None
@@ -171,30 +175,35 @@ def validate_comment(comment, current_sha, is_ancestor=git_ancestor):
         or not isinstance(rules, list)
         or not 1 <= len(batch["reports"]) + len(rules) <= MAX_BATCH):
         return None
-    reports = []
-    for row in batch["reports"]:
-        clean = validate_report(row, sha)
-        if clean is None or clean["protocol"] != protocol:
-            return None
-        reports.append(clean)
-    # The standalone v3 rule intake separately validates the full safe
-    # schema and cross-references. Here, validate fingerprints and overall
-    # batch integrity to continue accepting older issue observations.
-    rule_fp=[]
-    for entry in rules:
+    # Authenticate the ORIGINAL full list before filtering. Dropping a
+    # malformed child from the fingerprint computation would accept a
+    # modified batch ID and can hide tampering.
+    raw_reports=batch["reports"]
+    fingerprints=[]
+    for entry in raw_reports + rules:
         if not isinstance(entry,dict):
             return None
         fp=entry.get("fingerprint")
         if not isinstance(fp,str) or re.fullmatch("[0-9a-f]{64}",fp) is None:
             return None
-        rule_fp.append(fp)
-    fingerprints=sorted([row["fingerprint"] for row in reports] + rule_fp)
-    if len(fingerprints) != len(set(fingerprints)):
+        fingerprints.append(fp)
+    if len(fingerprints)!=len(set(fingerprints)):
         return None
     expected=hashlib.sha256(
-        (sha+"\n"+str(EPOCH)+"\n"+"\n".join(fingerprints)).encode()
+        (sha+"\n"+str(EPOCH)+"\n"+"\n".join(sorted(fingerprints))).encode()
     ).hexdigest()
     if batch["batch_id"] != expected:
+        return None
+    # A client can carry older observations in a fresh batch. Ancestor
+    # ancestry is required, followed by independent current-parser replay.
+    # A malformed individual report must not suppress other valid reports;
+    # it is NEVER treated as an ML training label.
+    reports=[]
+    for row in raw_reports:
+        clean=validate_report(row,sha,is_ancestor)
+        if clean is not None and clean["protocol"]==protocol:
+            reports.append(clean)
+    if raw_reports and not reports and not rules:
         return None
     return reports
 
