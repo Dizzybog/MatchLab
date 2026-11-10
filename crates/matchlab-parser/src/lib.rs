@@ -1194,7 +1194,10 @@ fn transform_resolution(input: &str) -> String {
 }
 
 fn parse_date_with_formats(input: &str, formats: &[String]) -> Option<String> {
-    let sanitized = NON_WORD_RE.replace_all(input, " ").trim().to_owned();
+    // Underscores are word characters in regex, but date separators in
+    // release names (e.g. 2026_11_10). Normalize before parsing.
+    let cleaned=input.replace('_', " ");
+    let sanitized = NON_WORD_RE.replace_all(&cleaned, " ").trim().to_owned();
     if sanitized.is_empty() {
         return None;
     }
@@ -1227,6 +1230,27 @@ fn parse_date(input: &str, fmt: &str) -> Option<NaiveDate> {
             let y = tokens[0].parse::<i32>().ok()?;
             let m = tokens[1].parse::<u32>().ok()?;
             let d = tokens[2].parse::<u32>().ok()?;
+            NaiveDate::from_ymd_opt(y, m, d)
+        }
+        "MM DD YYYY" => {
+            if tokens.len() < 3 { return None; }
+            let m = tokens[0].parse::<u32>().ok()?;
+            let d = tokens[1].parse::<u32>().ok()?;
+            let y = tokens[2].parse::<i32>().ok()?;
+            NaiveDate::from_ymd_opt(y, m, d)
+        }
+        "MMM DD YYYY" => {
+            if tokens.len() < 3 { return None; }
+            let m = month_to_num(tokens[0])?;
+            let d = parse_day(tokens[1])?;
+            let y = tokens[2].parse::<i32>().ok()?;
+            NaiveDate::from_ymd_opt(y, m, d)
+        }
+        "YYYY MMM DD" => {
+            if tokens.len() < 3 { return None; }
+            let y = tokens[0].parse::<i32>().ok()?;
+            let m = month_to_num(tokens[1])?;
+            let d = parse_day(tokens[2])?;
             NaiveDate::from_ymd_opt(y, m, d)
         }
         "DD MM YYYY" => {
@@ -3603,6 +3627,49 @@ static ADULT_KEYWORDS: Lazy<AhoCorasick> = Lazy::new(|| {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn date_field_normalizes_release_formats_without_inventing_episodes() {
+        // All dates are published in one ISO-8601 date field. The matcher,
+        // not the parser, resolves the date to IMDb season/episode.
+        let cases = [
+            ("The.Daily.Show.2026.11.10.1080p.WEB-DL", "2026-11-10"),
+            ("The_Daily_Show_2026_11_10_WEB-DL", "2026-11-10"),
+            ("The.Daily.Show.2026-11-10.1080p.WEB-DL", "2026-11-10"),
+            ("The.Daily.Show.2026.2.9.1080p.WEB-DL", "2026-02-09"),
+            ("The.Daily.Show.10.11.2026.1080p.WEB-DL", "2026-11-10"),
+            ("The.Daily.Show.9-2-2026.1080p.WEB-DL", "2026-02-09"),
+            ("The.Daily.Show.November.10.2026.1080p.WEB-DL", "2026-11-10"),
+            ("The.Daily.Show.2026-Nov-10.1080p.WEB-DL", "2026-11-10"),
+            ("The.Daily.Show.10th.November.2026.1080p.WEB-DL", "2026-11-10"),
+            ("The.Daily.Show.20261110.1080p.WEB-DL", "2026-11-10"),
+            ("The.Daily.Show.11.30.2026.1080p.WEB-DL", "2026-11-30"),
+            ("The.Daily.Show.2024.02.29.1080p.WEB-DL", "2024-02-29"),
+            ("The.Daily.Show.2031.12.31.1080p.WEB-DL", "2031-12-31"),
+        ];
+        for (release, expected) in cases {
+            let parsed=parse_title(release,false).unwrap();
+            assert_eq!(parsed["date"],expected,
+                "{release} => {parsed:?}");
+            assert_eq!(parsed["seasons"],json!([]),"{release}");
+            assert_eq!(parsed["episodes"],json!([]),"{release}");
+            assert!(parsed["title"].as_str().is_some_and(|s|
+                s.to_ascii_lowercase().contains("daily")),
+                "date handler damaged title: {release} => {parsed:?}");
+        }
+        for release in [
+            "The.Daily.Show.2026.02.30.1080p.WEB-DL",
+            "The.Daily.Show.2025.02.29.1080p.WEB-DL",
+            "The.Daily.Show.2026.13.01.1080p.WEB-DL",
+            "The.Daily.Show.20261301.WEB-DL",
+            "Breaking.Bad.S02E03.1080p.WEB-DL",
+            "Movie.Title.2026.1080p.BluRay",
+        ] {
+            let parsed=parse_title(release,false).unwrap();
+            assert!(parsed.get("date").is_none(),
+                "invalid date should not be exposed: {release} => {parsed:?}");
+        }
+    }
 
     #[test]
     fn unmarked_anime_batch_does_not_claim_only_its_last_episode(){
