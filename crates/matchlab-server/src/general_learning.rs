@@ -68,7 +68,13 @@ fn catalogue()->&'static Vec<Value>{
     SOURCE.get_or_init(matchlab_parser::existing_regex_rules)
 }
 fn source(index:usize)->Option<&'static Value>{
-    catalogue().iter().find(|v|v["index"].as_u64()==Some(index as u64))
+    // The generated catalog contains sparse original source IDs. Index
+    // positions once, instead of rescanning ~450 handlers per candidate.
+    static SOURCE_INDEX:OnceLock<std::collections::HashMap<usize,usize>>=OnceLock::new();
+    let offsets=SOURCE_INDEX.get_or_init(||catalogue().iter().enumerate()
+        .filter_map(|(offset,value)|Some((value["index"].as_u64()? as usize,offset)))
+        .collect());
+    offsets.get(&index).and_then(|offset|catalogue().get(*offset))
 }
 fn safe(name:&str)->bool{
     (12..=240).contains(&name.len())&&name.is_ascii()
@@ -244,9 +250,9 @@ fn derive(name:&str,ctx:&ParseContext)->Vec<Evidence>{
     // wrapper. Context parsing intentionally retains internal empty arrays
     // (e.g. languages=[]), while the public wrapper can omit them.
     // The comparison reference must therefore use the same output shape.
-    let Ok(expected_public)=matchlab_parser::parse_title_canonical(name,false)
-        else{return Vec::new();};
-    let expected_public=Value::Object(expected_public);
+    // Do not run the full path-level parser until we have a plausible,
+    // independently derived mutation. The canonical context was already
+    // parsed once by the worker for every incoming training title.
     let mut matches=ctx.matched.iter().filter_map(|(field,match_info)|{
         let index=match_info.source_index?;
         let template=source(index)?;
@@ -267,6 +273,10 @@ fn derive(name:&str,ctx:&ParseContext)->Vec<Evidence>{
         matches.rotate_left(position);
         matches.truncate(1);
     }
+    if matches.is_empty(){return Vec::new();}
+    let Ok(expected_public)=matchlab_parser::parse_title_canonical(name,false)
+        else{return Vec::new();};
+    let expected_public=Value::Object(expected_public);
     let mut out=Vec::new();
     for (index,field,pattern,mutants) in matches{
         let Some(reference)=ctx.result.get(&field)else{continue;};
