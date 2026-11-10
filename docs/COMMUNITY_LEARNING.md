@@ -248,7 +248,46 @@ The trusted GitHub Action:
 4. Keeps technical, TV and source-handler suggestions in `learning/community_regex_proposals.json` as **non-executable review data**. Independently approved changes must be integrated before they affect other installations.
 5. Publishes independently reviewed anime marker rules through `learning/community_rules.json`.
 
-**No community submission automatically replaces MatchLab source code, activates an unverified regex on another server, or merges its own PR.**
+### Automatic native regex impact review
+
+The daily GitHub Action now performs an **independent, deterministic native-Rust
+regex audit** before proposing changes. No external AI service is required:
+
+1. Rebuild the exact source-handler regex alternative from MatchLab's trusted
+   handler catalogue and the narrow allowlisted marker grammar. Reject a
+   changed original regex, handler index, field, transform or arbitrary PCRE.
+2. Compile the candidate in the **complete Rust parser** without installing it
+   into the live server. Compare it against canonical parsing for protected
+   negative cases, repeatable synthetic release names and the maintainer-owned
+   `learning/regex_review_fixtures.json` test titles.
+3. Report one of `invalid_source`, `no_effect`, `regression`,
+   `needs_independent_evidence`, or `ready_for_source_diff`. All other
+   proposal families remain `review_only` until their field and truth oracles
+   are independently implemented. Known duplicates/regressions are not sent
+   in a fresh bot PR.
+4. **If at least two different maintainer-labeled titles improve, and no
+   protected parser result changes incorrectly**, the Action may stage a
+   precise `(?:original_regex)|(?:new_marker_regex)` replacement in exactly
+   the matching `handlers.json` entry. Handler index, transform, flags and
+   options remain unchanged, and the corresponding independently labeled
+   titles become Rust regression tests.
+5. The generated GitHub PR and Actions artifact report only statuses, source
+   handler index and counters. Raw community torrent titles and claimed
+   IMDb/AniDB labels are **not** embedded in PR commentary.
+
+An Issue comment or ML confidence score **cannot** authorize a source change.
+For a new release convention, a maintainer must add appropriately checked
+positive/negative labels to `learning/regex_review_fixtures.json` first.
+If independent truth is missing, the candidate remains review-only and no
+parser source is altered.
+
+The Action never merges a GitHub PR to main on its own. A maintainer must
+approve the exact diff and green CI; all original metadata/matching
+verification requirements still apply. The GitHub job is deterministic, and
+the optional local ML model does not run on the matching hot path.
+
+**No community submission automatically activates an unverified regex on
+another server or merges its own PR.**
 
 Some reports can contain sanitized filename samples. **Unverified regex discovery proposals may also include the literal unknown release-marker token and its candidate regex** for human review. These tokens are never included in the local status endpoint. Removing paths, credentials and URLs does not guarantee a filename or marker is non-sensitive. Only enable optional GitHub sharing if you consent to publishing this information.
 
