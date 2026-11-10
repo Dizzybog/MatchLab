@@ -91,8 +91,8 @@ The learning process is:
 3. Test proposed regex rules against known values, conflicting patterns and negative examples.
 4. Activate eligible rules in memory without restarting. More uncertain changes are kept for review.
 
-The generated parser contains **458 ordered handlers across 48 field families**
-(449 regex handlers and nine Rust functions). The new *field-general*
+The generated parser contains **465 ordered handlers across 48 field families**
+(456 regex handlers and nine Rust functions). The new *field-general*
 learner can derive safe regex candidates from existing native handler
 provenance and meaning-preserving release-tag variants. It must prove
 **incremental improvement**, preserve complete parser results, reject
