@@ -28,10 +28,20 @@ const MIN_GAP_TITLES: i64 = 2;
 const MIN_OVERRIDE_EXAMPLES: i64 = 16;
 const MIN_OVERRIDE_TITLES: i64 = 6;
 const MAX_RULES: usize = 96;
+const MIN_REPLAY_REPAIRS:usize=4;
+const MIN_REPLAY_TITLES:usize=2;
+const MAX_REPLAY_EXAMPLES:usize=16;
+// Leave the ARM64 worker available for parsing/matching; candidate
+// validation (two complete parser builds) is intentionally paced.
+const MAX_NEW_REPLAY_CHECKS:usize=4;
 const MAX_TITLE_BYTES: usize = 240;
 static ACTIVE:OnceLock<RwLock<ActiveRules>>=OnceLock::new();
 static REVISION: AtomicU64 = AtomicU64::new(0);
 static EVIDENCE_ONLY_CANDIDATES: AtomicU64 = AtomicU64::new(0);
+static RULES_REJECTED_NO_GAIN:AtomicU64=AtomicU64::new(0);
+static RULES_REJECTED_UNVERIFIABLE:AtomicU64=AtomicU64::new(0);
+static PROMOTION_REPLAY_CHECKS:AtomicU64=AtomicU64::new(0);
+static VALIDATION_CURSOR:AtomicU64=AtomicU64::new(0);
 static ORIGINAL_HANDLER_COUNT:OnceLock<usize>=OnceLock::new();
 
 #[derive(Clone)]
@@ -908,6 +918,106 @@ pub fn publish_parser_rules_with_tv_and_corrections(
     matchlab_parser::install_learned_handler_regex_with_corrections(
         &patches,&additions,&corrections)
         .map_err(|e|format!("learned parser regex rejected: {e}"))
+}
+
+/// Validate the ACTUAL collected failures against the complete native
+/// parser before and after ONE new rule. A hash or aggregate counter alone
+/// is not a replayable improvement. The release name stays local.
+fn replayed_field_gain(db:&Connection,rule:&FieldRule,
+    existing:&[FieldRule])->Result<bool,String>{
+    let mut stmt=db.prepare("SELECT r.release_title,r.example_hash,
+            r.identity_hash,e.canonical
+        FROM learned_field_gap_replay r
+        JOIN learned_field_gap_evidence e ON
+            e.field=r.field AND e.signal=r.signal
+            AND e.example_hash=r.example_hash
+            AND e.source_build=r.source_build
+        WHERE r.field=?1 AND r.signal=?2 AND r.source_build=?3
+        ORDER BY r.identity_hash,r.example_hash LIMIT 128")
+        .map_err(|e|e.to_string())?;
+    let rows=stmt.query_map(params![rule.field,rule.signal,build()],|row|Ok((
+        row.get::<_,String>(0)?,row.get::<_,String>(1)?,
+        row.get::<_,String>(2)?,row.get::<_,String>(3)?)))
+        .map_err(|e|e.to_string())?;
+    let rows=rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e|e.to_string())?;
+    let mut titles=Vec::new();
+    let mut identities=Vec::new();
+    let mut seen=BTreeSet::new();
+    let mut per_work=BTreeMap::<String,usize>::new();
+    for (name,example_hash,_identity,serialized) in rows{
+        if titles.len()>=MAX_REPLAY_EXAMPLES{break;}
+        if !safe_title(&name)
+            ||digest(&format!("{}:{}:{}",
+                rule.field,rule.signal,name.to_ascii_lowercase()))=="" {
+            continue;
+        }
+        // The original observation hashes the lowercased release name.
+        if digest(&name.to_ascii_lowercase())!=example_hash{continue;}
+        let Ok(reference)=serde_json::from_str::<Value>(&serialized)else{continue;};
+        if reference!=rule.value{continue;}
+        let Ok(original)=matchlab_parser::parse_title_canonical(&name,false)
+            else{continue;};
+        let Some((validated,is_gap))=training_label(&name,&rule.field,
+            &rule.signal,&original)else{continue;};
+        if !is_gap||validated!=rule.value{continue;}
+        let Some(raw_title)=original.get("title").and_then(Value::as_str)
+            else{continue;};
+        let work=crate::imdb_matcher::clean_title(raw_title);
+        if !(4..=140).contains(&work.len()) ||!seen.insert(example_hash){
+            continue;
+        }
+        let counter=per_work.entry(work.clone()).or_default();
+        if *counter>=2{continue;}
+        *counter+=1;
+        titles.push(name);
+        identities.push(work);
+    }
+    if titles.len()<MIN_REPLAY_REPAIRS
+        ||per_work.len()<MIN_REPLAY_TITLES{
+        return Ok(false);
+    }
+
+    // Both engines contain the same TV/general rules. The ONLY difference
+    // is the new field rule; previous accepted field rules remain in place.
+    let old_patches=source_handler_patches(existing);
+    let new_rules=existing.iter().cloned()
+        .chain(std::iter::once(rule.clone())).collect::<Vec<_>>();
+    let new_patches=source_handler_patches(&new_rules);
+    let mk_additions=|rules:&[FieldRule]|{
+        let mut additions=source_handler_additions(rules);
+        additions.extend(crate::tv_learning::handler_additions());
+        additions.extend(crate::general_learning::handler_additions());
+        additions
+    };
+    let mut corrections=crate::corrective_learning::handler_corrections();
+    corrections.extend(crate::general_learning::handler_corrections());
+    let before=matchlab_parser::replay_handler_rules(
+        &old_patches,&mk_additions(existing),&corrections,&titles)
+        .map_err(|e|format!("baseline field replay failed: {e}"))?;
+    let after=matchlab_parser::replay_handler_rules(
+        &new_patches,&mk_additions(&new_rules),&corrections,&titles)
+        .map_err(|e|format!("candidate field replay failed: {e}"))?;
+    let mut repaired=0usize;
+    let mut fixed_works=BTreeSet::new();
+    for ((old,new),work) in before.iter().zip(after.iter()).zip(&identities){
+        let old_value=old.get(&rule.field);
+        let old_missing=empty_field(old_value)
+            ||matches!(rule.field.as_str(),"subbed"|"dubbed")
+                &&old_value==Some(&Value::Bool(false));
+        if old==new ||!old_missing {continue;}
+        if new.get(&rule.field)!=Some(&rule.value){return Ok(false);}
+        // All previously correct fields, including the extracted title,
+        // must remain unchanged. Title cleanup is review-only until an
+        // independent title reference verifies the new name.
+        let mut expected=old.clone();
+        expected.insert(rule.field.clone(),rule.value.clone());
+        if *new!=expected{return Ok(false);}
+        repaired+=1;
+        fixed_works.insert(work);
+    }
+    Ok(repaired>=MIN_REPLAY_REPAIRS
+        &&fixed_works.len()>=MIN_REPLAY_TITLES)
 }
 
 pub fn reconcile(db: &Connection) -> Result<(), String> {
