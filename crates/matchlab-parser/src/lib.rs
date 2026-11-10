@@ -3769,9 +3769,9 @@ mod tests {
 
     #[test]
     fn cached_pcre2_preserves_case_flags_and_parser_results(){
-        let sensitive=compile_regex(r"\\bBR\\b",false).unwrap();
-        let insensitive=compile_regex(r"\\bBR\\b",true).unwrap();
-        let same=compile_regex(r"\\bBR\\b",true).unwrap();
+        let sensitive=compile_regex(r"\bBR\b",false).unwrap();
+        let insensitive=compile_regex(r"\bBR\b",true).unwrap();
+        let same=compile_regex(r"\bBR\b",true).unwrap();
         assert!(!sensitive.is_match(b"br").unwrap());
         assert!(insensitive.is_match(b"br").unwrap());
         assert_eq!(same.is_match(b"br").unwrap(),
