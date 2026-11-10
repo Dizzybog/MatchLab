@@ -137,6 +137,9 @@ pub fn observe(db:&Connection,title:&str,parsed:&Value,
     if !(4..=120).contains(&name.len()) {return Ok(());}
     let source_build=build();
     let identity=hash(&format!("{source_build}:{name}"));
+    // Scores for multiple markers and source fields share immutable release
+    // context instead of lowercasing and scanning the title repeatedly.
+    let context=crate::online_model::TitleFeatureContext::new(title);
     for marker in unknown_tokens(title){
         if remaining.examples>=crate::ml_config::get().unknown_examples
             && !reclaim_unqualified(db,remaining)?{break;}
@@ -144,7 +147,7 @@ pub fn observe(db:&Connection,title:&str,parsed:&Value,
         // actual value and regex are never used in a parser or matcher.
         let mut ranked:Option<(&str,f32)>=None;
         for field in parser_fields(){
-            if let Some(score)=model.score(field,&marker,title)
+            if let Some(score)=model.score_prepared(field,&marker,&context)
                 && score>=MIN_RANK
                 && ranked.is_none_or(|(_,best)|score>best){
                 ranked=Some((field,score));
