@@ -6,8 +6,8 @@ use std::collections::BTreeSet;
 #[derive(Debug,Clone)]
 struct Part {id:String}
 
-fn aliases(db:&Connection,imdb:&str,key:&str)->rusqlite::Result<Vec<(String,String)>>{
-    crate::tantivy_search::anime_aliases(db,key,4)
+fn aliases(db:&Connection,imdb:&str,title:&str)->rusqlite::Result<Vec<(String,String)>>{
+    crate::tantivy_search::anime_aliases_for_title(db,title,4)
         .map_err(|error|rusqlite::Error::ToSqlConversionFailure(
             Box::new(std::io::Error::other(error))))
         .map(|found|found.into_iter().filter(|a|a.imdb_id==imdb)
@@ -56,7 +56,7 @@ pub fn resolve(db:&Connection,imdb:&str,title:&str,season:i64,episode:i64)
     if season<=0||episode<=0{return Ok(None);}
     let key=imdb_matcher::clean_title(title);
     if key.len()<4{return Ok(None);}
-    let mut aliases=aliases(db,imdb,&key)?;
+    let mut aliases=aliases(db,imdb,title)?;
     if aliases.is_empty(){return Ok(None);}
     aliases.sort_by_key(|(id,alias)|(if alias==&key{0}else{1},
         -(alias.len() as i64),id.clone(),alias.clone()));
@@ -134,7 +134,7 @@ pub fn resolve(db:&Connection,imdb:&str,title:&str,season:i64,episode:i64)
 pub fn has_specific_alias(db:&Connection,imdb:&str,title:&str)->rusqlite::Result<bool>{
     let key=imdb_matcher::clean_title(title);
     if key.len()<4{return Ok(false);}
-    let mut aliases=aliases(db,imdb,&key)?;
+    let mut aliases=aliases(db,imdb,title)?;
     if aliases.is_empty(){return Ok(false);}
     aliases.sort_by_key(|(id,alias)|(if alias==&key{0}else{1},-(alias.len() as i64),id.clone()));
     let best=&aliases[0];
@@ -161,7 +161,7 @@ pub fn resolve_episode_from_exact_part_title(
     if episode<=0{return Ok(None);}
     let Some(inferred_season)=season_from_title(db,imdb,title)? else{return Ok(None)};
     let key=imdb_matcher::clean_title(title);
-    let ids=aliases(db,imdb,&key)?.into_iter()
+    let ids=aliases(db,imdb,title)?.into_iter()
         .filter_map(|(id,alias)|(alias==key).then_some(id))
         .collect::<BTreeSet<_>>();
     if ids.len()!=1{return Ok(None);}
@@ -196,7 +196,7 @@ pub fn resolve_episode_from_exact_part_title(
 pub fn season_from_title(db:&Connection,imdb:&str,title:&str)->rusqlite::Result<Option<i64>>{
     let key=imdb_matcher::clean_title(title);
     if key.len()<4{return Ok(None);}
-    let ids=aliases(db,imdb,&key)?.into_iter().filter(|(_,alias)|alias==&key)
+    let ids=aliases(db,imdb,title)?.into_iter().filter(|(_,alias)|alias==&key)
         .collect::<Vec<_>>();
     let unique:BTreeSet<_>=ids.into_iter().map(|(id,_)|id).collect();
     if unique.len()!=1{return Ok(None);}

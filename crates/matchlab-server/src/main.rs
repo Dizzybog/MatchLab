@@ -216,63 +216,76 @@ fn open_db(path: &PathBuf) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-fn anime_candidate(db: &Connection, key: &str, season: Option<i64>, episode: i64) -> rusqlite::Result<Option<Value>> {
-    if key.len() < 4 || episode <= 0 { return Ok(None); }
-    let matches:Vec<_>=tantivy_search::anime_aliases(db,key,6)
+fn anime_candidate(db: &Connection, title: &str, season: Option<i64>, episode: i64) -> rusqlite::Result<Option<Value>> {
+    let key=imdb_matcher::clean_title(title);
+    if key.len()<4||episode<=0{return Ok(None);}
+    let matches:Vec<_>=tantivy_search::anime_aliases_for_title(db,title,6)
         .map_err(|error|rusqlite::Error::ToSqlConversionFailure(
             Box::new(std::io::Error::other(error))))?
-        .into_iter().map(|alias|(alias.anidb_id,alias.clean_title,alias.imdb_id)).collect();
-    if matches.is_empty() { return Ok(None); }
-    let exact = matches[0].1 == key;
-    let best_len = matches[0].1.len();
-    let best: std::collections::BTreeSet<String> = matches.iter()
-        .filter(|(_, alias, _)| (alias == key) == exact && alias.len() == best_len)
-        .map(|(_,_,imdb)|imdb.clone()).collect();
-    // Shared aliases are frequent (TV, movies, OVAs). The alias alone cannot
-    // select an IMDb identity, but a unique verified episode crosswalk can.
-    // Reject only when more than one *mapped* identity survives. Do not let
-    // a colliding film with no episode 338 block Bleach's TV episode 338.
-    let mut verified:Option<episode_crosswalk::Episode>=None;
-    for imdb in best {
-        let mapped = match season {
-            Some(season) if season > 0 => {
-                let titled=anime_title::resolve(db,&imdb,key,season,episode)?;
-                if titled.is_some() { titled }
-                else if anime_title::has_specific_alias(db,&imdb,key)? { None }
-                else { episode_crosswalk::resolve_season(db,&imdb,season,episode)? }
-            },
-            None => {
-                // Named anime sequel parts restart local episode numbering.
-                let named=anime_title::resolve_episode_from_exact_part_title(
-                    db,&imdb,key,episode)?;
-                if named.is_some(){named}
-                else{episode_crosswalk::resolve_absolute(db,&imdb,episode)?}
-            },
-            _ => None,
-        };
-        if let Some(mapped)=mapped {
-            if verified.replace(mapped).is_some(){
-                // Two independently mapped identities: never guess a winner.
-                return Ok(None);
+        .into_iter().map(|alias|(alias.anidb_id,alias.clean_title,alias.imdb_id))
+        .collect();
+    // AniDB alias hits are sorted by length, with leading edge ahead of
+    // trailing edge only for equal lengths. A longer alias with NO verified
+    // episode must not suppress a shorter alias that has real crosswalk
+    // evidence (e.g. a current JoJo TV series versus an older OVA).
+    let mut cursor=0;
+    while cursor<matches.len(){
+        let len=matches[cursor].1.len();
+        let leading=key.starts_with(&matches[cursor].1);
+        let mut imdb_ids=std::collections::BTreeSet::new();
+        while cursor<matches.len() && matches[cursor].1.len()==len
+            && key.starts_with(&matches[cursor].1)==leading {
+            imdb_ids.insert(matches[cursor].2.clone());
+            cursor+=1;
+        }
+        let mut verified:Option<episode_crosswalk::Episode>=None;
+        for imdb in imdb_ids {
+            let mapped=match season{
+                Some(season) if season>0=>{
+                    let titled=anime_title::resolve(db,&imdb,title,season,episode)?;
+                    if titled.is_some(){titled}
+                    else if anime_title::has_specific_alias(db,&imdb,title)?{None}
+                    else{episode_crosswalk::resolve_season(db,&imdb,season,episode)?}
+                },
+                None=>{
+                    let named=anime_title::resolve_episode_from_exact_part_title(
+                        db,&imdb,title,episode)?;
+                    if named.is_some(){named}
+                    else{episode_crosswalk::resolve_absolute(db,&imdb,episode)?}
+                },
+                _=>None,
+            };
+            if let Some(mapped)=mapped{
+                if verified.is_some(){
+                    // More than one independently mapped identity with the
+                    // same lexical fit: do not invent a winner.
+                    return Ok(None);
+                }
+                verified=Some(mapped);
             }
         }
+        if let Some(m)=verified{
+            return Ok(Some(json!({"imdb_id":m.imdb_id,"season":m.season,
+                "episode":m.episode,"anidb_id":m.anidb_id,
+                "anidb_episode":m.anidb_episode})));
+        }
     }
-    Ok(verified.map(|m|json!({"imdb_id":m.imdb_id,"season":m.season,
-        "episode":m.episode,"anidb_id":m.anidb_id,"anidb_episode":m.anidb_episode})))
+    Ok(None)
 }
 
 /// Resolve a title-only anime identity from anime tables, without inventing
 /// season or episode coordinates. Exact aliases precede longest prefixes.
-fn anime_identity(db:&Connection,key:&str)->rusqlite::Result<Option<String>>{
+fn anime_identity(db:&Connection,title:&str)->rusqlite::Result<Option<String>>{
+    let key=imdb_matcher::clean_title(title);
     if key.len()<4{return Ok(None);}
-    let rows:Vec<_>=tantivy_search::anime_aliases(db,key,6)
+    let rows:Vec<_>=tantivy_search::anime_aliases_for_title(db,title,6)
         .map_err(|error|rusqlite::Error::ToSqlConversionFailure(
             Box::new(std::io::Error::other(error))))?
         .into_iter().map(|alias|(alias.clean_title,alias.imdb_id)).collect();
     let Some((best_alias,best_imdb))=rows.first()else{return Ok(None)};
-    let exact=best_alias==key;
+    let exact=best_alias==&key;
     let size=best_alias.len();
-    if rows.iter().any(|(alias,id)|(alias==key)==exact&&alias.len()==size&&id!=best_imdb){
+    if rows.iter().any(|(alias,id)|(alias==&key)==exact&&alias.len()==size&&id!=best_imdb){
         return Ok(None);
     }
     Ok(Some(best_imdb.clone()))
@@ -1197,10 +1210,10 @@ fn diagnose_with_policy(
         None
     } else if series {
         if let Some(ep)=episodes.first(){
-            anime_candidate(&db,&anime_resolve_key,seasons.first().copied(),*ep)
+            anime_candidate(&db,anime_resolve_title,seasons.first().copied(),*ep)
                 .map_err(|e|e.to_string())?
         }else{
-            anime_identity(&db,&anime_resolve_key).map_err(|e|e.to_string())?
+            anime_identity(&db,anime_resolve_title).map_err(|e|e.to_string())?
                 .map(|id|{
                     let inferred=if seasons.is_empty() {
                         anime_title::season_from_title(&db,&id,anime_resolve_title).ok().flatten()
@@ -4814,7 +4827,9 @@ mod tests {
                     format!("tt{:07}",i+200),Some(1),Some(2))] {
                 let result=diagnose(&path,&MatchRequest{title:raw.clone(),year:None,
                     series:None}).unwrap_or_else(|e|panic!("{raw}: {e}"));
-                let selected=result.selected.unwrap_or_else(||panic!("no match: {raw}"));
+                let selected=result.selected.unwrap_or_else(||panic!(
+                    "no match: {raw}; parsed={:?}; imdb_candidates={:?}; reason={}",
+                    result.parsed,result.imdb_candidates,result.reason));
                 assert_eq!(selected["imdb_id"],id,"{raw}");
                 if let Some(season)=season {assert_eq!(selected["season"],season,"{raw}");}
                 if let Some(episode)=episode {assert_eq!(selected["episode"],episode,"{raw}");}
@@ -4889,6 +4904,30 @@ mod tests {
         assert!(anime_candidate(&db,"exampleanime",Some(2),4).unwrap().is_none());
         db.execute("INSERT INTO episode_map(anidb_id,tvdb_season,anidb_season,map,offset,start,end) VALUES('123',1,1,'',1,1,12)",[]).unwrap();
         assert_eq!(anime_candidate(&db,"exampleanime",Some(1),4).unwrap().unwrap()["anidb_episode"],3);
+    }
+    #[test]
+    fn anime_verified_shorter_alias_can_beat_unverified_longer_ova(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
+            CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT,
+                tvdb_id TEXT DEFAULT '',trakt_season INTEGER DEFAULT 0);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT DEFAULT '',tvdb_season INTEGER,
+                anidb_season INTEGER,map TEXT,offset INTEGER,start INTEGER,end INTEGER);
+            INSERT INTO anidb_titles VALUES
+                ('100','exampleanimeexpansion'),
+                ('200','exampleanime');
+            INSERT INTO anime_series_map(anidb_id,imdb_id) VALUES
+                ('100','tt0000998'),('200','tt0000999');
+            INSERT INTO episode_map(anidb_id,tvdb_id,tvdb_season,anidb_season,map,offset,start,end)
+                VALUES('100','same',1,1,'',0,1,5),
+                      ('200','other',1,1,'',0,1,60);").unwrap();
+        let matched=anime_candidate(&db,"exampleanimeexpansion",Some(1),37)
+            .unwrap().expect("the verified TV identity must survive an older OVA");
+        assert_eq!(matched["imdb_id"],"tt0000999");
+        assert_eq!(matched["anidb_id"],"200");
+        assert_eq!(matched["anidb_episode"],37);
     }
     #[test]
     fn chinese_episode_41_uses_only_verified_absolute_anime_crosswalk(){

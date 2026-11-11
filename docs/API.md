@@ -371,6 +371,41 @@ MatchLab; it does not crawl folders or read the filesystem.
 
 ### Anime identity and episode mapping
 
+### Title relevance and prefix/suffix ranking
+
+The deterministic matcher first checks country-qualified and exact normalized
+IMDb aliases. Without an exact hit, it queries Tantivy for aliases extending
+the parsed title at either edge and for complete aliases at the **start or end**
+of the parsed title. The embedded-prefix/suffix query uses one Tantivy term
+union; no SQLite title scan, per-character round trip, learned model or index
+schema change is needed.
+
+A partial IMDb title match normally requires a **normalized word boundary**,
+at least 50% coverage of the longer title, and at most 16 unmatched
+characters. If a parser accidentally consumes part of a name as technical
+metadata (e.g. `Televisionseries1` becomes `Television`), a longer alias
+is also eligible when its **complete words** are independently present in
+the original release. Numeric title suffixes get the same conservative
+check. This prevents `Dune` matching `Duneland` merely because the first
+characters overlap. Candidates are ordered by exact match,
+relative coverage, leading versus trailing edge (only on equal coverage), then
+title length; the existing year, media type, original/region, ratings and
+ordering tie-breakers still apply. Half-word prefix fallback is intentionally
+removed. Short exact titles such as `Up` remain valid.
+
+AniDB aliases now include sufficiently specific suffix matches in the same
+single index query as prefixes. Unlike compact normalized keys, the original
+release title preserves word starts: a trailing AniDB alias is accepted only
+when it begins at a full source-title word boundary (e.g. `My Favorite BlueArchive`
+may match `BlueArchive`, but `MyFavoriteBlueArchive` may not). Callers that
+only have a compact key are restricted to exact/prefix aliases. Cached Tantivy
+lookup results remain independent of raw-title word boundaries, which are
+validated separately on each request; no index migration is necessary. Anime episode identity is evaluated in lexical
+rank groups: when the best-looking anime alias cannot verify the requested
+episode, a lower-ranked alias with an independently proven crosswalk may still
+resolve it. Ambiguous, equally ranked *verified* anime identities are rejected.
+No missing season, episode or ASID is inferred from title length.
+
 Anime matching uses the same local metadata snapshot as IMDb matching, supplemented by **AniDB titles**, **animeApi** identity links and **Anime-Lists** episode mappings. It does not rely on AI inference or fabricate an IMDb/AniDB relationship.
 
 1. The Rust parser extracts a title, optional season/episode and any absolute episode interval.
