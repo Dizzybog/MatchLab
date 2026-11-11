@@ -121,6 +121,36 @@ class CommunityAutoWorkflowIntegrationTests(unittest.TestCase):
         self.assertFalse(changed)
         self.assertEqual(noop,[])
 
+    def test_verified_candidate_is_not_starved_by_unverified_rules(self):
+        from review_community_regex import screen
+        from community_rule_intake import digest, FIELD_EPOCH
+        source, entry, audit, fixtures = fixture_candidate()
+        rule = entry["proposal"]
+        rule = {
+            **rule,
+            "evidence_count": 24, "distinct_titles": 8,
+            "canonical_confirmations": 8,
+            "source_build": "a" * 40 + ":" + str(FIELD_EPOCH),
+            "verification": "source_catalog_and_canonical_release_markers",
+        }
+        rule["fingerprint"] = digest(
+            "community-patch:" + str(rule["handler_index"]) + ":" +
+            rule["original_regex"] + ":" + rule["proposed_regex"])
+        unverified = {
+            "kind": "learned_field_regex", "field": "quality",
+            "fingerprint": "f" * 64,
+            "signal": "bluray", "regex": "review-only",
+            "source_build": "a" * 40 + ":5",
+        }
+        audit = {**audit, "fingerprint": rule["fingerprint"],
+                 "distinct_verified_titles": 2}
+        result, selected = screen(
+            [unverified, rule], [],
+            [{"fingerprint": unverified["fingerprint"],
+              "status": "review_only"}, audit])
+        self.assertTrue(selected)
+        self.assertEqual(result[0]["fingerprint"], rule["fingerprint"])
+
     def test_workflow_promotes_only_after_trusted_rust_audit_and_tests(self):
         workflow=(Path(__file__).resolve().parents[2]/
             ".github/workflows/community-learning.yml").read_text()
