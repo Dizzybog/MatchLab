@@ -386,7 +386,7 @@ fn cache_worker()->Option<SyncSender<CacheEvent>>{
             }
         });
     if thread.is_err(){
-        tracing::warn!("cache writer unavailable; matching continues uncached");
+        tracing::debug!("cache writer unavailable; matching continues uncached");
         None
     }else{Some(tx)}
 }
@@ -421,7 +421,7 @@ fn write_in_generation(kind:&str,title:&str,year:Option<i32>,
         if let Ok(mut keys)=queued_keys().lock(){keys.remove(&identity);}
         let n=CACHE_DROPPED.fetch_add(1,Ordering::Relaxed)+1;
         if n==1||n%4096==0 {
-            tracing::warn!(dropped=n,disconnected=matches!(e,TrySendError::Disconnected(_)),
+            tracing::debug!(dropped=n,disconnected=matches!(e,TrySendError::Disconnected(_)),
                 "ML result cache queue saturated; matching unaffected");
         }
     }
@@ -498,7 +498,7 @@ pub fn maintain_learning(db:&Connection)->Result<(),String>{
     }
     // A persistent archive or active regex must never be discarded to
     // force the disk below quota. Keep the model running but report pressure.
-    tracing::warn!(occupied_bytes=occupied,budget_bytes=budget,
+    tracing::debug!(occupied_bytes=occupied,budget_bytes=budget,
         "ML learning evidence remains over quota; active rules and history preserved");
     Ok(())
 }
@@ -567,7 +567,7 @@ fn maintain_with_budget(db:&Connection,metadata:&Path,budget:u64)->Result<(),Str
     let occupied=used_bytes(db)?;
     CACHE_WRITES_ALLOWED.store(occupied<=budget,Ordering::Release);
     if occupied>budget {
-        tracing::warn!(occupied_bytes=occupied,budget_bytes=budget,
+        tracing::debug!(occupied_bytes=occupied,budget_bytes=budget,
             "learning storage remains over budget; future cache writes blocked");
     }
     Ok(())

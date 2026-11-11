@@ -422,12 +422,12 @@ pub fn start(history:PathBuf,metadata:PathBuf){
                                 SQLITE_BUSY_RETRIES.fetch_add(1,Ordering::Relaxed);
                                 consecutive_busy=consecutive_busy.saturating_add(1);
                                 if consecutive_busy==1||consecutive_busy%8==0{
-                                    tracing::warn!(failures=consecutive_busy,
+                                    tracing::debug!(failures=consecutive_busy,
                                         "local learning database busy; queued work deferred");
                                 }
                                 std::thread::sleep(retry_delay(consecutive_busy));
                             }else{
-                                tracing::warn!(%error,"local learning database unavailable");
+                                tracing::debug!(%error,"local learning database unavailable");
                                 std::thread::sleep(Duration::from_secs(POLL_SECONDS));
                             }
                             continue;
@@ -439,7 +439,7 @@ pub fn start(history:PathBuf,metadata:PathBuf){
                     if !legacy_captured{
                         match crate::community_rule_archive::snapshot_legacy(db){
                             Ok(_)=>legacy_captured=true,
-                            Err(error)=>tracing::warn!(%error,
+                            Err(error)=>tracing::debug!(%error,
                                 "historical regex migration skipped"),
                         }
                     }
@@ -473,7 +473,7 @@ pub fn start(history:PathBuf,metadata:PathBuf){
                             SQLITE_BUSY_RETRIES.fetch_add(1,Ordering::Relaxed);
                             consecutive_busy=consecutive_busy.saturating_add(1);
                             if consecutive_busy==1||consecutive_busy%8==0{
-                                tracing::warn!(failures=consecutive_busy,
+                                tracing::debug!(failures=consecutive_busy,
                                     "local learning database busy; queued work will retry");
                             }
                             // Never advance the committed queue cursor on
@@ -482,7 +482,7 @@ pub fn start(history:PathBuf,metadata:PathBuf){
                             continue;
                         },
                         Err(error)=>{
-                            tracing::warn!(%error,"local learning cycle skipped");
+                            tracing::debug!(%error,"local learning cycle skipped");
                             connection=None;
                             std::thread::sleep(Duration::from_secs(POLL_SECONDS));
                             continue;
@@ -505,7 +505,7 @@ pub fn start(history:PathBuf,metadata:PathBuf){
                 std::thread::sleep(pause);
             }
         });
-    if let Err(error)=worker{tracing::warn!(%error,"failed to start local learning");}
+    if let Err(error)=worker{tracing::debug!(%error,"failed to start local learning");}
 }
 #[cfg(test)]
 mod tests{

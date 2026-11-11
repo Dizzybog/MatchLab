@@ -30,7 +30,7 @@ mod learning_cache;
 mod ml_config;
 mod learned_regex;
 mod query_cache;
-use axum::{extract::{Query, State}, http::{StatusCode,header}, routing::{get,post}, Json, Router};
+use axum::{extract::{Query, State}, http::{StatusCode,header}, response::Redirect, routing::{get,post}, Json, Router};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 #[cfg(test)]
 use rusqlite::params;
@@ -1143,14 +1143,14 @@ fn diagnose_with_policy(
                         }
                         Ok(None)=>(!apply_episode_filter).then_some(candidate),
                         Err(error)=>{
-                            tracing::warn!(imdb_id=%candidate.imdb_id,%error,
+                            tracing::debug!(imdb_id=%candidate.imdb_id,%error,
                                 "Chinese absolute episode crosswalk unavailable");
                             (!apply_episode_filter).then_some(candidate)
                         }
                     }
                 },
                 Err(error)=>{
-                    tracing::warn!(imdb_id=%candidate.imdb_id,%error,
+                    tracing::debug!(imdb_id=%candidate.imdb_id,%error,
                         "season episode metadata unavailable for candidate");
                     (!apply_episode_filter).then_some(candidate)
                 }
@@ -1433,7 +1433,7 @@ fn diagnose_with_policy(
                         });
                     }
                     Ok(None)=>{},
-                    Err(error)=>tracing::warn!(imdb_id=%id,%error,"airdate lookup failed"),
+                    Err(error)=>tracing::debug!(imdb_id=%id,%error,"airdate lookup failed"),
                 }
             }
         }
@@ -1862,6 +1862,11 @@ async fn ml_status()->Json<Value>{
     Json(report)
 }
 
+/// Preserve bookmarks to the original dashboard while reserving / for
+/// navigation. Keep APIs rooted at their existing absolute paths.
+async fn dashboard_redirect()->Redirect{
+    Redirect::permanent("/dash")
+}
 async fn dashboard()->([(header::HeaderName,&'static str);1],&'static str){
     ([(header::CONTENT_TYPE,"text/html; charset=utf-8")],include_str!("dashboard.html"))
 }
@@ -2386,9 +2391,9 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
                         tracing::info!(deleted=count,"expired request history removed"),
                     Ok(Ok(_)) => (),
                     Ok(Err(error)) =>
-                        tracing::warn!(%error,"request history cleanup failed"),
+                        tracing::debug!(%error,"request history cleanup failed"),
                     Err(error) =>
-                        tracing::warn!(%error,"history cleanup task failed"),
+                        tracing::debug!(%error,"history cleanup task failed"),
                 }
                 tokio::time::sleep(Duration::from_secs(300)).await;
             }
@@ -2429,7 +2434,10 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
             }
         });
     }
-    let app = Router::new().route("/",get(dashboard))
+    let app = Router::new()
+        .route("/",get(dashboard_redirect))
+        .route("/dash",get(dashboard))
+        .route("/dash/",get(dashboard_redirect))
         .route("/api/dashboard/history",get(dashboard_history_request))
         .route("/api/dashboard/stats",get(dashboard_stats_request))
         .route("/api/community/status",get(community_learning::status))
@@ -2458,6 +2466,22 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn dashboard_is_on_dash_and_root_redirects_without_moving_api_routes(){
+        use axum::response::IntoResponse;
+        let response=dashboard_redirect().await.into_response();
+        assert_eq!(response.status(),StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(response.headers().get(header::LOCATION)
+            .and_then(|v|v.to_str().ok()),Some("/dash"));
+        let (headers,html)=dashboard().await;
+        assert_eq!(headers[0].1,"text/html; charset=utf-8");
+        assert!(html.contains("MatchLab — Dashboard"));
+        // The page uses absolute API URLs, not links resolved relative
+        // to the /dash path. Matching endpoints remain unchanged.
+        assert!(html.contains("fetch('/health')"));
+        assert!(html.contains("json('/api/dashboard/history"));
+        assert!(html.contains("json('/api/dashboard/diagnose"));
+    }
     #[test]
     fn airdate_releases_never_expand_to_season_packs() {
         // Keep the airdate cache in an isolated directory so these tests

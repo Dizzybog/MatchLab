@@ -398,11 +398,11 @@ pub async fn list(
     match result {
         Ok(Ok(value)) => response(StatusCode::OK, value),
         Ok(Err(error)) => {
-            tracing::warn!(%error, "parsing debug feed failed");
+            tracing::debug!(%error, "parsing debug feed failed");
             response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error":"history unavailable"}))
         }
         Err(error) => {
-            tracing::warn!(%error, "parsing debug feed worker failed");
+            tracing::debug!(%error, "parsing debug feed worker failed");
             response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error":"history unavailable"}))
         }
     }
@@ -424,11 +424,11 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> Respon
     match result {
         Ok(Ok(value)) => response(StatusCode::OK, value),
         Ok(Err(error)) => {
-            tracing::warn!(%error, "parsing debug status failed");
+            tracing::debug!(%error, "parsing debug status failed");
             response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error":"history unavailable"}))
         }
         Err(error) => {
-            tracing::warn!(%error, "parsing debug status worker failed");
+            tracing::debug!(%error, "parsing debug status worker failed");
             response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error":"history unavailable"}))
         }
     }
@@ -448,11 +448,11 @@ pub async fn detail(
         Ok(Ok(Some(value))) => response(StatusCode::OK, value),
         Ok(Ok(None)) => response(StatusCode::NOT_FOUND, json!({"error":"request expired or not found"})),
         Ok(Err(error)) => {
-            tracing::warn!(%error, "parsing debug detail failed");
+            tracing::debug!(%error, "parsing debug detail failed");
             response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error":"history unavailable"}))
         }
         Err(error) => {
-            tracing::warn!(%error, "parsing debug detail worker failed");
+            tracing::debug!(%error, "parsing debug detail worker failed");
             response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error":"history unavailable"}))
         }
     }

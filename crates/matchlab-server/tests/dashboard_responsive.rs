@@ -108,7 +108,21 @@ fn verified_anime_season_packs_show_crosswalk_episodes_not_legacy_absolute_field
     assert!(DASHBOARD.contains("ids.length>1?String(s.anidb_id)+':'+range:range"));
     assert!(DASHBOARD.contains("source?.complete===false"));
     assert!(DASHBOARD.contains("const anime=verifiedAnimeDisplay(selected);"));
-    assert!(DASHBOARD.contains("field('AniDB ID',r.anime_id)+field('Anime episode',r.winner?r.anime_episode"));
+    assert!(DASHBOARD.contains("field('IMDb ID',r.imdb_id,imdbLink(r.imdb_id))"));
+    assert!(DASHBOARD.contains("field('AniDB ID',r.anime_id,anidbLinks(r.anime_id))+field('Anime episode',r.winner?r.anime_episode"));
     assert!(DASHBOARD.contains("rankResults(row.details)"));
     assert!(DASHBOARD.contains("rankResults(d)"));
+}
+
+#[test]
+fn dashboard_id_links_are_strict_and_do_not_open_history_details(){
+    assert!(DASHBOARD.contains("function imdbLink(value){"));
+    assert!(DASHBOARD.contains("function anidbLinks(value){"));
+    assert!(DASHBOARD.contains("https://www.imdb.com/title/"));
+    assert!(DASHBOARD.contains("https://anidb.net/anime/"));
+    assert!(DASHBOARD.contains("rel=\"noopener noreferrer\""));
+    assert!(DASHBOARD.contains("target=\"_blank\""));
+    assert!(DASHBOARD.contains("imdbLink(r.imdb_id)+'</td>'"));
+    assert!(DASHBOARD.contains("if(event.target.closest('a.id-link'))return;"));
+    assert!(DASHBOARD.contains("const parts=String(value).split(',')"));
 }

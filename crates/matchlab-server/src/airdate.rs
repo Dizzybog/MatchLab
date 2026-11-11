@@ -129,7 +129,7 @@ pub fn resolve(metadata:&Path,id:&str,date:&str)->Result<Option<(i64,i64,String)
             tx.commit().map_err(|e|e.to_string())?;
         }
         Err(e)=>{
-            tracing::warn!(imdb_id=%id,error=%e,"Cinemeta airdate refresh failed");
+            tracing::debug!(imdb_id=%id,error=%e,"Cinemeta airdate refresh failed");
             // Stale cache is preferable to failing the ordinary matcher.
         }
     }

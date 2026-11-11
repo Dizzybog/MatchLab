@@ -141,6 +141,9 @@ tr[data-id]:focus-visible{outline-offset:-2px}
   background:transparent;color:var(--text);text-align:left;white-space:nowrap;
   overflow:hidden;text-overflow:ellipsis;cursor:copy}
 .copy-title:hover{color:var(--accent);text-decoration:underline}
+.id-link{color:var(--accent);text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:2px}
+.id-link:hover{color:#b2ffe1}
+.id-link:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:2px}
 .copy-title:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 .copy-title-detail{font-weight:650;width:max-content;overflow-x:auto;text-overflow:clip}
 .copy-feedback{position:fixed;bottom:max(16px,env(safe-area-inset-bottom));
@@ -171,6 +174,29 @@ tr[data-id]:focus-visible{outline-offset:-2px}
 <script>
 const $=id=>document.getElementById(id);let offset=0;let current=[];let statusFilter="all";let selectedActivityDay=null;
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// Only validated IDs can generate external URLs. Untrusted values
+// remain escaped text rather than being interpolated into href attributes.
+function imdbLink(value){
+  if(value===null||value===undefined||value==='')return '—';
+  const raw=String(value).trim();
+  const match=/^(tt[0-9]{7,10})(?::[0-9]{1,5}(?::[0-9]{1,5})?)?$/.exec(raw);
+  if(!match)return esc(raw);
+  const id=match[1];
+  return '<a class="id-link" href="https://www.imdb.com/title/'+id+'/" target="_blank" '+
+    'rel="noopener noreferrer" aria-label="Open '+id+' on IMDb">'+esc(raw)+'</a>';
+}
+function anidbLinks(value){
+  if(value===null||value===undefined||value==='')return '—';
+  const parts=String(value).split(',').map(part=>part.trim());
+  if(parts.length>16)return esc(value);
+  return parts.map(part=>{
+    const match=/^([1-9][0-9]{0,9})(?::[0-9]{1,8}(?:-[0-9]{1,8})?)?$/.exec(part);
+    if(!match)return esc(part);
+    const id=match[1];
+    return '<a class="id-link" href="https://anidb.net/anime/'+id+'" target="_blank" '+
+      'rel="noopener noreferrer" aria-label="Open AniDB '+id+'">'+esc(part)+'</a>';
+  }).join(', ');
+}
 async function json(url,options){
   const r=await fetch(url,options);
   const contentType=r.headers.get('content-type')||'';
@@ -261,13 +287,13 @@ function rankResults(d){
   }
   if(!rows.length)return '<div class="empty">No matching candidates found.</div>';
   const val=v=>v===null||v===undefined||v===''?'—':esc(v);
-  const field=(label,value)=>'<div class="rank-field"><small>'+label+'</small><span title="'+val(value)+'">'+val(value)+'</span></div>';
+  const field=(label,value,contents)=>'<div class="rank-field"><small>'+label+'</small><span title="'+val(value)+'">'+(contents??val(value))+'</span></div>';
   return '<div class="rank-list">'+rows.slice(0,5).map((r,i)=>
     '<article class="rank-card'+(r.winner?' winner':'')+'"><div class="rank-top"><div class="rank-name" title="'+val(r.title)+'">'+
     '#'+(i+1)+' · '+val(r.title)+'</div><span class="rank-tag">'+
     (r.winner?'WINNER':'RANK '+(i+1))+'</span></div><div class="rank-fields">'+
-    field('IMDb ID',r.imdb_id)+field(r.winner?'IMDb season':'Parsed season',seasonEpisodeDisplay(r).seasons)+field(r.winner?'IMDb episode':'Parsed episode',seasonEpisodeDisplay(r).episodes)+
-    field('AniDB ID',r.anime_id)+field('Anime episode',r.winner?r.anime_episode:displayRange(r.anime_episode,r.anime_episode_end))+
+    field('IMDb ID',r.imdb_id,imdbLink(r.imdb_id))+field(r.winner?'IMDb season':'Parsed season',seasonEpisodeDisplay(r).seasons)+field(r.winner?'IMDb episode':'Parsed episode',seasonEpisodeDisplay(r).episodes)+
+    field('AniDB ID',r.anime_id,anidbLinks(r.anime_id))+field('Anime episode',r.winner?r.anime_episode:displayRange(r.anime_episode,r.anime_episode_end))+
     field('Source',r.source)+'</div><div class="rank-meta" title="'+val(r.year)+' · '+val(r.type)+'">'+val(r.year)+' · '+val(r.type)+'</div></article>').join('')+'</div>';
 }
 // The statistics API includes every recorded request, even after the detailed
@@ -426,7 +452,7 @@ async function history(){
       '<td class="title" title="'+esc(r.title)+'">'+
       '<button type="button" class="copy-title" aria-label="Copy t_title: '+esc(r.title)+'" title="Copy t_title: '+esc(r.title)+'">'+esc(r.title)+'</button></td>'+
       '<td class="'+(r.status==='matched'?'good':r.status==='error'?'bad':'')+'">'+esc(r.status)+'</td>'+
-      '<td title="'+esc(r.imdb_id||'—')+'">'+esc(r.imdb_id||'—')+'</td>'+
+      '<td title="'+esc(r.imdb_id||'—')+'">'+imdbLink(r.imdb_id)+'</td>'+
       '<td title="'+esc(r.match_source||'—')+'">'+esc(r.match_source||'—')+'</td>'+
       '<td>'+esc(r.duration_ms)+'</td></tr>'
     ).join(''):'<tr><td colspan="6" class="muted">No requests for this filter</td></tr>';
@@ -443,7 +469,11 @@ async function history(){
           esc(row.title)+'</button>'+rankResults(row.details);
         bindCopyTitle($('history-details').querySelector('.copy-title'),row.title);
       };
-      tr.addEventListener('click',show);
+      tr.addEventListener('click',event=>{
+        // Following an external ID link must not expand history diagnostics.
+        if(event.target.closest('a.id-link'))return;
+        show();
+      });
       tr.addEventListener('keydown',event=>{
         // Enter/Space on the nested copy button belongs to the button.
         if(event.target!==tr)return;

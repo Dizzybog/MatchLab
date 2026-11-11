@@ -116,7 +116,7 @@ fn import_imdb_with_index_plan(
                 }
                 count+=1;
             }
-            if malformed_rows>0 {tracing::warn!(source="imdb_basics",malformed_rows,"skipped malformed metadata TSV records");}
+            if malformed_rows>0 {tracing::debug!(source="imdb_basics",malformed_rows,"skipped malformed metadata TSV records");}
             log_progress("imdb_basics",processed,started);
         }
         if count==0{return Err("IMDb basics contained no supported titles".into())}
@@ -149,7 +149,7 @@ fn import_imdb_with_index_plan(
                     i32::from(r.get(original)==Some("1")),
                     r.get(ordering).unwrap_or("0").parse::<i64>().unwrap_or(0)])?;
             }
-            if malformed_rows>0 {tracing::warn!(source="imdb_akas",malformed_rows,"skipped malformed metadata TSV records");}
+            if malformed_rows>0 {tracing::debug!(source="imdb_akas",malformed_rows,"skipped malformed metadata TSV records");}
             log_progress("imdb_akas",processed,started);
         }
         {
@@ -195,9 +195,9 @@ fn import_imdb_with_index_plan(
                     else if ep>0{insert_episode.execute(params![parent_id,se,ep])?;}
                 }
             }
-            if malformed_rows>0 {tracing::warn!(source="imdb_episodes",malformed_rows,"skipped malformed metadata TSV records");}
+            if malformed_rows>0 {tracing::debug!(source="imdb_episodes",malformed_rows,"skipped malformed metadata TSV records");}
             if outlier_episode_rows>0{
-                tracing::warn!(source="imdb_episodes",outlier_episode_rows,
+                tracing::debug!(source="imdb_episodes",outlier_episode_rows,
                     "ignored episode coordinates outside SID bounds");
             }
             log_progress("imdb_episodes",processed,started);
@@ -296,7 +296,7 @@ pub fn import_animeapi(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>{
     }
     drop(links);
     drop(identities);
-    if malformed_rows>0 {tracing::warn!(source="animeapi",malformed_rows,"skipped malformed metadata TSV records");}
+    if malformed_rows>0 {tracing::debug!(source="animeapi",malformed_rows,"skipped malformed metadata TSV records");}
             log_progress("animeapi",processed,started);
     if count==0{return Err("animeApi contained no valid IMDb/AniDB links".into());}
     let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
@@ -573,7 +573,7 @@ fn import_animelists_reader<R:std::io::BufRead>(
             "imported multi-IMDb entries as separate title associations");
     }
     if invalid_imdb_ids>0{
-        tracing::warn!(source="animelists",invalid_imdb_ids,
+        tracing::debug!(source="animelists",invalid_imdb_ids,
             "ignored malformed IMDb identifiers during Anime-Lists import");
     }
     drop(insert);drop(links);
@@ -683,7 +683,7 @@ pub fn refresh_from_files_with_ratings(
         // Cleanup is best-effort and must never turn a published import into an error.
         if let Ok(published)=Connection::open_with_flags(target,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) {
             if let Err(error)=crate::tantivy_search::prune(&published,target){
-                tracing::warn!(%error,"old Tantivy generation cleanup failed");
+                tracing::debug!(%error,"old Tantivy generation cleanup failed");
             }
         }
         Ok((imdb,links,episodes_count,aliases))
