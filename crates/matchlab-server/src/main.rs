@@ -4871,6 +4871,30 @@ mod tests {
         assert_eq!(anime_candidate(&db,"exampleanime",Some(1),4).unwrap().unwrap()["anidb_episode"],3);
     }
     #[test]
+    fn anime_verified_shorter_alias_can_beat_unverified_longer_ova(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
+            CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT,
+                tvdb_id TEXT DEFAULT '',trakt_season INTEGER DEFAULT 0);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT DEFAULT '',tvdb_season INTEGER,
+                anidb_season INTEGER,map TEXT,offset INTEGER,start INTEGER,end INTEGER);
+            INSERT INTO anidb_titles VALUES
+                ('100','exampleanimeexpansion'),
+                ('200','exampleanime');
+            INSERT INTO anime_series_map(anidb_id,imdb_id) VALUES
+                ('100','tt0000998'),('200','tt0000999');
+            INSERT INTO episode_map(anidb_id,tvdb_id,tvdb_season,anidb_season,map,offset,start,end)
+                VALUES('100','same',1,1,'',0,1,5),
+                      ('200','other',1,1,'',0,1,60);").unwrap();
+        let matched=anime_candidate(&db,"exampleanimeexpansion",Some(1),37)
+            .unwrap().expect("the verified TV identity must survive an older OVA");
+        assert_eq!(matched["imdb_id"],"tt0000999");
+        assert_eq!(matched["anidb_id"],"200");
+        assert_eq!(matched["anidb_episode"],37);
+    }
+    #[test]
     fn chinese_episode_41_uses_only_verified_absolute_anime_crosswalk(){
         // The 2024 live-action drama shares an English alias with the 2022
         // donghua. The former is a bad year-ranked candidate; only the
