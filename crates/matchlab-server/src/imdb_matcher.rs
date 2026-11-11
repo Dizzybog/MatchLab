@@ -79,7 +79,7 @@ impl TitleFit{
         Self{tier:2,unmatched_bp:0,edge:0,longest_first:-(length as i64)}
     }
 }
-fn title_fit(key:&str,words:&[String],row:&Aka)->Option<TitleFit>{
+fn title_fit(key:&str,words:&[String],release_words:&[String],row:&Aka)->Option<TitleFit>{
     if row.clean==key{return Some(TitleFit::exact());}
     let short=key.len().min(row.clean.len());
     let long=key.len().max(row.clean.len());
@@ -96,6 +96,16 @@ fn title_fit(key:&str,words:&[String],row:&Aka)->Option<TitleFit>{
     }
     let alias_words=crate::title_normalization::clean_words(&row.title);
     if words.is_empty()||alias_words.is_empty(){return None;}
+    // The parser sometimes consumes part of a *real* title as release
+    // metadata: Televisionseries1 -> Television. Restore a longer alias
+    // only when its FULL normalized words occur in the original release.
+    // A character-only prefix (Dune vs Duneland) is never sufficient.
+    if row.clean.starts_with(key)
+        && release_words.windows(alias_words.len())
+            .any(|window|window==alias_words.as_slice()){
+        return Some(TitleFit{tier:1,unmatched_bp,edge:0,
+            longest_first:-(short as i64)});
+    }
     let prefix=words.starts_with(&alias_words)||alias_words.starts_with(words);
     let suffix=words.ends_with(&alias_words)||alias_words.ends_with(words);
     if !prefix&&!suffix{return None;}
@@ -123,6 +133,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     let release=clean_title(release_title);
     if key.is_empty(){return Ok(vec![]);}
     let words=crate::title_normalization::clean_words(title);
+    let release_words=crate::title_normalization::clean_words(release_title);
     let mut stage="aligned";
     let mut rows=Vec::new();
     // Exact country-qualified aliases precede generic prefix matching.
@@ -151,7 +162,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
                 .map_err(index_error)?.into_iter().map(Aka::from));
             // Avoid eligibility SQL joins for candidates that only match
             // fragments of a word (e.g. Dune vs Duneland).
-            discovered.retain(|row|title_fit(&key,&words,row).is_some());
+            discovered.retain(|row|title_fit(&key,&words,&release_words,row).is_some());
             rows=filter(db,discovered,&release,series,year,required_season)?;
         }
     }
@@ -209,7 +220,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     for row in rows{
         let fit=if stage=="country_exact"{TitleFit::exact()}
             else if stage=="aligned"{
-                title_fit(&key,&words,&row).unwrap_or(TitleFit::fallback(row.clean.len()))
+                title_fit(&key,&words,&release_words,&row).unwrap_or(TitleFit::fallback(row.clean.len()))
             }else{TitleFit::fallback(row.clean.len())};
         groups.entry(row.imdb_id.clone()).or_default().push((row,fit));
     }
@@ -453,9 +464,11 @@ mod tests{
                 ('tt0000123','Televisionseries1','televisionseries1',2020,
                  'series','US',1,0,'tvSeries');
             INSERT INTO seasons VALUES('tt0000123',10);").unwrap();
-        let hits=search(&db,"Televisionseries",Some(2020),true,1,
-            "Televisionseries1.S01E02.1080p.WEB-DL",true,10).unwrap();
-        assert_eq!(hits[0].imdb_id,"tt0000123");
+        for title in ["Televisionseries","Television"] {
+            let hits=search(&db,title,None,true,1,
+                "Televisionseries1.S01E02.1080p.WEB-DL",true,10).unwrap();
+            assert_eq!(hits[0].imdb_id,"tt0000123","parser title: {title}");
+        }
     }
     #[test]
     fn suffix_of_release_title_is_discovered_without_reverse_fallback(){
