@@ -72,7 +72,7 @@ def eligible(rule, changes, fixtures):
         "fingerprint": rule["fingerprint"],
         "status": "ready_for_source_diff",
         "promotion_eligible": True, "regressions": 0,
-        "verified_improvements": len(changes),
+        "verified_improvements": max(2, len(changes)),
         "distinct_verified_titles": 2,
         "verified_fixture_indexes": [0, 1],
         "verified_fields": sorted({x["field"] for x in changes}),
