@@ -3874,7 +3874,14 @@ mod tests {
                 &db,&MatchRequest{title:release.into(),year:None,series:None},
                 &parsed).unwrap()
         };
-        assert_eq!(select(release).as_deref(),Some("The Simpsons"));
+        let parent=matchlab_parser::parse_title(
+            "The Simpsons Season 9 (Complete S09 Remastered HQ 720p x265 HappyLee)",
+            false).unwrap();
+        let parent_hits=imdb_matcher::search(&db,
+            parent["title"].as_str().unwrap_or(""),None,true,9,release,true,10)
+            .unwrap();
+        assert_eq!(select(release).as_deref(),Some("The Simpsons"),
+            "parsed={parsed:?}; parent={parent:?}; parent_hits={parent_hits:?}");
         assert_eq!(select("The Simpsons Season 9/Season 9/S09E24 Lost Our Lisa.mkv")
             .as_deref(),Some("The Simpsons"));
         assert_eq!(select("The Simpsons Season 9/Season 9/The.Simpsons.S09E24.mkv")
