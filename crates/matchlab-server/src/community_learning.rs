@@ -642,7 +642,7 @@ fn cycle(history:&Path,metadata:&Path,storage:&Path,token:&str)->Result<(),Strin
 pub fn start(history:PathBuf,metadata:PathBuf){
     if !enabled(){
         if opted_in(){
-            tracing::warn!("community sharing disabled: local ML, GitHub token and official SHA-stamped build are all required");
+            tracing::debug!("community sharing disabled: local ML, GitHub token and official SHA-stamped build are all required");
         }
         return;
     }
@@ -668,11 +668,11 @@ pub fn start(history:PathBuf,metadata:PathBuf){
                 match check{
                     TokenAuth::Authenticated=>tracing::info!(
                         "community sharing GitHub token valid: authenticated and upstream Issues reachable; comment permission verified on first successful upload"),
-                    TokenAuth::Rejected=>tracing::warn!(
+                    TokenAuth::Rejected=>tracing::debug!(
                         "community sharing GitHub token invalid or revoked (HTTP 401); check MATCHLAB_COMMUNITY_GITHUB_TOKEN"),
-                    TokenAuth::RepositoryUnavailable=>tracing::warn!(
+                    TokenAuth::RepositoryUnavailable=>tracing::debug!(
                         "community sharing authenticated, but upstream repository or Issues unavailable; check repository access"),
-                    TokenAuth::NetworkUnavailable=>tracing::warn!(
+                    TokenAuth::NetworkUnavailable=>tracing::debug!(
                         "community sharing GitHub token could not be verified; network/API unavailable; will retry"),
                     TokenAuth::NotChecked=>{},
                 }
@@ -685,9 +685,9 @@ pub fn start(history:PathBuf,metadata:PathBuf){
                 let key=token.clone();
                 match tokio::task::spawn_blocking(move||cycle(&db,&metadata_path,&local,&key)).await{
                     Ok(Ok(()))=>{},
-                    Ok(Err(error))=>tracing::warn!(%error,
+                    Ok(Err(error))=>tracing::debug!(%error,
                         "community sharing cycle deferred; pending receipt will be verified before retry"),
-                    Err(error)=>tracing::warn!(%error,"community learning worker failed"),
+                    Err(error)=>tracing::debug!(%error,"community learning worker failed"),
                 }
             }
             tokio::time::sleep(Duration::from_secs(POLL_SECS)).await;
