@@ -81,17 +81,26 @@ impl TitleFit{
 }
 fn title_fit(key:&str,words:&[String],row:&Aka)->Option<TitleFit>{
     if row.clean==key{return Some(TitleFit::exact());}
+    let short=key.len().min(row.clean.len());
+    let long=key.len().max(row.clean.len());
+    if short<4||short.saturating_mul(2)<long||long-short>16{return None;}
+    let unmatched_bp=((long-short) as u64*10_000/long as u64) as u32;
+    // The parser can treat an immediately trailing number as technical
+    // metadata even when it is part of an IMDb title: Televisionseries1.
+    // Reattach ONLY a complete ASCII numeric suffix already present in the
+    // source release (checked by filter). Never accept a partial word.
+    if row.clean.strip_prefix(key).is_some_and(|tail|
+        !tail.is_empty() && tail.bytes().all(|b|b.is_ascii_digit())){
+        return Some(TitleFit{tier:1,unmatched_bp,edge:0,
+            longest_first:-(short as i64)});
+    }
     let alias_words=crate::title_normalization::clean_words(&row.title);
     if words.is_empty()||alias_words.is_empty(){return None;}
     let prefix=words.starts_with(&alias_words)||alias_words.starts_with(words);
     let suffix=words.ends_with(&alias_words)||alias_words.ends_with(words);
     if !prefix&&!suffix{return None;}
-    let short=key.len().min(row.clean.len());
-    let long=key.len().max(row.clean.len());
-    if short<4||short.saturating_mul(2)<long||long-short>16{return None;}
-    Some(TitleFit{tier:1,
-        unmatched_bp:((long-short) as u64*10_000/long as u64) as u32,
-        edge:if prefix{0}else{1},longest_first:-(short as i64)})
+    Some(TitleFit{tier:1,unmatched_bp,edge:if prefix{0}else{1},
+        longest_first:-(short as i64)})
 }
 
 fn type_rank(t:&str)->i32{
@@ -430,6 +439,23 @@ mod tests{
         assert_eq!(found.len(),2);
         assert_eq!(found[0].imdb_id,"tt1111111",
             "equal-coverage whole-word prefix must beat suffix, not popularity");
+    }
+    #[test]
+    fn title_number_mistaken_for_parser_suffix_is_preserved(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            INSERT INTO titles VALUES
+                ('tt0000123','Televisionseries1','televisionseries1',2020,
+                 'series','US',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt0000123',10);").unwrap();
+        let hits=search(&db,"Televisionseries",Some(2020),true,1,
+            "Televisionseries1.S01E02.1080p.WEB-DL",true,10).unwrap();
+        assert_eq!(hits[0].imdb_id,"tt0000123");
     }
     #[test]
     fn suffix_of_release_title_is_discovered_without_reverse_fallback(){
