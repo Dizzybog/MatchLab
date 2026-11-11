@@ -72,6 +72,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: python3 scripts/community_state.py load backlog --path "$RUNNER_TEMP/backlog.json"
+      - name: Restore durable proposal decisions for unchanged parser sources
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: python3 scripts/community_state.py load decisions --path "$RUNNER_TEMP/community-decisions.json"
       - name: Merge yesterday's proposals with unprocessed historical backlog
         run: |
           python3 scripts/community_backlog.py prepare \
@@ -80,6 +85,10 @@ jobs:
             --seen "$RUNNER_TEMP/fingerprints-final.txt" \
             --curated learning/community_rules.json \
             --extended learning/community_regex_proposals.json \
+            --decisions "$RUNNER_TEMP/community-decisions.json" \
+            --handlers crates/matchlab-parser/src/generated/handlers.json \
+            --fixtures learning/regex_review_fixtures.json \
+            --parser-src crates/matchlab-parser/src \
             --out "$RUNNER_TEMP/backlog-prepared.json" \
             --daily "$RUNNER_TEMP/community-daily-review.json"
       - name: Persist backlog BEFORE screening; retain last verified snapshot
@@ -91,18 +100,15 @@ jobs:
           cp "$RUNNER_TEMP/backlog-prepared.json" "$RUNNER_TEMP/backlog.json"
           python3 scripts/community_state.py save backlog \
             --path "$RUNNER_TEMP/backlog.json" --phase prepared
-      - name: Screen at most one rule against latest trusted Rust parser
+      - name: Replay every proposed native regex family and screen verified source changes
         run: |
           cp learning/community_rules.json "$RUNNER_TEMP/community-rules-before.json"
           cp learning/community_regex_proposals.json "$RUNNER_TEMP/community-extended-before.json"
           cp crates/matchlab-parser/src/generated/handlers.json "$RUNNER_TEMP/community-handlers-before.json"
           cp learning/regex_promoted_tests.json "$RUNNER_TEMP/community-promoted-before.json"
-          cargo run --release --locked -p matchlab-parser \
-            --example screen_community_rules -- \
-            "$RUNNER_TEMP/community-daily-review.json" \
-            learning/community_rules.json \
-            "$RUNNER_TEMP/curated-rules-next.json"
-          cp "$RUNNER_TEMP/curated-rules-next.json" learning/community_rules.json
+          # The legacy anime marker screener may run in standalone tests,
+          # but it must NOT stage unaudited JSON alongside a verified code PR.
+          # Verified anime proposals also enter the universal Rust replay.
           # Select only actual release names associated with each validated
           # rule in the same Issue batch. These are untrusted test inputs:
           # they are NOT proof of a correct IMDb/anime mapping.
@@ -111,25 +117,33 @@ jobs:
             --candidates "$RUNNER_TEMP/community-daily-review.json" \
             --sha "${GITHUB_SHA}" \
             --out "$RUNNER_TEMP/community-title-cases.json"
-          # Reconstruct only safe source-handler changes in Rust, compare
-          # before/after on real community titles and protected fixtures.
+          # Reconstruct each proposal from exact immutable native handler
+          # transforms, flags and options; ambiguous families remain review-only.
+          python3 scripts/community_regex_plan.py \
+            --candidates "$RUNNER_TEMP/community-daily-review.json" \
+            --handlers crates/matchlab-parser/src/generated/handlers.json \
+            --out "$RUNNER_TEMP/community-native-plans.json"
+          # Rust replays full canonical parsing before and after every planned
+          # native change, including actual reported release names. Only
+          # independent maintainer-owned fixtures count as correctness proof.
           cargo run --release --locked -p matchlab-parser \
             --example audit_community_regex -- \
             "$RUNNER_TEMP/community-daily-review.json" \
             learning/regex_review_fixtures.json \
             "$RUNNER_TEMP/community-regex-impact.json" \
-            "$RUNNER_TEMP/community-title-cases.json"
-          # Source-aware field and TV proposals are reviewed as DATA first.
-          # Never execute an Issue-supplied regex or update handlers.json
-          # without independent verification by a maintainer.
+            "$RUNNER_TEMP/community-title-cases.json" \
+            "$RUNNER_TEMP/community-native-plans.json"
+          # Only a Rust-confirmed independent gain can stage native source
+          # changes. Self-reported issue evidence never grants authority.
           python3 scripts/review_community_regex.py \
             "$RUNNER_TEMP/community-daily-review.json" \
             learning/community_regex_proposals.json \
             "$RUNNER_TEMP/community-regex-next.json" \
             "$RUNNER_TEMP/community-regex-impact.json"
           cp "$RUNNER_TEMP/community-regex-next.json" learning/community_regex_proposals.json
-          # Two independent positive fixtures plus zero protected regressions
-          # can stage an exact source-handler merge for HUMAN approval.
+          # All fields use the same exact audited native source plan; two
+          # distinct independently labeled fixtures and zero protected
+          # regressions are required before staging a HUMAN review PR.
           python3 scripts/community_apply_verified_regex.py \
             --before "$RUNNER_TEMP/community-extended-before.json" \
             --after learning/community_regex_proposals.json \
@@ -203,11 +217,15 @@ jobs:
 
           Regex additions and proposed changes to existing handlers use
           strict trusted grammars and carry the exact original/new regex.
-          An exact native-handler regex union may also be staged as a code
-          diff, but ONLY after two independently labeled fixtures improve
-          with zero protected regressions. Those fixtures become native
-          regression tests. Other technical/TV suggestions remain REVIEW
-          DATA ONLY. Nothing in Issue comments can certify matching IDs.
+          A verified source change may replace an exact native regex or
+          clone a trusted native handler with its original flags, transform
+          and options, for any safely mapped field or TV coordinate grammar.
+          The Rust auditor independently replays all changed fields on real
+          reported titles and trusted fixtures. Only two distinct independently
+          labeled titles, proven improvement for every changed field, and zero
+          protected regressions allow this code diff to be staged. Ambiguous
+          or historical proposals remain diagnostic REVIEW DATA ONLY.
+          Nothing in Issue comments can certify matching IDs.
 
           This Action NEVER merges its own PR into main; source diffs require
           maintainer approval.
@@ -229,12 +247,19 @@ jobs:
               gains=int(row.get("verified_improvements",0))
               synthetic=int(row.get("synthetic_changes",0))
               regressions=int(row.get("regressions",0))
+              actual=int(row.get("community_title_cases",0))
+              affected=int(row.get("community_title_changes",0))
+              operations=[c.get("operation","?")
+                  for c in row.get("source_changes",[])]
+              reason=str(row.get("reason",""))[:160]
               print(f"- {fingerprint} ({kind}): {status}; "
+                    f"real cases={actual}, changed={affected}, "
                     f"verified gains={gains}, synthetic changes={synthetic}, "
-                    f"regressions={regressions}")
+                    f"regressions={regressions}, operations={operations}; "
+                    f"reason={reason}")
           if promotion:
               print("\nSource merge proposal: handler "
-                    f"{int(promotion['handler_index'])}; "
+                    f"{promotion.get('source_handler_indexes', [])}; "
                     "trusted fixtures promoted to Rust regression tests.")
           PY
           gh pr create --repo "$GH_REPO" \
@@ -321,6 +346,23 @@ jobs:
           cp "$RUNNER_TEMP/fingerprints-final.txt" "$RUNNER_TEMP/fingerprints.txt"
           python3 scripts/community_state.py save ledger \
             --path "$RUNNER_TEMP/fingerprints.txt" --phase ledger
+      - name: Persist audited proposal decisions for this immutable parser version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 scripts/community_decisions.py \
+            --existing "$RUNNER_TEMP/community-decisions.json" \
+            --audit "$RUNNER_TEMP/community-regex-impact.json" \
+            --backlog "$RUNNER_TEMP/backlog.json" \
+            --handlers "$RUNNER_TEMP/community-handlers-before.json" \
+            --fixtures learning/regex_review_fixtures.json \
+            --parser-src crates/matchlab-parser/src \
+            --out "$RUNNER_TEMP/community-decisions-next.json"
+          mv "$RUNNER_TEMP/community-decisions-next.json" "$RUNNER_TEMP/community-decisions.json"
+          python3 scripts/community_state.py save decisions \
+            --path "$RUNNER_TEMP/community-decisions.json" --phase final
       - name: Publish bounded review artifact; no automatic model activation
         uses: actions/upload-artifact@v4
         with:

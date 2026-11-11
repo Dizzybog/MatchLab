@@ -8,10 +8,11 @@ regression tests and human approval before the production parser is changed.
 import json
 import sys
 from pathlib import Path
-from community_rule_intake import valid_extended_rule
+from community_rule_intake import valid_extended_rule, valid_rule
 
 ALLOWED={"learned_field_regex","learned_tv_regex","learned_source_regex_patch","learned_corrective_regex","learned_general_regex_review",
-    "learned_field_regex_review","historical_regex_review"}
+    "learned_field_regex_review","historical_regex_review",
+    "verified_regex_proposal"}
 MAX_QUEUE=4096
 
 def screen(incoming,old,audits=None):
@@ -26,7 +27,9 @@ def screen(incoming,old,audits=None):
         source=candidate.get("source_build","")
         if not isinstance(source,str) or ":" not in source:continue
         sha=source.split(":",1)[0]
-        if valid_extended_rule(candidate,sha) is None:continue
+        verified=(valid_rule(candidate,sha) if candidate.get("kind")==
+            "verified_regex_proposal" else valid_extended_rule(candidate,sha))
+        if verified is None:continue
         if candidate["fingerprint"] in fingerprints:continue
         audit=audit_by_fp.get(candidate["fingerprint"],{})
         # In production the trusted Rust auditor is mandatory. Prefer an
@@ -34,12 +37,13 @@ def screen(incoming,old,audits=None):
         # Other kinds remain in the persistent queue and diagnostic artifact,
         # but cannot occupy the one-per-run code PR slot.
         if audits is not None and not (
-            candidate.get("kind") == "learned_source_regex_patch"
-            and audit.get("status") == "ready_for_source_diff"
+            audit.get("status") == "ready_for_source_diff"
             and audit.get("promotion_eligible") is True
             and audit.get("regressions") == 0
             and audit.get("verified_improvements", 0) >= 2
             and audit.get("distinct_verified_titles", 0) >= 2
+            and bool(audit.get("source_changes") or
+                     candidate.get("kind")=="learned_source_regex_patch")
         ):
             continue
         # Proven no-ops and conflicts do not deserve another PR. They stay

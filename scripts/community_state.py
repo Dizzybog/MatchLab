@@ -22,6 +22,7 @@ HEX = re.compile(r"[0-9a-f]{64}\Z")
 SPECS = {
     "ledger": ("community-learning-ledger", "fingerprints", "txt"),
     "backlog": ("community-learning-backlog", "backlog", "json"),
+    "decisions": ("community-learning-decisions", "decisions", "json"),
 }
 HEADER = "# matchlab-community-ledger-v1"
 KEEP = 6
@@ -47,7 +48,12 @@ def normalize(kind, raw):
     try:
         data = json.loads(raw)
     except (UnicodeError, ValueError) as exc:
-        raise ValueError("Invalid backlog JSON") from exc
+        raise ValueError("Invalid community state JSON") from exc
+    if kind == "decisions":
+        from community_decisions import validate
+        validate(data)
+        return (json.dumps(data, ensure_ascii=False, sort_keys=True,
+                           separators=(",", ":")) + "\n").encode()
     if not isinstance(data, dict) or set(data) != {"pending"}:
         raise ValueError("Invalid backlog schema")
     pending = data["pending"]
@@ -131,7 +137,9 @@ class Storage:
             # The initial Release may have been created before a failed
             # first upload; this is not evidence that dedup ever existed.
             print(f"community_{kind}=bootstrap_empty (no Release asset)")
-            raw = b"" if kind == "ledger" else b'{"pending":[]}\n'
+            raw = (b"" if kind == "ledger" else
+                   b'{"decisions":{}}\n' if kind == "decisions"
+                   else b'{"pending":[]}\n')
         else:
             asset = available[0]
             if not isinstance(asset.get("size"), int) or asset["size"] <= 0:

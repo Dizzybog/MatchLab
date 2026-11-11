@@ -232,9 +232,18 @@ def valid_extended_rule(r,sha,ancestor=None):
         if isinstance(value,str) and not (1<=len(value)<=48 and
             re.fullmatch("[a-zA-Z0-9_. +\\-]+",value)):return None
         if type(value) is int and not 0<=value<=9999:return None
-        if isinstance(value,list) and not (field=="languages" and
-            1<=len(value)<=8 and all(isinstance(x,str) and
-            re.fullmatch("[a-zA-Z]{1,5}",x) for x in value)):return None
+        if isinstance(value,list):
+            # Native audio is an array (e.g. ["OPUS"]), just like
+            # languages. Reject arbitrary nested objects/long strings.
+            if field=="languages":
+                valid=1<=len(value)<=8 and all(isinstance(x,str) and
+                    re.fullmatch("[a-zA-Z]{1,5}",x) for x in value)
+            elif field=="audio":
+                valid=1<=len(value)<=4 and all(isinstance(x,str) and
+                    re.fullmatch("[a-zA-Z0-9 .+_-]{1,32}",x) for x in value)
+            else:
+                valid=False
+            if not valid:return None
         canon=json.dumps(value,ensure_ascii=False,separators=(",",":"))
         expected_fp=digest(f"community-field:{field}:{signal}:{canon}")
     elif kind=="learned_tv_regex":

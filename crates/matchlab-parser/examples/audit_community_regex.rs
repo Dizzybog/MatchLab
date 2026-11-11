@@ -7,7 +7,8 @@
 //! original and proposed Rust parsers, and checks maintainer-owned labels.
 //! It never activates a rule or edits source code.
 use matchlab_parser::{existing_regex_rules, parse_title_canonical,
-    replay_handler_rules, verify_live_regression_corpus, HandlerPatch};
+    replay_handler_rules, verify_live_regression_corpus, HandlerAddition,
+    HandlerCorrection, HandlerPatch};
 use serde_json::{json, Map, Value};
 use std::{collections::{HashMap, HashSet}, env, fs};
 
@@ -307,15 +308,258 @@ fn audit_one(item:&Value,fixtures:&[Value],catalog:&[Value],
     report
 }
 
+/// Only rule plans reconstructed by the trusted Python schema/ancestry
+/// validator enter this path. This Rust boundary still checks exact source
+/// identity, source transform, operation and bounded safe compilation before
+/// running the full native parser.
+fn planned_rules(
+    plan:&Value,catalog:&[Value]
+)->Result<(Vec<HandlerPatch>,Vec<HandlerAddition>,Vec<HandlerCorrection>,
+    HashSet<String>),String>{
+    let changes=plan["source_changes"].as_array()
+        .ok_or("missing native source change plan")?;
+    if changes.is_empty()||changes.len()>4{
+        return Err("empty or excessive source changes".into());
+    }
+    let mut patches=Vec::new();
+    let mut additions=Vec::new();
+    let mut corrections=Vec::new();
+    let mut fields=HashSet::new();
+    let mut seen=HashSet::new();
+    for change in changes{
+        let index=change["handler_index"].as_u64()
+            .and_then(|v|usize::try_from(v).ok())
+            .ok_or("invalid source handler index")?;
+        let source=catalog.iter().find(|r|
+            r["index"].as_u64()==Some(index as u64))
+            .ok_or("missing source handler")?;
+        let field=change["field"].as_str().ok_or("missing field")?;
+        let original=change["original_pattern"].as_str()
+            .ok_or("missing original pattern")?;
+        let pattern=change["pattern"].as_str()
+            .ok_or("missing proposed pattern")?;
+        let transform=change["transform"].as_str()
+            .ok_or("missing trusted transform")?;
+        let action=change["operation"].as_str().ok_or("missing operation")?;
+        if source["kind"]!="regex"||source["field"]!=field ||
+            source["pattern"]!=original||source["transform"]!=transform{
+            return Err("native source identity diverged".into());
+        }
+        if !(4..=512).contains(&pattern.len()) ||
+            !seen.insert((index,action.to_owned(),pattern.to_owned())){
+            return Err("unsafe or duplicate native source change".into());
+        }
+        // The linear-time Rust regex engine restricts untrusted patterns
+        // before PCRE2 is permitted to compile the replay engine.
+        let safe=regex::RegexBuilder::new(pattern)
+            .size_limit(256*1024).build()
+            .map_err(|_|"candidate regex is not in the safe linear-time subset")?;
+        if safe.is_match(""){
+            return Err("zero-width candidate pattern is forbidden".into());
+        }
+        fields.insert(field.to_owned());
+        match action{
+            "patch"=>{
+                patches.push(HandlerPatch{index,
+                    original_pattern:original.to_owned(),
+                    replacement_pattern:pattern.to_owned()});
+            }
+            "add"=>{
+                additions.push(HandlerAddition{
+                    source_index:index,pattern:pattern.to_owned()});
+            }
+            "correct"=>{
+                if !matches!(field,"seasons"|"episodes") {
+                    return Err("unsafe corrective target".into());
+                }
+                let is_range=transform=="range_func";
+                corrections.push(HandlerCorrection{
+                    source_index:index,pattern:pattern.to_owned(),is_range});
+            }
+            _=>return Err("unsupported native source operation".into()),
+        }
+    }
+    Ok((patches,additions,corrections,fields))
+}
+
+/// A common before/after decision engine for all supported community regex
+/// families. Real torrent names are untrusted test INPUTS, never truth labels.
+/// Only independently maintained expected fixtures may authorize a source PR.
+fn audit_planned(
+    item:&Value,plan:&Value,fixtures:&[Value],catalog:&[Value],
+    community_titles:&[String]
+)->Value{
+    let fp=item["fingerprint"].as_str().unwrap_or("");
+    let kind=item["kind"].as_str().unwrap_or("unknown");
+    let mut report=json!({
+        "fingerprint":fp,"kind":kind,"field":item["field"],
+        "source_handler_index":item["handler_index"],
+        "status":"review_only","promotion_eligible":false,
+        "reason":plan["reason"],
+        "source_changes":[],
+        "verified_improvements":0,"distinct_verified_titles":0,
+        "verified_fixture_indexes":[],
+        "verified_fields":[],"regressions":0,"parser_output_changes":0,
+        "community_title_cases":community_titles.len(),
+        "community_title_changes":0,"community_field_changes":0,
+        "synthetic_changes":0
+    });
+    if plan["source_changes"].as_array().is_some_and(Vec::is_empty){
+        report["status"]=json!(if plan["reason"]=="already_supported"{
+            "no_effect"
+        }else{"review_only"});
+        return report;
+    }
+    let (patches,additions,corrections,fields)=match planned_rules(plan,catalog){
+        Ok(parts)=>parts,
+        Err(reason)=>{
+            report["status"]=json!("invalid_source");
+            report["reason"]=json!(reason);
+            return report;
+        }
+    };
+    report["source_changes"]=plan["source_changes"].clone();
+    if let Err(error)=verify_live_regression_corpus(&patches,&additions,&corrections){
+        report["status"]=json!("regression");
+        report["regressions"]=json!(1);
+        report["reason"]=json!(format!("protected parser regression: {error}"));
+        return report;
+    }
+    let mut titles=fixtures.iter()
+        .map(|row|row["title"].as_str().unwrap_or_default().to_owned())
+        .collect::<Vec<_>>();
+    let fixture_end=titles.len();
+    titles.extend(NEGATIVES.iter().map(|s|(*s).to_owned()));
+    let negatives_end=titles.len();
+    titles.extend(community_titles.iter().cloned());
+    let community_end=titles.len();
+    // Synthetic marker cases are replay diagnostics only, never labels.
+    if let Some(marker)=item["signal"].as_str(){
+        if (2..=24).contains(&marker.len()) &&
+            marker.bytes().all(|b|b.is_ascii_lowercase()||
+                b.is_ascii_digit()||b==b'.'||b==b'_'){
+            titles.push(format!("Synthetic.Show.S01E02.{marker}.WEB-DL"));
+            titles.push(format!("Synthetic.Movie.2025.{marker}.mkv"));
+        }
+    }
+    if titles.len()>128{
+        report["status"]=json!("invalid_source");
+        report["reason"]=json!("bounded comparison corpus exceeded");
+        return report;
+    }
+    let before=titles.iter().map(|title|parse_title_canonical(title,false))
+        .collect::<Result<Vec<_>,_>>();
+    let after=replay_handler_rules(&patches,&additions,&corrections,&titles);
+    let (Ok(before),Ok(after))=(before,after)else{
+        report["status"]=json!("invalid_source");
+        report["reason"]=json!("safe native parser replay could not compile");
+        return report;
+    };
+    let mut gains=0usize;
+    let mut regressions=0usize;
+    let mut changed=0usize;
+    let mut actual_changes=0usize;
+    let mut actual_target_changes=0usize;
+    let mut synthetic_changes=0usize;
+    let mut fixture_indexes=HashSet::new();
+    let mut identities=HashSet::new();
+    let mut verified_fields=HashSet::new();
+    for (i,(before,after)) in before.iter().zip(after.iter()).enumerate(){
+        if before==after{continue;}
+        changed+=1;
+        let keys=before.keys().chain(after.keys())
+            .map(String::as_str).collect::<HashSet<_>>();
+        if i>=community_end{
+            synthetic_changes+=1;
+            continue;
+        }
+        if i>=negatives_end{
+            actual_changes+=1;
+            if fields.iter().any(|field|before.get(field)!=after.get(field)){
+                actual_target_changes+=1;
+            }
+            if keys.iter().any(|key|!fields.contains(*key) &&
+                before.get(*key)!=after.get(*key)){
+                regressions+=1;
+            }
+            continue;
+        }
+        if i>=fixture_end{
+            // All protected release names are full-output regression oracles.
+            regressions+=1;
+            continue;
+        }
+        let expected=fixtures[i]["expected"].as_object()
+            .expect("validated expected labels");
+        let mut fixture_improved=false;
+        for key in keys{
+            if before.get(key)==after.get(key){continue;}
+            if let Some(label)=expected.get(key){
+                if after.get(key)!=Some(label){
+                    regressions+=1;
+                }else if fields.contains(key) && before.get(key)!=Some(label){
+                    gains+=1;
+                    fixture_improved=true;
+                    verified_fields.insert(key.to_owned());
+                }
+            }else if !fields.contains(key){
+                // A proposed field regex must not silently damage title,
+                // year, metadata or other unlabeled parsed fields.
+                regressions+=1;
+            }
+        }
+        if fixture_improved{
+            fixture_indexes.insert(i);
+            let identity=after.get("title").and_then(Value::as_str)
+                .or_else(||before.get("title").and_then(Value::as_str))
+                .unwrap_or(titles[i].as_str()).to_lowercase();
+            identities.insert(identity);
+        }
+    }
+    let mut idx=fixture_indexes.into_iter().collect::<Vec<_>>();
+    idx.sort_unstable();
+    let mut fields_verified=verified_fields.iter().cloned().collect::<Vec<_>>();
+    fields_verified.sort();
+    report["source_handler_index"]=json!(
+        plan["source_changes"][0]["handler_index"]);
+    report["field"]=json!(fields.iter().cloned().collect::<Vec<_>>());
+    report["verified_improvements"]=json!(gains);
+    report["verified_fixture_indexes"]=json!(idx);
+    report["distinct_verified_titles"]=json!(identities.len());
+    report["verified_fields"]=json!(fields_verified);
+    report["parser_output_changes"]=json!(changed);
+    report["community_title_changes"]=json!(actual_changes);
+    report["community_field_changes"]=json!(actual_target_changes);
+    report["synthetic_changes"]=json!(synthetic_changes);
+    report["regressions"]=json!(regressions);
+    let proven=gains>=2 && identities.len()>=2 &&
+        fields.iter().all(|field|verified_fields.contains(field));
+    let (status,reason)=if regressions>0{
+        ("regression","full parser replay changed protected or unrelated fields")
+    }else if changed==0{
+        ("no_effect","candidate produced exactly the existing parser output")
+    }else if proven{
+        ("ready_for_source_diff",
+         "independent fixtures prove all modified fields; zero regressions")
+    }else{
+        ("needs_independent_evidence",
+         "native replay ran but independent labels do not prove a safe gain")
+    };
+    report["status"]=json!(status);
+    report["reason"]=json!(reason);
+    report["promotion_eligible"]=json!(status=="ready_for_source_diff");
+    report
+}
+
 fn main()->Result<(),Box<dyn std::error::Error>>{
     let args=env::args().collect::<Vec<_>>();
-    if args.len()!=4 && args.len()!=5{
-        return Err("usage: audit_community_regex daily.json trusted-fixtures.json audit.json [community-titles.json]".into());
+    if !(4..=6).contains(&args.len()){
+        return Err("usage: audit_community_regex daily.json trusted-fixtures.json audit.json [community-titles.json] [plans.json]".into());
     }
     let proposals:Vec<Value>=serde_json::from_slice(&fs::read(&args[1])?)?;
     let fixtures:Vec<Value>=serde_json::from_slice(&fs::read(&args[2])?)?;
     validate_fixtures(&fixtures)?;
-    let supplied:HashMap<String,Vec<String>>=if args.len()==5{
+    let supplied:HashMap<String,Vec<String>>=if args.len()>=5{
         serde_json::from_slice(&fs::read(&args[4])?)?
     }else{HashMap::new()};
     if supplied.len()>MAX_CANDIDATES || supplied.values().any(|titles|
@@ -325,16 +569,50 @@ fn main()->Result<(),Box<dyn std::error::Error>>{
             title.chars().any(char::is_control))){
         return Err("untrusted community title corpus exceeds bounds".into());
     }
+    let plans:HashMap<String,Value>=if args.len()==6{
+        serde_json::from_slice(&fs::read(&args[5])?)?
+    }else{HashMap::new()};
+    if args.len()==6 && (plans.len()!=proposals.len() ||
+        plans.len()>MAX_CANDIDATES){
+        return Err("community plans do not cover the complete bounded batch".into());
+    }
     let catalog=existing_regex_rules();
     let reports=proposals.iter().take(MAX_CANDIDATES)
         .map(|item|{
             let fp=item["fingerprint"].as_str().unwrap_or("");
             let cases=supplied.get(fp).map(Vec::as_slice).unwrap_or(&[]);
-            audit_one(item,&fixtures,&catalog,cases)
+            if args.len()==6{
+                if let Some(plan)=plans.get(fp){
+                    audit_planned(item,plan,&fixtures,&catalog,cases)
+                }else{
+                    json!({"fingerprint":fp,"status":"invalid_source",
+                        "promotion_eligible":false,"reason":"missing plan"})
+                }
+            }else{
+                audit_one(item,&fixtures,&catalog,cases)
+            }
         })
         .collect::<Vec<_>>();
     let eligible=reports.iter().filter(|r|r["promotion_eligible"]==true).count();
     fs::write(&args[3],format!("{}\n",serde_json::to_string_pretty(&reports)?))?;
+    // Bounded, machine-readable per-candidate review decisions are visible
+    // even when no PR is opened. Never print the raw torrent titles or
+    // untrusted comment JSON in public Actions logs.
+    for row in &reports{
+        let reason=row["reason"].as_str().unwrap_or("")
+            .chars().take(160).collect::<String>();
+        println!("community_regex_verdict={}",json!({
+            "fingerprint":row["fingerprint"],
+            "kind":row["kind"],
+            "status":row["status"],
+            "reason":reason,
+            "verified_improvements":row["verified_improvements"],
+            "regressions":row["regressions"],
+            "real_title_cases":row["community_title_cases"],
+            "real_title_changes":row["community_title_changes"],
+            "source_changes":row["source_changes"].as_array().map_or(0,Vec::len)
+        }));
+    }
     println!("community_regex_audited={} source_diff_eligible={}",
         reports.len(),eligible);
     Ok(())
@@ -342,6 +620,59 @@ fn main()->Result<(),Box<dyn std::error::Error>>{
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn all_native_plan_modes_replay_only_exact_existing_handler_sources(){
+        let catalogue=existing_regex_rules();
+        let source=catalogue.iter().find(|row|
+            row["field"]=="audio" && row["transform"]=="uniq_concat(value('OPUS'))")
+            .expect("native OPUS source");
+        let index=source["index"].as_u64().unwrap();
+        let pattern=r"(?i)(?:^|[ ._-])opus(?:$|[ ._-])";
+        let plan=json!({"source_changes":[{
+            "operation":"add","handler_index":index,"field":"audio",
+            "original_pattern":source["pattern"],"pattern":pattern,
+            "transform":source["transform"]
+        }]});
+        let (patches,adds,corrections,fields)=
+            planned_rules(&plan,&catalogue).expect("safe native addition");
+        assert!(patches.is_empty()&&corrections.is_empty());
+        assert_eq!(adds.len(),1);
+        assert!(fields.contains("audio"));
+        let bad=json!({"source_changes":[{
+            "operation":"add","handler_index":index,"field":"year",
+            "original_pattern":source["pattern"],"pattern":pattern,
+            "transform":source["transform"]
+        }]});
+        assert!(planned_rules(&bad,&catalogue).is_err());
+        let malicious=json!({"source_changes":[{
+            "operation":"add","handler_index":index,"field":"audio",
+            "original_pattern":source["pattern"],
+            "pattern":"(?s)(.*)+","transform":source["transform"]
+        }]});
+        assert!(planned_rules(&malicious,&catalogue).is_err());
+    }
+
+    #[test]
+    fn actual_torrent_names_never_count_as_independent_labels(){
+        let catalogue=existing_regex_rules();
+        let source=catalogue.iter().find(|row|
+            row["field"]=="audio" && row["transform"]=="uniq_concat(value('OPUS'))")
+            .unwrap();
+        let plan=json!({"source_changes":[{
+            "operation":"add","handler_index":source["index"],"field":"audio",
+            "original_pattern":source["pattern"],
+            "pattern":r"(?i)(?:^|[ ._-])opus(?:$|[ ._-])",
+            "transform":source["transform"]
+        }]});
+        let candidate=json!({"fingerprint":"a".repeat(64),
+            "kind":"learned_field_regex","field":"audio","signal":"opus"});
+        let titles=vec!["Example.Show.S01E01.Opus.mkv".to_owned()];
+        let result=audit_planned(&candidate,&plan,&[],&catalogue,&titles);
+        assert_ne!(result["status"],"ready_for_source_diff");
+        assert_eq!(result["promotion_eligible"],false);
+        assert_eq!(result["verified_improvements"],0);
+        assert_eq!(result["community_title_cases"],1);
+    }
     #[test]
     fn reject_original_source_modification_and_arbitrary_regex(){
         let source=existing_regex_rules().into_iter()
