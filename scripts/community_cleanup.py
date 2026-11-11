@@ -113,8 +113,9 @@ def stale_branch(branch, prs, repo, now):
         return None
     if born > now or born > now - timedelta(days=BRANCH_GRACE_DAYS):
         return None
-    matching = [p for p in prs if (p.get("head") or {}).get("ref") == name
-                and ((p.get("head") or {}).get("repo") or {}).get("full_name", "").lower() == repo.lower()]
+    # A deleted fork or transient GitHub head.repo=None must not let an
+    # otherwise associated PR fall through as an "orphan" bot branch.
+    matching = [p for p in prs if (p.get("head") or {}).get("ref") == name]
     if matching:
         # Never remove the branch of any open PR, or a branch whose latest
         # commit differs from the recorded closed review PR head.
@@ -221,10 +222,24 @@ def run(api, now, apply=False):
     # A PR closed in this run has a seven-day recovery period; branch selection
     # intentionally uses the PRE-mutation PR snapshot.
     for issue in issues_to_close:
-        api.request("PATCH", "/issues/" + str(issue["number"]),
+        number = str(issue["number"])
+        latest = api.request("GET", "/issues/" + number)
+        # A late comment, label or reopen since listing must prevent closing.
+        if (latest.get("updated_at") != issue.get("updated_at")
+                or not daily_issue(latest, now)):
+            continue
+        api.request("PATCH", "/issues/" + number,
                     {"state": "closed", "state_reason": "completed"})
     for pr in prs_to_close:
         number = str(pr["number"])
+        latest = api.request("GET", "/pulls/" + number)
+        # Do not close if another maintainer changed the PR while we planned.
+        if (latest.get("updated_at") != pr.get("updated_at")
+                or (latest.get("head") or {}).get("sha") !=
+                (pr.get("head") or {}).get("sha")
+                or not stale_pr(latest, api.repo, now)
+                or reviewed_by_human(api, pr["number"])):
+            continue
         api.request("PATCH", "/pulls/" + number, {"state": "closed"})
         api.request("POST", "/issues/" + number + "/comments", {
             "body": ("Closed by scheduled Community Learning housekeeping after "
@@ -233,7 +248,34 @@ def run(api, now, apply=False):
                      "`community-keep-open` label to prevent future automatic "
                      "closure of bot proposals.")
         })
-    for name, _ in branches_to_delete:
+    for name, reason in branches_to_delete:
+        latest = api.request("GET", "/branches/" + quote(name, safe="/"))
+        original = next(b for b in branches if b["name"] == name)
+        if (latest.get("protected")
+                or (latest.get("commit") or {}).get("sha") !=
+                (original.get("commit") or {}).get("sha")):
+            continue
+        # GitHub's filtered PR query catches an open PR created or reopened
+        # since our initial snapshot; do not delete its branch.
+        owner = api.repo.split("/", 1)[0]
+        open_prs = api.request("GET", "/pulls?state=open&head=" +
+                               quote(owner + ":" + name, safe=":") + "&per_page=100")
+        if open_prs:
+            continue
+        if reason == "review-closed":
+            related = [p for p in prs if (p.get("head") or {}).get("ref") == name]
+            if not related:
+                continue
+            if any((live := api.request("GET", "/pulls/" + str(p["number"])))
+                   .get("state") != "closed"
+                   or not trusted_pr(live, api.repo)
+                   or not age_at_least(live.get("closed_at"), now, BRANCH_GRACE_DAYS)
+                   or (live.get("head") or {}).get("sha") !=
+                   (original.get("commit") or {}).get("sha")
+                   for p in related):
+                continue
+        if not branch_unchanged_and_idle(api, latest, reason, now):
+            continue
         api.request("DELETE", "/git/refs/heads/" + quote(name, safe="/"))
     return plan
 
