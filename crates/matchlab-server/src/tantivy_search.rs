@@ -864,12 +864,54 @@ pub fn title_aliases_inside(db:&Connection,key:&str)->Result<Vec<TitleAlias>,Str
     }else{title_aliases_inside_uncached(db,key)}
 }
 
-pub fn anime_aliases(db:&Connection,key:&str,min_prefix:usize)->Result<Vec<AnimeAlias>,String>{
+/// Cache the indexed candidates independent of the source title's word
+/// boundaries. Different raw titles can normalize to the same key but have
+/// different legal suffixes (e.g. "Beyond Dune" vs "BeyondDune").
+fn indexed_anime_aliases(db:&Connection,key:&str,min_prefix:usize)->Result<Vec<AnimeAlias>,String>{
     if let Some(id)=lookup_cache_key(db,&format!("anime_aliases_{min_prefix}"),key){
         ANIME_LOOKUPS.get_or_init(||QueryCache::new(LOOKUP_CAP,LOOKUP_TTL))
             .get_or_compute(id,||anime_aliases_uncached(db,key,min_prefix),
                 |rows|rows.len()<=LOOKUP_MAX_ALIASES)
     }else{anime_aliases_uncached(db,key,min_prefix)}
+}
+
+/// For callers with only the compact normalized key, suffix alignment cannot
+/// be verified. Allow exact and leading aliases only; never accept a suffix
+/// that may begin midway through a longer source word.
+pub fn anime_aliases(db:&Connection,key:&str,min_prefix:usize)->Result<Vec<AnimeAlias>,String>{
+    Ok(indexed_anime_aliases(db,key,min_prefix)?.into_iter()
+        .filter(|alias|key.starts_with(&alias.clean_title)).collect())
+}
+
+/// Discover trailing aliases only at real *source-title* word boundaries.
+/// Indexed compact aliases alone cannot distinguish "Beyond Dune" from
+/// "BeyondDune", so test suffixes of normalized whole source words.
+/// Prefix/exact lookup behavior and the Tantivy cache are unchanged.
+pub fn anime_aliases_for_title(
+    db:&Connection,raw_title:&str,min_prefix:usize,
+)->Result<Vec<AnimeAlias>,String>{
+    let key=crate::title_normalization::clean_title(raw_title);
+    if key.len()<4{return Ok(Vec::new());}
+    let mut results=indexed_anime_aliases(db,&key,min_prefix)?;
+    if results.iter().any(|alias|!key.starts_with(&alias.clean_title)){
+        let words=crate::title_normalization::clean_words(raw_title);
+        let mut boundary_suffixes=std::collections::HashSet::new();
+        let mut suffix=String::new();
+        for word in words.iter().rev(){
+            suffix.insert_str(0,word);
+            boundary_suffixes.insert(suffix.clone());
+        }
+        results.retain(|alias|key.starts_with(&alias.clean_title)
+            ||(key.ends_with(&alias.clean_title)
+                &&boundary_suffixes.contains(&alias.clean_title)));
+    }
+    // Re-check coverage on accepted candidates. The indexed best alias may
+    // have been an illegal suffix and must not authorize a weak prefix.
+    if results.first().is_some_and(|best|
+        !anime_alias_covers_title(&key,best.clean_title.len())){
+        results.clear();
+    }
+    Ok(results)
 }
 
 pub fn has_duplicate_title(db:&Connection,key:&str)->Result<bool,String>{
@@ -1107,10 +1149,50 @@ mod persistence_tests {
                 VALUES('tt0000001','bluearchive',2024);
             INSERT INTO anidb_titles VALUES('100','bluearchive');
             INSERT INTO anime_series_map VALUES('100','tt0000001');").unwrap();
-        let matches=anime_aliases(&db,"myfavoritebluearchive",6).unwrap();
+        // Only a real word boundary may expose a trailing AniDB alias.
+        let matches=anime_aliases_for_title(&db,"My Favorite BlueArchive",6).unwrap();
         assert_eq!(matches.len(),1);
         assert_eq!(matches[0].clean_title,"bluearchive");
+        assert!(anime_aliases_for_title(&db,"MyFavoriteBlueArchive",6)
+            .unwrap().is_empty());
+        assert!(anime_aliases(&db,"myfavoritebluearchive",6)
+            .unwrap().is_empty(),"compact keys cannot prove suffix boundaries");
         assert!(anime_aliases(&db,"monster the jeffrey dahmer story",6)
+            .unwrap().is_empty());
+    }
+    #[test]
+    fn anidb_suffix_requires_complete_source_word_boundary(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER,
+                title TEXT NOT NULL DEFAULT '',category TEXT NOT NULL DEFAULT 'movie',
+                region TEXT NOT NULL DEFAULT '',original INTEGER NOT NULL DEFAULT 1,
+                ordering INTEGER NOT NULL DEFAULT 0,type TEXT NOT NULL DEFAULT 'movie');
+            CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
+            CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT);
+            INSERT INTO titles(imdb_id,clean_title,year)
+                VALUES('tt0000001','bluearchive',2024);
+            INSERT INTO anidb_titles VALUES('100','bluearchive');
+            INSERT INTO anime_series_map VALUES('100','tt0000001');").unwrap();
+
+        for title in ["My Favorite BlueArchive","My.Favorite.BlueArchive",
+                      "My_Favorite_BlueArchive"] {
+            let rows=anime_aliases_for_title(&db,title,6).unwrap();
+            assert_eq!(rows.len(),1,"whole-word suffix: {title}");
+        }
+        for title in ["MyFavoriteBlueArchive","MyFavoritebluearchive",
+                      "FavoriteBlueArchive"] {
+            assert!(anime_aliases_for_title(&db,title,6).unwrap().is_empty(),
+                "partial-word suffix must be rejected: {title}");
+        }
+        assert_eq!(anime_aliases_for_title(&db,"BlueArchive",6).unwrap().len(),1,
+            "exact anime alias is unaffected");
+        assert_eq!(anime_aliases_for_title(&db,"BlueArchive Part Two",6)
+            .unwrap().len(),1,"prefix anime alias is unaffected");
+        // The same compact key is cached for both forms. Boundaries must be
+        // checked AFTER cache lookup and must never leak between requests.
+        let accepted=anime_aliases_for_title(&db,"My Favorite BlueArchive",6).unwrap();
+        assert_eq!(accepted.len(),1);
+        assert!(anime_aliases_for_title(&db,"MyFavoriteBlueArchive",6)
             .unwrap().is_empty());
     }
     #[test]
