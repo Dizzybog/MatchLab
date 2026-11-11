@@ -3897,9 +3897,16 @@ mod tests {
         assert_eq!(nested["title"],flat["title"],"numeric folder changed title: {nested:?}");
         assert_eq!(nested["seasons"],json!([6]),"{nested:?}");
         assert_eq!(nested["episodes"],json!([10]),"{nested:?}");
-        assert_eq!(nested["path_title_candidates"],flat["path_title_candidates"],
-            "numeric season folder must not become a candidate: {nested:?}");
+        assert_eq!(flat["title"],"Cops","{flat:?}");
+        assert_eq!(nested["title"],"Cops","{nested:?}");
+        // Keep even numeric parent names as untrusted *candidates*; a real
+        // series can be named "24". The matcher, not a hardcoded folder
+        // exclusion, decides whether "6" is a valid IMDb series title.
+        assert_eq!(nested["path_title_candidates"],json!(["Cops","6"]),
+            "{nested:?}");
         assert_eq!(select(cops_nested),select(cops_flat));
+        assert_eq!(select("Cops Seasons 1-24/Unknown Folder/6/s6e10.avi"),
+            select(cops_flat));
         // The leaf already has exactly the same title as its ancestor:
         // no override is needed.
         assert_eq!(select("The Simpsons Season 9/Season 9/The.Simpsons.S09E24.mkv"),
@@ -3939,7 +3946,8 @@ mod tests {
             "tt0096697:9:24");
 
         for release in ["Cops Seasons 1-24/s6e10.avi",
-            "Cops Seasons 1-24/6/s6e10.avi"]{
+            "Cops Seasons 1-24/6/s6e10.avi",
+            "Cops Seasons 1-24/Unknown Folder/6/s6e10.avi"]{
             let got=diagnose(&path,&MatchRequest{
                 title:release.into(),year:None,series:None}).unwrap();
             let selected=got.selected.as_ref().unwrap_or_else(||panic!("{release}: {got:?}"));
