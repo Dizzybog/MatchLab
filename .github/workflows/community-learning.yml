@@ -106,12 +106,9 @@ jobs:
           cp learning/community_regex_proposals.json "$RUNNER_TEMP/community-extended-before.json"
           cp crates/matchlab-parser/src/generated/handlers.json "$RUNNER_TEMP/community-handlers-before.json"
           cp learning/regex_promoted_tests.json "$RUNNER_TEMP/community-promoted-before.json"
-          cargo run --release --locked -p matchlab-parser \
-            --example screen_community_rules -- \
-            "$RUNNER_TEMP/community-daily-review.json" \
-            learning/community_rules.json \
-            "$RUNNER_TEMP/curated-rules-next.json"
-          cp "$RUNNER_TEMP/curated-rules-next.json" learning/community_rules.json
+          # The legacy anime marker screener may run in standalone tests,
+          # but it must NOT stage unaudited JSON alongside a verified code PR.
+          # Verified anime proposals also enter the universal Rust replay.
           # Select only actual release names associated with each validated
           # rule in the same Issue batch. These are untrusted test inputs:
           # they are NOT proof of a correct IMDb/anime mapping.
