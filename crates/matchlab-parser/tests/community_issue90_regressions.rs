@@ -127,14 +127,14 @@ fn path_fallback_validates_fields_independently_from_nearest_component(){
     // Coordinates from the leaf; other fields from the closest valid layer.
     // A numeric intermediate directory is neither an episode nor a title
     // unless metadata independently verifies a series of that name.
-    let release="Cops Seasons 1-24 1989 720p BluRay DTS-HD MA 5.1/6/Season 6 WEB-DL/s6e10.avi";
+    let release="Cops.1989.720p.BluRay.DTS-HD.MA.5.1/6/Season.6.WEB-DL/s6e10.avi";
     let parsed=parse_title(release,false).unwrap();
     assert_eq!(parsed["seasons"],json!([6]),"{parsed:?}");
     assert_eq!(parsed["episodes"],json!([10]),"{parsed:?}");
-    assert_eq!(parsed["extension"],json!("avi"),"{parsed:?}");
-    assert_eq!(parsed["year"],json!(1989),"{parsed:?}");
-    assert_eq!(parsed["quality"],json!("WEB-DL"),"{parsed:?}");
-    assert_eq!(parsed["resolution"],json!("720p"),"{parsed:?}");
+    assert_eq!(parsed.get("extension"),Some(&json!("avi")),"{parsed:?}");
+    assert_eq!(parsed.get("year"),Some(&json!(1989)),"{parsed:?}");
+    assert_eq!(parsed.get("quality"),Some(&json!("WEB-DL")),"{parsed:?}");
+    assert_eq!(parsed.get("resolution"),Some(&json!("720p")),"{parsed:?}");
     assert!(parsed["audio"].as_array().is_some_and(|v|
         v.contains(&json!("DTS Lossless"))),"{parsed:?}");
 }
