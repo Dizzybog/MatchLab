@@ -2674,14 +2674,16 @@ fn standalone_special_marker(raw:&str, result:&Map<String,Value>) -> Option<(Str
     }
     if result.get("episode_count").and_then(Value::as_i64).is_some_and(|n|n>1)
         || result.contains_key("anime_episode_range_candidate")
-        || SPECIAL_BATCH_RE.is_match(raw)
     {
         // "Episodes 01-12 + OVA" describes a collection, not one special.
         return None;
     }
+    // The overwhelmingly common non-special release takes one regex pass,
+    // without paying for a second range/pack scan.
     for captures in SPECIAL_RELEASE_MARKER_RE.captures_iter(raw) {
         let marker=captures.name("tag").or_else(||captures.name("bracket_sp"))?;
         let kind=marker.as_str().to_ascii_lowercase();
+        if SPECIAL_BATCH_RE.is_match(raw) {return None;}
         if SPECIAL_PACK_RE.is_match(raw) &&
             matches!(kind.as_str(),"ova"|"oav"|"oad") {
             continue;
