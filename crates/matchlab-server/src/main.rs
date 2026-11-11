@@ -283,9 +283,9 @@ fn anime_identity(db:&Connection,title:&str)->rusqlite::Result<Option<String>>{
             Box::new(std::io::Error::other(error))))?
         .into_iter().map(|alias|(alias.clean_title,alias.imdb_id)).collect();
     let Some((best_alias,best_imdb))=rows.first()else{return Ok(None)};
-    let exact=best_alias==key;
+    let exact=best_alias==&key;
     let size=best_alias.len();
-    if rows.iter().any(|(alias,id)|(alias==key)==exact&&alias.len()==size&&id!=best_imdb){
+    if rows.iter().any(|(alias,id)|(alias==&key)==exact&&alias.len()==size&&id!=best_imdb){
         return Ok(None);
     }
     Ok(Some(best_imdb.clone()))
