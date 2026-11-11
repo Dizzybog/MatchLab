@@ -2627,6 +2627,16 @@ static SOURCE_EXTENSION_RE:Lazy<regex::Regex>=Lazy::new(||{
         .expect("native extension matcher is Rust-regex compatible")
 });
 
+// Subtitle-release tags occurring after an explicit SxxEyy are never
+// part of the series title. Some upstream group/codec removals can leave a
+// partially truncated release suffix in "title"; recover the title prefix
+// from the explicit coordinate, without modifying episode_title or the
+// separately parsed release metadata.
+static TITLE_TAIL_SUBTITLE_TAG_RE:Lazy<regex::Regex>=Lazy::new(||{
+    regex::Regex::new(r"(?i)(?:^|[._ -])(?:fastsub|vostfr|vosta|softsub|hardsub)(?:$|[._ -])")
+        .expect("valid subtitle release marker")
+});
+
 // Parse each directory entry independently. The path-level merge below
 // never concatenates release names (which could confuse episode coordinates).
 fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<String,Value>,ParseError> {
@@ -2728,6 +2738,14 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
         )? {
             result.insert("anime_episode_candidate".into(),candidate);
         }
+    }
+    if result.get("title").and_then(Value::as_str)
+        .is_some_and(|title|TITLE_TAIL_SUBTITLE_TAG_RE.is_match(title))
+        && let Some(caps)=S_E_COORDS_RE.captures(raw)
+            .map_err(|e|ParseError::Regex(e.to_string()))?
+        && let Some(marker)=caps.get(0)
+    {
+        set_title_from_release_prefix(raw,marker.start(),translate_languages,&mut result)?;
     }
     if let Some(episode_title) = extract_release_episode_title(raw, &result)? {
         result.insert("episode_title".into(), json!(episode_title));
