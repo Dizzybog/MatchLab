@@ -72,6 +72,17 @@ class FakeAPI:
         if method != "GET":
             self.writes.append((method, path, payload))
             return {}
+        if path.startswith("/issues/"):
+            number = int(path.rsplit("/", 1)[1])
+            return next(i for i in self.issues if i["number"] == number)
+        if path.startswith("/pulls/"):
+            number = int(path.rsplit("/", 1)[1])
+            return next(p for p in self.prs if p["number"] == number)
+        if path.startswith("/branches/"):
+            name = path[len("/branches/"):]
+            return next(b for b in self.branches if b["name"] == name)
+        if path.startswith("/pulls?state=open&head="):
+            return []
         if path.startswith("/git/ref/heads/"):
             return {"object": {"sha": SHA}}
         if path == "/commits/" + SHA:
@@ -148,6 +159,36 @@ class CommunityCleanupTests(unittest.TestCase):
         self.assertEqual(plan["bot_branches"], ["bot/community-regex-20260901"])
         self.assertEqual([(method, route) for method, route, _ in api.writes],
                          [("DELETE", "/git/refs/heads/bot/community-regex-20260901")])
+
+    def test_latest_issue_update_prevents_stale_snapshot_closure(self):
+        class EditedAPI(FakeAPI):
+            def request(self, method, path, payload=None):
+                if method == "GET" and path == "/issues/1":
+                    return issue(updated_at=iso(1))
+                return super().request(method, path, payload)
+        api = EditedAPI(issues=[issue()])
+        cc.run(api, NOW, apply=True)
+        self.assertEqual(api.writes, [])
+
+    def test_latest_pr_update_prevents_stale_snapshot_closure(self):
+        class EditedAPI(FakeAPI):
+            def request(self, method, path, payload=None):
+                if method == "GET" and path == "/pulls/3":
+                    return pull(updated_at=iso(1))
+                return super().request(method, path, payload)
+        api = EditedAPI(prs=[pull()])
+        cc.run(api, NOW, apply=True)
+        self.assertEqual(api.writes, [])
+
+    def test_reopened_pr_blocks_branch_deletion(self):
+        class ReopenedAPI(FakeAPI):
+            def request(self, method, path, payload=None):
+                if method == "GET" and path.startswith("/pulls?state=open&head="):
+                    return [{"number": 3}]
+                return super().request(method, path, payload)
+        api = ReopenedAPI(prs=[pull(state="closed")], branches=[branch()])
+        cc.run(api, NOW, apply=True)
+        self.assertEqual(api.writes, [])
 
     def test_human_approval_blocks_automatic_pr_close(self):
         api = FakeAPI(prs=[pull()], reviews=[
