@@ -65,11 +65,6 @@ fn exact(db:&Connection,key:&str)->rusqlite::Result<Vec<Aka>>{
     crate::tantivy_search::title_aliases_exact(db,key)
         .map(|rows|rows.into_iter().map(Aka::from).collect()).map_err(index_error)
 }
-fn prefix(db:&Connection,key:&str,release:&str,series:bool,year:Option<i32>,season:i64)->rusqlite::Result<Vec<Aka>>{
-    let matching=filter(db,exact(db,key)?,release,series,year,season)?;
-    if !matching.is_empty(){return Ok(matching);}
-    filter(db,tantivy_aliases(db,key,false)?,release,series,year,season)
-}
 /// Prefer exact or complete-word edge alignment over raw alias length.
 #[derive(Clone,Copy,Debug,PartialEq,Eq,PartialOrd,Ord)]
 struct TitleFit{
@@ -145,28 +140,14 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             }
             discovered.extend(crate::tantivy_search::title_aliases_inside(db,&key)
                 .map_err(index_error)?.into_iter().map(Aka::from));
+            // Avoid eligibility SQL joins for candidates that only match
+            // fragments of a word (e.g. Dune vs Duneland).
+            discovered.retain(|row|title_fit(&key,&words,row).is_some());
             rows=filter(db,discovered,&release,series,year,required_season)?;
-            rows.retain(|row|title_fit(&key,&words,row).is_some());
         }
     }
-    if rows.is_empty()&&key.len()>=4{
-        for size in ((std::cmp::max(2,key.len()/2)+1)..key.len()).rev(){
-            if !key.is_char_boundary(size){continue;}
-            let short=&key[..size];
-            rows=filter(db,exact(db,short)?,&release,series,year,required_season)?;
-            if !rows.is_empty(){stage="shorter_prefix";break;}
-        }
-    }
-    if rows.is_empty()&&key.len()>=12{
-        rows=filter(db,tantivy_aliases(db,&key,true)?,
-            &release,series,year,required_season)?;
-        if !rows.is_empty(){stage="reverse_suffix";}
-    }
-    if rows.is_empty()&&key.len()>=6{
-        let half=&key[..(key.len()+1)/2];
-        rows=prefix(db,half,&release,series,year,required_season)?;
-        if !rows.is_empty(){stage="half_prefix";}
-    }
+    // Do not fall back to a half-word prefix: such matches are not
+    // independently meaningful, and caused short titles to hijack long ones.
     if rows.is_empty()&&series&&key.len()>=4{
         // IMDb's English primary title need not appear in the release at
         // all: e.g. Shinigami Bocchan to Kuro Maid is indexed under its
