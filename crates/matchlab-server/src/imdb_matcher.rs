@@ -70,6 +70,35 @@ fn prefix(db:&Connection,key:&str,release:&str,series:bool,year:Option<i32>,seas
     if !matching.is_empty(){return Ok(matching);}
     filter(db,tantivy_aliases(db,key,false)?,release,series,year,season)
 }
+/// Prefer exact or complete-word edge alignment over raw alias length.
+#[derive(Clone,Copy,Debug,PartialEq,Eq,PartialOrd,Ord)]
+struct TitleFit{
+    tier:u8,               // exact/country, full-word edge, last-resort fallback
+    unmatched_bp:u32,     // relative unmatched share (basis points)
+    edge:u8,              // prefix before suffix only when coverage is equal
+    longest_first:i64,    // length only breaks otherwise equivalent ties
+}
+impl TitleFit{
+    fn exact()->Self{Self{tier:0,unmatched_bp:0,edge:0,longest_first:0}}
+    fn fallback(length:usize)->Self{
+        Self{tier:2,unmatched_bp:0,edge:0,longest_first:-(length as i64)}
+    }
+}
+fn title_fit(key:&str,words:&[String],row:&Aka)->Option<TitleFit>{
+    if row.clean==key{return Some(TitleFit::exact());}
+    let alias_words=crate::title_normalization::clean_words(&row.title);
+    if words.is_empty()||alias_words.is_empty(){return None;}
+    let prefix=words.starts_with(&alias_words)||alias_words.starts_with(words);
+    let suffix=words.ends_with(&alias_words)||alias_words.ends_with(words);
+    if !prefix&&!suffix{return None;}
+    let short=key.len().min(row.clean.len());
+    let long=key.len().max(row.clean.len());
+    if short<4||short.saturating_mul(2)<long||long-short>16{return None;}
+    Some(TitleFit{tier:1,
+        unmatched_bp:((long-short) as u64*10_000/long as u64) as u32,
+        edge:if prefix{0}else{1},longest_first:-(short as i64)})
+}
+
 fn type_rank(t:&str)->i32{
     match t{"movie"=>0,"tvMovie"=>1,"short"=>2,"tvShort"=>3,"tvSpecial"=>4,"tvSeries"=>5,_=>6}
 }
@@ -89,7 +118,8 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     let key=clean_title(title);
     let release=clean_title(release_title);
     if key.is_empty(){return Ok(vec![]);}
-    let mut stage="forward_prefix";
+    let words=crate::title_normalization::clean_words(title);
+    let mut stage="aligned";
     let mut rows=Vec::new();
     // Exact country-qualified aliases precede generic prefix matching.
     if series {
@@ -104,14 +134,20 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
         if !rows.is_empty(){stage="country_exact";}
     }
     if rows.is_empty(){
-        // "S" or "Th" can be a damaged parser output, but prefix matching
-        // these against millions of Tantivy aliases is prohibitively broad.
-        // Keep legitimate short titles (Up, It, Her) eligible as exact hits.
-        rows=if key.len()<4 {
-            filter(db,exact(db,&key)?,&release,series,year,required_season)?
-        }else{
-            prefix(db,&key,&release,series,year,required_season)?
-        };
+        // Exact aliases are authoritative and fast, including "Up" and "It".
+        rows=filter(db,exact(db,&key)?,&release,series,year,required_season)?;
+        if rows.is_empty()&&key.len()>=4{
+            // Compare forward, reverse and embedded edge matches together;
+            // never let the first nonempty strategy decide the winning title.
+            let mut discovered=tantivy_aliases(db,&key,false)?;
+            if key.len()>=8{
+                discovered.extend(tantivy_aliases(db,&key,true)?);
+            }
+            discovered.extend(crate::tantivy_search::title_aliases_inside(db,&key)
+                .map_err(index_error)?.into_iter().map(Aka::from));
+            rows=filter(db,discovered,&release,series,year,required_season)?;
+            rows.retain(|row|title_fit(&key,&words,row).is_some());
+        }
     }
     if rows.is_empty()&&key.len()>=4{
         for size in ((std::cmp::max(2,key.len()/2)+1)..key.len()).rev(){
@@ -177,23 +213,22 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
         if !rows.is_empty(){stage="anime_alias";}
     }
     if rows.is_empty(){return Ok(vec![]);}
-    if matches!(stage,"forward_prefix"|"half_prefix"|"country_exact"){
-        let shape=rows.iter().map(|r|(if r.clean==key{0}else{1},-(r.clean.len() as i64))).min().unwrap();
-        rows.retain(|r|(if r.clean==key{0}else{1},-(r.clean.len() as i64))==shape);
-    }else if stage=="reverse_suffix"{
-        let longest=rows.iter().map(|r|r.clean.len()).max().unwrap();
-        rows.retain(|r|r.clean.len()==longest);
+    // Keep all plausible identities until ranked. Unrelated word fragments
+    // are rejected before season eligibility and expensive ID lookups.
+    let mut groups:BTreeMap<String,Vec<(Aka,TitleFit)>>=BTreeMap::new();
+    for row in rows{
+        let fit=if stage=="country_exact"{TitleFit::exact()}
+            else if stage=="aligned"{
+                title_fit(&key,&words,&row).unwrap_or(TitleFit::fallback(row.clean.len()))
+            }else{TitleFit::fallback(row.clean.len())};
+        groups.entry(row.imdb_id.clone()).or_default().push((row,fit));
     }
-    let mut groups:BTreeMap<String,Vec<Aka>>=BTreeMap::new();
-    for r in rows{groups.entry(r.imdb_id.clone()).or_default().push(r);}
     let mut duplicates=HashSet::new();
     let mut checked=HashSet::new();
-    
-    for r in groups.values().flatten(){
-        if checked.insert(r.clean.clone()) {
-            if crate::tantivy_search::has_duplicate_title(db,&r.clean).map_err(index_error)?{
-                duplicates.insert(r.clean.clone());
-            }
+    for (r,_) in groups.values().flatten(){
+        if checked.insert(r.clean.clone())
+            && crate::tantivy_search::has_duplicate_title(db,&r.clean).map_err(index_error)?{
+            duplicates.insert(r.clean.clone());
         }
     }
     let count_first=year.is_none()&&required_season==0&&!has_episode;
@@ -201,7 +236,9 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     for (id,aliases) in groups{
         let votes:i64=db.query_row("SELECT num_votes FROM imdb_ratings WHERE imdb_id=?1",[&id],|r|r.get(0))
             .optional().unwrap_or(None).unwrap_or(0);
-        let best=aliases.into_iter().min_by_key(|r|rank(r,year,series,duplicates.contains(&r.clean),count_first,votes)).unwrap();
+        let (best,fit)=aliases.into_iter().min_by_key(|(r,fit)|
+            (*fit,rank(r,year,series,duplicates.contains(&r.clean),count_first,votes))
+        ).unwrap();
         let mut ids=BTreeMap::new();
         let mut stmt=db.prepare("SELECT type,value FROM anime_ids WHERE group_id=?1")?;
         for item in stmt.query_map([&id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?{
@@ -212,7 +249,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             let linked=stmt.query_map([&id],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
             if linked.len()==1{ids.insert("anidb".into(),linked[0].clone());}
         }
-        let score=rank(&best,year,series,duplicates.contains(&best.clean),count_first,votes);
+        let score=(fit,rank(&best,year,series,duplicates.contains(&best.clean),count_first,votes));
         output.push((score,Match{imdb_id:id,title:best.title.clone(),year:best.year,
             category:best.category,matched_title:best.title,anime_ids:ids,media_type:best.media_type}));
     }
