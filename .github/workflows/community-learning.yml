@@ -7,6 +7,7 @@ on:
 
 # Trusted default branch only; untrusted issue text is data, never code.
 permissions:
+  actions: write  # GitHub-token-created PRs do not trigger pull_request CI
   contents: write
   issues: write
   pull-requests: write
@@ -241,6 +242,21 @@ jobs:
             --title "feat(parser): review high-evidence community regex" \
             --body-file "$RUNNER_TEMP/community-pr-body.md"
           echo "COMMUNITY_PR_CREATED=true" >> "$GITHUB_ENV"
+          # Pull requests created by GITHUB_TOKEN do not trigger ordinary
+          # pull_request workflows. Explicit workflow_dispatch is exempt.
+          # The source patch already passed pre-PR cargo regression checks.
+          # Never lose durable acknowledgement if the dispatch itself fails.
+          dispatched=false
+          for attempt in 1 2 3; do
+            if gh workflow run validate.yml --repo "$GH_REPO" --ref "$branch"; then
+              dispatched=true
+              break
+            fi
+            sleep 3
+          done
+          if [ "$dispatched" != true ]; then
+            echo "::warning::Rust CI dispatch failed; review PR must be tested manually before merge"
+          fi
       - name: Dedup only rules actually placed into a review PR
         if: env.COMMUNITY_PR_CREATED == 'true'
         run: |
