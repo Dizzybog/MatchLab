@@ -29,6 +29,19 @@ def screen(incoming,old,audits=None):
         if valid_extended_rule(candidate,sha) is None:continue
         if candidate["fingerprint"] in fingerprints:continue
         audit=audit_by_fp.get(candidate["fingerprint"],{})
+        # In production the trusted Rust auditor is mandatory. Prefer an
+        # actually verified source diff over earlier review-only proposals.
+        # Other kinds remain in the persistent queue and diagnostic artifact,
+        # but cannot occupy the one-per-run code PR slot.
+        if audits is not None and not (
+            candidate.get("kind") == "learned_source_regex_patch"
+            and audit.get("status") == "ready_for_source_diff"
+            and audit.get("promotion_eligible") is True
+            and audit.get("regressions") == 0
+            and audit.get("verified_improvements", 0) >= 2
+            and audit.get("distinct_verified_titles", 0) >= 2
+        ):
+            continue
         # Proven no-ops and conflicts do not deserve another PR. They stay
         # visible in the daily audit artifact and original Issue comment.
         if audit.get("status") in {"no_effect","invalid_source","regression"}:
