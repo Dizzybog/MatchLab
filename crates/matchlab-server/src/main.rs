@@ -3942,7 +3942,7 @@ mod tests {
             "Cops Seasons 1-24/6/s6e10.avi"]{
             let got=diagnose(&path,&MatchRequest{
                 title:release.into(),year:None,series:None}).unwrap();
-            let selected=got.selected.unwrap_or_else(||panic!("{release}: {got:?}"));
+            let selected=got.selected.as_ref().unwrap_or_else(||panic!("{release}: {got:?}"));
             assert_eq!(selected["imdb_id"],"tt0500002","{release}");
             assert_eq!(selected["season"],6,"{release}");
             assert_eq!(selected["episode"],10,"{release}");
