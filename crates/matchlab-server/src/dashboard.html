@@ -452,7 +452,7 @@ async function history(){
       '<td class="title" title="'+esc(r.title)+'">'+
       '<button type="button" class="copy-title" aria-label="Copy t_title: '+esc(r.title)+'" title="Copy t_title: '+esc(r.title)+'">'+esc(r.title)+'</button></td>'+
       '<td class="'+(r.status==='matched'?'good':r.status==='error'?'bad':'')+'">'+esc(r.status)+'</td>'+
-      '<td title="'+esc(r.imdb_id||'—')+'">'+esc(r.imdb_id||'—')+'</td>'+
+      '<td title="'+esc(r.imdb_id||'—')+'">'+imdbLink(r.imdb_id)+'</td>'+
       '<td title="'+esc(r.match_source||'—')+'">'+esc(r.match_source||'—')+'</td>'+
       '<td>'+esc(r.duration_ms)+'</td></tr>'
     ).join(''):'<tr><td colspan="6" class="muted">No requests for this filter</td></tr>';
@@ -469,7 +469,11 @@ async function history(){
           esc(row.title)+'</button>'+rankResults(row.details);
         bindCopyTitle($('history-details').querySelector('.copy-title'),row.title);
       };
-      tr.addEventListener('click',show);
+      tr.addEventListener('click',event=>{
+        // Following an external ID link must not expand history diagnostics.
+        if(event.target.closest('a.id-link'))return;
+        show();
+      });
       tr.addEventListener('keydown',event=>{
         // Enter/Space on the nested copy button belongs to the button.
         if(event.target!==tr)return;
