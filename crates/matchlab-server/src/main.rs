@@ -1076,7 +1076,9 @@ fn diagnose_with_policy(
     // cannot contain S02E37. When a *unique* modern anime has verified
     // season/episode coverage in IMDb or AniDB, prefer that identity.
     // Only query the anime Tantivy index on a verified-episode miss.
-    let imdb=if series && seasons.len()==1 && episodes.len()==1{
+    let imdb=if series && year.is_none() && seasons.len()==1 && episodes.len()==1{
+        // A known release production year is stronger identity evidence
+        // than episode presence in another same-name show (Doctor Who).
         imdb_matcher::prefer_verified_episode_identity(
             &db,imdb,title,seasons[0],episodes[0])
             .map_err(|e|e.to_string())?
