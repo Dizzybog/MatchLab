@@ -678,6 +678,7 @@ fn preferred_regular_series_parent_title(
     if has_exact_anime_alias(db,&leaf_key)?{
         return Ok(None);
     }
+    let mut leaf_is_exact_regular=false;
     if !leaf_key.is_empty(){
         let leaf_matches=imdb_matcher::search(
             db,leaf,year,true,season,&req.title,true,10)
@@ -685,6 +686,9 @@ fn preferred_regular_series_parent_title(
         for candidate in leaf_matches.iter().filter(|candidate|
             imdb_matcher::clean_title(&candidate.matched_title)==leaf_key){
             if is_anime_series_match(db,candidate)?{return Ok(None);}
+            if matches!(candidate.media_type.as_str(),"tvSeries"|"tvMiniSeries"){
+                leaf_is_exact_regular=true;
+            }
         }
     }
 
@@ -692,9 +696,12 @@ fn preferred_regular_series_parent_title(
     for parent in parents.iter().rev().filter_map(Value::as_str){
         let name=parent.trim();
         let key=imdb_matcher::clean_title(name);
-        if key.is_empty() || key==leaf_key || !seen.insert(key.clone()){
-            continue;
-        }
+        if key.is_empty() || !seen.insert(key.clone()){continue;}
+        // The nearest parent already names the same verified series as
+        // the leaf: it wins, so a more distant library folder cannot
+        // unexpectedly replace it with an unrelated IMDb series.
+        if key==leaf_key && leaf_is_exact_regular{return Ok(None);}
+        if key==leaf_key{continue;}
         if has_exact_anime_alias(db,&key)?{return Ok(None);}
         // Match through the ordinary Tantivy-based engine, never SQL title
         // scans or a guess from the folder text. An exact alias is required
@@ -3874,18 +3881,18 @@ mod tests {
                 &db,&MatchRequest{title:release.into(),year:None,series:None},
                 &parsed).unwrap()
         };
-        let parent=matchlab_parser::parse_title(
-            "The Simpsons Season 9 (Complete S09 Remastered HQ 720p x265 HappyLee)",
-            false).unwrap();
-        let parent_hits=imdb_matcher::search(&db,
-            parent["title"].as_str().unwrap_or(""),None,true,9,release,true,10)
-            .unwrap();
         assert_eq!(select(release).as_deref(),Some("The Simpsons"),
-            "parsed={parsed:?}; parent={parent:?}; parent_hits={parent_hits:?}");
+            "parser must preserve the series from the season-pack folder: {parsed:?}");
         assert_eq!(select("The Simpsons Season 9/Season 9/S09E24 Lost Our Lisa.mkv")
             .as_deref(),Some("The Simpsons"));
-        assert_eq!(select("The Simpsons Season 9/Season 9/The.Simpsons.S09E24.mkv")
-            .as_deref(),Some("The Simpsons"));
+        // The leaf already has exactly the same title as its ancestor:
+        // no override is needed.
+        assert_eq!(select("The Simpsons Season 9/Season 9/The.Simpsons.S09E24.mkv"),
+            None);
+        // Do not climb past a valid nearest parent just because the leaf
+        // independently contains the same correct show title.
+        assert_eq!(select("Different Show Season 9/The Simpsons Season 9/The.Simpsons.S09E24.mkv"),
+            None);
 
         // Parent is preferred over a different non-anime series name in the
         // leaf when both are otherwise valid IMDb title matches.
