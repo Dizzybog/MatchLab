@@ -2047,7 +2047,7 @@
         "remove": true
       },
       "kind": "regex",
-      "pattern": "\\b7[\\.\\- ]1(.?ch(annel)?)?\\b",
+      "pattern": "(?:\\b|(?<=MA))7[\\.\\- ]1(.?ch(annel)?)?\\b",
       "flags": 2,
       "transform": "uniq_concat(value('7.1'))"
     },
@@ -2112,7 +2112,7 @@
         "remove": true
       },
       "kind": "regex",
-      "pattern": "\\b(?!.+HR)(DTS.?HD.?Ma(ster)?|DTS.?X)\\b",
+      "pattern": "\\b(?!.+HR)(DTS.?HD.?Ma(ster)?|DTS.?X)(?=\\b|[0-9])",
       "flags": 2,
       "transform": "uniq_concat(value('DTS Lossless'))"
     },
