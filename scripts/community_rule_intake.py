@@ -453,7 +453,11 @@ def collect(all_comments,sha,seen,now=None,ancestor=git_ancestor):
                 if rule["fingerprint"] in seen or rule["fingerprint"] in pending:continue
                 pending.add(rule["fingerprint"])
                 output.append(rule)
-                if len(output)>=MAX_CATCHUP_PROPOSALS:return output,seen
+                if len(output)>MAX_CATCHUP_PROPOSALS:
+                    raise RuntimeError(
+                        "Community proposal intake exceeded capacity; "
+                        "refusing to silently truncate GitHub comments"
+                    )
     # Do NOT poison the permanent ledger with only self-reported evidence.
     # A fingerprint becomes permanent only after trusted screening, regression
     # tests and successful creation of the human-review PR.
