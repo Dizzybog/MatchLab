@@ -378,10 +378,14 @@ of the parsed title. The embedded-prefix/suffix query uses one Tantivy term
 union; no SQLite title scan, per-character round trip, learned model or index
 schema change is needed.
 
-A partial IMDb title match is valid only at a **normalized word boundary**,
-with at least 50% coverage of the longer title and at most 16 unmatched
-characters. This prevents `Dune` matching `Duneland` and short generic
-titles hijacking unrelated series. Candidates are ordered by exact match,
+A partial IMDb title match normally requires a **normalized word boundary**,
+at least 50% coverage of the longer title, and at most 16 unmatched
+characters. If a parser accidentally consumes part of a name as technical
+metadata (e.g. `Televisionseries1` becomes `Television`), a longer alias
+is also eligible when its **complete words** are independently present in
+the original release. Numeric title suffixes get the same conservative
+check. This prevents `Dune` matching `Duneland` merely because the first
+characters overlap. Candidates are ordered by exact match,
 relative coverage, leading versus trailing edge (only on equal coverage), then
 title length; the existing year, media type, original/region, ratings and
 ordering tie-breakers still apply. Half-word prefix fallback is intentionally
