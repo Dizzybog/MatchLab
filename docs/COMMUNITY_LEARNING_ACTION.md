@@ -14,12 +14,19 @@ comments on the daily `[community-learning] YYYY-MM-DD` GitHub issue.
    issue/comment content.
 2. Restore the newest **verified**, nonzero GitHub Release snapshot for each
    state family: `community-learning-ledger` (fingerprints) and
-   `community-learning-backlog` (unreviewed proposals).
+   `community-learning-backlog` (unreviewed proposals), and
+   `community-learning-decisions` (source-versioned decisions).
 3. Parse historical anomaly reports with the current Rust parser; discard
    problems already resolved; verify rule schemas, source-commit ancestry and
    bounded safe grammar. A user's assertion of a correct IMDb ID, AniDB ID, or
    field is never independent ground truth.
-4. Merge new proposals into the durable queue; write and **verify** an immutable
+4. Merge new proposals into the durable queue. Reuse audit decisions only
+   if the immutable native handler catalogue **and** independently labeled
+   fixture corpus have the identical SHA-256 signature. Unchanged `no_effect`,
+   `regression`, `invalid_source`, `review_only`, and `needs_independent_evidence`
+   cases stay in the queue but do not waste CPU on repeated reviews.
+   Any source or trusted-fixture edit automatically makes them reviewable again.
+   Write and **verify** an immutable
    `backlog-RUN-ATTEMPT-prepared.json` Release asset *before screening*.
 5. Choose up to 24 proposals for this run, screen at most one candidate for
    human review. Associate rules with up to 12 real torrent titles whose
@@ -54,7 +61,8 @@ comments on the daily `[community-learning] YYYY-MM-DD` GitHub issue.
    no-effect or formatting-only changes.
 10. Mark a fingerprint reviewed only after its PR was actually created.
    Persist and verify a new finalized backlog snapshot and dedup-ledger
-   snapshot. Publish bounded audit artifacts (no private issue titles).
+   snapshot, plus a separate verified versioned review-decision snapshot.
+   Publish bounded audit artifacts (no private issue titles).
 11. **Only after durable state and artifacts are saved**, close old bot-owned
     idle daily issues and unreviewed stale bot PRs, then delete old bot-owned
     review branches after a recovery grace period. Leave human PRs, non-bot
@@ -66,6 +74,8 @@ comments on the daily `[community-learning] YYYY-MM-DD` GitHub issue.
   ledger and backlog. For an empty fingerprint list, upload a nonzero file
   containing `# matchlab-community-ledger-v1`, never a zero-byte upload.
 - **Old Release:** `fingerprints.txt` or `backlog.json` loads normally.
+  Missing review decisions bootstrap to an empty map without disturbing the
+  existing backlog and dedup ledger.
 - **Upload failure / partial run:** the previous immutable asset remains
   available. Confirm the replacement exists with nonzero size **before**
   pruning previous snapshots. Retain six most recent snapshots per state type.
@@ -75,6 +85,9 @@ comments on the daily `[community-learning] YYYY-MM-DD` GitHub issue.
   stop with an explicit error rather than silently truncate the data.
 - **A PR is already waiting for human review:** do not duplicate it; rotate
   other unprocessed proposals in the durable backlog. Retrying is safe.
+- **Deferred review:** a cached decision does not delete, deduplicate or
+  acknowledge a proposal as merged. A new native handler catalogue or newly
+  verified fixture set invalidates its cache and triggers re-evaluation.
 - **Unverified suggestion / no source handler identity:** report review-only
   diagnostic information and retain it in the backlog. This is not grounds
   for a code-changing PR. Safe source-handler automation is deliberately
