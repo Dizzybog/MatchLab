@@ -94,6 +94,8 @@ jobs:
         run: |
           cp learning/community_rules.json "$RUNNER_TEMP/community-rules-before.json"
           cp learning/community_regex_proposals.json "$RUNNER_TEMP/community-extended-before.json"
+          cp crates/matchlab-parser/src/generated/handlers.json "$RUNNER_TEMP/community-handlers-before.json"
+          cp learning/regex_promoted_tests.json "$RUNNER_TEMP/community-promoted-before.json"
           cargo run --release --locked -p matchlab-parser \
             --example screen_community_rules -- \
             "$RUNNER_TEMP/community-daily-review.json" \
@@ -135,6 +137,9 @@ jobs:
             --handlers crates/matchlab-parser/src/generated/handlers.json \
             --promoted learning/regex_promoted_tests.json \
             --summary "$RUNNER_TEMP/community-promotion-summary.json"
+          # Review-only JSON proposals are kept in the backlog; only a
+          # proven native source change with promoted regression fixtures
+          # may open an actual bot PR. This also suppresses whitespace PRs.
           # The reviewer sometimes normalizes an empty array from "[\\n]" to
           # "[]". A whitespace-only diff must NEVER create a no-op PR or
           # consume a community fingerprint from the durable backlog.
@@ -143,7 +148,11 @@ jobs:
             learning/community_rules.json \
             "$RUNNER_TEMP/community-extended-before.json" \
             learning/community_regex_proposals.json \
-            "$GITHUB_ENV"
+            "$GITHUB_ENV" \
+            "$RUNNER_TEMP/community-handlers-before.json" \
+            crates/matchlab-parser/src/generated/handlers.json \
+            "$RUNNER_TEMP/community-promoted-before.json" \
+            learning/regex_promoted_tests.json
       - name: Test candidate against full Rust regression suite
         if: env.COMMUNITY_RULE_CHANGED == 'true'
         run: |
