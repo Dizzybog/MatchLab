@@ -81,6 +81,7 @@ def main():
     p.add_argument("--decisions")
     p.add_argument("--handlers")
     p.add_argument("--fixtures")
+    p.add_argument("--parser-src")
     args=p.parse_args()
     old=read(args.state,{"pending":[]})
     if args.phase=="prepare":
@@ -97,7 +98,7 @@ def main():
                 raise ValueError("decisions require immutable handlers and fixtures")
             decisions=read(args.decisions,{"decisions":{}})
             eligible,deferred=due(new["pending"],decisions,signature(
-                args.handlers,args.fixtures),MAX_DAILY)
+                args.handlers,args.fixtures,args.parser_src),MAX_DAILY)
         Path(args.daily).write_text(json.dumps(eligible,
             ensure_ascii=False,indent=2)+"\n")
         print("community_backlog_pending="+str(len(new["pending"]))+
