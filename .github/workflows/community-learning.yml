@@ -166,7 +166,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          branch="bot/community-regex-$(date -u +%Y%m%d)-${GITHUB_RUN_ID}"
+          branch="bot/community-regex-$(date -u +%Y%m%d)-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           # A prior review PR may still be pending human approval. Do not
           # create a second PR for the same unmerged fingerprint on a later day.
           # The durable backlog keeps other candidates until review completes.
