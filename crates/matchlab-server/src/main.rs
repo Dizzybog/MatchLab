@@ -1072,6 +1072,15 @@ fn diagnose_with_policy(
     let imdb = imdb_matcher::search(&db,title,year,series,seasons.iter().copied().max().unwrap_or(0),&req.title,
         !episodes.is_empty()||parsed.contains_key("episode_start"),20)
         .map_err(|e|e.to_string())?;
+    // A same-name older OVA may win an exact IMDb alias even though it
+    // cannot contain S02E37. When a *unique* modern anime has verified
+    // season/episode coverage in IMDb or AniDB, prefer that identity.
+    // Only query the anime Tantivy index on a verified-episode miss.
+    let imdb=if series && seasons.len()==1 && episodes.len()==1{
+        imdb_matcher::prefer_verified_episode_identity(
+            &db,imdb,title,seasons[0],episodes[0])
+            .map_err(|e|e.to_string())?
+    }else{imdb};
     // Enforce strict production-year/quality identity only for GET/POST /match.
     // The dashboard's /debug/match must still rank plain titles like "Fight Club".
     // Other season/episode, anime and ranking checks remain shared.
