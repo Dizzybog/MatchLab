@@ -170,8 +170,10 @@ class NativePlanTests(unittest.TestCase):
     def test_invalid_untrusted_proposal_cannot_enter_plan(self):
         rule = field_rule("audio", "opus", ["OPUS"])
         altered = {**rule, "regex": r"(?s)(.*)+"}
-        with self.assertRaises(ValueError):
-            build([altered], HANDLERS)
+        result = build([altered], HANDLERS)
+        self.assertEqual(result[rule["fingerprint"]]["source_changes"], [])
+        self.assertEqual(result[rule["fingerprint"]]["reason"],
+                         "stale_or_invalid_queued_proposal")
 
 
 class NativeReviewTests(unittest.TestCase):
