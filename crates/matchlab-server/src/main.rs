@@ -3812,6 +3812,98 @@ mod tests {
     }
 
     #[test]
+    fn regular_tv_prefers_verified_parent_then_grandparent_not_episode_title() {
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-regular-parent-title-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
+            region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES
+                ('tt0096697','The Simpsons','thesimpsons',1989,
+                    'series','',1,0,'tvSeries'),
+                ('tt0500001','Different Show','differentshow',2000,
+                    'series','',1,0,'tvSeries'),
+                ('tt0300001','Sword Art Online','swordartonline',2012,
+                    'series','',1,0,'tvSeries');
+            INSERT INTO seasons VALUES ('tt0096697',36),('tt0500001',12),
+                ('tt0300001',3);
+            INSERT INTO season_episodes VALUES
+                ('tt0096697',9,25,25),
+                ('tt0500001',9,25,25),
+                ('tt0300001',1,12,12);
+            INSERT INTO anime_series_map VALUES('tt0300001','100','456',0);
+            INSERT INTO anime_ids VALUES('tt0300001','anidb','100');
+            INSERT INTO anidb_titles VALUES(
+                '100','Sword Art Online','swordartonline','main','en');
+            INSERT INTO episode_map VALUES('100','456',1,1,1,12,0,'');
+        ").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+
+        let release="The Simpsons Season 9 (Complete S09 Remastered HQ 720p x265 HappyLee)/S09E24 Lost Our Lisa.mkv";
+        let parsed=matchlab_parser::parse_title(release,false).unwrap();
+        assert_eq!(parsed["seasons"],json!([9]),"{parsed:?}");
+        assert_eq!(parsed["episodes"],json!([24]),"{parsed:?}");
+        let select=|release:&str|{
+            let parsed=matchlab_parser::parse_title(release,false).unwrap();
+            preferred_regular_series_parent_title(
+                &db,&MatchRequest{title:release.into(),year:None,series:None},
+                &parsed).unwrap()
+        };
+        assert_eq!(select(release).as_deref(),Some("The Simpsons"));
+        assert_eq!(select("The Simpsons Season 9/Season 9/S09E24 Lost Our Lisa.mkv")
+            .as_deref(),Some("The Simpsons"));
+        assert_eq!(select("The Simpsons Season 9/Season 9/The.Simpsons.S09E24.mkv")
+            .as_deref(),Some("The Simpsons"));
+
+        // Parent is preferred over a different non-anime series name in the
+        // leaf when both are otherwise valid IMDb title matches.
+        assert_eq!(select("Different Show Season 9/The.Simpsons.S09E24.mkv")
+            .as_deref(),Some("Different Show"));
+        // No suitable folder identity: keep the leaf series title.
+        assert_eq!(select("Videos/The.Simpsons.S09E24.mkv"),None);
+        // Only a season, no episode: never infer an episode or apply this rule.
+        assert_eq!(select("Different Show Season 9/The.Simpsons.S09.mkv"),None);
+        // Exact AniDB/IMDb anime identity must keep its existing leaf rules.
+        assert_eq!(select("Different Show Season 9/Sword.Art.Online.S01E01.mkv"),
+            None);
+        let explicit_movie=MatchRequest{
+            title:release.into(),year:None,series:Some(false)};
+        assert_eq!(preferred_regular_series_parent_title(&db,&explicit_movie,&parsed)
+            .unwrap(),None);
+
+        drop(db);
+        let d=diagnose(&path,&MatchRequest{title:release.into(),
+            year:None,series:None}).unwrap();
+        assert_eq!(d.parsed["title"],"The Simpsons");
+        assert_eq!(d.parsed["seasons"],json!([9]));
+        assert_eq!(d.parsed["episodes"],json!([24]));
+        let selected=d.selected.expect("parent's The Simpsons IMDb title");
+        assert_eq!(selected["imdb_id"],"tt0096697");
+        assert_eq!(selected["season"],9);
+        assert_eq!(selected["episode"],24);
+        assert_eq!(public_match_response(Some(selected))["sid_start"],
+            "tt0096697:9:24");
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
     fn anime_part_subfolder_overrides_leaf_only_for_verified_anime_identity() {
         let stamp=std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
