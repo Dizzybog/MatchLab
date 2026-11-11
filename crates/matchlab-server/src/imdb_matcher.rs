@@ -219,6 +219,88 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     output.sort_by(|a,b|a.0.cmp(&b.0));
     Ok(output.into_iter().take(limit).map(|(_,m)|m).collect())
 }
+/// A matching English IMDb alias can belong to an older OVA with too few
+/// episodes, while the modern TV series is linked only by AniDB's English
+/// alias (e.g. JoJo 1993 versus JoJo 2012 S02E37).
+///
+/// Keep normal title ranking untouched when an already-ranked candidate has
+/// independently confirmed episode coverage. Only on an episode-evidence
+/// miss consult Tantivy's *exact* anime aliases and promote a UNIQUE
+/// verified series identity. No SQLite title scan, no guessed offsets, and
+/// no additional index query on ordinary successful matches.
+pub fn prefer_verified_episode_identity(
+    db:&Connection,mut candidates:Vec<Match>,title:&str,season:i64,episode:i64,
+)->rusqlite::Result<Vec<Match>>{
+    if !(1..=9_999).contains(&season)||!(1..=99_999).contains(&episode){
+        return Ok(candidates);
+    }
+    let proven=|id:&str|->rusqlite::Result<bool>{
+        let max:Option<i64>=db.query_row(
+            "SELECT max_episode FROM season_episodes WHERE imdb_id=?1 AND season=?2",
+            params![id,season],|r|r.get(0)).optional()?;
+        if max.is_some_and(|max|max>=episode){return Ok(true);}
+        Ok(crate::episode_crosswalk::resolve_season(
+            db,id,season,episode)?.is_some())
+    };
+    // A canonical IMDb episode is stronger than an unrelated exact title.
+    // Preserve relative ranking among equally supported candidates.
+    let mut support=Vec::with_capacity(candidates.len());
+    for candidate in &candidates{support.push(proven(&candidate.imdb_id)?);}
+    if support.iter().any(|supported|*supported){
+        let mut confirmed=Vec::new();
+        let mut unconfirmed=Vec::new();
+        for (candidate,supported) in candidates.into_iter().zip(support) {
+            if supported {confirmed.push(candidate)}else{unconfirmed.push(candidate)}
+        }
+        confirmed.extend(unconfirmed);
+        return Ok(confirmed);
+    }
+    let key=clean_title(title);
+    if key.len()<4{return Ok(candidates);}
+    let exact_anime_ids=crate::tantivy_search::anime_aliases(db,&key,4)
+        .map_err(index_error)?.into_iter()
+        .filter(|alias|alias.clean_title==key)
+        .map(|alias|alias.imdb_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    // Never choose between multiple independently plausible anime works
+    // with identical aliases solely because of a database iteration order.
+    let mut verified=Vec::new();
+    for id in exact_anime_ids {
+        if candidates.iter().any(|c|c.imdb_id==id) || !proven(&id)?{continue;}
+        verified.push(id);
+    }
+    if verified.len()!=1{return Ok(candidates);}
+    let id=verified.pop().unwrap();
+    let aliases=crate::tantivy_search::titles_by_ids(db,&[id.clone()])
+        .map_err(index_error)?;
+    let Some(best)=aliases.into_iter()
+        .filter(|alias|is_series(&alias.media_type))
+        .min_by_key(|alias|(
+            if alias.original{0}else{1},
+            alias.ordering,
+            alias.title.len()
+        )) else{return Ok(candidates)};
+    let mut anime_ids=BTreeMap::new();
+    let mut stmt=db.prepare("SELECT type,value FROM anime_ids WHERE group_id=?1")?;
+    for row in stmt.query_map([&id],|r|
+        Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))? {
+        let (kind,value)=row?;
+        anime_ids.insert(kind,value);
+    }
+    if !anime_ids.contains_key("anidb"){
+        let mut stmt=db.prepare(
+            "SELECT DISTINCT anidb_id FROM anime_series_map WHERE imdb_id=?1")?;
+        let linked=stmt.query_map([&id],|r|r.get::<_,String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if linked.len()==1{anime_ids.insert("anidb".into(),linked[0].clone());}
+    }
+    candidates.insert(0,Match{
+        imdb_id:id,title:best.title.clone(),year:best.year,
+        category:best.category,matched_title:best.title,
+        anime_ids,media_type:best.media_type
+    });
+    Ok(candidates)
+}
 #[cfg(test)]
 mod tests{
     use super::*;
