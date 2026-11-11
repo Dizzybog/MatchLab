@@ -216,9 +216,10 @@ fn open_db(path: &PathBuf) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-fn anime_candidate(db: &Connection, key: &str, season: Option<i64>, episode: i64) -> rusqlite::Result<Option<Value>> {
+fn anime_candidate(db: &Connection, title: &str, season: Option<i64>, episode: i64) -> rusqlite::Result<Option<Value>> {
+    let key=imdb_matcher::clean_title(title);
     if key.len()<4||episode<=0{return Ok(None);}
-    let matches:Vec<_>=tantivy_search::anime_aliases(db,key,6)
+    let matches:Vec<_>=tantivy_search::anime_aliases_for_title(db,title,6)
         .map_err(|error|rusqlite::Error::ToSqlConversionFailure(
             Box::new(std::io::Error::other(error))))?
         .into_iter().map(|alias|(alias.anidb_id,alias.clean_title,alias.imdb_id))
@@ -241,14 +242,14 @@ fn anime_candidate(db: &Connection, key: &str, season: Option<i64>, episode: i64
         for imdb in imdb_ids {
             let mapped=match season{
                 Some(season) if season>0=>{
-                    let titled=anime_title::resolve(db,&imdb,key,season,episode)?;
+                    let titled=anime_title::resolve(db,&imdb,title,season,episode)?;
                     if titled.is_some(){titled}
-                    else if anime_title::has_specific_alias(db,&imdb,key)?{None}
+                    else if anime_title::has_specific_alias(db,&imdb,title)?{None}
                     else{episode_crosswalk::resolve_season(db,&imdb,season,episode)?}
                 },
                 None=>{
                     let named=anime_title::resolve_episode_from_exact_part_title(
-                        db,&imdb,key,episode)?;
+                        db,&imdb,title,episode)?;
                     if named.is_some(){named}
                     else{episode_crosswalk::resolve_absolute(db,&imdb,episode)?}
                 },
@@ -274,9 +275,10 @@ fn anime_candidate(db: &Connection, key: &str, season: Option<i64>, episode: i64
 
 /// Resolve a title-only anime identity from anime tables, without inventing
 /// season or episode coordinates. Exact aliases precede longest prefixes.
-fn anime_identity(db:&Connection,key:&str)->rusqlite::Result<Option<String>>{
+fn anime_identity(db:&Connection,title:&str)->rusqlite::Result<Option<String>>{
+    let key=imdb_matcher::clean_title(title);
     if key.len()<4{return Ok(None);}
-    let rows:Vec<_>=tantivy_search::anime_aliases(db,key,6)
+    let rows:Vec<_>=tantivy_search::anime_aliases_for_title(db,title,6)
         .map_err(|error|rusqlite::Error::ToSqlConversionFailure(
             Box::new(std::io::Error::other(error))))?
         .into_iter().map(|alias|(alias.clean_title,alias.imdb_id)).collect();
@@ -1208,10 +1210,10 @@ fn diagnose_with_policy(
         None
     } else if series {
         if let Some(ep)=episodes.first(){
-            anime_candidate(&db,&anime_resolve_key,seasons.first().copied(),*ep)
+            anime_candidate(&db,anime_resolve_title,seasons.first().copied(),*ep)
                 .map_err(|e|e.to_string())?
         }else{
-            anime_identity(&db,&anime_resolve_key).map_err(|e|e.to_string())?
+            anime_identity(&db,anime_resolve_title).map_err(|e|e.to_string())?
                 .map(|id|{
                     let inferred=if seasons.is_empty() {
                         anime_title::season_from_title(&db,&id,anime_resolve_title).ok().flatten()
