@@ -2775,7 +2775,12 @@ fn merge_path_metadata(merged:&mut Map<String,Value>, layer:&Map<String,Value>){
         ||path_has_coordinates(layer,"anime_episode_candidate")
         ||path_has_coordinates(layer,"absolute_episode_candidate");
     let new_season=path_has_coordinates(layer,"seasons");
-    if new_episodes||new_season {
+    // Treat every field independently when walking from root to leaf.
+    // A closer explicit season must NOT erase a valid parent episode if it
+    // merely repeats that same season. A different season (or a previously
+    // unscoped episode) invalidates the inherited episode coordinates.
+    let conflicting_season=new_season && merged.get("seasons")!=layer.get("seasons");
+    if new_episodes||conflicting_season {
         // A deeper episode overrides a parent batch's range. A parent's
         // East Asian absolute hint is retained ONLY when it agrees with the
         // child coordinate: e.g. 第41集/Show.S02E41 can be crosswalk-resolved,
@@ -4123,6 +4128,21 @@ mod tests {
         let season=parse_title("The.Show.S01E06/The.Show.S02",false).unwrap();
         assert_eq!(season["seasons"],json!([2]));
         assert!(season.get("episodes").is_none_or(|v|v.as_array().is_some_and(Vec::is_empty)));
+    }
+
+    #[test]
+    fn same_season_and_independent_technical_fields_inherit_nearest_valid_values(){
+        let same=parse_title(
+            "A.Show.S06E05.720p.BluRay/Season.6.1080p/Featurette.mkv",false).unwrap();
+        assert_eq!(same["seasons"],json!([6]),"{same:?}");
+        assert_eq!(same["episodes"],json!([5]),"{same:?}");
+        assert_eq!(same["resolution"],json!("1080p"),"{same:?}");
+        assert_eq!(same["quality"],json!("BluRay"),"{same:?}");
+        let different=parse_title(
+            "A.Show.S06E05.720p.BluRay/Season.7.1080p/Featurette.mkv",false).unwrap();
+        assert_eq!(different["seasons"],json!([7]),"{different:?}");
+        assert!(different.get("episodes").is_none_or(|v|
+            v.as_array().is_some_and(Vec::is_empty)),"{different:?}");
     }
 
     #[test]
