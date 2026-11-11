@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 MARKER = "<!-- matchlab-community-batch-v2 -->"
 PROTOCOL = 2
 EPOCH = 1
-MAX_COMMENTS = 500
+MAX_COMMENTS = 5000
 MAX_CANDIDATES = 200
 MAX_LEDGER = 100_000
 MAX_BATCH = 16
@@ -272,9 +272,12 @@ def current_status(row, current):
 def flatten_comments(payload):
     if not isinstance(payload, list):
         return []
-    return [item for batch in payload for item in (
+    rows = [item for batch in payload for item in (
         batch if isinstance(batch, list) else [batch]
-    ) if isinstance(item, dict)][:MAX_COMMENTS]
+    ) if isinstance(item, dict)]
+    if len(rows) > MAX_COMMENTS:
+        raise ValueError("Community comment intake exceeds capacity; refusing truncation")
+    return rows
 
 
 def intake(comments, current_sha, now, seen, parser_bin,
@@ -282,7 +285,7 @@ def intake(comments, current_sha, now, seen, parser_bin,
     output = []
     added = set()
     seen_all = set(seen)
-    cutoff = now - timedelta(days=15)
+    cutoff = now - timedelta(days=60)
     for comment in flatten_comments(comments):
         created = comment.get("created_at")
         try:

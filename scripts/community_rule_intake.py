@@ -434,7 +434,7 @@ def parse_batch(comment,current_sha,ancestor=git_ancestor):
 
 def collect(all_comments,sha,seen,now=None,ancestor=git_ancestor):
     if now is None:now=datetime.now(timezone.utc)
-    cutoff=now-timedelta(days=15)
+    cutoff=now-timedelta(days=60)
     output=[]
     seen=set(seen)
     pending=set()
@@ -453,7 +453,11 @@ def collect(all_comments,sha,seen,now=None,ancestor=git_ancestor):
                 if rule["fingerprint"] in seen or rule["fingerprint"] in pending:continue
                 pending.add(rule["fingerprint"])
                 output.append(rule)
-                if len(output)>=MAX_CATCHUP_PROPOSALS:return output,seen
+                if len(output)>MAX_CATCHUP_PROPOSALS:
+                    raise RuntimeError(
+                        "Community proposal intake exceeded capacity; "
+                        "refusing to silently truncate GitHub comments"
+                    )
     # Do NOT poison the permanent ledger with only self-reported evidence.
     # A fingerprint becomes permanent only after trusted screening, regression
     # tests and successful creation of the human-review PR.
