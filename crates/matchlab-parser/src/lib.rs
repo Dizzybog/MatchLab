@@ -2907,7 +2907,15 @@ pub fn parse_title(
             let title=title.trim();
             if !is_parent{
                 leaf_title=title.to_owned();
-                leaf_title_generic=generic_path_title(title);
+                // Generic handlers can leave only a file-extension token
+                // as "title" after stripping an SxxEyy marker. That is a
+                // parsed technical field, not a series title. Preserve the
+                // nearest parent instead; matching will verify its IMDb ID.
+                leaf_title_generic=generic_path_title(title)
+                    || layer.get("extension").and_then(Value::as_str)
+                        .is_some_and(|ext|title.eq_ignore_ascii_case(ext))
+                    || layer.get("container").and_then(Value::as_str)
+                        .is_some_and(|container|title.eq_ignore_ascii_case(container));
             }else if !generic_path_title(title){
                 if !bare_number_directory {
                     fallback_parent_title=Some(title.to_owned());
