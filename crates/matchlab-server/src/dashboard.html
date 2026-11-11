@@ -201,20 +201,54 @@ function seasonEpisodeDisplay(row){
     Number(row.season)!==Number(row.season_end);
   return {seasons,episodes:multiple?'Season packs':displayRange(row.episode,row.episode_end)};
 }
+// IMDb episode counts do not imply AniDB coordinates. Use only the
+// crosswalk segments returned by the matcher, never inferred absolute fields.
+// Several Anime-Lists parts may span one IMDb season, so retain each part's
+// own AniDB identity and range instead of manufacturing one contiguous ASID.
+function verifiedAnimeDisplay(selected){
+  const verified=selected.episode_range;
+  const diagnostic=selected.anime_range_diagnostics;
+  const source=Array.isArray(verified?.segments)&&verified.segments.length
+    ?verified:diagnostic;
+  const segments=Array.isArray(source?.segments)?source.segments.filter(s=>
+    s&&s.anidb_id!==null&&s.anidb_id!==undefined&&
+    Number.isInteger(s.start_anime_episode)&&s.start_anime_episode>0&&
+    Number.isInteger(s.end_anime_episode)&&
+    s.end_anime_episode>=s.start_anime_episode):[];
+  const fallbackID=selected.anime?.anidb_id||selected.anime_ids?.anidb;
+  if(!segments.length)return {
+    id:fallbackID,
+    episodes:displayRange(
+      selected.anime_episode_start??selected.episode_range?.absolute_start??selected.anime?.episode,
+      selected.anime_episode_end??selected.episode_range?.absolute_end)
+  };
+  const ids=[...new Set(segments.map(s=>String(s.anidb_id)))];
+  const episodes=segments.map(s=>{
+    const range=displayRange(s.start_anime_episode,s.end_anime_episode);
+    return ids.length>1?String(s.anidb_id)+':'+range:range;
+  }).join(', ');
+  const missing=Number(source?.unmapped_count)||0;
+  const partial=source?.complete===false;
+  return {
+    id:ids.join(', '),
+    episodes:partial?episodes+' (partial'+(missing>0?'; '+missing+' unmapped':'')+')':episodes
+  };
+}
 function rankResults(d){
   if(!d||typeof d!=='object')return '<div class="empty">No diagnostic data available.</div>';
   const selected=d.selected&&typeof d.selected==='object'?d.selected:null;
   const candidates=Array.isArray(d.imdb_candidates)?d.imdb_candidates:[];
   const rows=[];
-  if(selected)rows.push({
-    imdb_id:selected.imdb_id,title:selected.title||selected.matched_title||d.parsed?.title,
-    season:selected.season,season_end:selected.season_end??selected.episode_range?.end_season,
-    episode:selected.episode,episode_end:selected.episode_end??selected.episode_range?.end_episode,
-    anime_id:selected.anime?.anidb_id||selected.anime_ids?.anidb,
-    anime_episode:selected.anime_episode_start??selected.episode_range?.absolute_start??selected.anime?.episode,
-    anime_episode_end:selected.anime_episode_end??selected.episode_range?.absolute_end,
-    source:selected.match_source,year:selected.year,type:selected.category||'—',winner:true
-  });
+  if(selected){
+    const anime=verifiedAnimeDisplay(selected);
+    rows.push({
+      imdb_id:selected.imdb_id,title:selected.title||selected.matched_title||d.parsed?.title,
+      season:selected.season,season_end:selected.season_end??selected.episode_range?.end_season,
+      episode:selected.episode,episode_end:selected.episode_end??selected.episode_range?.end_episode,
+      anime_id:anime.id,anime_episode:anime.episodes,
+      source:selected.match_source,year:selected.year,type:selected.category||'—',winner:true
+    });
+  }
   for(const c of candidates){
     if(rows.some(x=>x.imdb_id===c.imdb_id))continue;
     rows.push({imdb_id:c.imdb_id,title:c.title||c.matched_title,
@@ -233,7 +267,7 @@ function rankResults(d){
     '#'+(i+1)+' · '+val(r.title)+'</div><span class="rank-tag">'+
     (r.winner?'WINNER':'RANK '+(i+1))+'</span></div><div class="rank-fields">'+
     field('IMDb ID',r.imdb_id)+field(r.winner?'IMDb season':'Parsed season',seasonEpisodeDisplay(r).seasons)+field(r.winner?'IMDb episode':'Parsed episode',seasonEpisodeDisplay(r).episodes)+
-    field('AniDB ID',r.anime_id)+field('Anime episode',displayRange(r.anime_episode,r.anime_episode_end))+
+    field('AniDB ID',r.anime_id)+field('Anime episode',r.winner?r.anime_episode:displayRange(r.anime_episode,r.anime_episode_end))+
     field('Source',r.source)+'</div><div class="rank-meta" title="'+val(r.year)+' · '+val(r.type)+'">'+val(r.year)+' · '+val(r.type)+'</div></article>').join('')+'</div>';
 }
 // The statistics API includes every recorded request, even after the detailed
