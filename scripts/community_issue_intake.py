@@ -26,9 +26,17 @@ def official(row):
             type(row.get("number")) is int)
 
 
-def collect(api, now):
+def collect(api, now, create_daily=False):
     cutoff = now - timedelta(days=WINDOW_DAYS)
     issues = api.pages("/issues?state=all&sort=updated&direction=desc")
+    today = "[community-learning] " + now.date().isoformat()
+    if create_daily and not any(official(row) and row["title"] == today
+                                for row in issues):
+        api.request("POST", "/issues", {
+            "title": today,
+            "body": ("One shared daily thread for opt-in MatchLab reports. "
+                     "Candidate batches are not ground truth."),
+        })
     eligible = [
         row for row in issues if official(row) and
         (stamp := timestamp(row.get("updated_at"))) and stamp >= cutoff
@@ -63,7 +71,8 @@ def main():
     repo, token = os.environ.get("GH_REPO", ""), os.environ.get("GH_TOKEN", "")
     if not REPO_PATTERN.fullmatch(repo) or not token:
         p.error("GH_REPO and GH_TOKEN required")
-    rows = collect(GitHub(repo, token), datetime.now(timezone.utc))
+    rows = collect(GitHub(repo, token), datetime.now(timezone.utc),
+                   create_daily=True)
     args.out.write_text(json.dumps(rows, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
