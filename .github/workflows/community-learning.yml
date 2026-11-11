@@ -28,43 +28,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Test intake and historical-version validation
         run: python3 -m unittest discover -s scripts/tests -v
-      - name: Create or reuse ONE daily GitHub Issue; recover recent issue comments
+      - name: Recover today's and historical community issue comments
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          TODAY="$(date -u +%F)"
-          gh api "/repos/${GH_REPO}/issues?state=all&sort=created&direction=desc&per_page=100" > "$RUNNER_TEMP/recent-issues.json"
-          today_number="$(jq -r --arg title "[community-learning] $TODAY" '.[] | select(.title==$title and .user.login=="github-actions[bot]") | .number' "$RUNNER_TEMP/recent-issues.json" | head -n1)"
-          if [ -z "$today_number" ]; then
-            gh issue create --repo "$GH_REPO" \
-              --title "[community-learning] $TODAY" \
-              --body "One shared daily thread for opt-in MatchLab reports. Candidate batches are not ground truth."
-          fi
-          # Recover comments from recent official issues after a missed daily run.
-          echo '[]' > "$RUNNER_TEMP/community-comments.json"
-          for offset in $(seq 1 14); do
-            date="$(date -u -d "$offset days ago" +%F)"
-            issue="$(jq -r --arg title "[community-learning] $date" '.[] | select(.title==$title and .user.login=="github-actions[bot]") | .number' "$RUNNER_TEMP/recent-issues.json" | head -n1)"
-            if [ -n "$issue" ]; then
-              gh api --paginate --slurp "/repos/${GH_REPO}/issues/$issue/comments?per_page=100" > "$RUNNER_TEMP/day-comments.json"
-              jq -s 'add' "$RUNNER_TEMP/community-comments.json" "$RUNNER_TEMP/day-comments.json" > "$RUNNER_TEMP/all-comments.json"
-              mv "$RUNNER_TEMP/all-comments.json" "$RUNNER_TEMP/community-comments.json"
-            fi
-          done
-      - name: Load persistent fingerprint ledger (GitHub Release asset)
+          python3 scripts/community_issue_intake.py \
+            --out "$RUNNER_TEMP/community-comments.json"
+      - name: Restore durable dedup ledger (including empty or missing first asset)
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          if gh release view community-learning-ledger --repo "$GH_REPO" >/dev/null 2>&1; then
-            gh release download community-learning-ledger --repo "$GH_REPO" \
-              --pattern fingerprints.txt --dir "$RUNNER_TEMP"
-          else
-            touch "$RUNNER_TEMP/fingerprints.txt"
-          fi
+        run: python3 scripts/community_state.py load ledger --path "$RUNNER_TEMP/fingerprints.txt"
       - name: Build latest Rust parser for safe replay
         run: cargo build --release -p matchlab-parser --example community_replay
       - name: Replay historical reports, dedup globally, train verified-only shadow model
@@ -90,18 +66,11 @@ jobs:
             --sha "$LATEST_SHA" \
             --out "$RUNNER_TEMP/community-rule-candidates.json" \
             --seen-out "$RUNNER_TEMP/fingerprints-final.txt"
-      - name: Recover durable community proposal backlog
+      - name: Restore latest verified community backlog
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          if gh release view community-learning-backlog --repo "$GH_REPO" >/dev/null 2>&1; then
-            gh release download community-learning-backlog --repo "$GH_REPO" \
-              --pattern backlog.json --dir "$RUNNER_TEMP"
-          else
-            printf '{"pending":[]}\n' > "$RUNNER_TEMP/backlog.json"
-          fi
+        run: python3 scripts/community_state.py load backlog --path "$RUNNER_TEMP/backlog.json"
       - name: Merge yesterday's proposals with unprocessed historical backlog
         run: |
           python3 scripts/community_backlog.py prepare \
@@ -112,21 +81,15 @@ jobs:
             --extended learning/community_regex_proposals.json \
             --out "$RUNNER_TEMP/backlog-prepared.json" \
             --daily "$RUNNER_TEMP/community-daily-review.json"
-      - name: Persist backlog before screening, so failed PRs cannot lose reports
+      - name: Persist backlog BEFORE screening; retain last verified snapshot
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           cp "$RUNNER_TEMP/backlog-prepared.json" "$RUNNER_TEMP/backlog.json"
-          if ! gh release view community-learning-backlog --repo "$GH_REPO" >/dev/null 2>&1; then
-            gh release create community-learning-backlog --repo "$GH_REPO" \
-              --title "Community learning pending review backlog" \
-              --notes "Machine-maintained, untrusted review data; not active rules." \
-              --latest=false
-          fi
-          gh release upload community-learning-backlog "$RUNNER_TEMP/backlog.json" \
-            --repo "$GH_REPO" --clobber
+          python3 scripts/community_state.py save backlog \
+            --path "$RUNNER_TEMP/backlog.json" --phase prepared
       - name: Screen at most one rule against latest trusted Rust parser
         run: |
           cp learning/community_rules.json "$RUNNER_TEMP/community-rules-before.json"
@@ -185,7 +148,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          branch="bot/community-regex-$(date -u +%Y%m%d)"
+          branch="bot/community-regex-$(date -u +%Y%m%d)-${GITHUB_RUN_ID}"
           # A prior review PR may still be pending human approval. Do not
           # create a second PR for the same unmerged fingerprint on a later day.
           # The durable backlog keeps other candidates until review completes.
@@ -314,23 +277,17 @@ jobs:
             --accepted "$RUNNER_TEMP/community-backlog-accepted.json" \
             --out "$RUNNER_TEMP/backlog-next.json"
           cp "$RUNNER_TEMP/backlog-next.json" "$RUNNER_TEMP/backlog.json"
-          gh release upload community-learning-backlog "$RUNNER_TEMP/backlog.json" \
-            --repo "$GH_REPO" --clobber
-      - name: Persist global dedup ledger (no changes to main or production)
+          python3 scripts/community_state.py save backlog \
+            --path "$RUNNER_TEMP/backlog.json" --phase final
+      - name: Persist dedup ledger as a verified nonempty versioned asset
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           cp "$RUNNER_TEMP/fingerprints-final.txt" "$RUNNER_TEMP/fingerprints.txt"
-          if ! gh release view community-learning-ledger --repo "$GH_REPO" >/dev/null 2>&1; then
-            gh release create community-learning-ledger --repo "$GH_REPO" \
-              --title "Community learning dedup ledger" \
-              --notes "Machine-maintained report hashes; no training labels." \
-              --latest=false
-          fi
-          gh release upload community-learning-ledger "$RUNNER_TEMP/fingerprints.txt" \
-            --repo "$GH_REPO" --clobber
+          python3 scripts/community_state.py save ledger \
+            --path "$RUNNER_TEMP/fingerprints.txt" --phase ledger
       - name: Publish bounded review artifact; no automatic model activation
         uses: actions/upload-artifact@v4
         with:
