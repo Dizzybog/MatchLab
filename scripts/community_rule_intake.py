@@ -434,7 +434,7 @@ def parse_batch(comment,current_sha,ancestor=git_ancestor):
 
 def collect(all_comments,sha,seen,now=None,ancestor=git_ancestor):
     if now is None:now=datetime.now(timezone.utc)
-    cutoff=now-timedelta(days=15)
+    cutoff=now-timedelta(days=60)
     output=[]
     seen=set(seen)
     pending=set()
