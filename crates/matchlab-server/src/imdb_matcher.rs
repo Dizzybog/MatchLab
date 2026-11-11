@@ -128,7 +128,7 @@ fn rank(r:&Aka,year:Option<i32>,series:bool,duplicate:bool,count_first:bool,vote
         -if count_first{0}else{votes},r.ordering,r.imdb_id.clone())
 }
 pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_season:i64,
-    release_title:&str,has_episode:bool,limit:usize)->rusqlite::Result<Vec<Match>>{
+    release_title:&str,_has_episode:bool,limit:usize)->rusqlite::Result<Vec<Match>>{
     let key=clean_title(title);
     let release=clean_title(release_title);
     if key.is_empty()||limit==0{return Ok(vec![]);}
@@ -228,7 +228,8 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             }else{TitleFit::fallback(row.clean.len())};
         groups.entry(row.imdb_id.clone()).or_default().push((row,fit));
     }
-    // Final sort is (lexical fit, year/type/votes). Any candidate strictly
+    // Final sort is lexical fit first, followed by votes/year/type tie-breakers.
+    // Any candidate strictly
     // below the lexical rank at position `limit` can never be returned.
     // Retain the entire tied boundary so votes/year still choose fairly.
     // This avoids most per-IMDb rating, anime-ID and duplicate-title lookups.
@@ -252,7 +253,10 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             }
         }
     }
-    let count_first=year.is_none()&&required_season==0&&!has_episode;
+    // Without a release year, IMDb vote count breaks equal-title matches before
+    // the candidate's start year, even for season- or episode-based releases.
+    // Lexical fit and eligibility remain higher-priority constraints.
+    let count_first=year.is_none();
     let mut output=Vec::new();
     for (_,id,aliases) in ranked_groups{
         let votes:i64=db.query_row("SELECT num_votes FROM imdb_ratings WHERE imdb_id=?1",[&id],|r|r.get(0))
@@ -382,6 +386,45 @@ mod tests{
         assert_eq!(found.len(),1);
         assert_eq!(found[0].imdb_id,"tthigh",
             "lexical cutoff must retain all tied identities for vote ranking");
+    }
+    #[test]
+    fn votes_precede_year_when_release_year_is_missing_even_with_episode_coordinates(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_season INTEGER);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            INSERT INTO titles VALUES
+                ('ttold','Example','example',1993,'series','US',1,0,'tvSeries'),
+                ('ttnew','Example','example',2012,'series','US',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('ttold',5),('ttnew',5);
+            INSERT INTO imdb_ratings VALUES('ttold',100),('ttnew',90000);")
+            .unwrap();
+        // A missing year must choose popularity regardless of whether the
+        // parsed torrent has a season, an episode, both, or neither.
+        for (season,has_episode,release) in [
+            (0,false,"Example"),
+            (0,true,"Example.E37"),
+            (2,false,"Example.S02"),
+            (2,true,"Example.S02E37"),
+        ] {
+            let found=search(&db,"Example",None,true,season,release,has_episode,1).unwrap();
+            assert_eq!(found.len(),1,"release: {release}");
+            assert_eq!(found[0].imdb_id,"ttnew","release: {release}");
+        }
+        // An explicit year is still authoritative ahead of popularity.
+        let with_year=search(&db,"Example",Some(1993),true,2,
+            "Example.1993.S02E37",true,1).unwrap();
+        assert_eq!(with_year[0].imdb_id,"ttold");
+        // Eligibility continues to outrank popularity even with no year.
+        db.execute("UPDATE seasons SET max_season=1 WHERE imdb_id='ttnew'",[])
+            .unwrap();
+        let eligible=search(&db,"Example",None,true,4,
+            "Example.S04E37",true,1).unwrap();
+        assert_eq!(eligible[0].imdb_id,"ttold");
     }
     #[test] fn normalization(){assert_eq!(clean_title("Pokémon and Ægir"),"pokemonaegir");}
     #[test] fn short_titles_require_exact_match_instead_of_broad_tantivy_prefix(){
