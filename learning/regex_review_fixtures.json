@@ -109,5 +109,46 @@
         18
       ]
     }
+  },
+  {
+    "title": "Pandora.2019.S02E01.FASTSUB.VOSTFR.WEBRip.Xvid-EXTREME.avi",
+    "expected": {
+      "title": "Pandora",
+      "seasons": [
+        2
+      ],
+      "episodes": [
+        1
+      ],
+      "codec": "xvid"
+    }
+  },
+  {
+    "title": "Game of Thrones S06 1080p BluRay Multi AV1 Opus [AV1D]",
+    "expected": {
+      "codec": "av1",
+      "audio": [
+        "OPUS"
+      ]
+    }
+  },
+  {
+    "title": "The Apprentice S20E01.m4v",
+    "expected": {
+      "extension": "m4v",
+      "seasons": [
+        20
+      ],
+      "episodes": [
+        1
+      ]
+    }
+  },
+  {
+    "title": "Opus.2025.1080p.WEB-DL.mkv",
+    "expected": {
+      "title": "Opus",
+      "extension": "mkv"
+    }
   }
 ]

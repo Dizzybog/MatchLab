@@ -557,6 +557,14 @@ impl ParserEngine {
         // PCRE2 UTF mode returns offsets on UTF-8 boundaries. Borrow captures;
         // only episode/group context needs to retain an owned match.
         let raw_match = &title[m0.start()..m0.end()];
+        // Mixed-case Opus is valid audio release metadata only after the
+        // already recognized title/technical boundary. A film or series
+        // literally named "Opus" must not turn into an audio-only release.
+        if handler.name=="audio"
+            && raw_match.eq_ignore_ascii_case("opus")
+            && m0.start() < end_of_title {
+            return Ok(None);
+        }
         let clean_match = captures
             .get(1)
             .map(|m| &title[m.start()..m.end()])
@@ -2175,7 +2183,7 @@ fn episode_title_is_metadata(token: &str) -> bool {
         "max", "jpn", "jap", "eng", "ger", "deu", "ita", "fre",
         "fra", "spa", "esp", "por", "nor", "swe", "dan", "fin",
         "rus", "kor", "chi", "pol", "dut", "nld", "srt", "ass",
-        "vtt", "ssa", "mp4", "mkv", "avi", "m2ts", "ts", "nfo",
+        "vtt", "ssa", "mp4", "m4v", "mkv", "avi", "m2ts", "ts", "nfo",
         "legendado", "legendada", "dublado", "dublada",
         "doblado", "doblada", "vostfr", "vosta", "multisubs",
         "msubs", "rife", "track", "tracks",
@@ -2610,6 +2618,33 @@ fn unmarked_single_anime_episode_candidate(
         "numbering":"absolute","verified":false})))
 }
 
+// The upstream parser mutates its working title as handlers run. Some
+// episode/season markers can consume the trailing file suffix before the
+// native extension handler executes. Recover only known suffixes from the
+// original path component, using the EXACT bundled extension handler as the
+// authority instead of maintaining an independent allowlist.
+static SOURCE_EXTENSION_RE:Lazy<regex::Regex>=Lazy::new(||{
+    let catalogue:Value=serde_json::from_str(HANDLERS_JSON)
+        .expect("bundled parser handlers JSON");
+    let pattern=catalogue["handlers"].as_array()
+        .expect("bundled handler array").iter()
+        .find(|entry|entry["name"]=="extension" &&entry["kind"]=="regex")
+        .and_then(|entry|entry["pattern"].as_str())
+        .expect("native extension handler pattern");
+    regex::RegexBuilder::new(pattern).case_insensitive(true).build()
+        .expect("native extension matcher is Rust-regex compatible")
+});
+
+// Subtitle-release tags occurring after an explicit SxxEyy are never
+// part of the series title. Some upstream group/codec removals can leave a
+// partially truncated release suffix in "title"; recover the title prefix
+// from the explicit coordinate, without modifying episode_title or the
+// separately parsed release metadata.
+static TITLE_TAIL_SUBTITLE_TAG_RE:Lazy<regex::Regex>=Lazy::new(||{
+    regex::Regex::new(r"(?i)(?:^|[._ -])(?:fastsub|vostfr|vosta|softsub|hardsub)(?:$|[._ -])")
+        .expect("valid subtitle release marker")
+});
+
 // Parse each directory entry independently. The path-level merge below
 // never concatenates release names (which could confuse episode coordinates).
 fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<String,Value>,ParseError> {
@@ -2617,6 +2652,12 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
     let normalized = normalize_release_confusables(raw);
     let raw = normalized.as_ref();
     let mut result=engine_parse(raw,translate_languages)?;
+    if !result.contains_key("extension") && raw.contains('.')
+        && let Some(caps)=SOURCE_EXTENSION_RE.captures(raw)
+        && let Some(extension)=caps.get(1)
+    {
+        result.insert("extension".into(),json!(extension.as_str().to_ascii_lowercase()));
+    }
     // The generic handler engine can miss non-ASCII release resolutions
     // even after normalization. Preserve the explicit numeric marker.
     if original_raw.contains(['р', 'Р'])
@@ -2706,6 +2747,14 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
             result.insert("anime_episode_candidate".into(),candidate);
         }
     }
+    if result.get("title").and_then(Value::as_str)
+        .is_some_and(|title|TITLE_TAIL_SUBTITLE_TAG_RE.is_match(title))
+        && let Some(caps)=S_E_COORDS_RE.captures(raw)
+            .map_err(|e|ParseError::Regex(e.to_string()))?
+        && let Some(marker)=caps.get(0)
+    {
+        set_title_from_release_prefix(raw,marker.start(),translate_languages,&mut result)?;
+    }
     if let Some(episode_title) = extract_release_episode_title(raw, &result)? {
         result.insert("episode_title".into(), json!(episode_title));
     }
@@ -2734,7 +2783,12 @@ fn merge_path_metadata(merged:&mut Map<String,Value>, layer:&Map<String,Value>){
         ||path_has_coordinates(layer,"anime_episode_candidate")
         ||path_has_coordinates(layer,"absolute_episode_candidate");
     let new_season=path_has_coordinates(layer,"seasons");
-    if new_episodes||new_season {
+    // Treat every field independently when walking from root to leaf.
+    // A closer explicit season must NOT erase a valid parent episode if it
+    // merely repeats that same season. A different season (or a previously
+    // unscoped episode) invalidates the inherited episode coordinates.
+    let conflicting_season=new_season && merged.get("seasons")!=layer.get("seasons");
+    if new_episodes||conflicting_season {
         // A deeper episode overrides a parent batch's range. A parent's
         // East Asian absolute hint is retained ONLY when it agrees with the
         // child coordinate: e.g. 第41集/Show.S02E41 can be crosswalk-resolved,
@@ -2840,21 +2894,38 @@ pub fn parse_title(
     let mut leaf_title=String::new();
     let mut leaf_title_generic=false;
     for (index,component) in components.iter().enumerate(){
+        let is_parent=index+1<components.len();
+        // A bare numeric folder is structurally ambiguous. It can be a
+        // season directory, a video collection, or a legitimate numeric
+        // series name. Let Tantivy verify the title candidate, but do not
+        // invent episode/season metadata or pick it as the unverified
+        // parser-only fallback. Four-digit year directories remain eligible.
+        let bare_number_directory=is_parent && component.trim().len()<=3
+            && component.trim().bytes().all(|b|b.is_ascii_digit());
         let layer=parse_path_component(component,translate_languages)?;
         if let Some(title)=layer.get("title").and_then(Value::as_str){
             let title=title.trim();
-            if index+1==components.len(){
-                // A standalone title is preserved even if it happens to be
-                // named "Season" or "Episode". Only use the parent when one
-                // exists and the leaf title is empty or generic.
+            if !is_parent{
                 leaf_title=title.to_owned();
-                leaf_title_generic=generic_path_title(title);
+                // Generic handlers can leave only a file-extension token
+                // as "title" after stripping an SxxEyy marker. That is a
+                // parsed technical field, not a series title. Preserve the
+                // nearest parent instead; matching will verify its IMDb ID.
+                leaf_title_generic=generic_path_title(title)
+                    || layer.get("extension").and_then(Value::as_str)
+                        .is_some_and(|ext|title.eq_ignore_ascii_case(ext))
+                    || layer.get("container").and_then(Value::as_str)
+                        .is_some_and(|container|title.eq_ignore_ascii_case(container));
             }else if !generic_path_title(title){
-                fallback_parent_title=Some(title.to_owned());
+                if !bare_number_directory {
+                    fallback_parent_title=Some(title.to_owned());
+                }
                 parent_title_candidates.push(title.to_owned());
             }
         }
-        merge_path_metadata(&mut merged,&layer);
+        if !bare_number_directory {
+            merge_path_metadata(&mut merged,&layer);
+        }
     }
     let title=if !leaf_title.is_empty()&&!leaf_title_generic{
         leaf_title
@@ -4073,6 +4144,21 @@ mod tests {
         let season=parse_title("The.Show.S01E06/The.Show.S02",false).unwrap();
         assert_eq!(season["seasons"],json!([2]));
         assert!(season.get("episodes").is_none_or(|v|v.as_array().is_some_and(Vec::is_empty)));
+    }
+
+    #[test]
+    fn same_season_and_independent_technical_fields_inherit_nearest_valid_values(){
+        let same=parse_title(
+            "A.Show.S06E05.720p.BluRay/Season.6.1080p/Featurette.mkv",false).unwrap();
+        assert_eq!(same["seasons"],json!([6]),"{same:?}");
+        assert_eq!(same["episodes"],json!([5]),"{same:?}");
+        assert_eq!(same["resolution"],json!("1080p"),"{same:?}");
+        assert_eq!(same["quality"],json!("BluRay"),"{same:?}");
+        let different=parse_title(
+            "A.Show.S06E05.720p.BluRay/Season.7.1080p/Featurette.mkv",false).unwrap();
+        assert_eq!(different["seasons"],json!([7]),"{different:?}");
+        assert!(different.get("episodes").is_none_or(|v|
+            v.as_array().is_some_and(Vec::is_empty)),"{different:?}");
     }
 
     #[test]

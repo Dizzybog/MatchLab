@@ -82,5 +82,62 @@ class AutoSourcePatchTests(unittest.TestCase):
             [entry],[entry],[audit],fixtures,source,[])
         self.assertEqual((output,tests,summary),(source,[],None))
 
+class CommunityAutoWorkflowIntegrationTests(unittest.TestCase):
+    def test_validated_rule_is_reviewed_and_stages_only_verified_source_patch(self):
+        from community_rule_intake import digest, valid_extended_rule, FIELD_EPOCH
+        from review_community_regex import screen
+        source,entry,audit,fixtures=fixture_candidate()
+        rule=entry["proposal"]
+        original=rule["original_regex"]
+        proposed=rule["proposed_regex"]
+        index=rule["handler_index"]
+        proposal={
+            **rule,
+            "evidence_count":24,"distinct_titles":8,
+            "canonical_confirmations":8,
+            "source_build":"a"*40+":"+str(FIELD_EPOCH),
+            "verification":"source_catalog_and_canonical_release_markers",
+            "fingerprint":digest(f"community-patch:{index}:{original}:{proposed}"),
+        }
+        audit={**audit,"fingerprint":proposal["fingerprint"],
+            "distinct_verified_titles":2}
+        self.assertIsNotNone(valid_extended_rule(proposal,"a"*40))
+        reviewed,changed=screen([proposal],[],[audit])
+        self.assertTrue(changed)
+        self.assertEqual(len(reviewed),1)
+        self.assertFalse(reviewed[0]["automatic_activation"])
+        amended,tests,summary=apply.apply(
+            [],reviewed,[audit],fixtures,source,[])
+        self.assertIsNotNone(summary)
+        self.assertEqual(tests,fixtures)
+        before=json.loads(source)["handlers"]
+        after=json.loads(amended)["handlers"]
+        self.assertEqual([i for i,(old,new) in enumerate(zip(before,after))
+                          if old!=new],[index])
+        self.assertEqual(after[index]["pattern"],proposed)
+        # Already-reviewed suggestions and proven no-ops do not open PRs.
+        self.assertEqual(screen([proposal],reviewed,[audit]),(reviewed,False))
+        noop,changed=screen([proposal],[],[{**audit,"status":"no_effect"}])
+        self.assertFalse(changed)
+        self.assertEqual(noop,[])
+
+    def test_workflow_promotes_only_after_trusted_rust_audit_and_tests(self):
+        workflow=(Path(__file__).resolve().parents[2]/
+            ".github/workflows/community-learning.yml").read_text()
+        audit=workflow.index("--example audit_community_regex")
+        review=workflow.index("scripts/review_community_regex.py")
+        patch=workflow.index("scripts/community_apply_verified_regex.py")
+        test=workflow.index("RUSTFLAGS=\"-D warnings\" cargo test --workspace")
+        create=workflow.index("gh pr create --repo")
+        self.assertLess(audit,review)
+        self.assertLess(review,patch)
+        self.assertLess(patch,test)
+        self.assertLess(test,create)
+        self.assertIn("if: env.COMMUNITY_RULE_CHANGED == 'true'",workflow)
+        self.assertIn("automatic_activation",Path(__file__).resolve().parents[1]
+            .joinpath("review_community_regex.py").read_text())
+        self.assertNotIn("gh pr merge",workflow)
+
+
 if __name__=="__main__":
     unittest.main()
