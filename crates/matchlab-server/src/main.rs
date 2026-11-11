@@ -3082,16 +3082,23 @@ mod tests {
             -- release uses an English anime alias. This intentionally
             -- tests indexed AniDB-to-IMDb identity fallback, not a
             -- fabricated English title row in IMDb's basic data.
-            INSERT INTO titles VALUES('tt2359704','JoJo no Kimyo na Boken',
-                'jojonokimyonaboken',2012,'series','',1,0,'tvSeries');
-            INSERT INTO seasons VALUES('tt2359704',5);
-            INSERT INTO season_episodes VALUES('tt2359704',2,48,48);
+            INSERT INTO titles VALUES
+                ('tt2359704','JoJo no Kimyo na Boken',
+                 'jojonokimyonaboken',2012,'series','',1,0,'tvSeries'),
+                ('tt0248119','JoJo''s Bizarre Adventure',
+                 'jojosbizarreadventure',1993,'series','',1,0,'tvMiniSeries');
+            INSERT INTO seasons VALUES ('tt2359704',5),('tt0248119',1);
+            INSERT INTO season_episodes VALUES
+                ('tt2359704',2,48,48),('tt0248119',1,13,13);
             INSERT INTO anime_series_map VALUES
+                ('tt0248119','9000','222222',0),
                 ('tt2359704','10000','262954',0),
                 ('tt2359704','10001','262954',0),
                 ('tt2359704','10002','262954',0);
             INSERT INTO anime_ids VALUES('tt2359704','anidb','10000');
             INSERT INTO anidb_titles VALUES
+                ('9000','JoJo''s Bizarre Adventure',
+                 'jojosbizarreadventure','main','en'),
                 ('10000','JoJo''s Bizarre Adventure',
                  'jojosbizarreadventure','main','en'),
                 ('10001','JoJo''s Bizarre Adventure Stardust Crusaders',
@@ -3099,6 +3106,7 @@ mod tests {
                 ('10002','JoJo''s Bizarre Adventure Stardust Crusaders Egypt',
                  'jojosbizarreadventurestardustcrusadersegypt','main','en');
             INSERT INTO episode_map VALUES
+                ('9000','222222',1,1,1,13,0,''),
                 ('10000','262954',1,1,1,26,0,''),
                 ('10001','262954',1,2,1,24,0,''),
                 ('10002','262954',1,2,1,24,24,'');").unwrap();
@@ -3111,6 +3119,15 @@ mod tests {
         assert_eq!(imdb_matcher::clean_title(parsed["title"].as_str().unwrap()),
             "jojosbizarreadventure","{parsed:?}");
 
+        // The exact English IMDb title belongs to the 1993 OVA, but the
+        // English anime alias also identifies the 2012 TV series.
+        // This fixture must reproduce the actual wrong-first-candidate bug.
+        let db=Connection::open(&path).unwrap();
+        let initial=imdb_matcher::search(&db,"JoJos Bizarre Adventure",None,true,2,
+            raw,true,20).unwrap();
+        assert_eq!(initial.first().map(|row|row.imdb_id.as_str()),
+            Some("tt0248119"),"fixture must reproduce wrong 1993 match: {initial:?}");
+        drop(db);
         let req=MatchRequest{title:raw.into(),year:None,series:None};
         for policy in [MatchPolicy::DashboardDiagnostic,MatchPolicy::PublicApi]{
             let diag=diagnose_with_policy(&path,&req,policy).unwrap();
