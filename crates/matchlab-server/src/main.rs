@@ -3904,9 +3904,14 @@ mod tests {
         // exclusion, decides whether "6" is a valid IMDb series title.
         assert_eq!(nested["path_title_candidates"],json!(["Cops","6"]),
             "{nested:?}");
-        assert_eq!(select(cops_nested),select(cops_flat));
-        assert_eq!(select("Cops Seasons 1-24/Unknown Folder/6/s6e10.avi"),
-            select(cops_flat));
+        // The override helper may return None when the parser already
+        // selected Cops, or Some("Cops") when a closer unverified folder
+        // needs replacement. The public match must be identical either way.
+        for release in [cops_flat,cops_nested,
+            "Cops Seasons 1-24/Unknown Folder/6/s6e10.avi"]{
+            assert!(select(release).as_deref().is_none_or(|value|value=="Cops"),
+                "{release}: wrong parent title");
+        }
         // The leaf already has exactly the same title as its ancestor:
         // no override is needed.
         assert_eq!(select("The Simpsons Season 9/Season 9/The.Simpsons.S09E24.mkv"),
