@@ -2762,17 +2762,6 @@ fn merge_path_metadata(merged:&mut Map<String,Value>, layer:&Map<String,Value>){
     }
 }
 
-// Some episode files start with S09E24 and put only the episode name after
-// the coordinate ("S09E24 Lost Our Lisa.mkv"). That text is not a series
-// title; prefer a descriptive ancestor when one exists. This is anchored to
-// the start of a *path component* so a normal series-prefixed release keeps
-// its own title. No metadata lookup is needed.
-static LEADING_EPISODE_COORDINATE_RE: Lazy<regex::Regex> = Lazy::new(|| {
-    regex::Regex::new(
-        r"(?i)^(?:s[0-9]{1,3}[ ._-]*e[0-9]{1,5}|[0-9]{1,3}[xх][0-9]{1,5}|e(?:p(?:isode)?)?[ ._-]*[0-9]{1,5})(?:$|[ ._-])"
-    ).expect("valid leading episode coordinate")
-});
-
 fn generic_path_title(title:&str)->bool{
     let lowercase=title.trim().to_lowercase();
     // A leaf like "S6E1-8 ..." can be reduced by the upstream parser to
@@ -2859,12 +2848,7 @@ pub fn parse_title(
                 // named "Season" or "Episode". Only use the parent when one
                 // exists and the leaf title is empty or generic.
                 leaf_title=title.to_owned();
-                // The upstream parser may retain an episode's display name
-                // as a plausible title when SxxExx appears at byte zero.
-                // Do not let that override the actual show in the folder.
-                leaf_title_generic=generic_path_title(title)
-                    || (fallback_parent_title.is_some()
-                        && LEADING_EPISODE_COORDINATE_RE.is_match(component));
+                leaf_title_generic=generic_path_title(title);
             }else if !generic_path_title(title){
                 fallback_parent_title=Some(title.to_owned());
                 parent_title_candidates.push(title.to_owned());
@@ -4097,33 +4081,6 @@ mod tests {
         assert_eq!(parsed["year"],2006);
         assert_eq!(parsed["seasons"],json!([3]));
         assert_eq!(parsed["episodes"],json!([6]));
-    }
-
-    #[test]
-    fn episode_named_file_inherits_series_title_from_parent() {
-        let release = "The Simpsons Season 9 (Complete S09 Remastered HQ 720p x265 HappyLee)/S09E24 Lost Our Lisa.mkv";
-        let parsed = parse_title(release, false).unwrap();
-        assert_eq!(parsed["title"], "The Simpsons",
-            "episode name must not displace the series title: {parsed:?}");
-        assert_eq!(parsed["seasons"], json!([9]));
-        assert_eq!(parsed["episodes"], json!([24]));
-
-        // The coordinate-only file still inherits the parent, and a
-        // series-prefixed episode retains its own normal title extraction.
-        let coords = parse_title("The Simpsons Season 9/S09E23.mkv", false).unwrap();
-        assert_eq!(coords["title"], "The Simpsons");
-        assert_eq!(coords["episodes"], json!([23]));
-        let named = parse_title(
-            "The Simpsons Season 9/The.Simpsons.S09E24.Lost.Our.Lisa.mkv", false
-        ).unwrap();
-        assert!(named["title"].as_str().unwrap_or("").contains("Simpsons"));
-        assert_eq!(named["episodes"], json!([24]));
-
-        assert!(LEADING_EPISODE_COORDINATE_RE.is_match("S09E24 Lost Our Lisa.mkv"));
-        assert!(LEADING_EPISODE_COORDINATE_RE.is_match("09x24 Lost Our Lisa.mkv"));
-        assert!(LEADING_EPISODE_COORDINATE_RE.is_match("EP24 Lost Our Lisa.mkv"));
-        assert!(!LEADING_EPISODE_COORDINATE_RE.is_match(
-            "The.Simpsons.S09E24.Lost.Our.Lisa.mkv"));
     }
 
     #[test]
