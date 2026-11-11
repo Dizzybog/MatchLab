@@ -16,6 +16,7 @@ import re
 from pathlib import Path
 
 from community_rule_intake import technical_pattern
+from community_regex_plan import candidate_valid, resolve
 
 MAX_PROMOTED=1000
 ENTRY=re.compile(r"(?ms)^    \{\n.*?^    \}(?=,?\n)")
@@ -46,6 +47,67 @@ def update_handler_bytes(text,index,old,new):
     return merged
 
 
+def insert_native_handlers(source, plans):
+    """Insert byte-local trusted native handler copies, like Rust replay.
+
+    Additions are appended with their original transform/options/flags.
+    Corrective TV handlers are inserted ahead of that field as the Rust
+    replay engine does, never with a made-up Python transform.
+    """
+    original=json.loads(source)
+    handlers=original["handlers"]
+    expected=copy.deepcopy(original)
+    for change in plans:
+        action=change["operation"]
+        if action=="patch":
+            index=change["handler_index"]
+            source=update_handler_bytes(
+                source,index,change["original_pattern"],change["pattern"])
+            expected["handlers"][index]["pattern"]=change["pattern"]
+            continue
+        if action not in ("add","correct"):
+            raise ValueError("unsupported community native source edit")
+        index=change["handler_index"]
+        if type(index) is not int or not 0<=index<len(handlers):
+            raise ValueError("invalid native template")
+        template=handlers[index]
+        if (template.get("kind")!="regex" or
+            template.get("name")!=change["field"] or
+            template.get("pattern")!=change["original_pattern"] or
+            template.get("transform")!=change["transform"]):
+            raise ValueError("source handler changed since audit")
+        copied=copy.deepcopy(template)
+        copied["pattern"]=change["pattern"]
+        if copied.get("name") in ("seasons","episodes"):
+            copied["learned_tv_guard"]=True
+        if action=="correct" and copied.get("name") in ("seasons","episodes"):
+            # Range rules do not use the learned single-coordinate guard.
+            copied["learned_tv_guard"]=copied.get("transform")!="range_func"
+        if action=="add":
+            if not source.endswith("\n  ]\n}\n"):
+                raise ValueError("unexpected canonical handler JSON ending")
+            rendered=json.dumps(copied,ensure_ascii=False,indent=2)
+            rendered="    "+rendered.replace("\n","\n    ")
+            source=source[:-len("\n  ]\n}\n")]+",\n"+rendered+"\n  ]\n}\n"
+            expected["handlers"].append(copied)
+        else:
+            spans=list(ENTRY.finditer(source))
+            if len(spans)!=len(expected["handlers"]):
+                raise ValueError("nonstandard native handler source format")
+            field=copied["name"]
+            first=next((i for i,row in enumerate(expected["handlers"])
+                if row["name"]==field),None)
+            if first is None:
+                raise ValueError("no original native handler for correction")
+            rendered=json.dumps(copied,ensure_ascii=False,indent=2)
+            rendered="    "+rendered.replace("\n","\n    ")
+            source=source[:spans[first].start()]+rendered+",\n"+source[spans[first].start():]
+            expected["handlers"].insert(first,copied)
+        if json.loads(source)!=expected:
+            raise ValueError("native source diff exceeded planned changes")
+    return source
+
+
 def apply(before,after,audits,fixtures,source,promoted):
     if not all(isinstance(x,list) for x in (before,after,audits,fixtures,promoted)):
         raise ValueError("invalid automation JSON array")
@@ -59,7 +121,7 @@ def apply(before,after,audits,fixtures,source,promoted):
         if entry.get("status")!="review_required" or entry.get("automatic_activation") is not False:
             continue
         rule=entry.get("proposal")
-        if not isinstance(rule,dict) or rule.get("kind")!="learned_source_regex_patch":
+        if not isinstance(rule,dict):
             continue
         fp=entry.get("fingerprint")
         audit=by_fp.get(fp,{})
@@ -70,6 +132,44 @@ def apply(before,after,audits,fixtures,source,promoted):
             continue
         if fp!=rule.get("fingerprint") or not re.fullmatch(r"[0-9a-f]{64}",fp or ""):
             raise ValueError("review/audit fingerprint mismatch")
+        verified=audit.get("source_changes")
+        if verified is not None:
+            if not candidate_valid(rule):
+                raise ValueError("unauthenticated community candidate for source edits")
+            if audit.get("distinct_verified_titles",0)<2:
+                raise ValueError("native regex lacks distinct independently verified titles")
+            plans,reason=resolve(rule,parsed["handlers"])
+            if not plans or reason!="replay_ready" or plans!=verified:
+                raise ValueError("untrusted or stale native handler audit plan")
+            target_fields={plan["field"] for plan in plans}
+            if not target_fields.issubset(set(audit.get("verified_fields",[]))):
+                raise ValueError("not all modified native fields have independent proof")
+            indexes=audit.get("verified_fixture_indexes")
+            if (not isinstance(indexes,list) or len(indexes)<2 or
+                any(type(i) is not int or not 0<=i<len(fixtures) for i in indexes) or
+                len(set(indexes))<2):
+                raise ValueError("trusted fixture indexes missing")
+            proven=[fixtures[i] for i in sorted(set(indexes))]
+            if len(promoted)+len(proven)>MAX_PROMOTED:
+                raise ValueError("verified native regression fixture capacity exceeded")
+            if any(not isinstance(row,dict) or
+                   not isinstance(row.get("expected"),dict) or
+                   not (target_fields & set(row["expected"]))
+                   for row in proven):
+                raise ValueError("trusted fixtures do not label modified fields")
+            merged=insert_native_handlers(source,plans)
+            new_tests=promoted+[row for row in proven if row["title"] not in history]
+            if len(new_tests)==len(promoted):
+                raise ValueError("no new independently verified regression fixtures")
+            return merged,new_tests,{
+                "fingerprint":fp,"fields":sorted(target_fields),
+                "operations":[plan["operation"] for plan in plans],
+                "source_handler_indexes":[plan["handler_index"] for plan in plans],
+                "verified_improvements":audit["verified_improvements"],
+                "stored_regressions":len(new_tests)-len(promoted)
+            }
+        if rule.get("kind")!="learned_source_regex_patch":
+            continue
         idx=rule["handler_index"]
         if type(idx) is not int or not 0<=idx<len(parsed["handlers"]):
             raise ValueError("invalid source handler index")
