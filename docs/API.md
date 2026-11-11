@@ -392,7 +392,13 @@ ordering tie-breakers still apply. Half-word prefix fallback is intentionally
 removed. Short exact titles such as `Up` remain valid.
 
 AniDB aliases now include sufficiently specific suffix matches in the same
-single index query as prefixes. Anime episode identity is evaluated in lexical
+single index query as prefixes. Unlike compact normalized keys, the original
+release title preserves word starts: a trailing AniDB alias is accepted only
+when it begins at a full source-title word boundary (e.g. `My Favorite BlueArchive`
+may match `BlueArchive`, but `MyFavoriteBlueArchive` may not). Callers that
+only have a compact key are restricted to exact/prefix aliases. Cached Tantivy
+lookup results remain independent of raw-title word boundaries, which are
+validated separately on each request; no index migration is necessary. Anime episode identity is evaluated in lexical
 rank groups: when the best-looking anime alias cannot verify the requested
 episode, a lower-ranked alias with an independently proven crosswalk may still
 resolve it. Ambiguous, equally ranked *verified* anime identities are rejected.
