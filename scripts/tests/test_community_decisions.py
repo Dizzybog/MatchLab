@@ -40,6 +40,18 @@ class DecisionCacheTests(unittest.TestCase):
         self.assertEqual(len(due), 2)
         self.assertEqual(deferred, 0)
 
+    def test_parser_source_tree_changes_invalidate_cached_verdicts(self):
+        native = self.path / "parser"
+        native.mkdir()
+        (native / "lib.rs").write_text("stable lib")
+        before = decisions.signature(self.handlers, self.fixtures, native)
+        (native / "prefilter.rs").write_text("new prefilter")
+        after = decisions.signature(self.handlers, self.fixtures, native)
+        self.assertNotEqual(before, after)
+        (native / "prefilter.rs").write_text("modified prefilter")
+        self.assertNotEqual(after, decisions.signature(
+            self.handlers, self.fixtures, native))
+
     def test_all_nonpromoted_decisions_are_cached_and_review_ready_is_not(self):
         pending = [{"fingerprint": self.a}]
         for status in sorted(decisions.DECISIONS):
