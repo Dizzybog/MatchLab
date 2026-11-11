@@ -239,11 +239,18 @@ def build(candidates, handlers):
         raise ValueError("Invalid review candidate batch")
     plans = {}
     for rule in candidates:
-        if not candidate_valid(rule):
-            raise ValueError("Unvalidated community rule in trusted plan builder")
-        fp = rule["fingerprint"]
+        fp = rule.get("fingerprint") if isinstance(rule,dict) else None
+        if not isinstance(fp,str) or re.fullmatch("[0-9a-f]{64}",fp) is None:
+            raise ValueError("Invalid review candidate fingerprint")
         if fp in plans:
             raise ValueError("Duplicate rule fingerprint in review batch")
+        if not candidate_valid(rule):
+            # Old queued proposals can legitimately become stale as main
+            # changes. One invalid item must not abort review of valid rules.
+            # Keep its fingerprint/decision visible; never execute its regex.
+            plans[fp] = {"source_changes": [],
+                         "reason": "stale_or_invalid_queued_proposal"}
+            continue
         changes, reason = resolve(rule, handlers)
         plans[fp] = {"source_changes": changes, "reason": reason}
     return plans
