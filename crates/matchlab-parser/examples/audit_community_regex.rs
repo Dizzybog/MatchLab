@@ -595,6 +595,24 @@ fn main()->Result<(),Box<dyn std::error::Error>>{
         .collect::<Vec<_>>();
     let eligible=reports.iter().filter(|r|r["promotion_eligible"]==true).count();
     fs::write(&args[3],format!("{}\n",serde_json::to_string_pretty(&reports)?))?;
+    // Bounded, machine-readable per-candidate review decisions are visible
+    // even when no PR is opened. Never print the raw torrent titles or
+    // untrusted comment JSON in public Actions logs.
+    for row in &reports{
+        let reason=row["reason"].as_str().unwrap_or("")
+            .chars().take(160).collect::<String>();
+        println!("community_regex_verdict={}",json!({
+            "fingerprint":row["fingerprint"],
+            "kind":row["kind"],
+            "status":row["status"],
+            "reason":reason,
+            "verified_improvements":row["verified_improvements"],
+            "regressions":row["regressions"],
+            "real_title_cases":row["community_title_cases"],
+            "real_title_changes":row["community_title_changes"],
+            "source_changes":row["source_changes"].as_array().map_or(0,Vec::len)
+        }));
+    }
     println!("community_regex_audited={} source_diff_eligible={}",
         reports.len(),eligible);
     Ok(())
