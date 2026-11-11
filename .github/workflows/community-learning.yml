@@ -88,6 +88,7 @@ jobs:
             --decisions "$RUNNER_TEMP/community-decisions.json" \
             --handlers crates/matchlab-parser/src/generated/handlers.json \
             --fixtures learning/regex_review_fixtures.json \
+            --parser-src crates/matchlab-parser/src/lib.rs \
             --out "$RUNNER_TEMP/backlog-prepared.json" \
             --daily "$RUNNER_TEMP/community-daily-review.json"
       - name: Persist backlog BEFORE screening; retain last verified snapshot
@@ -360,6 +361,7 @@ jobs:
             --backlog "$RUNNER_TEMP/backlog.json" \
             --handlers "$RUNNER_TEMP/community-handlers-before.json" \
             --fixtures learning/regex_review_fixtures.json \
+            --parser-src crates/matchlab-parser/src/lib.rs \
             --out "$RUNNER_TEMP/community-decisions-next.json"
           mv "$RUNNER_TEMP/community-decisions-next.json" "$RUNNER_TEMP/community-decisions.json"
           python3 scripts/community_state.py save decisions \
