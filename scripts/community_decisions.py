@@ -25,7 +25,15 @@ MAX_DECISIONS = 20_000
 def signature(handlers, fixtures, parser_src=None):
     left = Path(handlers).read_bytes()
     right = Path(fixtures).read_bytes()
-    code = Path(parser_src).read_bytes() if parser_src else b""
+    code = b""
+    if parser_src:
+        root = Path(parser_src)
+        files = sorted(root.rglob("*.rs")) if root.is_dir() else [root]
+        if not files or len(files) > 64:
+            raise ValueError("Invalid native Rust parser source tree")
+        code = b"".join((str(path.relative_to(root) if root.is_dir()
+                        else path.name).encode() + b"\0" +
+                        path.read_bytes() + b"\0") for path in files)
     return hashlib.sha256(left + b"\0" + right + b"\0" + code).hexdigest()
 
 
