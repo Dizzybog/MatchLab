@@ -591,7 +591,7 @@ fn anime_aliases_uncached(db:&Connection,key:&str,min_prefix:usize)->Result<Vec<
     // Leading and trailing AniDB aliases share one Tantivy term-union query.
     // No per-character searches, SQLite scans or index-format changes.
     let terms=(4..=key.len())
-        .filter(|&len|len>=min_prefix
+        .filter(|&len|(len>=min_prefix||len==key.len())
             && key.is_char_boundary(len)
             && key.is_char_boundary(key.len()-len))
         .flat_map(|len|[
