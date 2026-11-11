@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
+from community_decisions import due, signature
 
 MAX_PENDING=20_000
 MAX_REVIEW=4096
@@ -77,6 +78,9 @@ def main():
     p.add_argument("--extended")
     p.add_argument("--daily")
     p.add_argument("--accepted")
+    p.add_argument("--decisions")
+    p.add_argument("--handlers")
+    p.add_argument("--fixtures")
     args=p.parse_args()
     old=read(args.state,{"pending":[]})
     if args.phase=="prepare":
@@ -86,9 +90,19 @@ def main():
         new=merge(old,read(args.candidate_file,[]),seen,
                   curated_fingerprints(rules,extended))
         Path(args.out).write_text(json.dumps(new,ensure_ascii=False,indent=2)+"\n")
-        Path(args.daily).write_text(json.dumps(new["pending"][:MAX_DAILY],
+        eligible=new["pending"][:MAX_DAILY]
+        deferred=0
+        if args.decisions:
+            if not args.handlers or not args.fixtures:
+                raise ValueError("decisions require immutable handlers and fixtures")
+            decisions=read(args.decisions,{"decisions":{}})
+            eligible,deferred=due(new["pending"],decisions,signature(
+                args.handlers,args.fixtures),MAX_DAILY)
+        Path(args.daily).write_text(json.dumps(eligible,
             ensure_ascii=False,indent=2)+"\n")
-        print("community_backlog_pending="+str(len(new["pending"])))
+        print("community_backlog_pending="+str(len(new["pending"]))+
+              " review_due="+str(len(eligible))+
+              " cached_decisions="+str(deferred))
     else:
         if args.daily is None or args.accepted is None:
             raise ValueError("daily/accepted inputs required")
