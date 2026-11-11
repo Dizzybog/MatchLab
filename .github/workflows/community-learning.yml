@@ -100,14 +100,22 @@ jobs:
             learning/community_rules.json \
             "$RUNNER_TEMP/curated-rules-next.json"
           cp "$RUNNER_TEMP/curated-rules-next.json" learning/community_rules.json
-          # Reconstruct only safe source-handler OR-patterns from trusted
-          # catalogue entries. Replay the entire Rust parser against protected
-          # titles and independent, maintainer-labeled fixtures.
+          # Select only actual release names associated with each validated
+          # rule in the same Issue batch. These are untrusted test inputs:
+          # they are NOT proof of a correct IMDb/anime mapping.
+          python3 scripts/community_evidence.py \
+            --comments "$RUNNER_TEMP/community-comments.json" \
+            --candidates "$RUNNER_TEMP/community-daily-review.json" \
+            --sha "${GITHUB_SHA}" \
+            --out "$RUNNER_TEMP/community-title-cases.json"
+          # Reconstruct only safe source-handler changes in Rust, compare
+          # before/after on real community titles and protected fixtures.
           cargo run --release --locked -p matchlab-parser \
             --example audit_community_regex -- \
             "$RUNNER_TEMP/community-daily-review.json" \
             learning/regex_review_fixtures.json \
-            "$RUNNER_TEMP/community-regex-impact.json"
+            "$RUNNER_TEMP/community-regex-impact.json" \
+            "$RUNNER_TEMP/community-title-cases.json"
           # Source-aware field and TV proposals are reviewed as DATA first.
           # Never execute an Issue-supplied regex or update handlers.json
           # without independent verification by a maintainer.
