@@ -247,7 +247,7 @@ fn persist_batch_with_learning(db:&mut Connection,items:&[HistoryEvent],
     if evicted>0{
         let total=ML_QUEUE_EVICTED.fetch_add(evicted,Ordering::Relaxed)+evicted;
         if total==evicted||total%4096<evicted{
-            tracing::warn!(evicted_total=total,
+            tracing::debug!(evicted_total=total,
                 "ML queue retention limit evicted older observations; matching unaffected");
         }
     }
@@ -266,7 +266,7 @@ pub fn record(
     };
     let result=connect(path).and_then(|mut db|persist_batch(&mut db,&[item]));
     if let Err(error)=result{
-        tracing::warn!(%error,"could not persist matching history and statistics");
+        tracing::debug!(%error,"could not persist matching history and statistics");
     }
 }
 
@@ -323,18 +323,18 @@ pub fn record_async(
                     }
                     if let Some((_,db))=connection.as_mut(){
                         if let Err(error)=persist_batch(db,&batch){
-                            tracing::warn!(%error,events=batch.len(),
+                            tracing::debug!(%error,events=batch.len(),
                                 "history writer batch failed; telemetry skipped");
                             connection=None; // discard failed connection/transaction
                         }
                     }else{
-                        tracing::warn!(events=batch.len(),
+                        tracing::debug!(events=batch.len(),
                             "history database unavailable; telemetry skipped");
                     }
                 }
             });
         if let Err(error)=spawned{
-            tracing::warn!(%error,"history writer unavailable");
+            tracing::debug!(%error,"history writer unavailable");
             None
         }else{Some(tx)}
     }).as_ref()else{return};
@@ -351,13 +351,13 @@ pub fn record_async(
         Err(TrySendError::Full(_))=>{
             let n=HISTORY_DROPPED.fetch_add(1,Ordering::Relaxed)+1;
             if n==1 || n%128==0 {
-                tracing::warn!(dropped=n,"history queue full; skipping telemetry, not match result");
+                tracing::debug!(dropped=n,"history queue full; skipping telemetry, not match result");
             }
         },
         Err(TrySendError::Disconnected(_))=>{
             let n=HISTORY_DROPPED.fetch_add(1,Ordering::Relaxed)+1;
             if n==1 || n%128==0{
-                tracing::warn!(dropped=n,"history writer unavailable; skipping telemetry");
+                tracing::debug!(dropped=n,"history writer unavailable; skipping telemetry");
             }
         },
     }
