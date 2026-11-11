@@ -40,7 +40,7 @@ docker compose logs -f matchlab
 curl http://127.0.0.1:8765/health
 ```
 
-The first run downloads public IMDb and anime metadata and builds the local index. This needs an internet connection, disk space and time. `/health` returns **503** until the index is ready and **200** when matching is available. Later metadata refreshes normally run every seven days. The dashboard is at `http://127.0.0.1:8765/`.
+The first run downloads public IMDb and anime metadata and builds the local index. This needs an internet connection, disk space and time. `/health` returns **503** until the index is ready and **200** when matching is available. Later metadata refreshes normally run every seven days. The dashboard is at [`http://127.0.0.1:8765/dash`](http://127.0.0.1:8765/dash). The root path redirects to `/dash` for old bookmarks.
 
 The example is limited to two CPUs and 6 GB RAM; these are starting limits, not guaranteed minimum requirements. To update, run `docker compose pull && docker compose up -d`. A full configuration is available in [compose.yaml](compose.yaml).
 
@@ -76,7 +76,11 @@ A **SID** is an IMDb title ID, optionally followed by season and episode. An **A
 | `POST /debug/match` | Inspect matching with the same strict checks as `/match` |
 | `POST /api/dashboard/diagnose` | Explore title-only matches without production API eligibility checks |
 | `GET /health` | Check whether matching is ready |
-| `GET /` | Open the dashboard |
+| `GET /dash` | Open the dashboard (also accepts the legacy `/` redirect) |
+
+The dashboard displays verified IMDb IDs as links to their IMDb title pages, and AniDB IDs (including multiple anime segments) as individual links to AniDB. Links open in a new tab; API identifiers remain unchanged.
+
+Logging: `ERROR` remains at error level. MatchLab's formerly `WARN`-level nonfatal diagnostics (metadata row skips, optional learning/cache/history failures and similar events) are emitted at `DEBUG`. Set `RUST_LOG=matchlab_server=debug` to inspect them; the default `info` level does not print them.
 
 The public `/match` and `/debug/match` endpoints have identical strict matching requirements. The dashboard's diagnostic endpoint is intentionally more permissive. If metadata is missing or conflicting, MatchLab avoids inventing a match. See [API documentation](docs/API.md) for request options, full responses and other endpoints.
 
