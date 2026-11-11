@@ -557,6 +557,14 @@ impl ParserEngine {
         // PCRE2 UTF mode returns offsets on UTF-8 boundaries. Borrow captures;
         // only episode/group context needs to retain an owned match.
         let raw_match = &title[m0.start()..m0.end()];
+        // Mixed-case Opus is valid audio release metadata only after the
+        // already recognized title/technical boundary. A film or series
+        // literally named "Opus" must not turn into an audio-only release.
+        if handler.name=="audio"
+            && raw_match.eq_ignore_ascii_case("opus")
+            && m0.start() < end_of_title {
+            return Ok(None);
+        }
         let clean_match = captures
             .get(1)
             .map(|m| &title[m.start()..m.end()])
