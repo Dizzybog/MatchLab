@@ -2840,28 +2840,27 @@ pub fn parse_title(
     let mut leaf_title=String::new();
     let mut leaf_title_generic=false;
     for (index,component) in components.iter().enumerate(){
+        let is_parent=index+1<components.len();
+        // A bare numeric folder is structurally ambiguous. It can be a
+        // season directory, a video collection, or a legitimate numeric
+        // series name. Let Tantivy verify the title candidate, but do not
+        // invent episode/season metadata or pick it as the unverified
+        // parser-only fallback. Four-digit year directories remain eligible.
+        let bare_number_directory=is_parent && component.trim().len()<=3
+            && component.trim().bytes().all(|b|b.is_ascii_digit());
         let layer=parse_path_component(component,translate_languages)?;
         if let Some(title)=layer.get("title").and_then(Value::as_str){
             let title=title.trim();
-            if index+1==components.len(){
-                // A standalone title is preserved even if it happens to be
-                // named "Season" or "Episode". Only use the parent when one
-                // exists and the leaf title is empty or generic.
+            if !is_parent{
                 leaf_title=title.to_owned();
                 leaf_title_generic=generic_path_title(title);
             }else if !generic_path_title(title){
-                fallback_parent_title=Some(title.to_owned());
+                if !bare_number_directory {
+                    fallback_parent_title=Some(title.to_owned());
+                }
                 parent_title_candidates.push(title.to_owned());
             }
         }
-        // A bare-number *directory* is ambiguous: it is not proof of an
-        // episode or a season. Keep its title for metadata-verified lookup
-        // (some TV series genuinely have numeric titles), but inherit all
-        // other field values from a named ancestor or the explicit leaf.
-        // Four-digit year directories remain eligible for regular year parsing.
-        let bare_number_directory=index+1<components.len()
-            && component.trim().len()<=3
-            && component.trim().bytes().all(|b|b.is_ascii_digit());
         if !bare_number_directory {
             merge_path_metadata(&mut merged,&layer);
         }
