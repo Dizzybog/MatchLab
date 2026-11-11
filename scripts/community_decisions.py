@@ -22,10 +22,11 @@ DEFER = DECISIONS - {"ready_for_source_diff"}
 MAX_DECISIONS = 20_000
 
 
-def signature(handlers, fixtures):
+def signature(handlers, fixtures, parser_src=None):
     left = Path(handlers).read_bytes()
     right = Path(fixtures).read_bytes()
-    return hashlib.sha256(left + b"\0" + right).hexdigest()
+    code = Path(parser_src).read_bytes() if parser_src else b""
+    return hashlib.sha256(left + b"\0" + right + b"\0" + code).hexdigest()
 
 
 def validate(state):
@@ -103,6 +104,7 @@ def main():
     p.add_argument("--backlog", required=True, type=Path)
     p.add_argument("--handlers", required=True, type=Path)
     p.add_argument("--fixtures", required=True, type=Path)
+    p.add_argument("--parser-src", type=Path)
     p.add_argument("--out", required=True, type=Path)
     args = p.parse_args()
     state = json.loads(args.existing.read_text(encoding="utf-8"))
@@ -110,7 +112,7 @@ def main():
     pending = json.loads(args.backlog.read_text(encoding="utf-8"))["pending"]
     now = datetime.now(timezone.utc).isoformat()
     updated = update(state, audit, pending, signature(
-        args.handlers, args.fixtures), now)
+        args.handlers, args.fixtures, args.parser_src), now)
     args.out.write_text(json.dumps(updated, sort_keys=True, indent=2) + "\n",
                         encoding="utf-8")
     print("community_decisions_saved=" + str(len(updated["decisions"])))
