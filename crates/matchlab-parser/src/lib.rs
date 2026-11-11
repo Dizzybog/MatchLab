@@ -2175,7 +2175,7 @@ fn episode_title_is_metadata(token: &str) -> bool {
         "max", "jpn", "jap", "eng", "ger", "deu", "ita", "fre",
         "fra", "spa", "esp", "por", "nor", "swe", "dan", "fin",
         "rus", "kor", "chi", "pol", "dut", "nld", "srt", "ass",
-        "vtt", "ssa", "mp4", "mkv", "avi", "m2ts", "ts", "nfo",
+        "vtt", "ssa", "mp4", "m4v", "mkv", "avi", "m2ts", "ts", "nfo",
         "legendado", "legendada", "dublado", "dublada",
         "doblado", "doblada", "vostfr", "vosta", "multisubs",
         "msubs", "rife", "track", "tracks",
@@ -2610,6 +2610,23 @@ fn unmarked_single_anime_episode_candidate(
         "numbering":"absolute","verified":false})))
 }
 
+// The upstream parser mutates its working title as handlers run. Some
+// episode/season markers can consume the trailing file suffix before the
+// native extension handler executes. Recover only known suffixes from the
+// original path component, using the EXACT bundled extension handler as the
+// authority instead of maintaining an independent allowlist.
+static SOURCE_EXTENSION_RE:Lazy<regex::Regex>=Lazy::new(||{
+    let catalogue:Value=serde_json::from_str(HANDLERS_JSON)
+        .expect("bundled parser handlers JSON");
+    let pattern=catalogue["handlers"].as_array()
+        .expect("bundled handler array").iter()
+        .find(|entry|entry["name"]=="extension" &&entry["kind"]=="regex")
+        .and_then(|entry|entry["pattern"].as_str())
+        .expect("native extension handler pattern");
+    regex::RegexBuilder::new(pattern).case_insensitive(true).build()
+        .expect("native extension matcher is Rust-regex compatible")
+});
+
 // Parse each directory entry independently. The path-level merge below
 // never concatenates release names (which could confuse episode coordinates).
 fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<String,Value>,ParseError> {
@@ -2617,6 +2634,12 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
     let normalized = normalize_release_confusables(raw);
     let raw = normalized.as_ref();
     let mut result=engine_parse(raw,translate_languages)?;
+    if !result.contains_key("extension") && raw.contains('.')
+        && let Some(caps)=SOURCE_EXTENSION_RE.captures(raw)
+        && let Some(extension)=caps.get(1)
+    {
+        result.insert("extension".into(),json!(extension.as_str().to_ascii_lowercase()));
+    }
     // The generic handler engine can miss non-ASCII release resolutions
     // even after normalization. Preserve the explicit numeric marker.
     if original_raw.contains(['р', 'Р'])
