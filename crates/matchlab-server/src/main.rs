@@ -625,6 +625,92 @@ fn verified_anime_subfolder_title(
     Ok(None)
 }
 
+/// IMDb anime markers are not limited to the optional anime_ids table:
+/// anime_series_map may be the only link for older imported titles.
+fn is_anime_series_match(
+    db:&Connection,candidate:&imdb_matcher::Match,
+)->Result<bool,String>{
+    if !candidate.anime_ids.is_empty(){return Ok(true);}
+    db.query_row("SELECT 1 FROM anime_series_map WHERE imdb_id=?1 LIMIT 1",
+        [&candidate.imdb_id],|row|row.get::<_,i64>(0))
+        .optional().map(|hit|hit.is_some()).map_err(|e|e.to_string())
+}
+
+/// When a hierarchical, ordinary TV release has both a season and an
+/// episode, prefer an exact IMDb title from the nearest named parent.
+/// If it has no eligible series title, walk outward toward the root.
+/// Fall back to the leaf title when no parent has a verified identity.
+/// Anime keeps its existing leaf/part-title and crosswalk precedence.
+fn preferred_regular_series_parent_title(
+    db:&Connection,req:&MatchRequest,
+    parsed:&serde_json::Map<String,Value>,
+)->Result<Option<String>,String>{
+    if req.series==Some(false) || parsed.get("anime_title_verified")
+        .and_then(Value::as_bool)==Some(true)
+    {
+        return Ok(None);
+    }
+    let seasons=numbers(parsed.get("seasons"));
+    let episodes=numbers(parsed.get("episodes"));
+    if seasons.is_empty() || (episodes.is_empty() &&
+        parsed.get("episode_start").and_then(Value::as_i64).is_none()){
+        return Ok(None);
+    }
+    let Some(parents)=parsed.get("path_title_candidates").and_then(Value::as_array)
+        else{return Ok(None)};
+    if parents.is_empty(){return Ok(None);}
+    let leaf=parsed.get("title").and_then(Value::as_str).unwrap_or("");
+    let leaf_key=imdb_matcher::clean_title(leaf);
+    let season=seasons.iter().copied().max().unwrap_or(0);
+    let year=req.year.or_else(||parsed.get("year")
+        .and_then(Value::as_i64).map(|value|value as i32));
+    // Do not reinterpret an exact anime title as an ordinary folder title,
+    // even if the optional anime_ids table is incomplete.
+    if exact_anime_identity(db,&leaf_key)?.is_some(){
+        return Ok(None);
+    }
+    if !leaf_key.is_empty(){
+        let leaf_matches=imdb_matcher::search(
+            db,leaf,year,true,season,&req.title,true,10)
+            .map_err(|e|e.to_string())?;
+        for candidate in leaf_matches.iter().filter(|candidate|
+            imdb_matcher::clean_title(&candidate.matched_title)==leaf_key){
+            if is_anime_series_match(db,candidate)?{return Ok(None);}
+        }
+    }
+
+    let mut seen=std::collections::HashSet::new();
+    for parent in parents.iter().rev().filter_map(Value::as_str){
+        let name=parent.trim();
+        let key=imdb_matcher::clean_title(name);
+        if key.len()<3 || key==leaf_key || !seen.insert(key.clone()){
+            continue;
+        }
+        // Match through the ordinary Tantivy-based engine, never SQL title
+        // scans or a guess from the folder text. An exact alias is required
+        // so generic library folders cannot hijack a valid leaf.
+        let matches=imdb_matcher::search(
+            db,name,year,true,season,&req.title,true,10)
+            .map_err(|e|e.to_string())?;
+        let mut regular=false;
+        let mut anime=false;
+        for candidate in matches.iter().filter(|candidate|
+            imdb_matcher::clean_title(&candidate.matched_title)==key
+            && matches!(candidate.media_type.as_str(),"tvSeries"|"tvMiniSeries")){
+            if is_anime_series_match(db,candidate)?{
+                anime=true;
+            }else{
+                regular=true;
+            }
+        }
+        // An anime title, or a title shared by anime and live action, is
+        // not evidence to replace the established anime handling.
+        if anime{return Ok(None);}
+        if regular{return Ok(Some(name.to_owned()));}
+    }
+    Ok(None)
+}
+
 /// Verify an unmarked anime interval using indexed exact AniDB aliases.
 /// Film and OVA titles can share the long-running TV series' alias. Preserve
 /// partial-range diagnostics for an unambiguous single IMDb association; for
@@ -909,6 +995,17 @@ fn diagnose_with_policy(
                 "absolute_episode":absolute,
                 "previous_parser":previous
             }));
+        }
+    }
+    // Series title precedence belongs to the matcher, not the metadata-only
+    // /parse endpoint: only the matcher can distinguish ordinary TV from anime.
+    let preferred_parent={
+        let parsed=parsed_value.as_object().ok_or("parser returned no object")?;
+        preferred_regular_series_parent_title(&db,req,parsed)?
+    };
+    if let Some(parent)=preferred_parent {
+        if let Some(parsed)=parsed_value.as_object_mut(){
+            parsed.insert("title".into(),json!(parent));
         }
     }
     let parsed=parsed_value.as_object().ok_or("parser returned no object")?;
