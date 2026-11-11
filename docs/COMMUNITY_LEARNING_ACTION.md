@@ -25,26 +25,37 @@ comments on the daily `[community-learning] YYYY-MM-DD` GitHub issue.
    human review. Associate rules with up to 12 real torrent titles whose
    technical markers occur in the **same validated comment batch**; keep the
    title file runner-local and never attach it to the public PR.
-6. The trusted Rust auditor runs baseline vs patched full-parser replay using:
-   maintainer-labeled `learning/regex_review_fixtures.json`, protected
-   negatives, actual user-supplied torrent names, and generated controls.
-   Report separate counts for genuine verified improvements, unverified
-   changes, no-ops and regressions. Changes to unrelated fields on real titles
-   block an automatic source patch.
-7. An automatic native source change is allowed only for a supported,
-   source-identified, bounded safe candidate with **two independently labeled
-   distinct positive fixtures and zero regressions**. Promote the fixtures to
-   `learning/regex_promoted_tests.json`. Review-only evidence is retained but
-   cannot authorize source edits.
-8. Full Rust regression tests/checks run before opening a human-review PR.
+6. Build bounded plans from **all validated regex families**. Proposals
+   for technical fields (quality, codec, audio, languages, extension, etc.)
+   reuse an exact native handler with the required output transform. TV rules
+   plan season and episode handlers **together**. Corrective TV and general
+   handler-specific rules reuse the current source identity. Source patches
+   retain their exact original handler. Ambiguous transforms, historical
+   proposals, and rules with outdated source indexes are explicitly reported
+   as review-only rather than guessed or executed.
+7. The trusted **Rust** auditor executes each planned patch, addition or
+   corrective rule with MatchLab's full native parser. It compares the current
+   parser to the candidate on maintainer-labeled
+   `learning/regex_review_fixtures.json`, protected negatives, and actual
+   community torrent titles. Community title changes are **telemetry**, not
+   proof: user-supplied parsing/IMDb labels are not a trusted oracle.
+8. A native source change is allowed only when at least **two distinct,
+   independently labeled titles** improve, **every modified field** has a
+   verified improvement, and the full protected and unrelated-field regression
+   counts are zero. The source writer re-derives and checks the exact plan,
+   then clones native handlers with original priority/flags/options/transform,
+   or replaces only the anchored original regex. Proven fixtures are promoted
+   to `learning/regex_promoted_tests.json`. Unproven suggestions remain
+   diagnostics in the durable backlog.
+9. Full Rust regression tests/checks run before opening a human-review PR.
    The bot creates a **unique per-run branch**, never merges its own PR, and
    explicitly dispatches Rust CI because `GITHUB_TOKEN`-authored PRs do not
    trigger ordinary `pull_request` workflows. No PR is opened for JSON-only,
    no-effect or formatting-only changes.
-9. Mark a fingerprint reviewed only after its PR was actually created.
+10. Mark a fingerprint reviewed only after its PR was actually created.
    Persist and verify a new finalized backlog snapshot and dedup-ledger
    snapshot. Publish bounded audit artifacts (no private issue titles).
-10. **Only after durable state and artifacts are saved**, close old bot-owned
+11. **Only after durable state and artifacts are saved**, close old bot-owned
     idle daily issues and unreviewed stale bot PRs, then delete old bot-owned
     review branches after a recovery grace period. Leave human PRs, non-bot
     issues and anything with the `community-keep-open` label untouched.
