@@ -588,9 +588,16 @@ fn anime_aliases_uncached(db:&Connection,key:&str,min_prefix:usize)->Result<Vec<
     let reader=search.reader.searcher();
     // Search all valid alias prefixes in one union query. The previous
     // implementation submitted one Tantivy query per character position.
+    // Leading and trailing AniDB aliases share one Tantivy term-union query.
+    // No per-character searches, SQLite scans or index-format changes.
     let terms=(4..=key.len())
-        .filter(|&len|key.is_char_boundary(len)&&(len>=min_prefix||len==key.len()))
-        .map(|len|Term::from_field_text(search.anime,&key[..len]));
+        .filter(|&len|len>=min_prefix
+            && key.is_char_boundary(len)
+            && key.is_char_boundary(key.len()-len))
+        .flat_map(|len|[
+            Term::from_field_text(search.anime,&key[..len]),
+            Term::from_field_text(search.anime,&key[key.len()-len..]),
+        ]);
     let query=TermSetQuery::new(terms);
     let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
     let mut matches=Vec::with_capacity(hits.len());
@@ -613,6 +620,7 @@ fn anime_aliases_uncached(db:&Connection,key:&str,min_prefix:usize)->Result<Vec<
     drop(search);
     if let Some(dir)=memory_dir {let _=std::fs::remove_dir_all(dir);}
     matches.sort_by(|a,b|b.clean_title.len().cmp(&a.clean_title.len())
+        .then_with(||key.starts_with(&b.clean_title).cmp(&key.starts_with(&a.clean_title)))
         .then(a.anidb_id.cmp(&b.anidb_id)).then(a.imdb_id.cmp(&b.imdb_id)));
     // This single gate protects IMDb's anime fallback, anime-priority
     // season/episode mapping, and title-only anime identity together.
@@ -652,6 +660,38 @@ fn title_aliases_exact_uncached(db:&Connection,key:&str)->Result<Vec<TitleAlias>
     for addr in hits {
         let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
         if let Some(alias)=read_title(&doc,&search){aliases.push(alias);}
+    }
+    drop(reader);drop(search);
+    if let Some(dir)=memory_dir{let _=std::fs::remove_dir_all(dir);}
+    Ok(aliases)
+}
+
+/// Find complete IMDb alias prefixes AND suffixes inside the parsed title.
+/// One Tantivy term-union query discovers the candidates; a separate word-
+/// boundary-aware ranker rejects fragments of longer words.
+fn title_aliases_inside_uncached(db:&Connection,key:&str)->Result<Vec<TitleAlias>,String>{
+    if key.len()<6{return Ok(Vec::new());}
+    let min_len=4usize.max((key.len()+1)/2).max(key.len().saturating_sub(16));
+    if min_len>=key.len(){return Ok(Vec::new());}
+    let (search,memory_dir)=open_search(db)?;
+    let reader=search.reader.searcher();
+    let terms=(min_len..key.len())
+        .filter(|&len|key.is_char_boundary(len)
+            && key.is_char_boundary(key.len()-len))
+        .flat_map(|len|[
+            Term::from_field_text(search.forward,&key[..len]),
+            Term::from_field_text(search.forward,&key[key.len()-len..]),
+        ]);
+    let query=TermSetQuery::new(terms);
+    let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
+    let mut aliases=Vec::with_capacity(hits.len());
+    for addr in hits{
+        let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
+        if let Some(alias)=read_title(&doc,&search)
+            && alias.clean.len()>=min_len
+            && (key.starts_with(&alias.clean)||key.ends_with(&alias.clean)){
+            aliases.push(alias);
+        }
     }
     drop(reader);drop(search);
     if let Some(dir)=memory_dir{let _=std::fs::remove_dir_all(dir);}
@@ -814,6 +854,14 @@ pub fn title_aliases(db:&Connection,key:&str,suffix:bool)->Result<Vec<TitleAlias
             .get_or_compute(id,||title_aliases_uncached(db,key,suffix),
                 |rows|rows.len()<=LOOKUP_MAX_ALIASES)
     }else{title_aliases_uncached(db,key,suffix)}
+}
+
+pub fn title_aliases_inside(db:&Connection,key:&str)->Result<Vec<TitleAlias>,String>{
+    if let Some(id)=lookup_cache_key(db,"inside_title",key){
+        TITLE_LOOKUPS.get_or_init(||QueryCache::new(LOOKUP_CAP,LOOKUP_TTL))
+            .get_or_compute(id,||title_aliases_inside_uncached(db,key),
+                |rows|rows.len()<=LOOKUP_MAX_ALIASES)
+    }else{title_aliases_inside_uncached(db,key)}
 }
 
 pub fn anime_aliases(db:&Connection,key:&str,min_prefix:usize)->Result<Vec<AnimeAlias>,String>{
