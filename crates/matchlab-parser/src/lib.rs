@@ -2764,6 +2764,13 @@ fn merge_path_metadata(merged:&mut Map<String,Value>, layer:&Map<String,Value>){
 
 fn generic_path_title(title:&str)->bool{
     let lowercase=title.trim().to_lowercase();
+    // Season-number-only intermediate directories ("Show/6/S06E10.mkv")
+    // are structural path components, not a competing series title. Keep
+    // full numeric titles such as "1917" and "24" as standalone leaf titles.
+    if lowercase.len()<=2 && lowercase.parse::<u8>()
+        .is_ok_and(|season| (1..=99).contains(&season)){
+        return true;
+    }
     // A leaf like "S6E1-8 ..." can be reduced by the upstream parser to
     // just "S". It is a coordinate marker, not a stronger title than its
     // descriptive parent directory.
