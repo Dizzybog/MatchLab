@@ -72,6 +72,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: python3 scripts/community_state.py load backlog --path "$RUNNER_TEMP/backlog.json"
+      - name: Restore durable proposal decisions for unchanged parser sources
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: python3 scripts/community_state.py load decisions --path "$RUNNER_TEMP/community-decisions.json"
       - name: Merge yesterday's proposals with unprocessed historical backlog
         run: |
           python3 scripts/community_backlog.py prepare \
@@ -80,6 +85,9 @@ jobs:
             --seen "$RUNNER_TEMP/fingerprints-final.txt" \
             --curated learning/community_rules.json \
             --extended learning/community_regex_proposals.json \
+            --decisions "$RUNNER_TEMP/community-decisions.json" \
+            --handlers crates/matchlab-parser/src/generated/handlers.json \
+            --fixtures learning/regex_review_fixtures.json \
             --out "$RUNNER_TEMP/backlog-prepared.json" \
             --daily "$RUNNER_TEMP/community-daily-review.json"
       - name: Persist backlog BEFORE screening; retain last verified snapshot
@@ -340,6 +348,22 @@ jobs:
           cp "$RUNNER_TEMP/fingerprints-final.txt" "$RUNNER_TEMP/fingerprints.txt"
           python3 scripts/community_state.py save ledger \
             --path "$RUNNER_TEMP/fingerprints.txt" --phase ledger
+      - name: Persist audited proposal decisions for this immutable parser version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 scripts/community_decisions.py \
+            --existing "$RUNNER_TEMP/community-decisions.json" \
+            --audit "$RUNNER_TEMP/community-regex-impact.json" \
+            --backlog "$RUNNER_TEMP/backlog.json" \
+            --handlers "$RUNNER_TEMP/community-handlers-before.json" \
+            --fixtures learning/regex_review_fixtures.json \
+            --out "$RUNNER_TEMP/community-decisions-next.json"
+          mv "$RUNNER_TEMP/community-decisions-next.json" "$RUNNER_TEMP/community-decisions.json"
+          python3 scripts/community_state.py save decisions \
+            --path "$RUNNER_TEMP/community-decisions.json" --phase final
       - name: Publish bounded review artifact; no automatic model activation
         uses: actions/upload-artifact@v4
         with:
