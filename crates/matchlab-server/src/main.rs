@@ -3057,6 +3057,71 @@ mod tests {
     }
 
     #[test]
+    fn jojo_s02e37_dubbed_xvid_preserves_imdb_and_egypt_anidb_episode(){
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-jojo-s02e37-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,
+            category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            INSERT INTO titles VALUES('tt2359704','JoJo''s Bizarre Adventure',
+                'jojosbizarreadventure',2012,'series','',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt2359704',5);
+            INSERT INTO season_episodes VALUES('tt2359704',2,48,48);
+            INSERT INTO anime_series_map VALUES
+                ('tt2359704','10001','262954',0),
+                ('tt2359704','10002','262954',0);
+            INSERT INTO anime_ids VALUES('tt2359704','anidb','10001');
+            INSERT INTO anidb_titles VALUES
+                ('10001','JoJo''s Bizarre Adventure Stardust Crusaders',
+                 'jojosbizarreadventurestardustcrusaders','main','en'),
+                ('10002','JoJo''s Bizarre Adventure Stardust Crusaders Egypt',
+                 'jojosbizarreadventurestardustcrusadersegypt','main','en');
+            INSERT INTO episode_map VALUES
+                ('10001','262954',1,2,1,24,0,''),
+                ('10002','262954',1,2,1,24,24,'');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        let raw="JoJos Bizarre Adventure S02E37 DUBBED XviD-AFG";
+        let parsed=matchlab_parser::parse_title(raw,false).unwrap();
+        assert_eq!(parsed["seasons"],json!([2]),"{parsed:?}");
+        assert_eq!(parsed["episodes"],json!([37]),"{parsed:?}");
+        assert_eq!(imdb_matcher::clean_title(parsed["title"].as_str().unwrap()),
+            "jojosbizarreadventure","{parsed:?}");
+
+        let req=MatchRequest{title:raw.into(),year:None,series:None};
+        for policy in [MatchPolicy::DashboardDiagnostic,MatchPolicy::PublicApi]{
+            let diag=diagnose_with_policy(&path,&req,policy).unwrap();
+            let winner=diag.selected.unwrap_or_else(||panic!(
+                "No JoJo match; parsed={:?}, candidates={:?}, reason={}",
+                diag.parsed,diag.imdb_candidates,diag.reason));
+            assert_eq!(winner["imdb_id"],"tt2359704","{winner}");
+            assert_eq!(winner["season"],2,"{winner}");
+            assert_eq!(winner["episode"],37,"{winner}");
+            assert_eq!(public_match_response(Some(winner)),json!({
+                "sid_start":"tt2359704:2:37","sid_end":"tt2359704:2:37",
+                "asid_start":"10002:13","asid_end":"10002:13"
+            }));
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
     fn stone_ocean_named_part_uses_canonical_jojo_imdb_season_five(){
         let stamp=std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
