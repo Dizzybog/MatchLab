@@ -85,24 +85,24 @@ fn community_pandora_release_markers_do_not_pollute_series_title(){
 #[test]
 fn community_known_opus_and_dts_channel_markers_are_not_reported_missing(){
     let opus=parse_title("Game of Thrones S06 1080p BluRay Multi AV1 Opus [AV1D]",false).unwrap();
-    assert!(opus["audio"].as_array().is_some_and(|a|a.contains(&json!("OPUS"))),"{opus:?}");
+    assert!(opus.get("audio").and_then(serde_json::Value::as_array).is_some_and(|a|a.contains(&json!("OPUS"))),"{opus:?}");
     assert_eq!(opus["codec"],json!("av1"),"{opus:?}");
     let dts=parse_title(
         "Homem.Formiga.e.a.Vespa.2018.REMUX.UHD.BluRay.2160p.HEVC.DTS-HD.MA7.1-GUR",
         false).unwrap();
-    assert!(dts["audio"].as_array().is_some_and(|a|a.contains(&json!("DTS Lossless"))),"{dts:?}");
-    assert!(dts["channels"].as_array().is_some_and(|a|a.contains(&json!("7.1"))),"{dts:?}");
+    assert!(dts.get("audio").and_then(serde_json::Value::as_array).is_some_and(|a|a.contains(&json!("DTS Lossless"))),"{dts:?}");
+    assert!(dts.get("channels").and_then(serde_json::Value::as_array).is_some_and(|a|a.contains(&json!("7.1"))),"{dts:?}");
 }
 
 #[test]
 fn community_m4v_extension_and_natural_language_airdate(){
     let tv=parse_title("The Apprentice S20E01.m4v",false).unwrap();
-    assert_eq!(tv["extension"],json!("m4v"),"{tv:?}");
+    assert_eq!(tv.get("extension"),Some(&json!("m4v")),"{tv:?}");
     assert_eq!(tv["seasons"],json!([20]),"{tv:?}");
     assert_eq!(tv["episodes"],json!([1]),"{tv:?}");
     let dated=parse_title(
         "Exotic4k - Lorraine Mack (Latin Heat) NEW 08 November 2014 1080p",false).unwrap();
-    assert_eq!(dated["date"],json!("2014-11-08"),"{dated:?}");
+    assert_eq!(dated.get("date"),Some(&json!("2014-11-08")),"{dated:?}");
 }
 
 #[test]
@@ -116,4 +116,21 @@ fn community_existing_native_markers_remain_supported_without_duplicate_ml_rules
         let p=parse_title(title,false).unwrap();
         assert_eq!(p[field],value,"{title}: {p:?}");
     }
+}
+
+#[test]
+fn path_fallback_validates_fields_independently_from_nearest_component(){
+    // Coordinates from the leaf; other fields from the closest valid layer.
+    // A numeric intermediate directory is neither an episode nor a title
+    // unless metadata independently verifies a series of that name.
+    let release="Cops Seasons 1-24 1989 720p BluRay DTS-HD MA 5.1/6/Season 6 WEB-DL/s6e10.avi";
+    let parsed=parse_title(release,false).unwrap();
+    assert_eq!(parsed["seasons"],json!([6]),"{parsed:?}");
+    assert_eq!(parsed["episodes"],json!([10]),"{parsed:?}");
+    assert_eq!(parsed["extension"],json!("avi"),"{parsed:?}");
+    assert_eq!(parsed["year"],json!(1989),"{parsed:?}");
+    assert_eq!(parsed["quality"],json!("WEB-DL"),"{parsed:?}");
+    assert_eq!(parsed["resolution"],json!("720p"),"{parsed:?}");
+    assert!(parsed["audio"].as_array().is_some_and(|v|
+        v.contains(&json!("DTS Lossless"))),"{parsed:?}");
 }
