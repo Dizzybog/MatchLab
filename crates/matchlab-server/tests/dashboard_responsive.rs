@@ -93,3 +93,22 @@ fn ml_regex_inventory_is_conditional_and_uses_live_status(){
     assert!(DASHBOARD.contains("' · Compiled patterns: '+"));
     assert!(DASHBOARD.contains("mlRegexStats();setInterval("));
 }
+
+#[test]
+fn verified_anime_season_packs_show_crosswalk_episodes_not_legacy_absolute_fields(){
+    // The public /match protocol and strict debug diagnostics expose actual
+    // AniDB episodes via episode_range.segments, not absolute_start or the
+    // single-episode anime object. Both tester and history use rankResults.
+    assert!(DASHBOARD.contains("function verifiedAnimeDisplay(selected){"));
+    assert!(DASHBOARD.contains("const verified=selected.episode_range;"));
+    assert!(DASHBOARD.contains("const diagnostic=selected.anime_range_diagnostics;"));
+    assert!(DASHBOARD.contains("s.start_anime_episode"));
+    assert!(DASHBOARD.contains("s.end_anime_episode"));
+    assert!(DASHBOARD.contains("ids=[...new Set(segments.map(s=>String(s.anidb_id)))]"));
+    assert!(DASHBOARD.contains("ids.length>1?String(s.anidb_id)+':'+range:range"));
+    assert!(DASHBOARD.contains("source?.complete===false"));
+    assert!(DASHBOARD.contains("const anime=verifiedAnimeDisplay(selected);"));
+    assert!(DASHBOARD.contains("field('AniDB ID',r.anime_id)+field('Anime episode',r.winner?r.anime_episode"));
+    assert!(DASHBOARD.contains("rankResults(row.details)"));
+    assert!(DASHBOARD.contains("rankResults(d)"));
+}
