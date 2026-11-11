@@ -248,6 +248,46 @@ The trusted GitHub Action:
 4. Keeps technical, TV and source-handler suggestions in `learning/community_regex_proposals.json` as **non-executable review data**. Independently approved changes must be integrated before they affect other installations.
 5. Publishes independently reviewed anime marker rules through `learning/community_rules.json`.
 
+### Scheduled cleanup of bot issues, parser review PRs and branches
+
+The trusted default-branch Community Learning workflow runs daily and, only
+**after** it has saved the unprocessed proposal backlog, global fingerprint
+ledger and review artifacts, runs `scripts/community_cleanup.py --apply`.
+This housekeeping does not delete issue discussions or learning evidence.
+Its scope and retention are intentionally conservative:
+
+- **Daily community issues:** Close official `[community-learning] YYYY-MM-DD`
+  discussions created by `github-actions[bot]` after **21 days**, provided
+  they have been inactive for **7 days**. A thread with comments arriving after
+  the 14-day intake window stays open: unprocessed late evidence must not be
+  silently treated as archived. Closed issues and their comments remain
+  readable on GitHub.
+- **Old parser proposal PRs:** Close only `github-actions[bot]` PRs with the
+  exact Community Learning title, trusted body marker and a same-repository
+  `bot/community-regex-YYYYMMDD` branch, after **30 days of inactivity**.
+  Ignore human-created parser PRs, draft PRs, requested reviews, approved /
+  changes-requested reviews and proposals marked `community-keep-open`.
+  The bot never merges its own PR.
+- **Bot branches:** Delete a trusted bot proposal branch only if its PR has
+  already been closed for **7 days** and its recorded head SHA is unchanged,
+  or if the branch is **45 days old**, has no PR, and its last
+  `github-actions[bot]` commit is at least **30 days old**. A branch with
+  an open PR, protection, changed head or unfamiliar name is never deleted.
+  Maintainer-created branches, including `fix/parser-*`, are out of scope.
+
+The repository's existing `contents: write`, `issues: write` and
+`pull-requests: write` Actions permissions cover these operations; community
+**contributors** need only their existing Issues token, not branch permissions.
+The cleanup uses GitHub's REST API via the standard Python library, with no
+extra runtime or network requests during normal torrent matching.
+
+To inspect pending maintenance without changing anything, run the script
+without `--apply` in an authenticated checkout with `GH_REPO` and
+`GH_TOKEN` set. The planned issue/PR numbers and branch names are printed as
+JSON. To prevent automatic closure of an eligible thread/PR, add the
+`community-keep-open` label. A GitHub API failure fails the step without
+silently broadening deletion criteria.
+
 ### Automatic native regex impact review
 
 The daily GitHub Action now performs an **independent, deterministic native-Rust
