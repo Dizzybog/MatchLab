@@ -330,7 +330,7 @@ without requiring clients to send a new field. A future explicit
 infohash-keyed torrent context cache would need additional validity guards
 for files with conflicting years and anime subfolder titles.
 
-For detailed ranking, candidates, episode mapping segments and debugging, use `POST /debug/match`. The dashboard at `/` also uses diagnostic data.
+For detailed ranking, candidates, episode mapping segments and debugging, use `POST /debug/match`. The dashboard at `/dash` also uses diagnostic data (legacy `/` redirects to `/dash`).
 
 ### Hierarchical paths: deepest metadata wins
 
