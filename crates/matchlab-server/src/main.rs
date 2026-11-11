@@ -4794,7 +4794,9 @@ mod tests {
                     format!("tt{:07}",i+200),Some(1),Some(2))] {
                 let result=diagnose(&path,&MatchRequest{title:raw.clone(),year:None,
                     series:None}).unwrap_or_else(|e|panic!("{raw}: {e}"));
-                let selected=result.selected.unwrap_or_else(||panic!("no match: {raw}"));
+                let selected=result.selected.unwrap_or_else(||panic!(
+                    "no match: {raw}; parsed={:?}; imdb_candidates={:?}; reason={}",
+                    result.parsed,result.imdb_candidates,result.reason));
                 assert_eq!(selected["imdb_id"],id,"{raw}");
                 if let Some(season)=season {assert_eq!(selected["season"],season,"{raw}");}
                 if let Some(episode)=episode {assert_eq!(selected["episode"],episode,"{raw}");}
