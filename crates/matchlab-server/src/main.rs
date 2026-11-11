@@ -447,7 +447,7 @@ fn reconcile_series_coordinates(
     let parsed_episodes=numbers(parsed.get("episodes"));
     if parsed_seasons.len()>1 || parsed_episodes.len()>1 {return Ok(());}
     let parsed_season=parsed_seasons.first().copied()
-        .filter(|s|*s>0 && valid_sid_coordinate(*s,0));
+        .filter(|s|*s>=0 && valid_sid_coordinate(*s,0));
     let parsed_episode=parsed_episodes.first().copied()
         .filter(|e|*e>0 && valid_sid_coordinate(1,*e));
     let mut season=winner["season"].as_i64();
@@ -4449,6 +4449,37 @@ mod tests {
             &parse(json!([]),json!([]))).unwrap();
         assert!(neither["season"].is_null());
         assert!(neither["episode"].is_null());
+    }
+    #[test]
+    fn special_episode_season_zero_survives_imdb_reconciliation(){
+        let db=Connection::open_in_memory().unwrap();
+        let mut winner=json!({"imdb_id":"tt1234567","category":"series",
+            "season":null,"episode":null,"anime_ids":{}});
+        let parsed=json!({"seasons":[0],"episodes":[2],
+            "special_episode":true,"special_type":"ova"});
+        reconcile_series_coordinates(
+            &db,&mut winner,parsed.as_object().unwrap()).unwrap();
+        assert_eq!(winner["season"],0);
+        assert_eq!(winner["episode"],2);
+        assert_eq!(winner["sid"],"tt1234567:0:2");
+        let response=public_match_response(Some(winner));
+        assert_eq!(response["sid_start"],"tt1234567:0:2");
+        assert_eq!(response["sid_end"],"tt1234567:0:2");
+    }
+    #[test]
+    fn special_without_episode_keeps_imdb_identity_not_fabricated_e01(){
+        let db=Connection::open_in_memory().unwrap();
+        let mut winner=json!({"imdb_id":"tt1234567","category":"series",
+            "season":null,"episode":null,"anime_ids":{}});
+        let parsed=json!({"seasons":[0],"episodes":[],
+            "special_episode":true,"special_type":"oad"});
+        reconcile_series_coordinates(
+            &db,&mut winner,parsed.as_object().unwrap()).unwrap();
+        assert_eq!(winner["season"],0);
+        assert!(winner["episode"].is_null());
+        let response=public_match_response(Some(winner));
+        assert_eq!(response["sid_start"],"tt1234567");
+        assert_eq!(response["sid_end"],"tt1234567");
     }
     #[test]
     fn series_fallback_keeps_verified_anime_mapping_and_anidb_only_results(){
