@@ -2645,6 +2645,75 @@ static TITLE_TAIL_SUBTITLE_TAG_RE:Lazy<regex::Regex>=Lazy::new(||{
         .expect("valid subtitle release marker")
 });
 
+// TheTVDB/Kodi catalogue individual extras as season 0. Recognize release
+// *markers*, not loose substrings in titles: "Special Ops" and "Special
+// Edition" are not evidence of a special episode. A bare ONA is a delivery
+// format and may denote an entire regular series, so require "ONA Special".
+static SPECIAL_RELEASE_MARKER_RE: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(
+        r"(?i)(?:^|[ ._\[(-])(?P<tag>ova|oav|oad|omake|specials?|bonus[ ._-]+(?:episode|ep)|extra[ ._-]+(?:episode|ep|special)|unaired(?:[ ._-]+(?:episode|ep|pilot))?|pilot[ ._-]+episode|webisode|picture[ ._-]+drama|recap[ ._-]+special|behind[ ._-]+the[ ._-]+scenes|one[ ._-]+shot|ona[ ._-]+special|sp[ ._-]*[0-9]{1,3})(?:$|[ ._\])(-])|\[(?P<bracket_sp>sp)\]"
+    ).expect("valid special episode release markers")
+});
+static SPECIAL_BATCH_RE: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(
+        r"(?i)(?:^|[ ._\[(-])(?:e(?:p(?:isode)?)?[ ._-]*)?[0-9]{1,4}[ ._-]*(?:-|~|to)[ ._-]*(?:e(?:p(?:isode)?)?[ ._-]*)?[0-9]{1,4}(?:$|[ ._\])(-])"
+    ).expect("valid special episode batch guard")
+});
+static SPECIAL_PACK_RE: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r"(?i)(?:^|[ ._\[(-])(?:complete|batch|collection|season[ ._-]*[0-9]{1,3})(?:$|[ ._\])(-])")
+        .expect("valid standalone OVA pack guard")
+});
+
+/// Returns the release keyword and its byte offset. Parsing a keyword does
+/// not manufacture a TVDB special episode number or an AniDB crosswalk.
+fn standalone_special_marker(raw:&str, result:&Map<String,Value>) -> Option<(String,usize)> {
+    if result.get("seasons").and_then(Value::as_array).is_some_and(|seasons|
+        seasons.iter().any(|season|season.as_i64().is_some_and(|s|s>0))) {
+        // Explicit S01E02/Season 1 outranks a vague extra/OVA annotation.
+        return None;
+    }
+    if result.get("episode_count").and_then(Value::as_i64).is_some_and(|n|n>1)
+        || result.contains_key("anime_episode_range_candidate")
+        || SPECIAL_BATCH_RE.is_match(raw)
+    {
+        // "Episodes 01-12 + OVA" describes a collection, not one special.
+        return None;
+    }
+    for captures in SPECIAL_RELEASE_MARKER_RE.captures_iter(raw) {
+        let marker=captures.name("tag").or_else(||captures.name("bracket_sp"))?;
+        let kind=marker.as_str().to_ascii_lowercase();
+        if SPECIAL_PACK_RE.is_match(raw) &&
+            matches!(kind.as_str(),"ova"|"oav"|"oad") {
+            continue;
+        }
+        if kind=="special" {
+            let before=raw[..marker.start()].trim_matches(|c:char|
+                matches!(c,' '|'.'|'_'|'-'|'['|'('|')'));
+            let after=raw[marker.end()..].trim_start_matches(|c:char|
+                matches!(c,' '|'.'|'_'|'-'|']'|')'|'('|'['));
+            // A generic English adjective in a work's name must not become
+            // season zero. "Show Special", "Show Special E01" and technical
+            // suffixes are release labels; "Special Ops" is not.
+            let next=after.split(|c:char|!c.is_ascii_alphanumeric())
+                .next().unwrap_or_default().to_ascii_lowercase();
+            let technical=next.is_empty() || next.bytes().next()
+                .is_some_and(|first|first.is_ascii_digit())
+                || next.starts_with('e') && next[1..].bytes().next()
+                    .is_some_and(|first|first.is_ascii_digit())
+                || matches!(next.as_str(),
+                    "episode"|"ep"|"web"|"webdl"|"webrip"|"bluray"|"bdrip"|
+                    "hdtv"|"mkv"|"avi"|"mp4"|"hevc"|"x264"|"x265"|
+                    "dubbed"|"subbed"|"multi"|"bd"|"dvd"|"remux");
+            if (!before.chars().any(char::is_alphabetic) && !after.is_empty())
+                || !technical {
+                continue;
+            }
+        }
+        return Some((kind,marker.start()));
+    }
+    None
+}
+
 // Parse each directory entry independently. The path-level merge below
 // never concatenates release names (which could confuse episode coordinates).
 fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<String,Value>,ParseError> {
@@ -2755,6 +2824,13 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
     {
         set_title_from_release_prefix(raw,marker.start(),translate_languages,&mut result)?;
     }
+    if let Some((kind,marker_start))=standalone_special_marker(raw,&result) {
+        result.insert("seasons".into(),json!([0]));
+        result.insert("special_episode".into(),json!(true));
+        result.insert("special_type".into(),json!(kind));
+        // The qualifier belongs to the release, not the canonical show name.
+        set_title_from_release_prefix(raw,marker_start,translate_languages,&mut result)?;
+    }
     if let Some(episode_title) = extract_release_episode_title(raw, &result)? {
         result.insert("episode_title".into(), json!(episode_title));
     }
@@ -2806,6 +2882,14 @@ fn merge_path_metadata(merged:&mut Map<String,Value>, layer:&Map<String,Value>){
             merged.remove("absolute_episode_candidate");
         }
         merged.remove("episodes");
+    }
+    if new_season && layer.get("seasons").and_then(Value::as_array)
+        .is_some_and(|seasons|seasons.iter().any(|v|v.as_i64().is_some_and(|s|s>0)))
+    {
+        // An explicit season in the leaf overrides an ancestral Specials/OVA
+        // folder. Its stale special metadata must not survive the merge.
+        merged.remove("special_episode");
+        merged.remove("special_type");
     }
     // An empty value from the generic parser means "not detected", not an
     // instruction to erase metadata that was detected in an ancestor.
