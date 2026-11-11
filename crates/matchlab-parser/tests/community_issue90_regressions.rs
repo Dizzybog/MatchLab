@@ -87,6 +87,10 @@ fn community_known_opus_and_dts_channel_markers_are_not_reported_missing(){
     let opus=parse_title("Game of Thrones S06 1080p BluRay Multi AV1 Opus [AV1D]",false).unwrap();
     assert!(opus.get("audio").and_then(serde_json::Value::as_array).is_some_and(|a|a.contains(&json!("OPUS"))),"{opus:?}");
     assert_eq!(opus["codec"],json!("av1"),"{opus:?}");
+    let movie=parse_title("Opus.2025.1080p.WEB-DL.mkv",false).unwrap();
+    assert_eq!(movie["title"],json!("Opus"),"{movie:?}");
+    assert!(movie.get("audio").is_none_or(|v|v.as_array()
+        .is_none_or(|a|!a.contains(&json!("OPUS")))),"{movie:?}");
     let dts=parse_title(
         "Homem.Formiga.e.a.Vespa.2018.REMUX.UHD.BluRay.2160p.HEVC.DTS-HD.MA7.1-GUR",
         false).unwrap();
