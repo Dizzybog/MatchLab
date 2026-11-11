@@ -70,6 +70,22 @@ fn prefix(db:&Connection,key:&str,release:&str,series:bool,year:Option<i32>,seas
     if !matching.is_empty(){return Ok(matching);}
     filter(db,tantivy_aliases(db,key,false)?,release,series,year,season)
 }
+/// Prefer how well an alias covers the *parsed* title, not its raw length.
+/// Longer aliases are a tie-breaker only after coverage and boundary quality.
+fn fallback_shape(key:&str,alias:&str)->(usize,usize,usize,usize){
+    let overlap=if key.starts_with(alias)||key.ends_with(alias){
+        alias.len().min(key.len())
+    }else if alias.starts_with(key)||alias.ends_with(key){
+        key.len()
+    }else{0};
+    let residual=key.len().saturating_sub(overlap)
+        +alias.len().saturating_sub(overlap);
+    let boundary=if key==alias{0}
+        else if key.starts_with(alias)||alias.starts_with(key){1}
+        else if key.ends_with(alias)||alias.ends_with(key){2}
+        else{3};
+    (residual,boundary,usize::MAX-overlap,usize::MAX-alias.len())
+}
 fn type_rank(t:&str)->i32{
     match t{"movie"=>0,"tvMovie"=>1,"short"=>2,"tvShort"=>3,"tvSpecial"=>4,"tvSeries"=>5,_=>6}
 }
@@ -113,23 +129,46 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             prefix(db,&key,&release,series,year,required_season)?
         };
     }
-    if rows.is_empty()&&key.len()>=4{
-        for size in ((std::cmp::max(2,key.len()/2)+1)..key.len()).rev(){
-            if !key.is_char_boundary(size){continue;}
-            let short=&key[..size];
-            rows=filter(db,exact(db,short)?,&release,series,year,required_season)?;
-            if !rows.is_empty(){stage="shorter_prefix";break;}
+    if rows.is_empty() {
+        // Collect conservative fallback shapes before ranking. Previously the
+        // first nonempty stage won, even when a later candidate covered more
+        // of the actual release title. No broad scan for short query strings.
+        let mut fallback=Vec::new();
+        if key.len()>=4 {
+            for size in ((std::cmp::max(2,key.len()/2)+1)..key.len()).rev(){
+                if !key.is_char_boundary(size){continue;}
+                let short=&key[..size];
+                let found=filter(db,exact(db,short)?,&release,series,year,required_season)?;
+                if !found.is_empty(){fallback.extend(found);break;}
+            }
         }
-    }
-    if rows.is_empty()&&key.len()>=12{
-        rows=filter(db,tantivy_aliases(db,&key,true)?,
-            &release,series,year,required_season)?;
-        if !rows.is_empty(){stage="reverse_suffix";}
-    }
-    if rows.is_empty()&&key.len()>=6{
-        let half=&key[..(key.len()+1)/2];
-        rows=prefix(db,half,&release,series,year,required_season)?;
-        if !rows.is_empty(){stage="half_prefix";}
+        if key.len()>=12 {
+            fallback.extend(filter(db,tantivy_aliases(db,&key,true)?,
+                &release,series,year,required_season)?);
+        }
+        if key.len()>=6 {
+            let half=&key[..(key.len()+1)/2];
+            fallback.extend(prefix(db,half,&release,series,year,required_season)?);
+        }
+        if !fallback.is_empty(){
+            // Exact coverage, then prefix/suffix coverage, then alias length.
+            // Require substantial overlap: a tiny alias must not win solely
+            // because its IMDb work happens to have more votes.
+            fallback.retain(|r| {
+                let overlap=if key.starts_with(&r.clean)||key.ends_with(&r.clean){
+                    r.clean.len().min(key.len())
+                }else if r.clean.starts_with(&key)||r.clean.ends_with(&key){
+                    key.len()
+                }else{0};
+                overlap>=4 && overlap.saturating_mul(2)>=key.len()
+            });
+            if !fallback.is_empty(){
+                let best=fallback.iter().map(|r|fallback_shape(&key,&r.clean)).min().unwrap();
+                fallback.retain(|r|fallback_shape(&key,&r.clean)==best);
+                rows=fallback;
+                stage="ranked_fallback";
+            }
+        }
     }
     if rows.is_empty()&&series&&key.len()>=4{
         // IMDb's English primary title need not appear in the release at
@@ -304,6 +343,15 @@ pub fn prefer_verified_episode_identity(
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn fallback_quality_prioritizes_coverage_before_length(){
+        assert!(fallback_shape("thelordoftherings","thelordoftherings")
+            <fallback_shape("thelordoftherings","thelord"));
+        assert!(fallback_shape("exampletitle","exampletitleextra")
+            <fallback_shape("exampletitle","example"));
+        assert!(fallback_shape("jojosbizarreadventurestoneocean","jojosbizarreadventure")
+            <fallback_shape("jojosbizarreadventurestoneocean","jojos"));
+    }
     #[test] fn votes_replace_alias_count_as_tiebreaker(){
         let db=Connection::open_in_memory().unwrap();
         db.create_scalar_function("reverse",1,
