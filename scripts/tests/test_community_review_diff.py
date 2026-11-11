@@ -39,6 +39,29 @@ class ReviewDiffTests(unittest.TestCase):
         self.assertEqual(paths[1].read_bytes(),paths[0].read_bytes())
         self.assertEqual(json.loads(paths[3].read_text()),[{"fingerprint":"ok"}])
 
+    def test_bot_requires_real_source_and_promoted_regression(self):
+        old_handler, new_handler, old_cases, new_cases = [
+            self.root / name for name in (
+                "handler-old.json", "handler-new.json",
+                "cases-old.json", "cases-new.json")
+        ]
+        old_handler.write_text('{"regex":"old"}')
+        new_handler.write_text('{"regex":"old"}')
+        old_cases.write_text("[]")
+        new_cases.write_text("[]")
+        self.assertFalse(review.source_proven(
+            old_handler, new_handler, old_cases, new_cases))
+        new_handler.write_text('{"regex":"better"}')
+        self.assertFalse(review.source_proven(
+            old_handler, new_handler, old_cases, new_cases))
+        new_cases.write_text('[{"title":"Example.Show.S01E01"}]')
+        self.assertTrue(review.source_proven(
+            old_handler, new_handler, old_cases, new_cases))
+        old_cases.write_text('[{"title":"Old.Show.S01E01"}]')
+        with self.assertRaises(ValueError):
+            review.source_proven(
+                old_handler, new_handler, old_cases, new_cases)
+
     def test_unparseable_review_json_fails_closed(self):
         paths=self.files("[]","not-json")
         with self.assertRaises(ValueError):
