@@ -1095,6 +1095,39 @@ mod persistence_tests {
         assert!(!anime_alias_covers_title(&long,7));
     }
     #[test]
+    fn suffix_anime_aliases_are_discovered_without_index_rebuild(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER,
+                title TEXT NOT NULL DEFAULT '',category TEXT NOT NULL DEFAULT 'movie',
+                region TEXT NOT NULL DEFAULT '',original INTEGER NOT NULL DEFAULT 1,
+                ordering INTEGER NOT NULL DEFAULT 0,type TEXT NOT NULL DEFAULT 'movie');
+            CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
+            CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT);
+            INSERT INTO titles(imdb_id,clean_title,year)
+                VALUES('tt0000001','bluearchive',2024);
+            INSERT INTO anidb_titles VALUES('100','bluearchive');
+            INSERT INTO anime_series_map VALUES('100','tt0000001');").unwrap();
+        let matches=anime_aliases(&db,"myfavoritebluearchive",6).unwrap();
+        assert_eq!(matches.len(),1);
+        assert_eq!(matches[0].clean_title,"bluearchive");
+        assert!(anime_aliases(&db,"monster the jeffrey dahmer story",6)
+            .unwrap().is_empty());
+    }
+    #[test]
+    fn imdb_aliases_inside_title_are_retrieved_as_full_terms(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            INSERT INTO titles VALUES
+                ('tt1111111','Beyond Dune','beyonddune',2020,'movie','',1,0,'movie'),
+                ('tt2222222','Mystery','mystery',2020,'movie','',1,0,'movie');")
+            .unwrap();
+        let hits=title_aliases_inside(&db,"mysterybeyonddune").unwrap();
+        assert_eq!(hits.len(),1);
+        assert_eq!(hits[0].imdb_id,"tt1111111");
+    }
+
+    #[test]
     fn anime_aliases_collect_nested_prefixes_in_one_query() {
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER,
