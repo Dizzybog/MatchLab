@@ -2256,7 +2256,7 @@
       },
       "kind": "regex",
       "pattern": "\\bOPUS(\\b|\\d)(?!.*[ ._-](\\d{3,4}p))",
-      "flags": 0,
+      "flags": 2,
       "transform": "uniq_concat(value('OPUS'))"
     },
     {
