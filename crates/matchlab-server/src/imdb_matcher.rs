@@ -131,7 +131,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     release_title:&str,has_episode:bool,limit:usize)->rusqlite::Result<Vec<Match>>{
     let key=clean_title(title);
     let release=clean_title(release_title);
-    if key.is_empty(){return Ok(vec![]);}
+    if key.is_empty()||limit==0{return Ok(vec![]);}
     // Most lookups resolve exactly: avoid two extra Unicode folds and word
     // vector allocations on that hot path.
     let mut words=Vec::new();
@@ -228,17 +228,33 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             }else{TitleFit::fallback(row.clean.len())};
         groups.entry(row.imdb_id.clone()).or_default().push((row,fit));
     }
+    // Final sort is (lexical fit, year/type/votes). Any candidate strictly
+    // below the lexical rank at position `limit` can never be returned.
+    // Retain the entire tied boundary so votes/year still choose fairly.
+    // This avoids most per-IMDb rating, anime-ID and duplicate-title lookups.
+    let mut ranked_groups=groups.into_iter().map(|(id,aliases)|{
+        let best_fit=aliases.iter().map(|(_,fit)|*fit).min().unwrap();
+        (best_fit,id,aliases)
+    }).collect::<Vec<_>>();
+    ranked_groups.sort_by_key(|(fit,_,_)|*fit);
+    if ranked_groups.len()>limit {
+        let cutoff=ranked_groups[limit-1].0;
+        ranked_groups.retain(|(fit,_,_)|*fit<=cutoff);
+    }
     let mut duplicates=HashSet::new();
     let mut checked=HashSet::new();
-    for (r,_) in groups.values().flatten(){
-        if checked.insert(r.clean.clone())
-            && crate::tantivy_search::has_duplicate_title(db,&r.clean).map_err(index_error)?{
-            duplicates.insert(r.clean.clone());
+    for (_,_,aliases) in &ranked_groups{
+        for (r,_) in aliases {
+            if checked.insert(r.clean.clone())
+                && crate::tantivy_search::has_duplicate_title(db,&r.clean)
+                    .map_err(index_error)? {
+                duplicates.insert(r.clean.clone());
+            }
         }
     }
     let count_first=year.is_none()&&required_season==0&&!has_episode;
     let mut output=Vec::new();
-    for (id,aliases) in groups{
+    for (_,id,aliases) in ranked_groups{
         let votes:i64=db.query_row("SELECT num_votes FROM imdb_ratings WHERE imdb_id=?1",[&id],|r|r.get(0))
             .optional().unwrap_or(None).unwrap_or(0);
         let (best,fit)=aliases.into_iter().min_by_key(|(r,fit)|
@@ -362,8 +378,10 @@ mod tests{
             INSERT INTO titles VALUES('ttlow','Example alternate','examplealternate',2020,'movie','',0,1,'movie');
             INSERT INTO imdb_ratings VALUES('ttlow',100);
             INSERT INTO imdb_ratings VALUES('tthigh',50000);").unwrap();
-        let found=search(&db,"Example",Some(2020),false,0,"Example.2020",false,5).unwrap();
-        assert_eq!(found[0].imdb_id,"tthigh");
+        let found=search(&db,"Example",Some(2020),false,0,"Example.2020",false,1).unwrap();
+        assert_eq!(found.len(),1);
+        assert_eq!(found[0].imdb_id,"tthigh",
+            "lexical cutoff must retain all tied identities for vote ranking");
     }
     #[test] fn normalization(){assert_eq!(clean_title("Pokémon and Ægir"),"pokemonaegir");}
     #[test] fn short_titles_require_exact_match_instead_of_broad_tantivy_prefix(){
