@@ -2910,6 +2910,15 @@ fn generic_path_title(title:&str)->bool{
     if lowercase.len()==1 && lowercase.bytes().all(|b|b.is_ascii_alphabetic()){
         return true;
     }
+    // A lone episode marker is not a show title. This also allows
+    // Show/OVA/E03.mkv to inherit Show while retaining S00E03.
+    if ["episode","ep","e"].iter().any(|prefix|
+        lowercase.strip_prefix(prefix).is_some_and(|digits|
+            !digits.is_empty() && digits.len()<=5 &&
+            digits.bytes().all(|byte|byte.is_ascii_digit())))
+    {
+        return true;
+    }
     lowercase.is_empty()||[
         "episode","ep","season","seasons","season 1","series",
         "shows","tv","tv shows","movies","films","media","videos",
