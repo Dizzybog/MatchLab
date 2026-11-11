@@ -52,8 +52,9 @@ class ReviewDiffTests(unittest.TestCase):
         self.assertFalse(review.source_proven(
             old_handler, new_handler, old_cases, new_cases))
         new_handler.write_text('{"regex":"better"}')
-        self.assertFalse(review.source_proven(
-            old_handler, new_handler, old_cases, new_cases))
+        with self.assertRaises(ValueError):
+            review.source_proven(
+                old_handler, new_handler, old_cases, new_cases)
         new_cases.write_text('[{"title":"Example.Show.S01E01"}]')
         self.assertTrue(review.source_proven(
             old_handler, new_handler, old_cases, new_cases))
