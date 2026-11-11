@@ -3855,13 +3855,16 @@ mod tests {
                     'series','',1,0,'tvSeries'),
                 ('tt0500001','Different Show','differentshow',2000,
                     'series','',1,0,'tvSeries'),
+                ('tt0500002','Cops','cops',1989,
+                    'series','',1,0,'tvSeries'),
                 ('tt0300001','Sword Art Online','swordartonline',2012,
                     'series','',1,0,'tvSeries');
             INSERT INTO seasons VALUES ('tt0096697',36),('tt0500001',12),
-                ('tt0300001',3);
+                ('tt0500002',24),('tt0300001',3);
             INSERT INTO season_episodes VALUES
                 ('tt0096697',9,25,25),
                 ('tt0500001',9,25,25),
+                ('tt0500002',6,20,20),
                 ('tt0300001',1,12,12);
             INSERT INTO anime_series_map VALUES('tt0300001','100','456',0);
             INSERT INTO anime_ids VALUES('tt0300001','anidb','100');
@@ -3885,6 +3888,18 @@ mod tests {
             "parser must preserve the series from the season-pack folder: {parsed:?}");
         assert_eq!(select("The Simpsons Season 9/Season 9/S09E24 Lost Our Lisa.mkv")
             .as_deref(),Some("The Simpsons"));
+        // An intervening numeric season directory must not steal the
+        // parent's show title. Match the direct and nested Cops files alike.
+        let cops_flat="Cops Seasons 1-24/s6e10.avi";
+        let cops_nested="Cops Seasons 1-24/6/s6e10.avi";
+        let flat=matchlab_parser::parse_title(cops_flat,false).unwrap();
+        let nested=matchlab_parser::parse_title(cops_nested,false).unwrap();
+        assert_eq!(nested["title"],flat["title"],"numeric folder changed title: {nested:?}");
+        assert_eq!(nested["seasons"],json!([6]),"{nested:?}");
+        assert_eq!(nested["episodes"],json!([10]),"{nested:?}");
+        assert_eq!(nested["path_title_candidates"],flat["path_title_candidates"],
+            "numeric season folder must not become a candidate: {nested:?}");
+        assert_eq!(select(cops_nested),select(cops_flat));
         // The leaf already has exactly the same title as its ancestor:
         // no override is needed.
         assert_eq!(select("The Simpsons Season 9/Season 9/The.Simpsons.S09E24.mkv"),
@@ -3922,6 +3937,16 @@ mod tests {
         assert_eq!(selected["episode"],24);
         assert_eq!(public_match_response(Some(selected))["sid_start"],
             "tt0096697:9:24");
+
+        for release in ["Cops Seasons 1-24/s6e10.avi",
+            "Cops Seasons 1-24/6/s6e10.avi"]{
+            let got=diagnose(&path,&MatchRequest{
+                title:release.into(),year:None,series:None}).unwrap();
+            let selected=got.selected.unwrap_or_else(||panic!("{release}: {got:?}"));
+            assert_eq!(selected["imdb_id"],"tt0500002","{release}");
+            assert_eq!(selected["season"],6,"{release}");
+            assert_eq!(selected["episode"],10,"{release}");
+        }
 
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
