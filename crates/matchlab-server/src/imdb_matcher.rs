@@ -178,7 +178,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
         // English title. The exact/longest AniDB alias provides identity;
         // requiring release.contains(imdb_alias) silently rejects it.
         // Search via the existing Tantivy anime index, not SQLite title scans.
-        let anime_aliases=crate::tantivy_search::anime_aliases(db,&key,4)
+        let anime_aliases=crate::tantivy_search::anime_aliases_for_title(db,title,4)
             .map_err(index_error)?;
         let best_len=anime_aliases.first().map(|alias|alias.clean_title.len())
             .unwrap_or(0);
@@ -315,7 +315,7 @@ pub fn prefer_verified_episode_identity(
     }
     let key=clean_title(title);
     if key.len()<4{return Ok(candidates);}
-    let exact_anime_ids=crate::tantivy_search::anime_aliases(db,&key,4)
+    let exact_anime_ids=crate::tantivy_search::anime_aliases_for_title(db,title,4)
         .map_err(index_error)?.into_iter()
         .filter(|alias|alias.clean_title==key)
         .map(|alias|alias.imdb_id)
