@@ -389,9 +389,13 @@ the original release. Numeric title suffixes get the same conservative
 check. This prevents `Dune` matching `Duneland` merely because the first
 characters overlap. Candidates are ordered by exact match,
 relative coverage, leading versus trailing edge (only on equal coverage), then
-title length; the existing year, media type, original/region, ratings and
-ordering tie-breakers still apply. Half-word prefix fallback is intentionally
-removed. Short exact titles such as `Up` remain valid.
+title length. Within equally relevant title matches, the number of IMDb
+votes (`numVotes`) ranks first when the release **does not specify a year**, even
+when a season and/or episode is present. When a year **is specified**, year
+proximity ranks before popularity. Media type, original/region preference and
+stable alias ordering remain tie-breakers; title relevance and season/episode
+eligibility are never overridden by popularity. Half-word prefix fallback is
+intentionally removed. Short exact titles such as `Up` remain valid.
 
 AniDB aliases now include sufficiently specific suffix matches in the same
 single index query as prefixes. Unlike compact normalized keys, the original
