@@ -412,6 +412,61 @@ mod tests{
         assert_eq!(exact[0].imdb_id,"tt0434706",
             "the exact anime title should still match normally");
     }
+    #[test]
+    fn lexical_alignment_ranks_whole_word_prefix_over_equal_suffix(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('tt1111111','Alpha Beta','alphabeta',2021,'movie','US',1,0,'movie'),
+                ('tt2222222','Beta Gamma','betagamma',2021,'movie','US',1,0,'movie');
+            INSERT INTO imdb_ratings VALUES('tt1111111',1),('tt2222222',90000);")
+            .unwrap();
+        let found=search(&db,"Alpha Beta Gamma",None,false,0,
+            "Alpha.Beta.Gamma.2021.WEB-DL",false,10).unwrap();
+        assert_eq!(found.len(),2);
+        assert_eq!(found[0].imdb_id,"tt1111111",
+            "equal-coverage whole-word prefix must beat suffix, not popularity");
+    }
+    #[test]
+    fn suffix_of_release_title_is_discovered_without_reverse_fallback(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('tt1111111','Beyond Dune','beyonddune',2021,'movie','US',1,0,'movie'),
+                ('tt2222222','Mystery','mystery',2021,'movie','US',1,0,'movie');")
+            .unwrap();
+        let found=search(&db,"Mystery Beyond Dune",None,false,0,
+            "Mystery.Beyond.Dune.2021.1080p",false,10).unwrap();
+        assert_eq!(found.len(),1);
+        assert_eq!(found[0].imdb_id,"tt1111111");
+    }
+    #[test]
+    fn word_fragments_and_short_generic_titles_are_not_identity(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('tt1111111','Dune','dune',2021,'movie','US',1,0,'movie'),
+                ('tt2222222','Monster','monster',2004,'movie','US',1,0,'movie');")
+            .unwrap();
+        assert!(search(&db,"Duneland",None,false,0,"Duneland.2026",false,10)
+            .unwrap().is_empty(),"a substring of a word cannot be an alias");
+        assert!(search(&db,"Monster The Jeffrey Dahmer Story",None,false,0,
+            "Monster.The.Jeffrey.Dahmer.Story",false,10).unwrap().is_empty(),
+            "a short generic prefix cannot override an unrelated longer title");
+    }
+
     #[test] fn imdb_exact_year_and_series_cap() {
         let db=Connection::open_in_memory().unwrap();
         db.create_scalar_function("reverse",1,
