@@ -9,7 +9,7 @@
 use matchlab_parser::{existing_regex_rules, parse_title_canonical,
     replay_handler_rules, verify_live_regression_corpus, HandlerPatch};
 use serde_json::{json, Map, Value};
-use std::{collections::HashSet, env, fs};
+use std::{collections::{HashMap, HashSet}, env, fs};
 
 const MAX_CANDIDATES:usize=24;
 const MAX_FIXTURES:usize=100;
@@ -91,7 +91,8 @@ fn validate_fixtures(fixtures:&[Value])->Result<(),String>{
     }
     Ok(())
 }
-fn audit_one(item:&Value,fixtures:&[Value],catalog:&[Value])->Value{
+fn audit_one(item:&Value,fixtures:&[Value],catalog:&[Value],
+    community_titles:&[String])->Value{
     let fingerprint=item["fingerprint"].as_str().unwrap_or("");
     let kind=item["kind"].as_str().unwrap_or("unknown");
     let mut report=json!({
@@ -103,6 +104,9 @@ fn audit_one(item:&Value,fixtures:&[Value],catalog:&[Value])->Value{
         "verified_improvements":0,
         "verified_fixture_indexes":[],
         "synthetic_changes":0,
+        "community_title_cases":community_titles.len(),
+        "community_title_changes":0,
+        "community_field_changes":0,
         "regressions":0,
         "source_handler_index":item["handler_index"],
         "reason":"requires independently verified field labels or a supported source handler"
@@ -128,6 +132,13 @@ fn audit_one(item:&Value,fixtures:&[Value],catalog:&[Value])->Value{
                 .count();
             report["native_marker_hits"]=json!(matched);
             report["native_marker_cases"]=json!(samples.len());
+            // These are real torrent names submitted with the same batch.
+            // The candidate's own labels are still NOT ground truth.
+            let community_hits=community_titles.iter().filter(|title|
+                parse_title_canonical(title,false).ok().is_some_and(|parsed|
+                    parsed.get(field)==Some(&item["canonical"])))
+                .count();
+            report["community_native_hits"]=json!(community_hits);
             report["reason"]=json!(if matched==samples.len(){
                 "canonical parser already resolves all checked marker forms; source novelty unproven"
             }else{
@@ -193,6 +204,9 @@ fn audit_one(item:&Value,fixtures:&[Value],catalog:&[Value])->Value{
         .map(str::to_owned).collect::<Vec<_>>();
     let fixture_count=titles.len();
     titles.extend(NEGATIVES.iter().map(|s|(*s).to_owned()));
+    let negative_end=titles.len();
+    titles.extend(community_titles.iter().cloned());
+    let community_end=titles.len();
     titles.extend(synthetic.iter().cloned());
     if titles.len()>128{
         report["status"]=json!("invalid_source");
@@ -211,20 +225,32 @@ fn audit_one(item:&Value,fixtures:&[Value],catalog:&[Value])->Value{
     let mut improved_fixture_indexes=Vec::new();
     let mut distinct_title_identities=HashSet::new();
     let mut synthetic_changes=0usize;
+    let mut community_changes=0usize;
+    let mut community_field_changes=0usize;
     let mut regressions=0usize;
     let mut changes=0usize;
     for (i,(a,b)) in before.iter().zip(after.iter()).enumerate(){
         if a==b{continue;}
         changes+=1;
-        if i>=fixture_count+NEGATIVES.len(){
+        if i>=community_end{
             if a.get(field)!=b.get(field){synthetic_changes+=1;}
-            // Synthetic cases are not independent truth and never authorize
-            // writing parser source by themselves.
+            // Synthetic cases never authorize a source patch.
+            continue;
+        }
+        if i>=negative_end{
+            community_changes+=1;
+            if a.get(field)!=b.get(field){community_field_changes+=1;}
+            // For a field-specific source patch, changing another parsed
+            // field in an unverified real torrent is a safety regression.
+            let keys=a.keys().chain(b.keys()).collect::<HashSet<_>>();
+            if keys.iter().any(|key|key.as_str()!=field &&
+                a.get(key.as_str())!=b.get(key.as_str())){
+                regressions+=1;
+            }
             continue;
         }
         if i>=fixture_count{
-            // Protected public negative controls must stay identical in
-            // every field, regardless of whether a proposed token matches.
+            // Negative controls must remain identical in every field.
             regressions+=1;
             continue;
         }
@@ -262,6 +288,8 @@ fn audit_one(item:&Value,fixtures:&[Value],catalog:&[Value])->Value{
     report["verified_fixture_indexes"]=json!(improved_fixture_indexes);
     report["distinct_verified_titles"]=json!(distinct_title_identities.len());
     report["synthetic_changes"]=json!(synthetic_changes);
+    report["community_title_changes"]=json!(community_changes);
+    report["community_field_changes"]=json!(community_field_changes);
     report["regressions"]=json!(regressions);
     report["parser_output_changes"]=json!(changes);
     let (status,reason)=if regressions>0{
@@ -281,15 +309,29 @@ fn audit_one(item:&Value,fixtures:&[Value],catalog:&[Value])->Value{
 
 fn main()->Result<(),Box<dyn std::error::Error>>{
     let args=env::args().collect::<Vec<_>>();
-    if args.len()!=4{
-        return Err("usage: audit_community_regex daily.json trusted-fixtures.json audit.json".into());
+    if args.len()!=4 && args.len()!=5{
+        return Err("usage: audit_community_regex daily.json trusted-fixtures.json audit.json [community-titles.json]".into());
     }
     let proposals:Vec<Value>=serde_json::from_slice(&fs::read(&args[1])?)?;
     let fixtures:Vec<Value>=serde_json::from_slice(&fs::read(&args[2])?)?;
     validate_fixtures(&fixtures)?;
+    let supplied:HashMap<String,Vec<String>>=if args.len()==5{
+        serde_json::from_slice(&fs::read(&args[4])?)?
+    }else{HashMap::new()};
+    if supplied.len()>MAX_CANDIDATES || supplied.values().any(|titles|
+        titles.len()>12 || titles.iter().any(|title|
+            title.is_empty() || title.len()>200 ||
+            title.contains(['/', '\\', '\n', '\r', '\0']) ||
+            title.chars().any(char::is_control))){
+        return Err("untrusted community title corpus exceeds bounds".into());
+    }
     let catalog=existing_regex_rules();
     let reports=proposals.iter().take(MAX_CANDIDATES)
-        .map(|item|audit_one(item,&fixtures,&catalog))
+        .map(|item|{
+            let fp=item["fingerprint"].as_str().unwrap_or("");
+            let cases=supplied.get(fp).map(Vec::as_slice).unwrap_or(&[]);
+            audit_one(item,&fixtures,&catalog,cases)
+        })
         .collect::<Vec<_>>();
     let eligible=reports.iter().filter(|r|r["promotion_eligible"]==true).count();
     fs::write(&args[3],format!("{}\n",serde_json::to_string_pretty(&reports)?))?;
@@ -333,7 +375,7 @@ mod tests{
             "proposed_regex":format!("(?:{original})|(?:{})",
                 technical_pattern("codec","h264").unwrap())
         });
-        let res=audit_one(&item,&[],&existing_regex_rules());
+        let res=audit_one(&item,&[],&existing_regex_rules(),&[]);
         assert_eq!(res["promotion_eligible"],false);
         assert_ne!(res["status"],"ready_for_source_diff");
     }
