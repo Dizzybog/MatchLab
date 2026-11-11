@@ -132,8 +132,10 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     let key=clean_title(title);
     let release=clean_title(release_title);
     if key.is_empty(){return Ok(vec![]);}
-    let words=crate::title_normalization::clean_words(title);
-    let release_words=crate::title_normalization::clean_words(release_title);
+    // Most lookups resolve exactly: avoid two extra Unicode folds and word
+    // vector allocations on that hot path.
+    let mut words=Vec::new();
+    let mut release_words=Vec::new();
     let mut stage="aligned";
     let mut rows=Vec::new();
     // Exact country-qualified aliases precede generic prefix matching.
@@ -152,6 +154,8 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
         // Exact aliases are authoritative and fast, including "Up" and "It".
         rows=filter(db,exact(db,&key)?,&release,series,year,required_season)?;
         if rows.is_empty()&&key.len()>=4{
+            words=crate::title_normalization::clean_words(title);
+            release_words=crate::title_normalization::clean_words(release_title);
             // Compare forward, reverse and embedded edge matches together;
             // never let the first nonempty strategy decide the winning title.
             let mut discovered=tantivy_aliases(db,&key,false)?;
