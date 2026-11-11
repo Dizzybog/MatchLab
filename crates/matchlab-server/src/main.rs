@@ -636,6 +636,15 @@ fn is_anime_series_match(
         .optional().map(|hit|hit.is_some()).map_err(|e|e.to_string())
 }
 
+/// An exact AniDB title may be unambiguous even before an IMDb candidate
+/// exists. Conservatively protect any indexed anime alias, including aliases
+/// shared by multiple IMDb identities.
+fn has_exact_anime_alias(db:&Connection,key:&str)->Result<bool,String>{
+    if key.len()<4{return Ok(false);}
+    Ok(tantivy_search::anime_aliases(db,key,4)?.into_iter()
+        .any(|alias|alias.clean_title==key))
+}
+
 /// When a hierarchical, ordinary TV release has both a season and an
 /// episode, prefer an exact IMDb title from the nearest named parent.
 /// If it has no eligible series title, walk outward toward the root.
@@ -666,7 +675,7 @@ fn preferred_regular_series_parent_title(
         .and_then(Value::as_i64).map(|value|value as i32));
     // Do not reinterpret an exact anime title as an ordinary folder title,
     // even if the optional anime_ids table is incomplete.
-    if exact_anime_identity(db,&leaf_key)?.is_some(){
+    if has_exact_anime_alias(db,&leaf_key)?{
         return Ok(None);
     }
     if !leaf_key.is_empty(){
@@ -683,9 +692,10 @@ fn preferred_regular_series_parent_title(
     for parent in parents.iter().rev().filter_map(Value::as_str){
         let name=parent.trim();
         let key=imdb_matcher::clean_title(name);
-        if key.len()<3 || key==leaf_key || !seen.insert(key.clone()){
+        if key.is_empty() || key==leaf_key || !seen.insert(key.clone()){
             continue;
         }
+        if has_exact_anime_alias(db,&key)?{return Ok(None);}
         // Match through the ordinary Tantivy-based engine, never SQL title
         // scans or a guess from the folder text. An exact alias is required
         // so generic library folders cannot hijack a valid leaf.
