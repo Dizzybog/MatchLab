@@ -41,6 +41,11 @@ fn specials_folder_is_inherited_but_explicit_child_season_wins(){
     assert_eq!(parsed["episodes"],json!([3]),"{parsed:?}");
     assert_eq!(parsed["special_episode"],json!(true),"{parsed:?}");
 
+    let ova=parse_title("Example Show/OVA/E03.1080p.mkv",false).unwrap();
+    assert_eq!(ova["seasons"],json!([0]),"{ova:?}");
+    assert_eq!(ova["title"],"Example Show","{ova:?}");
+    assert_eq!(ova["special_type"],"ova","{ova:?}");
+
     let ordinary=parse_title("Example Show/Specials/Example.Show.S01E03.mkv",false).unwrap();
     assert_eq!(ordinary["seasons"],json!([1]),"{ordinary:?}");
     assert!(ordinary.get("special_episode").is_none(),"{ordinary:?}");
