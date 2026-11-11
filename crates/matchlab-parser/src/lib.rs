@@ -2912,7 +2912,9 @@ fn generic_path_title(title:&str)->bool{
         "episode","ep","season","seasons","season 1","series",
         "shows","tv","tv shows","movies","films","media","videos",
         "downloads","download","archive","library","complete",
-        "extras","specials","subtitles"
+        "extras","special","specials","ova","oav","oad","omake",
+        "webisode","webisodes","bonus","bonus episodes","picture drama",
+        "recap special","ona special","one shot","sp","subtitles"
     ].contains(&lowercase.as_str())
 }
 
