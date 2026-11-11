@@ -3078,20 +3078,28 @@ mod tests {
             CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
                 anidb_season INTEGER,tvdb_season INTEGER,
                 start INTEGER,end INTEGER,offset INTEGER,map TEXT);
-            INSERT INTO titles VALUES('tt2359704','JoJo''s Bizarre Adventure',
-                'jojosbizarreadventure',2012,'series','',1,0,'tvSeries');
+            -- IMDb's original name is Japanese romanization, while the
+            -- release uses an English anime alias. This intentionally
+            -- tests indexed AniDB-to-IMDb identity fallback, not a
+            -- fabricated English title row in IMDb's basic data.
+            INSERT INTO titles VALUES('tt2359704','JoJo no Kimyo na Boken',
+                'jojonokimyonaboken',2012,'series','',1,0,'tvSeries');
             INSERT INTO seasons VALUES('tt2359704',5);
             INSERT INTO season_episodes VALUES('tt2359704',2,48,48);
             INSERT INTO anime_series_map VALUES
+                ('tt2359704','10000','262954',0),
                 ('tt2359704','10001','262954',0),
                 ('tt2359704','10002','262954',0);
-            INSERT INTO anime_ids VALUES('tt2359704','anidb','10001');
+            INSERT INTO anime_ids VALUES('tt2359704','anidb','10000');
             INSERT INTO anidb_titles VALUES
+                ('10000','JoJo''s Bizarre Adventure',
+                 'jojosbizarreadventure','main','en'),
                 ('10001','JoJo''s Bizarre Adventure Stardust Crusaders',
                  'jojosbizarreadventurestardustcrusaders','main','en'),
                 ('10002','JoJo''s Bizarre Adventure Stardust Crusaders Egypt',
                  'jojosbizarreadventurestardustcrusadersegypt','main','en');
             INSERT INTO episode_map VALUES
+                ('10000','262954',1,1,1,26,0,''),
                 ('10001','262954',1,2,1,24,0,''),
                 ('10002','262954',1,2,1,24,24,'');").unwrap();
         tantivy_search::warmup(&db).unwrap();
