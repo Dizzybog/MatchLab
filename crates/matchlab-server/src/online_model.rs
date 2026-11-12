@@ -330,6 +330,9 @@ impl OnlineModel{
     /// resolution and anime markers. Labels are replayed from the unmodified
     /// canonical parser. They are advisory, never rule-promotion truth.
     /// A fixed per-release cap bounds SQLite writes and CPU use.
+    // Retained for standalone callers and differential tests; production
+    // worker uses observe_canonical_fields_with_context to avoid rework.
+    #[allow(dead_code)]
     pub fn observe_canonical_fields(
         &mut self,db:&Connection,title:&str,canonical:&Value
     )->Result<usize,String>{
