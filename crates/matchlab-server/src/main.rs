@@ -5477,6 +5477,10 @@ mod tests {
         // FALSE season pack because the parent announces 第62集.
         let db=Connection::open(&path).unwrap();
         db.execute("DELETE FROM episode_map",[]).unwrap();
+        // Any modification of the SQLite snapshot changes its Tantivy
+        // generation fingerprint. Warm the new immutable generation before
+        // issuing another /match request, just as production startup does.
+        tantivy_search::warmup(&db).unwrap();
         drop(db);
         let unresolved=diagnose(&path,&MatchRequest{
             title:RAW.into(),year:None,series:None}).unwrap();
