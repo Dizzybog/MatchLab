@@ -467,8 +467,14 @@ impl ParserEngine {
                 let start = match_result.match_index.min(title.len());
                 let end = (match_result.match_index + match_result.match_len).min(title.len());
                 if start <= end && title.is_char_boundary(start) && title.is_char_boundary(end) {
+                    let previous_len=title.len();
                     title.replace_range(start..end, "");
-                    if PREFILTER {
+                    // Removing an entire prefix or suffix cannot create a
+                    // *new* literal match in the remaining text. Keeping
+                    // already-set gates is conservative (false positives are
+                    // checked by PCRE2), while rescanning an interior deletion
+                    // is essential: newly adjacent words may form a literal.
+                    if PREFILTER && start>0 && end<previous_len {
                         self.prefilter.scan(&title, &mut hits);
                     }
                 }
