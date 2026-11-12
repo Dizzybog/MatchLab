@@ -432,6 +432,19 @@ title length. For otherwise eligible IMDb candidates, the ranking is:
    boundary, partial-word matches and release-group names alone are never
    sufficient identity evidence. All suffix discoveries use a single
    indexed Tantivy query, not a SQLite title scan.
+   The matcher also supports the **reverse title-suffix relationship**:
+   the complete source content can itself be the END of a longer IMDb
+   title. For example, `The.ed.gein.story.s01e01` matches the trailing
+   words of `Monster: The Ed Gein Story`, even though `Monster` is
+   entirely absent from the torrent and a shorter title starting with
+   `The Ed` may have been discovered already. The existing reversed
+   Tantivy title index retrieves these longer candidates; the validator
+   checks that **all** source-title words form the candidate's exact
+   whole-word suffix, that the matched text covers at least 50% of its
+   title, and that no more than 16 candidate-title characters remain
+   unmatched. The length of the actually matched title words outranks
+   shorter matches, while a complete exact title wins at equal matched
+   length. No broad substring scan or parser-specific exception is used.
 2. **Distance from the release year**, when one was provided; otherwise all
    candidates have the same distance (zero), regardless of season/episode.
 3. **Region preference**: for duplicate normalized IMDb titles, prefer
