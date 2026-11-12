@@ -59,6 +59,23 @@ fn filter_eligible(db:&Connection,rows:Vec<Aka>,series:bool,year:Option<i32>,sea
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter().collect::<Vec<_>>();
     if ids.is_empty(){return Ok(rows);}
+    // Most ordinary exact matches involve one or two IMDb identities.
+    // Avoid building dynamic SQL and collecting a full ID set for the
+    // small-candidate path; retain the original memoized checks instead.
+    if ids.len()<=4 {
+        let mut memo=std::collections::HashMap::new();
+        let mut result=Vec::with_capacity(rows.len());
+        for row in rows {
+            if !is_series(&row.media_type){result.push(row);continue;}
+            let yes=if let Some(&yes)=memo.get(&row.imdb_id){yes}else{
+                let yes=eligible(db,&row,season)?;
+                memo.insert(row.imdb_id.clone(),yes);
+                yes
+            };
+            if yes{result.push(row);}
+        }
+        return Ok(result);
+    }
     let threshold=std::cmp::max(1,season-1);
     let mut eligible_ids=std::collections::HashSet::new();
     for batch in ids.chunks(256){
