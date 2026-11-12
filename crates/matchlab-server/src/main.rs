@@ -3087,6 +3087,66 @@ mod tests {
     }
 
     #[test]
+    fn historical_bleach_s07_release_publishes_real_imdb_anidb_endpoints(){
+        // Explicitly model the previously verified production crosswalk:
+        // Bleach S07E01..20 -> AniDB 2369 absolute episodes 132..151.
+        // Deterministic fixture, not a live IMDb/AniDB metadata snapshot.
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-bleach-s07-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+                imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,
+                category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES
+                ('tt0434665','Bleach','bleach',2004,'series','',1,0,'tvSeries');
+            INSERT INTO imdb_ratings VALUES('tt0434665',90000);
+            INSERT INTO seasons VALUES('tt0434665',16);
+            INSERT INTO season_episodes VALUES('tt0434665',7,20,20);
+            INSERT INTO anime_series_map VALUES
+                ('tt0434665','2369','74796',0);
+            INSERT INTO anime_ids VALUES('tt0434665','anidb','2369');
+            INSERT INTO anidb_titles VALUES
+                ('2369','Bleach','bleach','main','en');
+            INSERT INTO episode_map VALUES
+                ('2369','74796',1,-1,1,366,0,''),
+                ('2369','74796',1,7,132,151,-131,'');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        for (release,start,end,asid_start,asid_end) in [
+            ("Bleach.S07.MULTi.1080p.WEB.H264-UwU",1,20,132,151),
+            ("Bleach.S07E01.1080p.WEB",1,1,132,132),
+            ("Bleach.S07E20.1080p.WEB",20,20,151,151),
+        ] {
+            let result=diagnose(&path,&MatchRequest{
+                title:release.into(),year:None,series:None}).unwrap();
+            let selected=result.selected.expect("verified Bleach IMDb identity");
+            assert_eq!(selected["imdb_id"],"tt0434665","{release}: {selected}");
+            assert_eq!(public_match_response(Some(selected)),json!({
+                "sid_start":format!("tt0434665:7:{start}"),
+                "sid_end":format!("tt0434665:7:{end}"),
+                "asid_start":format!("2369:{asid_start}"),
+                "asid_end":format!("2369:{asid_end}")
+            }),"{release}");
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
     fn bleach_absolute_episode_uses_ranked_winner_despite_five_anime_list_imdb_ids(){
         let stamp=std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
