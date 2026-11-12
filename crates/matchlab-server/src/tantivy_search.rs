@@ -1,6 +1,6 @@
 //! MatchLab's persistent Tantivy search engine for IMDb and AniDB titles.
 //! Exact/prefix/suffix lookups share immutable metadata index generations.
-use std::{collections::{HashMap,BTreeSet},fs::File,path::{Path,PathBuf},sync::{Mutex,OnceLock,atomic::{AtomicU64,Ordering}},time::{Duration,SystemTime,UNIX_EPOCH}};
+use std::{collections::{HashMap,BTreeSet},fs::File,path::{Path,PathBuf},sync::{RwLock,OnceLock,atomic::{AtomicU64,Ordering}},time::{Duration,SystemTime,UNIX_EPOCH}};
 use crate::query_cache::QueryCache;
 use rusqlite::{Connection,OptionalExtension};
 use tantivy::{collector::DocSetCollector,doc,query::{RegexQuery,TermQuery,TermSetQuery},schema::{Schema,STORED,STRING,Value,IndexRecordOption},Index,IndexReader,ReloadPolicy,Term};
@@ -37,7 +37,9 @@ pub struct TitleAlias {
     pub ordering:i32,pub media_type:String,
 }
 
-static CACHE:OnceLock<Mutex<HashMap<String,SearchIndex>>>=OnceLock::new();
+// SearchIndex generations are immutable after publication. Concurrent
+// queries only need a shared read lock; index opening uses the write path.
+static CACHE:OnceLock<RwLock<HashMap<String,SearchIndex>>>=OnceLock::new();
 static MEMORY_INDEX_NONCE:AtomicU64=AtomicU64::new(0);
 
 // Reuse identical immutable Tantivy lookups across files belonging to the
@@ -363,29 +365,36 @@ fn open_search(db:&Connection)->Result<(SearchIndex,Option<PathBuf>),String>{
     let search=if let Some(ref directory)=memory_dir {
         build(db,directory)?
     }else{
-        let cache=CACHE.get_or_init(||Mutex::new(HashMap::new()));
-        let mut guard=cache.lock().map_err(|e|e.to_string())?;
-        // Keep several immutable generations cached simultaneously. In-flight
-        // requests may hold an older SQLite snapshot after a refresh; evicting
-        // every other generation on each query would cause cache thrashing.
-        if !guard.contains_key(&path) {
-            let location=index_dir(Path::new(source),&generation_id);
-            // Never index millions of titles on an HTTP request. The importer
-            // publishes completed generations before SQLite; startup warmup
-            // is responsible for recovering genuinely missing indices.
-            if !location.join(".matchlab-complete").is_file(){
-                return Err(format!("Tantivy generation not ready: {}",location.display()));
-            }
-            let opened=build(db,&location)?;
-            const MAX_GENERATIONS:usize=12;
-            if guard.len()>=MAX_GENERATIONS {
-                if let Some(victim)=guard.keys().find(|k|k.as_str()!=path).cloned() {
-                    guard.remove(&victim);
+        let cache=CACHE.get_or_init(||RwLock::new(HashMap::new()));
+        // No exclusive process-wide lock on the ordinary warmed-index path.
+        let cached={
+            let guard=cache.read().map_err(|e|e.to_string())?;
+            guard.get(&path).cloned()
+        };
+        if let Some(cached)=cached{
+            cached
+        }else{
+            let mut guard=cache.write().map_err(|e|e.to_string())?;
+            // Double-check after acquiring the exclusive lock: a concurrent
+            // request may have loaded this same generation already.
+            if !guard.contains_key(&path) {
+                let location=index_dir(Path::new(source),&generation_id);
+                // Never index millions of titles on an HTTP request.
+                if !location.join(".matchlab-complete").is_file(){
+                    return Err(format!("Tantivy generation not ready: {}",location.display()));
                 }
+                let opened=build(db,&location)?;
+                // Preserve immutable generations for old SQLite snapshots.
+                const MAX_GENERATIONS:usize=12;
+                if guard.len()>=MAX_GENERATIONS {
+                    if let Some(victim)=guard.keys().find(|k|k.as_str()!=path).cloned() {
+                        guard.remove(&victim);
+                    }
+                }
+                guard.insert(path.clone(),opened);
             }
-            guard.insert(path.clone(),opened);
+            guard.get(&path).ok_or("index missing")?.clone()
         }
-        guard.get(&path).ok_or("index missing")?.clone()
     };
     Ok((search,memory_dir))
 }
@@ -413,32 +422,13 @@ pub struct AliasRecord {
 #[derive(Debug,Clone,Copy)]
 pub enum AliasLookupKind { ImdbId, AnidbId, ExactTitle }
 
-/// All identity lookups and exact normalized title lookups use Tantivy term
-/// postings. No SQLite title scans, prefix expansion, ranker, or TopDocs cap.
-pub fn lookup_aliases(
-    db:&Connection,kind:AliasLookupKind,key:&str,
+// Rehydrate records once for both single-ID and multi-ID index queries.
+// One TermSetQuery replaces O(N) reader acquisitions for external aliases.
+fn alias_records_from_hits(
+    search:&SearchIndex,
+    reader:&tantivy::Searcher,
+    hits:impl IntoIterator<Item=tantivy::DocAddress>,
 )->Result<Vec<AliasRecord>,String>{
-    let (search,memory_dir)=open_search(db)?;
-    let reader=search.reader.searcher();
-    let hits=match kind{
-        AliasLookupKind::ImdbId=>{
-            let q=TermQuery::new(Term::from_field_text(search.id,key),
-                IndexRecordOption::Basic);
-            reader.search(&q,&DocSetCollector)
-        },
-        AliasLookupKind::AnidbId=>{
-            let q=TermQuery::new(Term::from_field_text(search.anime_id,key),
-                IndexRecordOption::Basic);
-            reader.search(&q,&DocSetCollector)
-        },
-        AliasLookupKind::ExactTitle=>{
-            let q=TermSetQuery::new([
-                Term::from_field_text(search.forward,key),
-                Term::from_field_text(search.anime,key),
-            ]);
-            reader.search(&q,&DocSetCollector)
-        },
-    }.map_err(|e|e.to_string())?;
     let mut records=BTreeSet::new();
     for addr in hits {
         let document:tantivy::TantivyDocument=reader.doc(addr)
@@ -467,10 +457,40 @@ pub fn lookup_aliases(
             });
         }
     }
+    Ok(records.into_iter().collect())
+}
+
+/// All identity lookups and exact normalized title lookups use Tantivy term
+/// postings. No SQLite title scans, prefix expansion, ranker, or TopDocs cap.
+pub fn lookup_aliases(
+    db:&Connection,kind:AliasLookupKind,key:&str,
+)->Result<Vec<AliasRecord>,String>{
+    let (search,memory_dir)=open_search(db)?;
+    let reader=search.reader.searcher();
+    let hits=match kind{
+        AliasLookupKind::ImdbId=>{
+            let q=TermQuery::new(Term::from_field_text(search.id,key),
+                IndexRecordOption::Basic);
+            reader.search(&q,&DocSetCollector)
+        },
+        AliasLookupKind::AnidbId=>{
+            let q=TermQuery::new(Term::from_field_text(search.anime_id,key),
+                IndexRecordOption::Basic);
+            reader.search(&q,&DocSetCollector)
+        },
+        AliasLookupKind::ExactTitle=>{
+            let q=TermSetQuery::new([
+                Term::from_field_text(search.forward,key),
+                Term::from_field_text(search.anime,key),
+            ]);
+            reader.search(&q,&DocSetCollector)
+        },
+    }.map_err(|e|e.to_string())?;
+    let records=alias_records_from_hits(&search,&reader,hits)?;
     drop(reader);
     drop(search);
     if let Some(dir)=memory_dir{let _=std::fs::remove_dir_all(dir);}
-    Ok(records.into_iter().collect())
+    Ok(records)
 }
 
 
@@ -530,14 +550,21 @@ pub fn imdb_ids_for_external_id(
 
 /// Fetch all titles for an explicit set of IMDb IDs with one Tantivy union.
 /// Used after alternate-ID lookup, not for fuzzy title discovery.
+/// Rehydrate only the returned documents; no title scans or per-ID searches.
 pub fn aliases_for_imdb_ids(
     db:&Connection,ids:&BTreeSet<String>,
 )->Result<Vec<AliasRecord>,String>{
-    let mut out=BTreeSet::new();
-    for id in ids {
-        out.extend(lookup_aliases(db,AliasLookupKind::ImdbId,id)?);
-    }
-    Ok(out.into_iter().collect())
+    if ids.is_empty(){return Ok(Vec::new());}
+    let (search,memory_dir)=open_search(db)?;
+    let reader=search.reader.searcher();
+    let query=TermSetQuery::new(ids.iter()
+        .map(|id|Term::from_field_text(search.id,id)));
+    let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
+    let records=alias_records_from_hits(&search,&reader,hits)?;
+    drop(reader);
+    drop(search);
+    if let Some(dir)=memory_dir{let _=std::fs::remove_dir_all(dir);}
+    Ok(records)
 }
 
 /// IMDb-independent AniDB identity lookup. Collect only AniDB ID postings
@@ -1030,6 +1057,71 @@ pub fn anime_candidates(db:&Connection,key:&str)->Result<Vec<String>,String>{
 #[cfg(test)]
 mod persistence_tests {
     use super::*;
+
+    #[test]
+    fn warmed_index_handles_simultaneous_readers(){
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-concurrent-tantivy-{}-{:?}.sqlite3",
+            std::process::id(),std::thread::current().id()));
+        let _=std::fs::remove_file(&path);
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
+            region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE metadata_state(source TEXT PRIMARY KEY,
+                updated_at TEXT NOT NULL,row_count INTEGER NOT NULL);
+            INSERT INTO metadata_state VALUES('tantivy_generation','v3-parallel-readers',0);
+            INSERT INTO titles VALUES
+                ('tt0000400','Parallel Show','parallelshow',2026,'series','',1,0,'tvSeries');")
+            .unwrap();
+        warmup(&db).unwrap();
+        drop(db);
+        let mut workers=Vec::new();
+        for _ in 0..8 {
+            let path=path.clone();
+            workers.push(std::thread::spawn(move||{
+                let db=Connection::open(&path).unwrap();
+                for _ in 0..16 {
+                    let hits=title_aliases_exact(&db,"parallelshow").unwrap();
+                    assert_eq!(hits.len(),1);
+                    assert_eq!(hits[0].imdb_id,"tt0000400");
+                }
+            }));
+        }
+        for worker in workers {worker.join().unwrap();}
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
+    fn multi_imdb_lookup_matches_union_of_individual_index_queries(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
+            region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT);
+            INSERT INTO titles VALUES
+                ('tt0000001','First Show','firstshow',2020,'series','',1,0,'tvSeries'),
+                ('tt0000001','Show One','showone',2020,'series','US',0,1,'tvSeries'),
+                ('tt0000002','Second Show','secondshow',2021,'series','',1,0,'tvSeries'),
+                ('tt0000003','Other Show','othershow',2022,'series','',1,0,'tvSeries');
+            INSERT INTO anidb_titles VALUES
+                ('123','Anime Alternate','animealternate','main','en');
+            INSERT INTO anime_series_map VALUES('123','tt0000002');").unwrap();
+        let ids=BTreeSet::from(["tt0000001".to_owned(),"tt0000002".to_owned()]);
+        let mut expected=BTreeSet::new();
+        for id in &ids {
+            expected.extend(lookup_aliases(&db,AliasLookupKind::ImdbId,id).unwrap());
+        }
+        let actual=aliases_for_imdb_ids(&db,&ids).unwrap();
+        assert_eq!(actual,expected.into_iter().collect::<Vec<_>>());
+        assert!(actual.iter().all(|item|
+            item.imdb_id.as_deref()!=Some("tt0000003")));
+        assert!(actual.iter().any(|item|item.anidb_id.as_deref()==Some("123")));
+        assert!(aliases_for_imdb_ids(&db,&BTreeSet::new()).unwrap().is_empty());
+    }
 
     #[test]
     fn disk_cache_key_changes_with_metadata_generation(){

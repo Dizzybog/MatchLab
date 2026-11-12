@@ -82,6 +82,27 @@ fn matchlab_parser_benches(c: &mut Criterion) {
         );
     });
 
+    // Measure flat torrent filenames separately from bracket-aware paths.
+    // These cases exercise the URL banner/path tokenizer introduced in #120.
+    group.bench_function("flat_single_file",|b|{
+        b.iter(||black_box(parse_title(
+            black_box("LEGO.Masters.AU.S03E09.1080p.WEB-DL.x264"),false).unwrap()));
+    });
+    group.bench_function("bracketed_multilevel_path",|b|{
+        let path="【发布 https://example.org/release】The.Demon.Hunter.S01.2023/Season 01/【镜像 https://mirror.example.org】S01E02.mkv";
+        b.iter(||black_box(parse_title(black_box(path),false).unwrap()));
+    });
+    // Compare the existing native parallel batch path with sequential parsing.
+    // No throughput claims until these run on the same production hardware.
+    group.bench_function("parse_many_128_sequential",|b|{
+        b.iter(||{
+            let parsed=(0..128).map(|i|
+                parse_title(black_box(TITLES[i%TITLES.len()]),false))
+                .collect::<Result<Vec<_>,_>>().expect("sequential parse");
+            black_box(parsed);
+        });
+    });
+
     group.finish();
 }
 
