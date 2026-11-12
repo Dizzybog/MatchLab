@@ -700,6 +700,41 @@ pub fn title_aliases_at_release_prefixes(
     Ok(aliases)
 }
 
+/// Recover longer IMDb titles anchored at a later whole-word boundary in
+/// the original release, ending at the first season/episode/quality marker.
+/// One bounded indexed prefix query replaces N per-word searches. The
+/// matcher rejects all unsafe partial words/coverage after retrieval.
+pub fn title_aliases_at_release_suffixes(
+    db:&Connection,keys:&[String],
+)->Result<Vec<TitleAlias>,String>{
+    if keys.is_empty(){return Ok(Vec::new());}
+    let (search,memory_dir)=open_search(db)?;
+    let mut alternatives=Vec::with_capacity(keys.len());
+    for key in keys {
+        if key.is_empty(){continue;}
+        let mut escaped=String::new();
+        for ch in key.chars(){
+            if ".+*?()[]{}|^$\\".contains(ch){escaped.push('\\');}
+            escaped.push(ch);
+        }
+        alternatives.push(escaped);
+    }
+    if alternatives.is_empty(){return Ok(Vec::new());}
+    let pattern=format!("({}).*",alternatives.join("|"));
+    let query=RegexQuery::from_pattern(&pattern,search.forward)
+        .map_err(|e|e.to_string())?;
+    let reader=search.reader.searcher();
+    let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
+    let mut aliases=Vec::with_capacity(hits.len());
+    for addr in hits{
+        let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
+        if let Some(alias)=read_title(&doc,&search){aliases.push(alias);}
+    }
+    drop(reader);drop(search);
+    if let Some(dir)=memory_dir{let _=std::fs::remove_dir_all(dir);}
+    Ok(aliases)
+}
+
 /// Find complete IMDb alias prefixes AND suffixes inside the parsed title.
 /// One Tantivy term-union query discovers the candidates; a separate word-
 /// boundary-aware ranker rejects fragments of longer words.
