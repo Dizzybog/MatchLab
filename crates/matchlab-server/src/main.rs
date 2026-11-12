@@ -1428,6 +1428,39 @@ fn diagnose_with_policy(
             winner["absolute_episode_input"]=json!(chinese_absolute_hint);
         }
     }
+    // A Chinese/Korean parent can label an *absolute* episode (第62集)
+    // while the leaf file is only a download banner. Such a file is NOT a
+    // complete season pack, nor proof that episode 62 belongs to S01.
+    // The already-selected IMDb identity can receive one episode only
+    // through an unambiguous imported AniDB/TVDB absolute crosswalk.
+    if episodes.is_empty() && !airdate_only && season_range.is_none()
+        && !parsed.contains_key("anime_episode_range_candidate")
+        && let Some(absolute)=parsed.get("absolute_episode_candidate")
+            .and_then(Value::as_i64)
+        && let Some(winner)=selected.as_mut()
+        && winner["category"]=="series" && winner["episode"].is_null()
+        && let Some(imdb)=winner["imdb_id"].as_str()
+            .filter(|id|metadata_import::valid_imdb_id(id))
+            .map(str::to_owned)
+        && let Some(mapped)=episode_crosswalk::resolve_absolute(&db,&imdb,absolute)
+            .map_err(|error|error.to_string())?
+        && candidate_has_episode(&db,&imdb,mapped.season,mapped.episode)?
+        && valid_sid_coordinate(mapped.season,mapped.episode)
+    {
+        winner["season"]=json!(mapped.season);
+        winner["episode"]=json!(mapped.episode);
+        winner["sid"]=json!(format!("{imdb}:{}:{}",mapped.season,mapped.episode));
+        winner["anime"]=json!({
+            "anidb_id":mapped.anidb_id,
+            "episode":mapped.anidb_episode,
+            "asid":format!("{}:{}",mapped.anidb_id,mapped.anidb_episode)
+        });
+        winner["absolute_episode_input"]=json!(absolute);
+        winner["match_source"]=json!("verified_parent_absolute_episode");
+        if let Some(ids)=winner["anime_ids"].as_object_mut(){
+            ids.insert("anidb".into(),json!(mapped.anidb_id));
+        }
+    }
     // Date-only releases use Cinemeta; explicit SxxExx coordinates take precedence.
     if airdate_only {
         if let (Some(date),Some(winner))=(dated.as_ref(),selected.as_mut()){
@@ -1476,6 +1509,7 @@ fn diagnose_with_policy(
     // whose metadata verified season 1 (e.g. [Group][Chaos_Head][BDRip]).
     // A supplied episode or batch is never expanded to the entire season.
     if !airdate_only && episodes.is_empty() && !parsed.contains_key("episode_start")
+        && !parsed.contains_key("absolute_episode_candidate")
         && !parsed.contains_key("anime_episode_candidate")
         && !parsed.contains_key("anime_episode_range_candidate")
         && !parsed.contains_key("anime_season_episode_candidate")
