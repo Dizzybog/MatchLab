@@ -638,109 +638,6 @@ fn verified_anime_subfolder_title(
     Ok(None)
 }
 
-/// IMDb anime markers are not limited to the optional anime_ids table:
-/// anime_series_map may be the only link for older imported titles.
-fn is_anime_series_match(
-    db:&Connection,candidate:&imdb_matcher::Match,
-)->Result<bool,String>{
-    if !candidate.anime_ids.is_empty(){return Ok(true);}
-    db.query_row("SELECT 1 FROM anime_series_map WHERE imdb_id=?1 LIMIT 1",
-        [&candidate.imdb_id],|row|row.get::<_,i64>(0))
-        .optional().map(|hit|hit.is_some()).map_err(|e|e.to_string())
-}
-
-/// An exact AniDB title may be unambiguous even before an IMDb candidate
-/// exists. Conservatively protect any indexed anime alias, including aliases
-/// shared by multiple IMDb identities.
-fn has_exact_anime_alias(db:&Connection,key:&str)->Result<bool,String>{
-    if key.len()<4{return Ok(false);}
-    Ok(tantivy_search::anime_aliases(db,key,4)?.into_iter()
-        .any(|alias|alias.clean_title==key))
-}
-
-/// When a hierarchical, ordinary TV release has both a season and an
-/// episode, prefer an exact IMDb title from the nearest named parent.
-/// If it has no eligible series title, walk outward toward the root.
-/// Fall back to the leaf title when no parent has a verified identity.
-/// Anime keeps its existing leaf/part-title and crosswalk precedence.
-fn preferred_regular_series_parent_title(
-    db:&Connection,req:&MatchRequest,
-    parsed:&serde_json::Map<String,Value>,
-)->Result<Option<String>,String>{
-    if req.series==Some(false) || parsed.get("anime_title_verified")
-        .and_then(Value::as_bool)==Some(true)
-    {
-        return Ok(None);
-    }
-    let seasons=numbers(parsed.get("seasons"));
-    let episodes=numbers(parsed.get("episodes"));
-    if seasons.is_empty() || (episodes.is_empty() &&
-        parsed.get("episode_start").and_then(Value::as_i64).is_none()){
-        return Ok(None);
-    }
-    let Some(parents)=parsed.get("path_title_candidates").and_then(Value::as_array)
-        else{return Ok(None)};
-    if parents.is_empty(){return Ok(None);}
-    let leaf=parsed.get("title").and_then(Value::as_str).unwrap_or("");
-    let leaf_key=imdb_matcher::clean_title(leaf);
-    let season=seasons.iter().copied().max().unwrap_or(0);
-    let year=req.year.or_else(||parsed.get("year")
-        .and_then(Value::as_i64).map(|value|value as i32));
-    // Do not reinterpret an exact anime title as an ordinary folder title,
-    // even if the optional anime_ids table is incomplete.
-    if has_exact_anime_alias(db,&leaf_key)?{
-        return Ok(None);
-    }
-    let mut leaf_is_exact_regular=false;
-    if !leaf_key.is_empty(){
-        let leaf_matches=imdb_matcher::search(
-            db,leaf,year,true,season,&req.title,true,10)
-            .map_err(|e|e.to_string())?;
-        for candidate in leaf_matches.iter().filter(|candidate|
-            imdb_matcher::clean_title(&candidate.matched_title)==leaf_key){
-            if is_anime_series_match(db,candidate)?{return Ok(None);}
-            if matches!(candidate.media_type.as_str(),"tvSeries"|"tvMiniSeries"){
-                leaf_is_exact_regular=true;
-            }
-        }
-    }
-
-    let mut seen=std::collections::HashSet::new();
-    for parent in parents.iter().rev().filter_map(Value::as_str){
-        let name=parent.trim();
-        let key=imdb_matcher::clean_title(name);
-        if key.is_empty() || !seen.insert(key.clone()){continue;}
-        // The nearest parent already names the same verified series as
-        // the leaf: it wins, so a more distant library folder cannot
-        // unexpectedly replace it with an unrelated IMDb series.
-        if key==leaf_key && leaf_is_exact_regular{return Ok(None);}
-        if key==leaf_key{continue;}
-        if has_exact_anime_alias(db,&key)?{return Ok(None);}
-        // Match through the ordinary Tantivy-based engine, never SQL title
-        // scans or a guess from the folder text. An exact alias is required
-        // so generic library folders cannot hijack a valid leaf.
-        let matches=imdb_matcher::search(
-            db,name,year,true,season,&req.title,true,10)
-            .map_err(|e|e.to_string())?;
-        let mut regular=false;
-        let mut anime=false;
-        for candidate in matches.iter().filter(|candidate|
-            imdb_matcher::clean_title(&candidate.matched_title)==key
-            && matches!(candidate.media_type.as_str(),"tvSeries"|"tvMiniSeries")){
-            if is_anime_series_match(db,candidate)?{
-                anime=true;
-            }else{
-                regular=true;
-            }
-        }
-        // An anime title, or a title shared by anime and live action, is
-        // not evidence to replace the established anime handling.
-        if anime{return Ok(None);}
-        if regular{return Ok(Some(name.to_owned()));}
-    }
-    Ok(None)
-}
-
 /// Use identical production gates for both a filename and each parent directory.
 /// A candidate rejected later must not prevent the search from climbing.
 #[derive(Clone,Copy)]
@@ -1105,10 +1002,7 @@ fn diagnose_with_policy(
             }));
         }
     }
-    // Series title precedence belongs to the matcher, not the metadata-only
-    // /parse endpoint: only the matcher can distinguish ordinary TV from anime.
-    let preferred_parent={
-        let parsed=parsed_value.as_object().ok_or("parser returned no object")?;
+    let parsed=parsed_value.as_object().ok_or("parser returned no object")?;
         // Retain the established parser-facing parent-title normalization,
         // especially when the leaf is an episode name instead of a show.
         // This does NOT force the IMDb identity: the new bottom-up matcher
@@ -1190,8 +1084,15 @@ fn diagnose_with_policy(
                 &db,title,year,series,seasons.iter().copied().max().unwrap_or(0),
                 &req.title,has_episode,20).map_err(|e|e.to_string())?,gate))
     };
-    // Keep parser metadata independent of IMDb candidate discovery. All
-    // downstream title comparisons use the actual selected component.
+    // The matcher's verified level becomes the presentation title of its
+    // diagnostic, while the standalone /parse result remains unchanged.
+    // All later anime/crosswalk checks now use that same selected level.
+    if let Some(ref name)=layer_title {
+        if let Some(fields)=parsed_value.as_object_mut(){
+            fields.insert("title".into(),json!(name));
+        }
+    }
+    let parsed=parsed_value.as_object().ok_or("parser returned no object")?;
     let title=layer_title.as_deref().unwrap_or(title);
     let key=imdb_matcher::clean_title(title);
     // A complete longer title found in the ORIGINAL torrent is stronger
@@ -4362,64 +4263,49 @@ mod tests {
         let parsed=matchlab_parser::parse_title(release,false).unwrap();
         assert_eq!(parsed["seasons"],json!([9]),"{parsed:?}");
         assert_eq!(parsed["episodes"],json!([24]),"{parsed:?}");
+        // One authoritative leaf-first identity walk replaces the older
+        // pre-matching parent override. Parents are used only if the leaf
+        // does not provide an eligible IMDb identity.
         let select=|release:&str|{
             let parsed=matchlab_parser::parse_title(release,false).unwrap();
-            preferred_regular_series_parent_title(
-                &db,&MatchRequest{title:release.into(),year:None,series:None},
-                &parsed).unwrap()
+            let seasons=numbers(parsed.get("seasons"));
+            let episodes=numbers(parsed.get("episodes"));
+            bottom_up_imdb_path_match(
+                &db,&parsed,None,true,seasons.iter().copied().max().unwrap_or(0),
+                !episodes.is_empty(),|hits|hits
+            ).unwrap().expect("a valid path title").1[0].imdb_id.clone()
         };
-        assert_eq!(select(release).as_deref(),Some("The Simpsons"),
-            "parser must preserve the series from the season-pack folder: {parsed:?}");
-        assert_eq!(select("The Simpsons Season 9/Season 9/S09E24 Lost Our Lisa.mkv")
-            .as_deref(),Some("The Simpsons"));
-        // An intervening numeric season directory must not steal the
-        // parent's show title. Match the direct and nested Cops files alike.
+        assert_eq!(select(release),"tt0096697");
+        assert_eq!(
+            select("The Simpsons Season 9/Season 9/S09E24 Lost Our Lisa.mkv"),
+            "tt0096697");
+        // Numeric season folders are metadata; series names and additional
+        // valid show identities must be proven, not joined together.
         let cops_flat="Cops Seasons 1-24/s6e10.avi";
         let cops_nested="Cops Seasons 1-24/6/s6e10.avi";
         let flat=matchlab_parser::parse_title(cops_flat,false).unwrap();
         let nested=matchlab_parser::parse_title(cops_nested,false).unwrap();
-        assert_eq!(nested["title"],flat["title"],"numeric folder changed title: {nested:?}");
-        assert_eq!(nested["seasons"],json!([6]),"{nested:?}");
-        assert_eq!(nested["episodes"],json!([10]),"{nested:?}");
-        assert_eq!(flat["title"],"Cops","{flat:?}");
-        assert_eq!(nested["title"],"Cops","{nested:?}");
-        // Keep even numeric parent names as untrusted *candidates*; a real
-        // series can be named "24". The matcher, not a hardcoded folder
-        // exclusion, decides whether "6" is a valid IMDb series title.
-        assert_eq!(nested["path_title_candidates"],json!(["Cops","6"]),
-            "{nested:?}");
-        // The override helper may return None when the parser already
-        // selected Cops, or Some("Cops") when a closer unverified folder
-        // needs replacement. The public match must be identical either way.
+        assert_eq!(nested["title"],flat["title"]);
+        assert_eq!(nested["seasons"],json!([6]));
+        assert_eq!(nested["episodes"],json!([10]));
+        assert_eq!(nested["path_title_candidates"],json!(["Cops","6"]));
         for release in [cops_flat,cops_nested,
             "Cops Seasons 1-24/Unknown Folder/6/s6e10.avi"]{
-            assert!(select(release).as_deref().is_none_or(|value|value=="Cops"),
-                "{release}: wrong parent title");
+            assert_eq!(select(release),"tt0500002","{release}");
         }
-        // The leaf already has exactly the same title as its ancestor:
-        // no override is needed.
-        assert_eq!(select("The Simpsons Season 9/Season 9/The.Simpsons.S09E24.mkv"),
-            None);
-        // Do not climb past a valid nearest parent just because the leaf
-        // independently contains the same correct show title.
-        assert_eq!(select("Different Show Season 9/The Simpsons Season 9/The.Simpsons.S09E24.mkv"),
-            None);
-
-        // Parent is preferred over a different non-anime series name in the
-        // leaf when both are otherwise valid IMDb title matches.
-        assert_eq!(select("Different Show Season 9/The.Simpsons.S09E24.mkv")
-            .as_deref(),Some("Different Show"));
-        // No suitable folder identity: keep the leaf series title.
-        assert_eq!(select("Videos/The.Simpsons.S09E24.mkv"),None);
-        // Only a season, no episode: never infer an episode or apply this rule.
-        assert_eq!(select("Different Show Season 9/The.Simpsons.S09.mkv"),None);
-        // Exact AniDB/IMDb anime identity must keep its existing leaf rules.
+        assert_eq!(select(
+            "Different Show Season 9/The Simpsons Season 9/The.Simpsons.S09E24.mkv"),
+            "tt0096697");
+        // A verified leaf now takes priority over a different parent.
+        assert_eq!(select("Different Show Season 9/The.Simpsons.S09E24.mkv"),
+            "tt0096697");
+        assert_eq!(select("Different Show Season 9/S09E24 Lost Our Lisa.mkv"),
+            "tt0500001");
+        assert_eq!(select("Videos/The.Simpsons.S09E24.mkv"),"tt0096697");
+        assert_eq!(select("Different Show Season 9/The.Simpsons.S09.mkv"),
+            "tt0096697");
         assert_eq!(select("Different Show Season 9/Sword.Art.Online.S01E01.mkv"),
-            None);
-        let explicit_movie=MatchRequest{
-            title:release.into(),year:None,series:Some(false)};
-        assert_eq!(preferred_regular_series_parent_title(&db,&explicit_movie,&parsed)
-            .unwrap(),None);
+            "tt0300001");
 
         drop(db);
         let d=diagnose(&path,&MatchRequest{title:release.into(),
@@ -4434,9 +4320,8 @@ mod tests {
         assert_eq!(public_match_response(Some(selected))["sid_start"],
             "tt0096697:9:24");
 
-        // The matcher may choose a valid leaf even when the legacy
-        // presentation-normalizer recognized an unrelated parent. All
-        // downstream identity checks must use the chosen leaf's key.
+        // An independently matched leaf wins over a different series parent;
+        // its parser snapshot and normalized identity must agree.
         let release="Different Show Season 9/The.Simpsons.S09E24.mkv";
         let leaf=diagnose(&path,&MatchRequest{
             title:release.into(),year:None,series:None}).unwrap();
