@@ -389,13 +389,32 @@ the original release. Numeric title suffixes get the same conservative
 check. This prevents `Dune` matching `Duneland` merely because the first
 characters overlap. Candidates are ordered by exact match,
 relative coverage, leading versus trailing edge (only on equal coverage), then
-title length. Within equally relevant title matches, the number of IMDb
-votes (`numVotes`) ranks first when the release **does not specify a year**, even
-when a season and/or episode is present. When a year **is specified**, year
-proximity ranks before popularity. Media type, original/region preference and
-stable alias ordering remain tie-breakers; title relevance and season/episode
-eligibility are never overridden by popularity. Half-word prefix fallback is
-intentionally removed. Short exact titles such as `Up` remain valid.
+title length. For otherwise eligible IMDb candidates, the ranking is:
+
+1. **Title relevance** (exact match, relative coverage, whole-word edge and length).
+2. **Distance from the release year**, when one was provided; otherwise all
+   candidates have the same distance (zero), regardless of season/episode.
+3. **IMDb `numVotes`** (descending), unless the release explicitly qualifies
+   the title by country. Only with an explicit country does region take
+   precedence over votes.
+4. **Region preference**: for explicitly country-qualified titles, prefer
+   the named country (UK maps to the IMDb region GB); otherwise keep the
+   existing US-first preference for duplicated normalized aliases as a
+   *secondary* tie-breaker after votes. Region is never inferred from the
+   user's location or the server's locale.
+5. **Earliest IMDb candidate year**, only when all the preceding criteria tie.
+   An unknown candidate year is not considered earlier than a known year.
+
+For example, `Example.1080p` uses votes before region, whereas
+`Example.Norge.1080p` can use the Norwegian regional title before votes.
+Exact country-qualified TV-series aliases are still checked before generic
+title matching. IMDb ID is used only after the above criteria to make exact
+ties deterministic; it is not a semantic score. Original-title flags, media
+type and IMDb AKA ordering are no longer ranking tie-breakers. Media type
+and season/episode eligibility still decide **which candidates are valid**,
+and independently verified episodes can still promote the correct identity.
+Half-word prefix fallback is intentionally removed. Short exact titles such
+as `Up` remain valid.
 
 AniDB aliases now include sufficiently specific suffix matches in the same
 single index query as prefixes. Unlike compact normalized keys, the original
