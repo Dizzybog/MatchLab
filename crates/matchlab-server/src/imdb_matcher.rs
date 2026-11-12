@@ -150,26 +150,22 @@ fn title_fit(key:&str,words:&[String],release_words:&[String],row:&Aka,
         longest_first:-(short as i64)})
 }
 
-/// Title relevance is ranked by the caller. Then: requested-year distance,
-/// IMDb votes before region (unless a country is explicitly supplied), and
-/// earliest candidate year only after every other semantic criterion ties.
-/// IMDb ID provides deterministic output for otherwise identical candidates.
+/// Title relevance is ranked by the caller. After that, use release-year
+/// distance, region preference, IMDb votes, and the earliest production year.
+/// When no release year was supplied, its distance is neutral for all works.
+/// IMDb ID is only a final deterministic tie-breaker.
 fn rank(r:&Aka,year:Option<i32>,duplicate:bool,country:Option<&str>,votes:i64)
-    -> (i64,i32,i64,i32,i32,String) {
+    -> (i64,i32,i64,i32,String) {
     let distance=year.map_or(0,|y|(i64::from(r.year)-i64::from(y)).abs());
-    // IMDb uses GB for UK AKA regions, although our explicit country
-    // release marker uses UK. Region matters only for duplicate titles.
+    // Keep the existing regional rules: the explicitly supplied country
+    // takes precedence, otherwise prefer US, and only for duplicate aliases.
+    // IMDb calls its British region GB; the release marker uses UK.
     let preferred=country.map(|code|if code=="UK"{"GB"}else{code});
     let region=if !duplicate
         || r.region.as_deref()==Some(preferred.unwrap_or("US")){0}else{1};
-    // With an explicit country, region takes precedence over popularity.
-    // Without one, popularity leads and legacy US preference is a fallback.
-    let (region_before_votes,region_after_votes)=
-        if country.is_some(){(region,0)}else{(0,region)};
-    // Unknown IMDb year (0) is not the "earliest" known year.
+    // Missing/unknown IMDb year (0) is not earlier than a known year.
     let earliest_year=if r.year>0{r.year}else{i32::MAX};
-    (distance,region_before_votes,-votes,region_after_votes,
-        earliest_year,r.imdb_id.clone())
+    (distance,region,-votes,earliest_year,r.imdb_id.clone())
 }
 pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_season:i64,
     release_title:&str,_has_episode:bool,limit:usize)->rusqlite::Result<Vec<Match>>{
@@ -353,9 +349,9 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             }
         }
     }
-    // Missing release year means zero distance for every eligible work;
-    // votes precede region unless the release explicitly names a country.
-    // Season/episode tokens never alter this ranking order.
+    // With no release year, every eligible work has zero distance.
+    // Region always precedes votes, including season/episode releases.
+    // Title fit and verified episode eligibility still outrank both.
     let mut output=Vec::new();
     for (_,id,aliases) in ranked_groups{
         let votes:i64=db.query_row("SELECT num_votes FROM imdb_ratings WHERE imdb_id=?1",[&id],|r|r.get(0))
@@ -526,7 +522,7 @@ mod tests{
         assert_eq!(eligible[0].imdb_id,"ttold");
     }
     #[test]
-    fn ranking_orders_year_votes_and_region_conditionally(){
+    fn ranking_orders_year_region_votes_then_earliest_year(){
         let candidate=|id:&str,year:i32,region:&str|{
             Aka{imdb_id:id.into(),title:"Example".into(),clean:"example".into(),
                 year,category:"movie".into(),region:Some(region.into()),
@@ -538,11 +534,11 @@ mod tests{
         // An explicit release year always beats popularity and region.
         assert!(rank(&no_exact,Some(2020),true,None,1)
             <rank(&us_old,Some(2020),true,None,1_000_000));
-        // No country qualifier: votes are ahead of the region preference.
-        assert!(rank(&no_old,Some(2018),true,None,1_000_000)
-            <rank(&us_old,Some(2018),true,None,1));
-        assert!(rank(&no_old,None,true,None,1_000_000)
-            <rank(&us_old,None,true,None,1));
+        // Region wins ahead of popularity even without a country marker.
+        assert!(rank(&us_old,Some(2018),true,None,1)
+            <rank(&no_old,Some(2018),true,None,1_000_000));
+        assert!(rank(&us_old,None,true,None,1)
+            <rank(&no_old,None,true,None,1_000_000));
         // Explicit country qualifier: prefer the requested region first.
         assert!(rank(&us_old,Some(2018),true,Some("US"),1)
             <rank(&no_old,Some(2018),true,Some("US"),1_000_000));
@@ -570,7 +566,7 @@ mod tests{
     }
 
     #[test]
-    fn explicit_country_changes_votes_vs_region_order_for_duplicate_titles(){
+    fn region_precedes_votes_with_or_without_explicit_country(){
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
             year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
@@ -584,12 +580,12 @@ mod tests{
             INSERT INTO imdb_ratings VALUES('ttus',10),('ttno',100000),('ttgb',1000);")
             .unwrap();
         for specified_year in [None,Some(2020)] {
-            // Neither a region marker nor IMDb's original-title/AKA ordering
-            // is allowed to overrule a more popular candidate.
+            // Without a country qualifier, the existing US-first
+            // preference beats vote count for otherwise equal title/year.
             let found=search(&db,"Example",specified_year,false,0,
                 "Example.1080p",false,3).unwrap();
             assert_eq!(found.iter().map(|m|m.imdb_id.as_str())
-                .collect::<Vec<_>>(),vec!["ttno","ttgb","ttus"]);
+                .collect::<Vec<_>>(),vec!["ttus","ttno","ttgb"]);
             // Country explicitly supplied: requested region wins before votes.
             let us=search(&db,"Example",specified_year,false,0,
                 "Example.US.1080p",false,3).unwrap();

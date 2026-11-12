@@ -406,19 +406,21 @@ title length. For otherwise eligible IMDb candidates, the ranking is:
    **Only candidates with equal title relevance proceed to year distance.**
 2. **Distance from the release year**, when one was provided; otherwise all
    candidates have the same distance (zero), regardless of season/episode.
-3. **IMDb `numVotes`** (descending), unless the release explicitly qualifies
-   the title by country. Only with an explicit country does region take
-   precedence over votes.
-4. **Region preference**: for explicitly country-qualified titles, prefer
-   the named country (UK maps to the IMDb region GB); otherwise keep the
-   existing US-first preference for duplicated normalized aliases as a
-   *secondary* tie-breaker after votes. Region is never inferred from the
-   user's location or the server's locale.
+3. **Region preference**: for duplicate normalized IMDb titles, prefer
+   the explicitly named country (UK maps to IMDb region GB), or use the
+   existing US-first preference if no country is named. Region comes
+   **before popularity in both cases**. This does not use the user's
+   location or server locale, and never overrides title relevance or year.
+4. **IMDb `numVotes`** (descending), among candidates with equivalent
+   title relevance, year distance and region preference.
 5. **Earliest IMDb candidate year**, only when all the preceding criteria tie.
    An unknown candidate year is not considered earlier than a known year.
 
-For example, `Example.1080p` uses votes before region, whereas
-`Example.Norge.1080p` can use the Norwegian regional title before votes.
+For example, `Example.1080p` favors the US-region title over a
+non-US alternative when the same normalized title belongs to distinct
+IMDb works, even if the alternative has more votes.
+`Example.Norge.1080p` prefers the Norwegian region explicitly. When no
+regional distinction applies, `numVotes` decides.
 Exact country-qualified TV-series aliases are still checked before generic
 title matching. IMDb ID is used only after the above criteria to make exact
 ties deterministic; it is not a semantic score. Original-title flags, media
