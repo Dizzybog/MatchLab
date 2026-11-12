@@ -411,6 +411,17 @@ title length. For otherwise eligible IMDb candidates, the ranking is:
    existing US-first preference if no country is named. Region comes
    **before popularity in both cases**. This does not use the user's
    location or server locale, and never overrides title relevance or year.
+   When independently verified regional productions have the **same IMDb
+   display title but lack country-qualified aliases**, MatchLab can use the
+   local registry `crates/matchlab-server/data/regional_series.tsv` to
+   associate the normalized base title + explicit country suffix with the
+   intended IMDb identity (for example, `ex.on.the.beach.us.s01` →
+   `tt8285922`, while `...uk.s01` → `tt3522052`). The register is
+   only consulted for country-qualified releases: it is a country-of-origin
+   hint, not a localized AKA-region inference. The matcher requires the
+   mapped identity to exist as an eligible indexed series, retains the
+   competing base-title series for year-based disambiguation, and falls
+   back to the regular matcher if the entry is missing or stale.
 4. **IMDb `numVotes`** (descending), among candidates with equivalent
    title relevance, year distance and region preference.
 5. **Earliest IMDb candidate year**, only when all the preceding criteria tie.
