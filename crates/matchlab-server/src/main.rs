@@ -2624,6 +2624,11 @@ mod tests {
                 title_type TEXT,language TEXT);
             INSERT INTO titles VALUES
                 ('tt0000101','Bleach','bleach',2004,'series','',1,0,'tvSeries'),
+                -- Popular sequel with the *same* exact AKA must not hijack
+                -- the canonical title, even when it has more IMDb votes.
+                ('tt14986406','Bleach: Thousand-Year Blood War',
+                 'bleachthousandyearbloodwar',2022,'series','',0,0,'tvSeries'),
+                ('tt14986406','Bleach','bleach',2022,'series','US',0,51,'tvSeries'),
                 ('tt0000202','The Duke of Death and His Maid',
                   'thedukeofdeathandhismaid',2021,'series','',1,0,'tvSeries'),
                 ('tt0000303','Chaos;Head','chaoshead',2008,'series','',1,0,'tvSeries'),
@@ -2631,14 +2636,19 @@ mod tests {
                  'rebornasavendingmachine',2023,'series','',1,0,'tvSeries'),
                 ('tt0000505','Bleach side story','bleachsidestory',2005,
                  'movie','',1,0,'movie');
-            INSERT INTO seasons VALUES ('tt0000101',16),('tt0000202',3),
+            INSERT INTO seasons VALUES ('tt0000101',16),('tt14986406',4),
+                ('tt0000202',3),
                 ('tt0000303',1),('tt0000404',3);
             INSERT INTO season_episodes VALUES
                 ('tt0000101',1,20,20),('tt0000101',2,21,21),
+                ('tt14986406',1,13,13),
                 ('tt0000202',2,12,12),
                 ('tt0000303',1,12,12),('tt0000404',3,12,12);
+            INSERT INTO imdb_ratings VALUES
+                ('tt0000101',90000),('tt14986406',120000);
             INSERT INTO anime_series_map VALUES
                 ('tt0000101','100','bleachtv',0),
+                ('tt14986406','901','bleachtybw',0),
                 ('tt0000101','101','otherbleachtv',0),
                 ('tt0000505','500','sidebleachtv',0),
                 ('tt0000202','200','duketv',0),
@@ -2650,6 +2660,9 @@ mod tests {
                 ('tt0000404','anidb','400');
             INSERT INTO anidb_titles VALUES
                 ('100','Bleach','bleach','main','en'),
+                ('901','Bleach','bleach','synonym','en'),
+                ('901','Bleach Thousand Year Blood War',
+                 'bleachthousandyearbloodwar','main','en'),
                 ('101','Bleach','bleach','synonym','en'),
                 ('500','Bleach','bleach','synonym','en'),
                 ('200','Shinigami Bocchan to Kuro Maid',
@@ -2658,6 +2671,7 @@ mod tests {
                 ('400','Jihanki 3','jihanki3','synonym','ja');
             INSERT INTO episode_map VALUES
                 ('100','bleachtv',1,-1,1,366,0,''),
+                ('901','bleachtybw',1,1,1,13,0,''),
                 ('100','bleachtv',1,1,1,20,0,''),
                 ('101','otherbleachtv',1,99,1,12,0,''),
                 ('500','sidebleachtv',1,1,1,2,0,''),
@@ -2681,15 +2695,19 @@ mod tests {
         // IMDb already knows the complete first season. Equal Bleach
         // aliases for an unrelated film and a separate AniDB part must not
         // suppress the one fully verified season mapping.
-        let d=diagnose(&path,&MatchRequest{
-            title:"Bleach S01".into(),year:None,series:None}).unwrap();
-        let selected=d.selected.expect("Bleach S01 IMDb match");
-        assert_eq!(selected["episode_range"]["complete"],true,"{selected}");
-        assert_eq!(selected["anime_range_diagnostics"]["unmapped_count"],0);
-        assert_eq!(public_match_response(Some(selected)),json!({
-            "sid_start":"tt0000101:1:1","sid_end":"tt0000101:1:20",
-            "asid_start":"100:1","asid_end":"100:20"
-        }));
+        for release in ["Bleach S01","bleach.s1"] {
+            let d=diagnose(&path,&MatchRequest{
+                title:release.into(),year:None,series:None}).unwrap();
+            let selected=d.selected.expect("Bleach S01 IMDb match");
+            assert_eq!(selected["imdb_id"],"tt0000101",
+                "a sequel's abbreviated AKA cannot hijack the original: {release}");
+            assert_eq!(selected["episode_range"]["complete"],true,"{selected}");
+            assert_eq!(selected["anime_range_diagnostics"]["unmapped_count"],0);
+            assert_eq!(public_match_response(Some(selected)),json!({
+                "sid_start":"tt0000101:1:1","sid_end":"tt0000101:1:20",
+                "asid_start":"100:1","asid_end":"100:20"
+            }));
+        }
         // An absolute episode matches only when one IMDb identity has
         // a verified crosswalk for it, despite shared AniDB title aliases.
         // Fixture season 14 maps absolute episode 300 -> IMDb S14E01.
