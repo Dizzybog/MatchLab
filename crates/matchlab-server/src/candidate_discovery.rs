@@ -131,6 +131,8 @@ fn reclaim_unqualified(db:&Connection,budget:&mut Budget)->Result<bool,String>{
     budget.evictions+=1;
     Ok(true)
 }
+// Retained for standalone callers/tests; the worker shares its context.
+#[allow(dead_code)]
 pub fn observe(db:&Connection,title:&str,parsed:&Value,
     model:&crate::online_model::OnlineModel,remaining:&mut Budget)->Result<(),String>{
     let context=crate::online_model::TitleFeatureContext::new(title);
