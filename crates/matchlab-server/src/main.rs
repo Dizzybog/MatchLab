@@ -741,6 +741,51 @@ fn preferred_regular_series_parent_title(
     Ok(None)
 }
 
+/// Match each independently parsed path component from leaf to root.
+/// The parser has already merged nearest-first field values (year/season/
+/// episode/etc.) into the parent Diagnostic. We never concatenate folder
+/// names, and a coordinate-only component cannot replace a show title.
+/// Every component performs the SAME pooled IMDb prefix/suffix ranking.
+fn bottom_up_imdb_path_match(
+    db:&Connection,parsed:&serde_json::Map<String,Value>,
+    year:Option<i32>,series:bool,season:i64,has_episode:bool,
+)->Result<Option<(String,Vec<imdb_matcher::Match>)>,String>{
+    let Some(layers)=parsed.get("path_layers").and_then(Value::as_array)else{
+        return Ok(None);
+    };
+    for layer in layers.iter().rev(){
+        let Some(raw)=layer.get("raw").and_then(Value::as_str)else{continue};
+        let Some(fields)=layer.get("parsed").and_then(Value::as_object)else{
+            continue
+        };
+        let Some(title)=fields.get("title").and_then(Value::as_str)else{
+            continue
+        };
+        let trimmed=title.trim();
+        let lower=trimmed.to_ascii_lowercase();
+        // A path leaf like E02.mkv, 6, Season 1, or S01 is metadata,
+        // not independent title evidence. Short legitimate titles such as
+        // "Up" are still eligible through exact IMDb alias matching.
+        let coordinate_only=lower.is_empty()
+            || matches!(lower.as_str(),"s"|"e"|"ep"|"episode"|"episodes"
+                |"season"|"seasons"|"series"|"mkv"|"mp4"|"avi"
+                |"extras"|"specials"|"subtitles")
+            ||lower.bytes().all(|b|b.is_ascii_digit())
+            ||(lower.len()<=4 && lower.starts_with('s')
+                && lower[1..].bytes().all(|b|b.is_ascii_digit()))
+            ||(lower.len()<=5 && lower.starts_with('e')
+                && lower[1..].bytes().all(|b|b.is_ascii_digit()));
+        if coordinate_only{continue;}
+        let found=imdb_matcher::search(
+            db,trimmed,year,series,season,raw,has_episode,20)
+            .map_err(|e|e.to_string())?;
+        if !found.is_empty(){
+            return Ok(Some((trimmed.to_owned(),found)));
+        }
+    }
+    Ok(None)
+}
+
 /// Verify an unmarked anime interval using indexed exact AniDB aliases.
 /// Film and OVA titles can share the long-running TV series' alias. Preserve
 /// partial-range diagnostics for an unambiguous single IMDb association; for
@@ -1031,7 +1076,11 @@ fn diagnose_with_policy(
     // /parse endpoint: only the matcher can distinguish ordinary TV from anime.
     let preferred_parent={
         let parsed=parsed_value.as_object().ok_or("parser returned no object")?;
-        preferred_regular_series_parent_title(&db,req,parsed)?
+        // Hierarchical IMDb matching walks already-parsed levels from
+        // the leaf upward. Do not preempt its leaf with a parent-title
+        // lookup before candidates have been collected and ranked.
+        if parsed.get("path_layers").is_some(){None}
+        else{preferred_regular_series_parent_title(&db,req,parsed)?}
     };
     if let Some(parent)=preferred_parent {
         if let Some(parsed)=parsed_value.as_object_mut(){
@@ -1082,9 +1131,21 @@ fn diagnose_with_policy(
             .map_err(|e|e.to_string())?.is_some()
             || exact_anime_identity(&db,&key)?.is_some(),
     };
-    let imdb = imdb_matcher::search(&db,title,year,series,seasons.iter().copied().max().unwrap_or(0),&req.title,
-        !episodes.is_empty()||parsed.contains_key("episode_start"),20)
-        .map_err(|e|e.to_string())?;
+    let chosen_layer=bottom_up_imdb_path_match(
+        &db,parsed,year,series,seasons.iter().copied().max().unwrap_or(0),
+        !episodes.is_empty()||parsed.contains_key("episode_start"))?;
+    let (layer_title,imdb)=if let Some((name,matches))=chosen_layer{
+        (Some(name),matches)
+    }else{
+        (None,imdb_matcher::search(
+            &db,title,year,series,seasons.iter().copied().max().unwrap_or(0),
+            &req.title,!episodes.is_empty()||parsed.contains_key("episode_start"),20)
+            .map_err(|e|e.to_string())?)
+    };
+    // Keep the winning level's title for identity checks while all
+    // season/episode/year/quality fields remain merged from their nearest
+    // source in the original whole-path parse.
+    let title=layer_title.as_deref().unwrap_or(title);
     // A complete longer title found in the ORIGINAL torrent is stronger
     // identity evidence than a short anime alias created by a truncated
     // parser title. Preserve this across all episode/anime selection paths.
