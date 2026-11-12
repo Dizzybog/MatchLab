@@ -473,6 +473,43 @@ mod tests{
     }
 
     #[test]
+    fn split_index_matches_nested_reference_across_tvdb_families(){
+        // The precomputed index must preserve the previous O(links*maps)
+        // split-cour membership rule, including duplicate and indirect
+        // links and unrelated TVDB families.
+        let links=vec![
+            Link{anidb:"101".into(),tvdb:"700".into(),trakt:1,direct:true},
+            Link{anidb:"202".into(),tvdb:"700".into(),trakt:2,direct:true},
+            Link{anidb:"303".into(),tvdb:"800".into(),trakt:2,direct:true},
+            Link{anidb:"404".into(),tvdb:"700".into(),trakt:0,direct:false},
+            Link{anidb:"101".into(),tvdb:"700".into(),trakt:1,direct:true},
+        ];
+        let maps=vec![
+            Mapping{anidb:"101".into(),tvdb:"700".into(),
+                tv_season:1,start:1,end:12,offset:0,explicit:vec![]},
+            Mapping{anidb:"202".into(),tvdb:"700".into(),
+                tv_season:1,start:1,end:12,offset:0,explicit:vec![]},
+            Mapping{anidb:"303".into(),tvdb:"800".into(),
+                tv_season:1,start:1,end:12,offset:0,explicit:vec![]},
+            Mapping{anidb:"404".into(),tvdb:"700".into(),
+                tv_season:3,start:1,end:12,offset:0,explicit:vec![]},
+        ];
+        let index=split_index(&links,&maps);
+        for link in &links{
+            for map in &maps{
+                let previous=link.trakt>0&&links.iter().any(|other|
+                    other.anidb!=link.anidb
+                    &&other.trakt>0
+                    &&other.trakt!=link.trakt
+                    &&maps.iter().any(|x|x.anidb==other.anidb
+                        &&x.tvdb==map.tvdb&&x.tv_season==map.tv_season));
+                assert_eq!(split(link,map,&index),previous,
+                    "link={} map={}",link.anidb,map.anidb);
+            }
+        }
+    }
+
+    #[test]
     fn hundred_episode_batch_preserves_explicit_pairs_and_ambiguity(){
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE anime_series_map(
