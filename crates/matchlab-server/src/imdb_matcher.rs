@@ -247,6 +247,31 @@ fn title_in_original_release_fit(
         edge:if full{0}else{1}})
 }
 
+/// Rank an existing eligible prefix candidate on the *same* raw-release
+/// length scale as a recovered suffix, even if the parser retained more
+/// non-title words. This is only a re-ranking of already discovered valid
+/// rows, so it does not broaden the candidate set to unsafe generic words.
+fn title_prefix_in_original_release_fit(
+    content:&[String],row:&Aka,
+)->Option<TitleFit>{
+    let title=semantic_words(&row.title);
+    if content.len()<2||title.len()<2{return None;}
+    let full=content.starts_with(&title);
+    let count=if full{title.len()}else if title.starts_with(content){
+        content.len()
+    }else{return None};
+    let matched=title[..count].iter().map(|w|w.chars().count()).sum::<usize>();
+    let total=title.iter().map(|w|w.chars().count()).sum::<usize>();
+    if total==0{return None;}
+    let unmatched=total-matched;
+    if !full && (matched<4||matched.saturating_mul(2)<total||unmatched>16){
+        return None;
+    }
+    Some(TitleFit{tier:0,longest_first:-(matched as i64),
+        unmatched_bp:((unmatched as u64*10_000)/total as u64) as u32,
+        edge:0})
+}
+
 /// Symmetric raw-release suffix evidence: a complete IMDb title must equal
 /// the entire final title span, or the entire span must be a whole-word
 /// prefix of the IMDb title (bounded partial match). Stray words between
@@ -271,7 +296,7 @@ fn title_suffix_in_original_release_fit(
         }
         let fit=TitleFit{tier:0,longest_first:-(matched as i64),
             unmatched_bp:((unmatched as u64*10_000)/total as u64) as u32,
-            edge:if full{0}else{1}};
+            edge:1};
         if best.is_none_or(|old|fit<old){best=Some(fit);}
     }
     best
@@ -476,14 +501,25 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
                 title_fit(&key,&words,&release_words,&row,&semantic_release)
                     .unwrap_or(TitleFit::fallback(row.clean.len()))
             }else{TitleFit::fallback(row.clean.len())};
-        // A complete parsed IMDb name occupying the entire source-title
-        // span must not lose to a shorter fully matching suffix. Give
-        // *every* complete original-release title the same length metric.
+        // Previously discovered prefix rows and newly recovered suffixes
+        // must use the SAME title-length scale. Otherwise a same-length
+        // suffix gets an artificial advantage from tier 0 over an ordinary
+        // lexical prefix. Keep the original prefix preference at equal fit.
         let mut fit=fit;
+        if !suffix_title_matches.contains(&alias_key)
+            && !extended_title_matches.contains(&alias_key) {
+            if let Some(source_prefix)=title_prefix_in_original_release_fit(
+                &semantic_content,&row){
+                fit=source_prefix;
+            }
+        }
+        // Full parsed names occupying the entire content span are exact,
+        // even when no additional release-prefix lookup was necessary.
         if fit.tier==0 && semantic_words(&row.title)==semantic_content {
             let matched=semantic_content.iter()
                 .map(|word|word.chars().count()).sum::<usize>();
             fit.longest_first=-(matched as i64);
+            fit.edge=0;
         }
         groups.entry(row.imdb_id.clone()).or_default().push((row,fit));
     }
@@ -1101,7 +1137,9 @@ mod tests{
             let fit=title_suffix_in_original_release_fit(&content,&candidate)
                 .unwrap_or_else(||panic!("expected valid suffix in {raw}"));
             assert_eq!(fit.tier,0);
-            assert_eq!(fit.edge,if complete{0}else{1});
+            assert_eq!(fit.edge,1,
+                "suffix location is the edge tie-breaker; completeness is unmatched_bp");
+            assert_eq!(fit.unmatched_bp==0,complete);
             let keys=longer_release_title_suffix_keys(raw);
             assert!(keys.iter().any(|key|key=="monsterthe"),"{keys:?}");
             assert!(has_longer_title_evidence_in_release(
