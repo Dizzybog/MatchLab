@@ -1354,6 +1354,16 @@ mod tests{
             assert_eq!(hits[0].imdb_id,"ttgein",
                 "longer IMDb-title suffix outranks shorter prefix and votes: {raw}, parser={parsed_title}: {hits:?}");
         }
+        // The critical regression: an ALREADY FOUND exact/short prefix
+        // must not prevent discovering the longer reversed-title suffix.
+        // Verify both identities survive initial retrieval and are ranked
+        // together rather than stopping on the first nonempty stage.
+        let jointly_ranked=search(&db,"The Ed",None,true,1,
+            "The.ed.gein.story.s01e01",true,10).unwrap();
+        assert_eq!(jointly_ranked[0].imdb_id,"ttgein",
+            "long reverse-title suffix must outrank an already found exact prefix");
+        assert!(jointly_ranked.iter().any(|item|item.imdb_id=="ttshort"),
+            "both prefix and suffix IMDb IDs must be gathered before ranking");
         // A complete matching IMDb title is stronger when the matched
         // source-word count ties a suffix of another IMDb identity.
         db.execute("INSERT INTO titles VALUES
