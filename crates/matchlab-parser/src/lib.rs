@@ -3032,6 +3032,13 @@ pub fn parse_title(
     let mut path_layers=Vec::new();
     let mut leaf_title=String::new();
     let mut leaf_title_generic=false;
+    // Offline ML replay and canonical labels must not consume production
+    // component-cache results: their active parser engines differ even when
+    // the installed live handler revision is unchanged.
+    let share_components=components.len()>1
+        && !CANONICAL_ONLY.with(Cell::get)
+        && REPLAY_ENGINE.with(|slot|slot.borrow().is_none())
+        && !CAPTURE_ALL_MATCHES.with(Cell::get);
     for (index,component) in components.iter().enumerate(){
         let is_parent=index+1<components.len();
         // A bare numeric folder is structurally ambiguous. It can be a
@@ -3041,7 +3048,7 @@ pub fn parse_title(
         // parser-only fallback. Four-digit year directories remain eligible.
         let bare_number_directory=is_parent && component.trim().len()<=3
             && component.trim().bytes().all(|b|b.is_ascii_digit());
-        let layer=if components.len()>1{
+        let layer=if share_components{
             cached_path_component(component,translate_languages)?
         }else{
             parse_path_component(component,translate_languages)?
@@ -4296,6 +4303,23 @@ mod tests {
         }
         let current=cached_path_component(&key.0,false).unwrap();
         assert_ne!(current.get("title"),Some(&json!("incorrect old regex title")));
+    }
+
+    #[test]
+    fn canonical_hierarchical_parsing_ignores_live_component_cache(){
+        // ML's canonical labels must be computed from native handlers,
+        // never a cached result produced by a different live generation.
+        let parent="MatchLab.Canonical.Path.Cache.S01";
+        let mut counterfeit=Map::new();
+        counterfeit.insert("title".into(),json!("unsafe live title"));
+        let key=(parent.to_owned(),false);
+        let cache=PATH_COMPONENT_CACHE.get_or_init(||Mutex::new(HashMap::new()));
+        cache.lock().unwrap().insert(key.clone(),(
+            handler_patch_revision(),std::time::Instant::now(),counterfeit));
+        let parsed=parse_title_canonical(&format!("{parent}/E02.mkv"),false).unwrap();
+        assert_ne!(parsed["path_layers"][0]["parsed"]["title"],
+            json!("unsafe live title"));
+        cache.lock().unwrap().remove(&key);
     }
 
     #[test]
