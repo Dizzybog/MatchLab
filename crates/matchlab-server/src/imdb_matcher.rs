@@ -46,18 +46,52 @@ fn eligible(db:&Connection,r:&Aka,season:i64)->rusqlite::Result<bool>{
 use rusqlite::OptionalExtension;
 fn filter_eligible(db:&Connection,rows:Vec<Aka>,series:bool,year:Option<i32>,season:i64)
     ->rusqlite::Result<Vec<Aka>>{
-    let mut eligibility=std::collections::HashMap::new();
-    let mut result=Vec::new();
-    for row in rows {
-        if !allowed(&row.media_type,series,year){continue;}
-        let yes=if let Some(&cached)=eligibility.get(&row.imdb_id){cached}else{
-            let value=eligible(db,&row,season)?;
-            eligibility.insert(row.imdb_id.clone(),value);
-            value
-        };
-        if yes{result.push(row);}
+    let rows=rows.into_iter()
+        .filter(|row|allowed(&row.media_type,series,year))
+        .collect::<Vec<_>>();
+    if season<=0 {return Ok(rows);}
+    // IMDb title discovery often returns several aliases per work. Query
+    // season eligibility in bounded ID batches rather than one SQL statement
+    // for every candidate. Neither season bounds nor AniDB fallback criteria
+    // are relaxed; order and duplicate aliases are preserved.
+    let ids=rows.iter().filter(|row|is_series(&row.media_type))
+        .map(|row|row.imdb_id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter().collect::<Vec<_>>();
+    if ids.is_empty(){return Ok(rows);}
+    let threshold=std::cmp::max(1,season-1);
+    let mut eligible_ids=std::collections::HashSet::new();
+    for batch in ids.chunks(256){
+        let markers=vec!["?";batch.len()].join(",");
+        let sql=format!("SELECT imdb_id,max_season FROM seasons
+            WHERE imdb_id IN ({markers})");
+        let mut stmt=db.prepare(&sql)?;
+        for row in stmt.query_map(rusqlite::params_from_iter(batch.iter()),
+            |r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<i64>>(1)?)))? {
+            let (id,max)=row?;
+            if max.unwrap_or(0)>=threshold{eligible_ids.insert(id);}
+        }
     }
-    Ok(result)
+    let remaining=ids.iter().filter(|id|!eligible_ids.contains(*id))
+        .collect::<Vec<_>>();
+    for batch in remaining.chunks(256){
+        let markers=vec!["?";batch.len()].join(",");
+        let sql=format!("SELECT DISTINCT l.imdb_id
+            FROM anime_series_map l JOIN episode_map m ON m.anidb_id=l.anidb_id
+            WHERE l.imdb_id IN ({markers})
+              AND (m.tvdb_season=? OR l.trakt_season=?)");
+        let mut args=batch.iter().map(|id|*id as &dyn rusqlite::ToSql)
+            .collect::<Vec<_>>();
+        args.push(&season);
+        args.push(&season);
+        let mut stmt=db.prepare(&sql)?;
+        for id in stmt.query_map(rusqlite::params_from_iter(args),
+            |r|r.get::<_,String>(0))? {
+            eligible_ids.insert(id?);
+        }
+    }
+    Ok(rows.into_iter().filter(|row|
+        !is_series(&row.media_type)||eligible_ids.contains(&row.imdb_id)).collect())
 }
 fn filter(db:&Connection,rows:Vec<Aka>,release:&str,series:bool,year:Option<i32>,season:i64)
     ->rusqlite::Result<Vec<Aka>>{
