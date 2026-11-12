@@ -829,17 +829,11 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
         let cutoff=ranked_groups[limit-1].0;
         ranked_groups.retain(|(fit,_,_)|*fit<=cutoff);
     }
-    let mut duplicates=HashSet::new();
-    let mut checked=HashSet::new();
-    for (_,_,aliases) in &ranked_groups{
-        for (r,_) in aliases {
-            if checked.insert(r.clean.clone())
-                && crate::tantivy_search::has_duplicate_title(db,&r.clean)
-                    .map_err(index_error)? {
-                duplicates.insert(r.clean.clone());
-            }
-        }
-    }
+    let alias_keys=ranked_groups.iter()
+        .flat_map(|(_,_,aliases)|aliases.iter().map(|(row,_)|row.clean.clone()))
+        .collect::<std::collections::BTreeSet<_>>();
+    let duplicates=crate::tantivy_search::duplicate_titles(db,&alias_keys)
+        .map_err(index_error)?;
     // With no release year, every eligible work has zero distance.
     // Region always precedes votes, including season/episode releases.
     // Title fit and verified episode eligibility still outrank both.
