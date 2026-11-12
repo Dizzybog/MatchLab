@@ -308,6 +308,32 @@ fn title_suffix_in_original_release_fit(
     best
 }
 
+/// The *source* can itself be a suffix of a LONGER IMDb title:
+/// "The Ed Gein Story" is the trailing four words of
+/// "Monster: The Ed Gein Story". This is a different direction from
+/// matching an IMDb title at the end of a longer torrent title.
+/// Require ALL significant release words to be the candidate's final
+/// complete words, with the same coverage guard as partial-prefix recovery.
+fn release_is_imdb_title_suffix_fit(
+    content:&[String],row:&Aka,
+)->Option<TitleFit>{
+    if content.len()<2{return None;}
+    let candidate=semantic_words(&row.title);
+    if candidate.len()<=content.len()||!candidate.ends_with(content){
+        return None;
+    }
+    let matched=content.iter().map(|s|s.chars().count()).sum::<usize>();
+    let total=candidate.iter().map(|s|s.chars().count()).sum::<usize>();
+    if total==0{return None;}
+    let unmatched=total-matched;
+    if matched<4||matched.saturating_mul(2)<total||unmatched>16{
+        return None;
+    }
+    Some(TitleFit{tier:0,longest_first:-(matched as i64),
+        unmatched_bp:((unmatched as u64*10_000)/total as u64) as u32,
+        edge:1})
+}
+
 /// Stronger original-release evidence suppresses an unrelated shorter anime
 /// identity even if that anime has a mapped episode. This covers complete
 /// full-title matches AND validated partial prefix matches.
@@ -326,6 +352,7 @@ pub fn has_longer_title_evidence_in_release(
     (!keys.is_empty() && title_in_original_release_fit(
         &release,&parsed,content.len(),&candidate).is_some())
         ||title_suffix_in_original_release_fit(&content,&candidate).is_some()
+        ||release_is_imdb_title_suffix_fit(&content,&candidate).is_some()
 }
 
 /// Title relevance is ranked by the caller. After that, use release-year
@@ -449,6 +476,30 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             rows.push(candidate);
         }
     }
+    // The opposite suffix direction must also be considered: the original
+    // torrent content may omit the START of the IMDb title, e.g.
+    // "The.Ed.Gein.Story.S01E01" vs "Monster: The Ed Gein Story".
+    // Tantivy's existing reversed-title index finds suffix completions in
+    // one targeted lookup. Ordinary filter(release.contains(alias)) cannot
+    // be used here: by definition the IMDb name is longer than the source.
+    let mut imdb_title_suffix_matches=HashSet::new();
+    if semantic_content.len()>=2
+        && !rows.iter().any(|row|semantic_words(&row.title)==semantic_content)
+    {
+        let suffix_key=clean_title(&semantic_content.join(" "));
+        if suffix_key.len()>=6{
+            let found=tantivy_aliases(db,&suffix_key,true)?;
+            let matching=found.into_iter()
+                .filter(|row|release_is_imdb_title_suffix_fit(
+                    &semantic_content,row).is_some()).collect::<Vec<_>>();
+            for candidate in filter_eligible(
+                db,matching,series,year,required_season)?{
+                imdb_title_suffix_matches.insert((candidate.imdb_id.clone(),
+                    candidate.title.clone()));
+                rows.push(candidate);
+            }
+        }
+    }
     // Do not fall back to a half-word prefix: such matches are not
     // independently meaningful, and caused short titles to hijack long ones.
     if rows.is_empty()&&series&&key.len()>=4{
@@ -509,6 +560,9 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
         }else if suffix_title_matches.contains(&alias_key){
             title_suffix_in_original_release_fit(&semantic_content,&row)
                 .unwrap_or(TitleFit::fallback(row.clean.len()))
+        }else if imdb_title_suffix_matches.contains(&alias_key){
+            release_is_imdb_title_suffix_fit(&semantic_content,&row)
+                .unwrap_or(TitleFit::fallback(row.clean.len()))
         }else if stage=="country_exact"{TitleFit::exact()}
             else if stage=="aligned"{
                 title_fit(&key,&words,&release_words,&row,&semantic_release)
@@ -520,6 +574,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
         // lexical prefix. Keep the original prefix preference at equal fit.
         let mut fit=fit;
         if !suffix_title_matches.contains(&alias_key)
+            && !imdb_title_suffix_matches.contains(&alias_key)
             && !extended_title_matches.contains(&alias_key) {
             if let Some(source_prefix)=title_prefix_in_original_release_fit(
                 &semantic_content,&row){
