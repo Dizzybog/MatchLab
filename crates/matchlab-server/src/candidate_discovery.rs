@@ -133,13 +133,20 @@ fn reclaim_unqualified(db:&Connection,budget:&mut Budget)->Result<bool,String>{
 }
 pub fn observe(db:&Connection,title:&str,parsed:&Value,
     model:&crate::online_model::OnlineModel,remaining:&mut Budget)->Result<(),String>{
+    let context=crate::online_model::TitleFeatureContext::new(title);
+    observe_with_context(db,title,parsed,model,remaining,&context)
+}
+/// Reuse release context and scorer scratch without changing candidate rank.
+pub fn observe_with_context(db:&Connection,title:&str,parsed:&Value,
+    model:&crate::online_model::OnlineModel,remaining:&mut Budget,
+    context:&crate::online_model::TitleFeatureContext)->Result<(),String>{
     let name=parsed["title"].as_str().unwrap_or("").to_ascii_lowercase();
     if !(4..=120).contains(&name.len()) {return Ok(());}
     let source_build=build();
     let identity=hash(&format!("{source_build}:{name}"));
     // Scores for multiple markers and source fields share immutable release
     // context instead of lowercasing and scanning the title repeatedly.
-    let context=crate::online_model::TitleFeatureContext::new(title);
+    let mut scratch=Vec::with_capacity(110);
     for marker in unknown_tokens(title){
         if remaining.examples>=crate::ml_config::get().unknown_examples
             && !reclaim_unqualified(db,remaining)?{break;}
@@ -147,7 +154,7 @@ pub fn observe(db:&Connection,title:&str,parsed:&Value,
         // actual value and regex are never used in a parser or matcher.
         let mut ranked:Option<(&str,f32)>=None;
         for field in parser_fields(){
-            if let Some(score)=model.score_prepared(field,&marker,&context)
+            if let Some(score)=model.score_prepared_reusing(field,&marker,context,&mut scratch)
                 && score>=MIN_RANK
                 && ranked.is_none_or(|(_,best)|score>best){
                 ranked=Some((field,score));
@@ -260,6 +267,34 @@ pub fn status()->Value{
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn shared_context_preserves_unknown_marker_review_rows(){
+        let left=Connection::open_in_memory().unwrap();
+        let right=Connection::open_in_memory().unwrap();
+        let training=Connection::open_in_memory().unwrap();
+        let mut model=crate::online_model::OnlineModel::load(&training).unwrap();
+        for i in 0..80 {
+            model.observe(&training,&format!("Work{i}.2160p.WEB-DL"),
+                "resolution","2160p").unwrap();
+        }
+        let title="Film.2160p.X266.WEB-DL";
+        let parsed=json!({"title":"Film"});
+        let ctx=crate::online_model::TitleFeatureContext::new(title);
+        let mut l=budget(&left).unwrap();
+        let mut r=budget(&right).unwrap();
+        observe(&left,title,&parsed,&model,&mut l).unwrap();
+        observe_with_context(&right,title,&parsed,&model,&mut r,&ctx).unwrap();
+        let collect=|db:&Connection|{
+            let mut stmt=db.prepare("SELECT marker,predicted_field,rank,distinct_works
+                FROM ml_unknown_candidates ORDER BY marker,predicted_field").unwrap();
+            let rows=stmt.query_map([],|row|Ok((row.get::<_,String>(0)?,
+                row.get::<_,String>(1)?,row.get::<_,f32>(2)?,row.get::<_,i64>(3)?)))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            rows
+        };
+        assert_eq!(collect(&left),collect(&right));
+        assert_eq!((l.candidates,l.examples),(r.candidates,r.examples));
+    }
     #[test]
     fn discovery_catalog_includes_every_original_parser_field(){
         let fields=parser_fields();
