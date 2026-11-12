@@ -449,4 +449,44 @@ mod tests{
         assert_eq!((resolved.season,resolved.episode,resolved.anidb_episode),(2,3,10));
         assert!(resolve_absolute(&db,"tt1234567",12).unwrap().is_none());
     }
+
+    #[test]
+    fn hundred_episode_batch_preserves_explicit_pairs_and_ambiguity(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO anime_series_map VALUES('tt1234567','123','789',0);
+            INSERT INTO episode_map VALUES('123','789',1,-1,1,120,0,'');")
+            .unwrap();
+        let pairs=(1..=120)
+            .map(|n|if n==17 {"17-17+18".to_owned()}
+                else{format!("{n}-{n}")})
+            .collect::<Vec<_>>().join(";");
+        db.execute("INSERT INTO episode_map VALUES
+            ('123','789',1,2,1,120,0,?1)",rusqlite::params![pairs]).unwrap();
+
+        let season=resolve_season_range(&db,"tt1234567",2,1,120).unwrap();
+        let absolute=resolve_absolute_range(&db,"tt1234567",1,120).unwrap();
+        assert_eq!(season.len(),120);
+        assert_eq!(absolute.len(),120);
+        for number in 1..=120 {
+            let slot=(number-1) as usize;
+            assert_eq!(season[slot],
+                resolve_season(&db,"tt1234567",2,number).unwrap(),
+                "season episode {number}");
+            assert_eq!(absolute[slot],
+                resolve_absolute(&db,"tt1234567",number).unwrap(),
+                "absolute episode {number}");
+        }
+        // One AniDB-local episode mapping to two TVDB numbers must never
+        // become an arbitrary, first-result-wins SID/ASID selection.
+        assert!(season[17].is_none());
+        assert!(absolute[16].is_none());
+        let mapped=season[24].as_ref().unwrap();
+        assert_eq!((mapped.season,mapped.episode,mapped.anidb_episode),(2,25,25));
+    }
 }
