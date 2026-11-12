@@ -445,18 +445,26 @@ fn release_component_for_title<'a>(raw:&'a str,title:&str)->&'a str{
 /// distance, region preference, IMDb votes, and the earliest production year.
 /// When no release year was supplied, its distance is neutral for all works.
 /// IMDb ID is only a final deterministic tie-breaker.
-fn rank(r:&Aka,year:Option<i32>,duplicate:bool,country:Option<&str>,votes:i64)
-    -> (i64,i32,i64,i32,String) {
+// The same identity can have many AKA rows. During *intra-identity*
+// alias selection, IMDb ID never distinguishes aliases and cloning it for
+// every comparison is needless CPU/allocation. Keep the owned-ID rank only
+// for the final cross-identity deterministic tie-break.
+fn rank_without_id(r:&Aka,year:Option<i32>,duplicate:bool,
+    country:Option<&str>,votes:i64)->(i64,i32,i64,i32){
     let distance=year.map_or(0,|y|(i64::from(r.year)-i64::from(y)).abs());
-    // Keep the existing regional rules: the explicitly supplied country
-    // takes precedence, otherwise prefer US, and only for duplicate aliases.
-    // IMDb calls its British region GB; the release marker uses UK.
+    // Explicit country overrides the default US region only for duplicate
+    // aliases. IMDb names its British region GB; torrent markers use UK.
     let preferred=country.map(|code|if code=="UK"{"GB"}else{code});
     let region=if !duplicate
         || r.region.as_deref()==Some(preferred.unwrap_or("US")){0}else{1};
-    // Missing/unknown IMDb year (0) is not earlier than a known year.
     let earliest_year=if r.year>0{r.year}else{i32::MAX};
-    (distance,region,-votes,earliest_year,r.imdb_id.clone())
+    (distance,region,-votes,earliest_year)
+}
+fn rank(r:&Aka,year:Option<i32>,duplicate:bool,country:Option<&str>,votes:i64)
+    ->(i64,i32,i64,i32,String){
+    let (distance,region,negative_votes,earliest_year)=
+        rank_without_id(r,year,duplicate,country,votes);
+    (distance,region,negative_votes,earliest_year,r.imdb_id.clone())
 }
 // For a tied IMDb shortlist, the scalar ranker used one ratings query,
 // one anime_ids query and often one anime_series_map query per identity.
@@ -849,7 +857,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
                 .optional().unwrap_or(None).unwrap_or(0)
         };
         let (best,fit)=aliases.into_iter().min_by_key(|(r,fit)|
-            (*fit,rank(r,year,duplicates.contains(&r.clean),country,votes))
+            (*fit,rank_without_id(r,year,duplicates.contains(&r.clean),country,votes))
         ).unwrap();
         let ids=if let Some((_,ids))=prefetched{ids}else{
             let mut ids=BTreeMap::new();
