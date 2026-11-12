@@ -2988,6 +2988,10 @@ pub fn parse_title(
     // a title is anime; the matcher may use a verified AniDB *part* alias in
     // a subfolder, without changing the ordinary series/movie title.
     let mut parent_title_candidates:Vec<String>=Vec::new();
+    // Retain the ORIGINAL component and its independently parsed fields.
+    // Matchers can walk leaf-to-root without reparsing, guessing titles,
+    // or concatenating unrelated folder names into one IMDb title.
+    let mut path_layers=Vec::new();
     let mut leaf_title=String::new();
     let mut leaf_title_generic=false;
     for (index,component) in components.iter().enumerate(){
@@ -3000,6 +3004,9 @@ pub fn parse_title(
         let bare_number_directory=is_parent && component.trim().len()<=3
             && component.trim().bytes().all(|b|b.is_ascii_digit());
         let layer=parse_path_component(component,translate_languages)?;
+        if components.len()>1 {
+            path_layers.push(json!({"raw":component,"parsed":layer.clone()}));
+        }
         if let Some(title)=layer.get("title").and_then(Value::as_str){
             let title=title.trim();
             if !is_parent{
@@ -3032,6 +3039,9 @@ pub fn parse_title(
     if !title.is_empty(){merged.insert("title".into(),Value::String(title));}
     if !parent_title_candidates.is_empty() {
         merged.insert("path_title_candidates".into(),json!(parent_title_candidates));
+    }
+    if !path_layers.is_empty(){
+        merged.insert("path_layers".into(),Value::Array(path_layers));
     }
     // The upstream parser exposes empty season/episode arrays even when
     // nothing was recognized. Keep this established /parse API behavior,
