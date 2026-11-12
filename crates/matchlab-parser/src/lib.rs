@@ -2716,6 +2716,44 @@ fn standalone_special_marker(raw:&str, result:&Map<String,Value>) -> Option<(Str
     None
 }
 
+// Different episode leaves in a torrent commonly share the same ancestor
+// components. Cache each independent component briefly so siblings do not
+// re-run the full native regex catalogue for their shared folder names.
+// A new handler patch generation invalidates cached component parses.
+static PATH_COMPONENT_CACHE:std::sync::OnceLock<Mutex<HashMap<
+    (String,bool),(u64,std::time::Instant,Map<String,Value>)
+>>>=std::sync::OnceLock::new();
+fn cached_path_component(raw:&str,translate_languages:bool)
+    ->Result<Map<String,Value>,ParseError>{
+    let generation=handler_patch_revision();
+    let key=(raw.to_owned(),translate_languages);
+    let cache=PATH_COMPONENT_CACHE.get_or_init(||Mutex::new(HashMap::new()));
+    if let Ok(guard)=cache.try_lock(){
+        if let Some((revision,at,result))=guard.get(&key){
+            if *revision==generation&&at.elapsed()<std::time::Duration::from_secs(30)
+                &&handler_patch_revision()==generation {
+                return Ok(result.clone());
+            }
+        }
+    }
+    let result=parse_path_component(raw,translate_languages)?;
+    if handler_patch_revision()==generation {
+        if let Ok(mut guard)=cache.try_lock(){
+            const MAX_COMPONENTS:usize=2048;
+            if guard.len()>=MAX_COMPONENTS{
+                guard.retain(|_,(rev,at,_)|
+                    *rev==generation&&at.elapsed()<std::time::Duration::from_secs(30));
+            }
+            if guard.len()>=MAX_COMPONENTS{
+                if let Some(oldest)=guard.iter().min_by_key(|(_,(_,at,_))|*at)
+                    .map(|(key,_)|key.clone()){guard.remove(&oldest);}
+            }
+            guard.insert(key,(generation,std::time::Instant::now(),result.clone()));
+        }
+    }
+    Ok(result)
+}
+
 // Parse each directory entry independently. The path-level merge below
 // never concatenates release names (which could confuse episode coordinates).
 fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<String,Value>,ParseError> {
@@ -3003,7 +3041,11 @@ pub fn parse_title(
         // parser-only fallback. Four-digit year directories remain eligible.
         let bare_number_directory=is_parent && component.trim().len()<=3
             && component.trim().bytes().all(|b|b.is_ascii_digit());
-        let layer=parse_path_component(component,translate_languages)?;
+        let layer=if components.len()>1{
+            cached_path_component(component,translate_languages)?
+        }else{
+            parse_path_component(component,translate_languages)?
+        };
         if components.len()>1 {
             path_layers.push(json!({"raw":component,"parsed":layer.clone()}));
         }
