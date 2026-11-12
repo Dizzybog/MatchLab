@@ -266,9 +266,13 @@ validators. Public parser, match and diagnostic responses are not changed.
   field evidence and unknown-token discovery. Existing public methods remain.
 - **Zero extra scoring buffers per candidate:** one reusable 110-slot vector
   covers the complete unknown-marker / possible-field scoring matrix.
-- **One training feature buffer per label:** sequentially build positive and
-  counterfactual features in the same vector. The positive FTRL update still
-  precedes the negative, and holdout scoring uses the original model weights.
+- **One reusable training buffer per loaded model:** sequentially build
+  positive and counterfactual features in the same vector, retained across
+  accepted labels. The positive FTRL update still precedes the negative;
+  holdout scoring uses the original model weights.
+- **Prehashed FNV n-gram field prefixes:** hash `g2/g3/g4:field:` once per
+  feature family, then extend the same 64-bit FNV-1a state for each window.
+  Feature IDs remain bit-exact, including multilingual UTF-8 validation.
 - **Differential tests:** compare owned/reused hash indices and model scores
   on ASCII/Unicode signals, train both paths and assert identical FTRL arrays,
   counts, holdout and SQLite deduplication, and verify candidate review rows.
