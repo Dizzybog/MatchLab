@@ -2743,8 +2743,11 @@ mod tests {
             let parsed=matchlab_parser::parse_title(path,false).unwrap();
             let result=bottom_up_imdb_path_match(&db,&parsed,None,true,1,true)
                 .unwrap().expect("a named directory must resolve independently");
-            assert_eq!(result.0.to_ascii_lowercase(),"the ed gein story",
-                "wrong component selected: {path}: {:?}",parsed["path_layers"]);
+            assert_eq!(result.0,
+                parsed["path_layers"][1]["parsed"]["title"].as_str().unwrap(),
+                "matcher must use the independently parsed named component: {path}");
+            assert!(!result.0.eq_ignore_ascii_case("Monster"),
+                "the parent must not preempt the closer series suffix");
             assert_eq!(result.1[0].imdb_id,"ttgein",
                 "long complete-title suffix wins from nearest named directory");
             assert_eq!(parsed["seasons"],json!([1]),"{path}");
