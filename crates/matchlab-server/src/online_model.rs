@@ -40,7 +40,17 @@ pub struct OnlineModel{
     recent_window:u32,
     recent_count:u8,
 }
-fn digest(s:&str)->String{format!("{:x}",Sha256::digest(s.as_bytes()))}
+fn sample_digest(field:&str,signal:&str,title:&str)->String{
+    // Streaming the exact legacy key bytes avoids allocating/copying
+    // "epoch:field:signal:title" for every training label.
+    let mut digest=Sha256::new();
+    let epoch=EPOCH.to_string();
+    for part in [epoch.as_bytes(),b":",field.as_bytes(),b":",
+        signal.as_bytes(),b":",title.as_bytes()]{
+        digest.update(part);
+    }
+    format!("{:x}",digest.finalize())
+}
 const FNV_OFFSET:u64=0xcbf29ce484222325;
 fn extend_hash(mut state:u64,bytes:&[u8])->u64{
     for &byte in bytes {
@@ -416,7 +426,7 @@ impl OnlineModel{
         // The original Rust parser and field validator already established
         // the positive. A mismatched field is a safe counterfactual negative,
         // not an inferred claim about the film or the final match.
-        let sample=digest(&format!("{EPOCH}:{field}:{signal}:{title}"));
+        let sample=sample_digest(field,signal,title);
         let inserted=db.prepare_cached(
             "INSERT OR IGNORE INTO online_model_seen(sample_hash,seen_at)
              VALUES(?1,strftime('%s','now'))")
@@ -466,6 +476,20 @@ impl OnlineModel{
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn streaming_sample_sha_is_identical_to_persisted_key_format(){
+        for (field,signal,title) in [
+            ("resolution","2160p","Example.S02E07.2160p.WEB-DL"),
+            ("audio","日本語","Série:2025.日本語"),
+            ("codec","x265","Film:x265"),
+            ("title","title_boundary","JoJo's Bizarre Adventure")
+        ] {
+            let legacy=format!("{:x}",Sha256::digest(
+                format!("{EPOCH}:{field}:{signal}:{title}").as_bytes()));
+            assert_eq!(sample_digest(field,signal,title),legacy);
+        }
+    }
+
     #[test]
     fn reusable_model_scratch_matches_legacy_pairwise_ftrl_updates(){
         // This independent scalar reference models the former two-Vec path,
