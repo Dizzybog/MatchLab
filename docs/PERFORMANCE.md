@@ -148,3 +148,49 @@ No numerical gains are asserted without those measurements.
   remains configurable; on a single CPU, higher configured concurrency
   may harm throughput/latency and needs load testing.
 - No automatic activation of unverified ML rules and no API/schema changes.
+
+## Third-pass Graphify CPU review — main `0456e4f`
+
+Graphify reindexed the merged PR #122 tree on 2026-11-12
+(1,918 nodes, 5,584 edges). The additional improvements below reduce
+unnecessary work in candidate enrichment, crosswalk ranges, and high-cardinality
+cache traffic; they do **not** change the index or matching contracts.
+
+- **IMDb shortlist enrichment:** Candidate discovery, title-fit ranking and
+  tie retention still happen first. For more than four surviving IMDb works,
+  fetch votes and anime IDs with SQL `IN` batches of at most 200 IDs.
+  Restrict AniDB fallback to identities without an explicit AniDB ID.
+  Preserve the direct, low-overhead query path for short lists, and retain
+  missing-ratings-as-zero behavior.
+- **Explicit anime episode maps:** Convert `episode_map.map` into validated
+  pairs once per metadata snapshot, not once for each episode. Avoid building
+  temporary filtered mapping arrays for every absolute episode.
+  The crosswalk still checks each episode's separate ambiguity and permitted
+  SID/ASID ranges. Tests compare 120 episode intervals to independent scalar
+  conversions, including non-bijective mappings.
+- **Strict season-range gates:** For more than four candidate IMDb identities
+  surviving the public year gate, read season limits in batches and retain
+  the original result order. Missing or invalid season bounds still reject
+  candidates. A 345-candidate fixture compares scalar/batch results.
+- **High-cardinality single-flight cache:** Replace the O(capacity)
+  oldest-entry search on each insertion with a bounded FIFO insertion-order
+  queue and unique sequence tags. Expired/reinserted keys never evict their
+  replacement through stale tickets. Queue compaction is infrequent and
+  bounded; error results, TTLs and generation-scoped keys remain unchanged.
+
+### Validation and measurement
+
+```sh
+cargo test --workspace
+cargo test -p matchlab-server
+cargo test -p matchlab-parser
+cargo check --workspace --all-targets
+cargo bench -p matchlab-parser --bench matchlab_parser_bench
+```
+
+CI includes Rust tests and native ARM64/AMD64 build and ML smoke checks.
+Benchmark *execution* is a separate step. For any throughput or CPU-gain
+claim compare this PR against `0456e4f` on equivalent hardware, identical
+metadata, cold/warm lookup mixes, 1/2/4/8/16/32 concurrent callers and
+identical response JSON. Record CPU seconds per 1,000 matches, latency
+p50/p95/p99, requests/second and peak memory. No speedup has yet been measured.
