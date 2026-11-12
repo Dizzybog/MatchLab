@@ -857,15 +857,16 @@ pub fn titles_by_ids(db:&Connection,ids:&[String])->Result<Vec<TitleAlias>,Strin
     if ids.is_empty(){return Ok(Vec::new());}
     let (search,memory_dir)=open_search(db)?;
     let reader=search.reader.searcher();
-    let mut aliases=Vec::new();
-    let unique:std::collections::HashSet<_>=ids.iter().collect();
-    for imdb in unique {
-        let query=TermQuery::new(Term::from_field_text(search.id,imdb),IndexRecordOption::Basic);
-        let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
-        for addr in hits {
-            let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
-            if let Some(title)=read_title(&doc,&search){aliases.push(title);}
-        }
+    // A union of exact IMDb ID postings replaces one query per ID. This
+    // includes every title alias for every ID, without an arbitrary TopDocs
+    // cutoff or a new title ranking policy.
+    let query=TermSetQuery::new(ids.iter()
+        .map(|id|Term::from_field_text(search.id,id)));
+    let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
+    let mut aliases=Vec::with_capacity(hits.len());
+    for addr in hits {
+        let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
+        if let Some(title)=read_title(&doc,&search){aliases.push(title);}
     }
     drop(reader);drop(search);
     if let Some(dir)=memory_dir{let _=std::fs::remove_dir_all(dir);}
@@ -1091,6 +1092,33 @@ mod persistence_tests {
         for worker in workers {worker.join().unwrap();}
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
+    fn title_id_union_preserves_all_aliases_and_deduplicates_repeated_ids(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
+            region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            INSERT INTO titles VALUES
+                ('tt0000001','First Show','firstshow',2020,'series','',1,0,'tvSeries'),
+                ('tt0000001','Show One','showone',2020,'series','US',0,1,'tvSeries'),
+                ('tt0000002','Second Show','secondshow',2021,'series','',1,0,'tvSeries'),
+                ('tt0000003','Other Show','othershow',2022,'series','',1,0,'tvSeries');").unwrap();
+        let ids=vec!["tt0000001".into(),"tt0000002".into(),
+                     "tt0000001".into(),"tt9999999".into()];
+        let found=titles_by_ids(&db,&ids).unwrap();
+        let expected=ids.iter().collect::<std::collections::BTreeSet<_>>()
+            .into_iter().map(|id|titles_by_ids(&db,&[id.clone()]).unwrap())
+            .flatten().map(|r|(r.imdb_id,r.title,r.clean,r.year,r.category,
+                r.region,r.original,r.ordering,r.media_type))
+            .collect::<std::collections::BTreeSet<_>>();
+        let actual=found.into_iter().map(|r|(r.imdb_id,r.title,r.clean,r.year,
+            r.category,r.region,r.original,r.ordering,r.media_type))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(actual,expected);
+        assert_eq!(actual.len(),3);
+        assert!(titles_by_ids(&db,&[]).unwrap().is_empty());
     }
 
     #[test]
