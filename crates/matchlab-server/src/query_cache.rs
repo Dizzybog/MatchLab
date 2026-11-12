@@ -8,7 +8,9 @@ use std::{
     time::{Duration,Instant},
 };
 
-struct Ready<T> { at:Instant, value:T }
+// Share finished responses across threads without cloning large candidate
+// vectors while holding the process-wide cache mutex.
+struct Ready<T> { at:Instant, value:Arc<T> }
 struct Inner<T> {
     ready:HashMap<String,Ready<T>>,
     // One short lock per key, so distinct titles are never serialized while
@@ -33,40 +35,53 @@ impl<T:Clone> QueryCache<T> {
     )->Result<T,String>{
         // Fast path: only clone a completed result while holding the cache
         // mutex. Never perform Tantivy or SQLite work under this global lock.
-        let flight={
+        let (cached,flight)={
             let mut inner=self.inner.lock().map_err(|e|e.to_string())?;
-            if let Some(entry)=inner.ready.get(&key){
-                if entry.at.elapsed()<self.ttl{return Ok(entry.value.clone());}
-            }
-            inner.ready.remove(&key);
-            Arc::clone(inner.flights.entry(key.clone()).or_insert_with(||
-                Arc::new(Mutex::new(()))))
+            let cached=inner.ready.get(&key)
+                .filter(|entry|entry.at.elapsed()<self.ttl)
+                .map(|entry|Arc::clone(&entry.value));
+            let flight=if cached.is_some(){
+                None
+            }else{
+                inner.ready.remove(&key);
+                Some(Arc::clone(inner.flights.entry(key.clone()).or_insert_with(||
+                    Arc::new(Mutex::new(())))))
+            };
+            (cached,flight)
         };
+        // Clone the payload after releasing the global mutex.
+        if let Some(value)=cached{return Ok((*value).clone());}
+        let flight=flight.expect("cache miss has a single-flight lock");
         let _guard=flight.lock().map_err(|e|e.to_string())?;
-        // A different request may have populated this entry while we waited.
-        {
+        // Another request may have populated this entry while we waited.
+        let cached={
             let inner=self.inner.lock().map_err(|e|e.to_string())?;
-            if let Some(entry)=inner.ready.get(&key){
-                if entry.at.elapsed()<self.ttl{return Ok(entry.value.clone());}
-            }
-        }
+            inner.ready.get(&key)
+                .filter(|entry|entry.at.elapsed()<self.ttl)
+                .map(|entry|Arc::clone(&entry.value))
+        };
+        if let Some(value)=cached{return Ok((*value).clone());}
         let result=compute();
+        // The potentially expensive T::clone also happens off-lock.
+        let cache_copy=match &result {
+            Ok(value) if self.max_entries>0 && cacheable(value)=>
+                Some(Arc::new(value.clone())),
+            _=>None,
+        };
         // Do not cache transient query errors. Limit the number of entries and
         // evict expired/oldest results to avoid unbounded memory growth.
         if let Ok(mut inner)=self.inner.lock(){
-            if let Ok(ref value)=result {
-                if self.max_entries>0 && cacheable(value){
-                    if inner.ready.len()>=self.max_entries{
-                        inner.ready.retain(|_,entry|entry.at.elapsed()<self.ttl);
-                    }
-                    if inner.ready.len()>=self.max_entries {
-                        if let Some(oldest)=inner.ready.iter().min_by_key(|(_,e)|e.at)
-                            .map(|(key,_)|key.clone()) {
-                            inner.ready.remove(&oldest);
-                        }
-                    }
-                    inner.ready.insert(key.clone(),Ready{at:Instant::now(),value:value.clone()});
+            if let Some(value)=cache_copy {
+                if inner.ready.len()>=self.max_entries{
+                    inner.ready.retain(|_,entry|entry.at.elapsed()<self.ttl);
                 }
+                if inner.ready.len()>=self.max_entries {
+                    if let Some(oldest)=inner.ready.iter().min_by_key(|(_,e)|e.at)
+                        .map(|(key,_)|key.clone()) {
+                        inner.ready.remove(&oldest);
+                    }
+                }
+                inner.ready.insert(key.clone(),Ready{at:Instant::now(),value});
             }
             inner.flights.remove(&key);
         }
