@@ -10,12 +10,13 @@ pub use crate::title_normalization::clean_title;
 #[derive(Clone,Debug)]
 struct Aka {
     imdb_id:String, title:String, clean:String, year:i32, category:String,
-    region:Option<String>, media_type:String,
+    region:Option<String>, ordering:i32, media_type:String,
 }
 impl From<crate::tantivy_search::TitleAlias> for Aka {
     fn from(a:crate::tantivy_search::TitleAlias)->Self{
         Self{imdb_id:a.imdb_id,title:a.title,clean:a.clean,year:a.year,
-            category:a.category,region:a.region,media_type:a.media_type}
+            category:a.category,region:a.region,ordering:a.ordering,
+            media_type:a.media_type}
     }
 }
 fn index_error(error:String)->rusqlite::Error{
@@ -68,18 +69,31 @@ fn exact(db:&Connection,key:&str)->rusqlite::Result<Vec<Aka>>{
 #[derive(Clone,Copy,Debug,PartialEq,Eq,PartialOrd,Ord)]
 struct TitleFit{
     tier:u8,               // exact/country, full-word edge, last-resort fallback
+    alias_exact:u8,        // exact title.basics entry before exact AKA, if undated
     unmatched_bp:u32,     // relative unmatched share (basis points)
     edge:u8,              // prefix before suffix only when coverage is equal
     longest_first:i64,    // length only breaks otherwise equivalent ties
 }
 impl TitleFit{
-    fn exact()->Self{Self{tier:0,unmatched_bp:0,edge:0,longest_first:0}}
+    fn exact()->Self{Self{tier:0,alias_exact:0,unmatched_bp:0,edge:0,longest_first:0}}
+    fn exact_aka()->Self{Self{tier:0,alias_exact:1,unmatched_bp:0,edge:0,longest_first:0}}
     fn fallback(length:usize)->Self{
-        Self{tier:2,unmatched_bp:0,edge:0,longest_first:-(length as i64)}
+        Self{tier:2,alias_exact:0,unmatched_bp:0,edge:0,longest_first:-(length as i64)}
     }
 }
-fn title_fit(key:&str,words:&[String],release_words:&[String],row:&Aka)->Option<TitleFit>{
-    if row.clean==key{return Some(TitleFit::exact());}
+fn title_fit(key:&str,words:&[String],release_words:&[String],row:&Aka,
+    prefer_primary:bool)->Option<TitleFit>{
+    if row.clean==key{
+        // An IMDb AKA can abbreviate a different work to the same short
+        // title as an established series (Bleach 2004 vs TYBW 2022).
+        // Match the full title.basics identity before the abbreviated AKA
+        // only for undated, country-unqualified releases. An explicit year
+        // or country still disambiguates using the established ranking.
+        let from_basics=row.ordering==0 && row.region.as_deref().unwrap_or("").is_empty();
+        return Some(if prefer_primary && !from_basics {
+            TitleFit::exact_aka()
+        }else{TitleFit::exact()});
+    }
     let short=key.len().min(row.clean.len());
     let long=key.len().max(row.clean.len());
     if short<4||short.saturating_mul(2)<long||long-short>16{return None;}
@@ -90,7 +104,7 @@ fn title_fit(key:&str,words:&[String],release_words:&[String],row:&Aka)->Option<
     // source release (checked by filter). Never accept a partial word.
     if row.clean.strip_prefix(key).is_some_and(|tail|
         !tail.is_empty() && tail.bytes().all(|b|b.is_ascii_digit())){
-        return Some(TitleFit{tier:1,unmatched_bp,edge:0,
+        return Some(TitleFit{tier:1,alias_exact:0,unmatched_bp,edge:0,
             longest_first:-(short as i64)});
     }
     let alias_words=crate::title_normalization::clean_words(&row.title);
@@ -102,13 +116,13 @@ fn title_fit(key:&str,words:&[String],release_words:&[String],row:&Aka)->Option<
     if row.clean.starts_with(key)
         && release_words.windows(alias_words.len())
             .any(|window|window==alias_words.as_slice()){
-        return Some(TitleFit{tier:1,unmatched_bp,edge:0,
+        return Some(TitleFit{tier:1,alias_exact:0,unmatched_bp,edge:0,
             longest_first:-(short as i64)});
     }
     let prefix=words.starts_with(&alias_words)||alias_words.starts_with(words);
     let suffix=words.ends_with(&alias_words)||alias_words.ends_with(words);
     if !prefix&&!suffix{return None;}
-    Some(TitleFit{tier:1,unmatched_bp,edge:if prefix{0}else{1},
+    Some(TitleFit{tier:1,alias_exact:0,unmatched_bp,edge:if prefix{0}else{1},
         longest_first:-(short as i64)})
 }
 
@@ -148,6 +162,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     // canonical country-title aliases and the regional tie-breaker.
     let country_qualified=crate::country_aliases::qualified(release_title);
     let country=country_qualified.as_ref().map(|(code,_)|*code);
+    let prefer_primary=year.is_none() && country.is_none();
     // Exact country-qualified aliases precede generic prefix matching.
     if series {
         if let Some((_,aliases))=&country_qualified {
@@ -178,7 +193,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
                 .map_err(index_error)?.into_iter().map(Aka::from));
             // Avoid eligibility SQL joins for candidates that only match
             // fragments of a word (e.g. Dune vs Duneland).
-            discovered.retain(|row|title_fit(&key,&words,&release_words,row).is_some());
+            discovered.retain(|row|title_fit(&key,&words,&release_words,row,prefer_primary).is_some());
             rows=filter(db,discovered,&release,series,year,required_season)?;
         }
     }
@@ -236,11 +251,13 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     for row in rows{
         let fit=if stage=="country_exact"{TitleFit::exact()}
             else if stage=="aligned"{
-                title_fit(&key,&words,&release_words,&row).unwrap_or(TitleFit::fallback(row.clean.len()))
+                title_fit(&key,&words,&release_words,&row,prefer_primary)
+                    .unwrap_or(TitleFit::fallback(row.clean.len()))
             }else{TitleFit::fallback(row.clean.len())};
         groups.entry(row.imdb_id.clone()).or_default().push((row,fit));
     }
-    // Title fit is primary, then year distance, conditional country preference
+    // Title fit is primary (including canonical vs abbreviated AKA for
+    // undated searches), then year distance, conditional country preference
     // and votes, followed by earliest year as the final semantic tie-breaker.
     // Candidates below the lexical rank at `limit` cannot be returned.
     // Retain the entire tied boundary for the remaining criteria.
@@ -560,6 +577,65 @@ mod tests{
             "Same.2020",false,1).unwrap();
         assert_eq!(found[0].imdb_id,"tttv",
             "media type, original flag and alias order are not ranking factors");
+    }
+    #[test]
+    fn bleach_s01_uses_canonical_title_not_shortened_sequel_aka(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_season INTEGER);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            INSERT INTO titles VALUES
+                ('tt0434665','Bleach','bleach',2004,'series','',0,0,'tvSeries'),
+                ('tt14986406','Bleach: Thousand-Year Blood War',
+                    'bleachthousandyearbloodwar',2022,'series','',0,0,'tvSeries'),
+                ('tt14986406','Bleach','bleach',2022,'series','US',0,42,'tvSeries');
+            INSERT INTO imdb_ratings VALUES('tt0434665',90000),('tt14986406',120000);
+            INSERT INTO seasons VALUES('tt0434665',16),('tt14986406',4);")
+            .unwrap();
+        // IMDb's sequel has more votes, but 'Bleach' is only an abbreviated
+        // AKA of the sequel and is the main title of the 2004 series.
+        for release in ["bleach.s1","Bleach.S01","Bleach.S01E01"] {
+            let hits=search(&db,"Bleach",None,true,1,release,
+                release.contains('E'),1).unwrap();
+            assert_eq!(hits[0].imdb_id,"tt0434665","release: {release}");
+        }
+        // A full sequel title still resolves to the sequel.
+        let sequel=search(&db,"Bleach Thousand Year Blood War",None,true,1,
+            "Bleach.Thousand.Year.Blood.War.S01",false,1).unwrap();
+        assert_eq!(sequel[0].imdb_id,"tt14986406");
+        // An explicitly supplied production year must remain authoritative.
+        let year=search(&db,"Bleach",Some(2022),true,1,
+            "Bleach.2022.S01",false,1).unwrap();
+        assert_eq!(year[0].imdb_id,"tt14986406");
+        // The older series still survives the 1-season import tolerance;
+        // the newer series must not be selected for the older show's S17.
+        let season=search(&db,"Bleach",None,true,17,
+            "Bleach.S17E01",true,1).unwrap();
+        assert_eq!(season[0].imdb_id,"tt0434665");
+    }
+
+    #[test]
+    fn equal_primary_titles_still_choose_imdb_votes(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('tt1984','Dune','dune',1984,'movie','',0,0,'movie'),
+                ('tt2021','Dune','dune',2021,'movie','',0,0,'movie');
+            INSERT INTO imdb_ratings VALUES('tt1984',2000),('tt2021',200000);")
+            .unwrap();
+        let hits=search(&db,"Dune",None,false,0,
+            "Dune.1080p",false,1).unwrap();
+        assert_eq!(hits[0].imdb_id,"tt2021",
+            "popularity must win when both candidates actually share the primary title");
     }
     #[test] fn normalization(){assert_eq!(clean_title("Pokémon and Ægir"),"pokemonaegir");}
     #[test] fn short_titles_require_exact_match_instead_of_broad_tantivy_prefix(){
