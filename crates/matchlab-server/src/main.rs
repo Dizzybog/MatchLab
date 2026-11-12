@@ -5420,6 +5420,78 @@ mod tests {
         assert_eq!(matched["anidb_episode"],37);
     }
     #[test]
+    fn parent_chinese_episode_with_advertising_only_leaf_is_not_a_season_pack(){
+        // Absolute episode 62 is independent of the S01 directory label.
+        // The fixture's S02E03 mapping is synthetic: actual coordinates
+        // must come from the imported AniDB/TVDB episode crosswalk.
+        const RAW:&str="【高清剧集网发布 www.BBEGGE.com】沧元图[第62集][国语配音+中文字幕].The.Demon.Hunter.S01.2023.2160p.WEB-DL.H265.AAC-ColorTV/【更多高清剧集下载请访问 www.BPHDTV.com】【更多剧集打包下载请访问 www.BPHDTV.com】.mkv";
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-parent-cjk-episode-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,
+                clean_title TEXT,year INTEGER,category TEXT,region TEXT,
+                original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES
+                ('tt27497430','The Demon Hunter','thedemonhunter',
+                    2023,'series','',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt27497430',2);
+            INSERT INTO season_episodes VALUES
+                ('tt27497430',1,26,26),('tt27497430',2,14,14);
+            INSERT INTO anime_series_map VALUES
+                ('tt27497430','4000','tvdb-4000',0);
+            INSERT INTO anime_ids VALUES('tt27497430','anidb','4000');
+            INSERT INTO anidb_titles VALUES
+                ('4000','The Demon Hunter','thedemonhunter','main','en');
+            INSERT INTO episode_map VALUES
+                ('4000','tvdb-4000',1,2,60,66,-59,'');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        let result=diagnose(&path,&MatchRequest{
+            title:RAW.into(),year:None,series:None}).unwrap();
+        assert_eq!(result.parsed["title"],"The Demon Hunter","{:?}",result.parsed);
+        assert_eq!(result.parsed["seasons"],json!([1]));
+        assert_eq!(result.parsed["episodes"],json!([]));
+        assert_eq!(result.parsed["absolute_episode_candidate"],json!(62));
+        let winner=result.selected.expect("indexed IMDb identity");
+        assert_eq!(winner["imdb_id"],"tt27497430");
+        assert_eq!(winner["match_source"],"verified_parent_absolute_episode");
+        assert_eq!(public_match_response(Some(winner)),json!({
+            "sid_start":"tt27497430:2:3","sid_end":"tt27497430:2:3",
+            "asid_start":"4000:62","asid_end":"4000:62"
+        }));
+        // If the AniDB import lacks an episode relationship, retain
+        // only the real IMDb identity. In particular S01E01..E26 is a
+        // FALSE season pack because the parent announces 第62集.
+        let db=Connection::open(&path).unwrap();
+        db.execute("DELETE FROM episode_map",[]).unwrap();
+        drop(db);
+        let unresolved=diagnose(&path,&MatchRequest{
+            title:RAW.into(),year:None,series:None}).unwrap();
+        let selected=unresolved.selected.expect("keep IMDb identity");
+        assert!(selected["episode_range"].is_null(),
+            "absolute episode may not silently expand into entire season");
+        assert_eq!(public_match_response(Some(selected)),json!({
+            "sid_start":"tt27497430","sid_end":"tt27497430",
+            "asid_start":null,"asid_end":null
+        }));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
     fn chinese_episode_41_uses_only_verified_absolute_anime_crosswalk(){
         // The 2024 live-action drama shares an English alias with the 2022
         // donghua. The former is a bad year-ranked candidate; only the
