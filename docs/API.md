@@ -404,6 +404,16 @@ title length. For otherwise eligible IMDb candidates, the ranking is:
    the original `Bleach` work instead of `Bleach: Thousand-Year Blood War`,
    regardless of whether the torrent specifies a production year.
    **Only candidates with equal title relevance proceed to year distance.**
+   If the parser stopped too early on a metadata-like token (such as the name
+   `Ed` in `Monster.the.ed.gein.story.s1.e1`), the IMDb matcher also
+   checks **longer complete IMDb aliases appearing as whole-word prefixes
+   of the original torrent name**, before the season/episode/technical suffix.
+   Such a fully present title outranks a shorter compatible title, even
+   when the shorter title is all the parser retained; the regular partial
+   title coverage limits still apply to other matches. This recovery uses
+   one exact-term Tantivy query, never a SQLite title scan, and rechecks
+   original Unicode word boundaries so `Dune` never matches `Duneland`.
+   It is independent of the requested year, region and vote count.
 2. **Distance from the release year**, when one was provided; otherwise all
    candidates have the same distance (zero), regardless of season/episode.
 3. **Region preference**: for duplicate normalized IMDb titles, prefer
