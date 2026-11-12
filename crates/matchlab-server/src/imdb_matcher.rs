@@ -495,16 +495,22 @@ fn shortlist_metadata(
                 entry.1.insert(kind,value);
             }
         }
+        // A verified explicit AniDB ID makes the fallback query unnecessary.
+        // This also preserves legacy snapshots which have anime_ids but no
+        // anime_series_map table unless fallback discovery is actually needed.
+        let missing=batch.iter().filter(|id|
+            metadata.get(*id).is_some_and(|(_,ids)|!ids.contains_key("anidb")))
+            .collect::<Vec<_>>();
+        if missing.is_empty(){continue;}
+        let markers=vec!["?";missing.len()].join(",");
         let sql=format!("SELECT DISTINCT imdb_id,anidb_id FROM anime_series_map
             WHERE imdb_id IN ({markers})");
         let mut stmt=db.prepare(&sql)?;
         let mut links=HashMap::<String,std::collections::BTreeSet<String>>::new();
-        for row in stmt.query_map(params(),|row|
+        for row in stmt.query_map(rusqlite::params_from_iter(missing.iter().copied()),|row|
             Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))?{
             let (id,anidb)=row?;
-            if metadata.get(&id).is_some_and(|(_,values)|!values.contains_key("anidb")){
-                links.entry(id).or_default().insert(anidb);
-            }
+            links.entry(id).or_default().insert(anidb);
         }
         for (id,linked) in links {
             if linked.len()==1 {
