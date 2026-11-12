@@ -1917,24 +1917,22 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result
             return Err("matching metadata or learned regex changed during request; retry".into());
         }
     }
-    if cacheable
-        && let Ok(ref diagnostic)=result
-        && let Ok(snapshot)=serde_json::to_value(diagnostic){
-        if let Some(ref ns)=generation{
-            learning_cache::put_match(
-                &req.title,req.year,req.series,ns,&snapshot);
-        }
-    }
     let elapsed=start.elapsed().as_millis() as u64;
     match &result{
         Ok(d)=>{
-            let status=if d.selected.is_some(){"matched"}else{"unmatched"};
+            // One serialization for the optional ML cache and bounded
+            // history queue; ownership is transferred to the writer.
             let details=serde_json::to_value(d).unwrap_or(Value::Null);
+            if cacheable && let Some(ref ns)=generation {
+                learning_cache::put_match(
+                    &req.title,req.year,req.series,ns,&details);
+            }
+            let status=if d.selected.is_some(){"matched"}else{"unmatched"};
             dashboard_history::record_async(
-                &state.history,&req.title,status,d.selected.as_ref(),&details,elapsed);
+                &state.history,&req.title,status,d.selected.as_ref(),details,elapsed);
         },
         Err(error)=>dashboard_history::record_async(
-            &state.history,&req.title,"error",None,&json!({"error":error}),elapsed),
+            &state.history,&req.title,"error",None,json!({"error":error}),elapsed),
     }
     result
 }
