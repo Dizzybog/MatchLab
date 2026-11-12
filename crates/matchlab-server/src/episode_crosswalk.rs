@@ -8,7 +8,10 @@ use std::collections::BTreeSet;
 #[derive(Clone,Debug)]
 struct Link {anidb:String,tvdb:String,trakt:i64,direct:bool}
 #[derive(Clone,Debug)]
-struct Mapping {anidb:String,tvdb:String,tv_season:i64,start:i64,end:i64,offset:i64,map:String}
+struct Mapping {anidb:String,tvdb:String,tv_season:i64,start:i64,end:i64,offset:i64,
+    // Parsed once per metadata snapshot. A 300-episode range previously
+    // parsed the identical semicolon mapping hundreds of times.
+    explicit:Vec<(i64,i64)>}
 #[derive(Clone,Debug,PartialEq,Eq,Serialize)]
 pub struct Episode {pub imdb_id:String,pub season:i64,pub episode:i64,pub anidb_id:String,pub anidb_episode:i64}
 
@@ -43,9 +46,12 @@ fn mappings(db:&Connection,links:&[Link],include_absolute:bool)->rusqlite::Resul
     let mut stmt=db.prepare("SELECT anidb_id,tvdb_id,anidb_season,tvdb_season,start,end,offset,map
         FROM episode_map WHERE anidb_id=?1 AND anidb_season>0")?;
     for id in ids {
-        for row in stmt.query_map([id],|r|Ok(Mapping{anidb:r.get(0)?,tvdb:r.get(1)?,
-            tv_season:r.get(3)?,start:r.get(4)?,end:r.get(5)?,
-            offset:r.get(6)?,map:r.get(7)?}))?{
+        for row in stmt.query_map([id],|r|{
+            let map:String=r.get(7)?;
+            Ok(Mapping{anidb:r.get(0)?,tvdb:r.get(1)?,
+                tv_season:r.get(3)?,start:r.get(4)?,end:r.get(5)?,
+                offset:r.get(6)?,explicit:explicit_pairs(&map)})
+        })?{
             let m=row?;
             if include_absolute||m.tv_season>0{out.push(m);}
         }
@@ -97,9 +103,8 @@ fn resolve_season_preloaded(
         if is_split&&link.trakt!=season{continue;}
         if !is_split&&m.tv_season!=season{continue;}
         if !is_split{
-            let explicit=explicit_pairs(&m.map);
-            if !explicit.is_empty(){
-                for (ani,tv) in explicit{
+            if !m.explicit.is_empty(){
+                for &(ani,tv) in &m.explicit{
                     if tv==episode{candidates.push((m.offset,m.start,link.anidb.clone(),ani));}
                 }
                 continue;
@@ -180,9 +185,8 @@ fn resolve_absolute_preloaded(
             if m.tv_season<=0{continue;}
             // Explicit episode pairs are authoritative even if the mapping
             // range describes another numbering domain.
-            let explicit=explicit_pairs(&m.map);
-            if !explicit.is_empty(){
-                for (ani,tv) in explicit {
+            if !m.explicit.is_empty(){
+                for &(ani,tv) in &m.explicit {
                     if ani==local&&tv>0{
                         let season=if split(link,m,links,maps){link.trakt}else{m.tv_season};
                         if season>0{
@@ -263,11 +267,10 @@ pub fn resolve_anidb(
                         Vec::new()
                     }else{vec![episode-m.start.max(1)+1]}
                 }else{
-                    let pairs=explicit_pairs(&m.map);
-                    if !pairs.is_empty(){
+                    if !m.explicit.is_empty(){
                         // Non-bijective maps may associate one AniDB episode
                         // with several TVDB episodes: preserve every result.
-                        pairs.into_iter().filter_map(|(ani,tv)|
+                        m.explicit.iter().copied().filter_map(|(ani,tv)|
                             (ani==episode).then_some(tv)).collect()
                     }else if episode>=m.start.max(1) &&
                         (m.end<=0||episode<=m.end){
