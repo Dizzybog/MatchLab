@@ -776,12 +776,14 @@ mod tests{
             ("ex.on.the.beach.uk.s01","tt3522052"),
             ("ex.on.the.beach.gb.s01","tt3522052"),
         ]{
-            let titles=search(&db,"Ex on the Beach",None,true,1,release,false,4)
+            let parsed_title=release.split(".s01").next().unwrap()
+                .replace('.'," ");
+            let titles=search(&db,&parsed_title,None,true,1,release,false,4)
                 .unwrap();
             assert_eq!(titles[0].imdb_id,id,"release {release}");
         }
         // Explicit year remains ahead of country evidence, as promised.
-        let year=search(&db,"Ex on the Beach",Some(2014),true,1,
+        let year=search(&db,"Ex on the Beach US",Some(2014),true,1,
             "Ex.on.the.Beach.US.2014.S01",false,4).unwrap();
         assert_eq!(year[0].imdb_id,"tt3522052");
         // Without a country qualifier, this registry must not interfere.
@@ -790,7 +792,7 @@ mod tests{
         assert_eq!(no_country[0].imdb_id,"tt3522052");
         // A season outside US production bounds cannot be rescued by a
         // country hint. The existing eligibility filter remains authoritative.
-        let later=search(&db,"Ex on the Beach",None,true,11,
+        let later=search(&db,"Ex on the Beach US",None,true,11,
             "Ex.on.the.Beach.US.S11",false,4).unwrap();
         assert_eq!(later[0].imdb_id,"tt3522052");
     }
