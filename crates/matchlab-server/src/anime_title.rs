@@ -51,41 +51,77 @@ fn within_known_season_bounds(
     Ok(episode>0 && max.is_none_or(|end|end>=episode))
 }
 
-pub fn resolve(db:&Connection,imdb:&str,title:&str,season:i64,episode:i64)
-    -> rusqlite::Result<Option<episode_crosswalk::Episode>> {
-    if season<=0||episode<=0{return Ok(None);}
+/// Resolve a batch of named-anime-part episodes from one immutable SQLite
+/// snapshot. Unlike repeated resolve() calls, alias selection, part ordering,
+/// crosswalk links and episode-map rows are loaded at most once per range.
+/// All tie/ambiguity and boundedness checks remain episode-specific.
+pub fn resolve_range(
+    db:&Connection,imdb:&str,title:&str,season:i64,start:i64,end:i64,
+)->rusqlite::Result<Vec<Option<episode_crosswalk::Episode>>>{
+    if season<=0||start<=0||end<start||end-start>=1_000 {
+        return Ok(Vec::new());
+    }
+    let mut results=vec![None;(end-start+1) as usize];
     let key=imdb_matcher::clean_title(title);
-    if key.len()<4{return Ok(None);}
-    let mut aliases=aliases(db,imdb,title)?;
-    if aliases.is_empty(){return Ok(None);}
-    aliases.sort_by_key(|(id,alias)|(if alias==&key{0}else{1},
+    if key.len()<4{return Ok(results);}
+    let mut title_aliases=aliases(db,imdb,title)?;
+    if title_aliases.is_empty(){return Ok(results);}
+    title_aliases.sort_by_key(|(id,alias)|(if alias==&key{0}else{1},
         -(alias.len() as i64),id.clone(),alias.clone()));
-    let best=&aliases[0];
-    if aliases.iter().any(|(id,alias)|id!=&best.0&&
-        (alias==&key)==(best.1==key)&&alias.len()==best.1.len()){return Ok(None);}
+    let best=&title_aliases[0];
+    if title_aliases.iter().any(|(id,alias)|id!=&best.0
+        &&(alias==&key)==(best.1==key)&&alias.len()==best.1.len()){
+        return Ok(results);
+    }
     let selected=&best.0;
-    // Explicit S01E27 under a *named* anime part is frequently the
-    // part-local first season, not season 1 of the canonical IMDb show.
-    // The exact AniDB part may map to TVDB/IMDb season 5 (Stone Ocean).
-    // Remap only when this specific alias has one verified season and
-    // the selected IMDb title's crosswalk confirms the same AniDB ID.
+
+    // A named AniDB part may begin an IMDb season other than S01 (JoJo).
+    // Preload its whole crosswalk once, but keep every episode's independent
+    // eligibility and ambiguous-mapping check.
     if season==1 && best.1==key
         && let Some(mapped_season)=season_from_title(db,imdb,title)?
-        && mapped_season>1
-        && let Some(mapped)=episode_crosswalk::resolve_season(
-            db,imdb,mapped_season,episode)?
-        && within_known_season_bounds(db,imdb,mapped.season,mapped.episode)?
-        && (mapped.anidb_id==*selected
-            || (begins_tvdb_season(db,selected,mapped_season)?
-                && shares_tvdb_season(
-                    db,selected,&mapped.anidb_id,mapped_season)?)) {
-        return Ok(Some(mapped));
+        && mapped_season>1 {
+        let mapped=episode_crosswalk::resolve_season_range(
+            db,imdb,mapped_season,start,end)?;
+        let mut bounds=std::collections::HashMap::<i64,Option<i64>>::new();
+        let mut shared=std::collections::HashMap::<String,bool>::new();
+        let mut begins:Option<bool>=None;
+        for (slot,candidate) in results.iter_mut().zip(mapped) {
+            let Some(candidate)=candidate else{continue};
+            let upper=if let Some(upper)=bounds.get(&candidate.season){
+                *upper
+            }else{
+                let upper:Option<i64>=db.query_row(
+                    "SELECT MAX(max_episode) FROM season_episodes
+                     WHERE imdb_id=?1 AND season=?2",
+                    params![imdb,candidate.season],|row|row.get(0))
+                    .optional()?.flatten();
+                bounds.insert(candidate.season,upper);
+                upper
+            };
+            if upper.is_some_and(|max|candidate.episode>max){continue;}
+            let valid=if candidate.anidb_id==*selected {true}else{
+                let begins=*begins.get_or_insert(
+                    begins_tvdb_season(db,selected,mapped_season)?);
+                if !begins {false}else if let Some(&value)=shared.get(&candidate.anidb_id){
+                    value
+                }else{
+                    let value=shares_tvdb_season(
+                        db,selected,&candidate.anidb_id,mapped_season)?;
+                    shared.insert(candidate.anidb_id.clone(),value);
+                    value
+                }
+            };
+            if valid{*slot=Some(candidate);}
+        }
+        if results.iter().all(Option::is_some){return Ok(results);}
     }
+
     let family:Option<String>=db.query_row(
         "SELECT tvdb_id FROM episode_map WHERE anidb_id=?1 AND anidb_season>0
          AND tvdb_season>0 ORDER BY tvdb_season,offset,start LIMIT 1",
         [selected],|r|r.get(0)).optional()?;
-    let Some(family)=family else{return Ok(None)};
+    let Some(family)=family else{return Ok(results)};
     let base:Option<String>=db.query_row(
         "SELECT anidb_id FROM episode_map WHERE tvdb_id=?1 AND anidb_season>0
          AND tvdb_season>0 ORDER BY tvdb_season,offset,start,
@@ -93,7 +129,11 @@ pub fn resolve(db:&Connection,imdb:&str,title:&str,season:i64,episode:i64)
          ELSE 2147483647 END LIMIT 1",
         [&family],|r|r.get(0)).optional()?;
     if base.as_deref()==Some(selected){
-        return episode_crosswalk::resolve_season(db,imdb,season,episode);
+        let fallback=episode_crosswalk::resolve_season_range(db,imdb,season,start,end)?;
+        for (slot,mapped) in results.iter_mut().zip(fallback){
+            if slot.is_none(){*slot=mapped;}
+        }
+        return Ok(results);
     }
     let mut stmt=db.prepare(
         "SELECT m.anidb_id,MIN(m.tvdb_season),MIN(m.offset),MIN(m.start)
@@ -102,33 +142,53 @@ pub fn resolve(db:&Connection,imdb:&str,title:&str,season:i64,episode:i64)
          GROUP BY m.anidb_id ORDER BY 2,3,4,1")?;
     let parts=stmt.query_map(params![imdb,family],|r|Ok(Part{id:r.get(0)?}))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let Some(position)=parts.iter().position(|p|&p.id==selected)else{return Ok(None)};
-    let Some(target)=parts.get(position.saturating_add(season as usize-1))else{return Ok(None)};
+    let Some(position)=parts.iter().position(|p|&p.id==selected)else{
+        return Ok(results);
+    };
+    let Some(target)=parts.get(position.saturating_add(season as usize-1))else{
+        return Ok(results);
+    };
     let mut stmt=db.prepare("SELECT tvdb_season,offset,start,end FROM episode_map
         WHERE anidb_id=?1 AND anidb_season>0 AND tvdb_season>0
         ORDER BY tvdb_season,offset,start")?;
     let rows=stmt.query_map([&target.id],|r|Ok((r.get::<_,i64>(0)?,
         r.get::<_,i64>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut locals=BTreeSet::new();
-    for (_,_,start,end) in &rows {
-        let local=if *start>1{episode+start.max(&1)-1}else{episode};
-        if local>=(*start).max(1)&&(*end<=0||local<=*end){locals.insert(local);}
+
+    for (index,slot) in results.iter_mut().enumerate(){
+        if slot.is_some(){continue;}
+        let episode=start+index as i64;
+        let mut locals=BTreeSet::new();
+        for (_,_,range_start,range_end) in &rows {
+            let local=if *range_start>1{
+                episode+range_start.max(&1)-1
+            }else{episode};
+            if local>=(*range_start).max(1)
+                &&(*range_end<=0||local<=*range_end){locals.insert(local);}
+        }
+        if locals.len()!=1{continue;}
+        let local=*locals.iter().next().unwrap();
+        let coordinates:BTreeSet<_>=rows.iter().filter(|(_,_,s,e)|
+            local>=(*s).max(1)&&(*e<=0||local<=*e))
+            .map(|(tv,offset,_,_)|(*tv,local+offset)).collect();
+        if coordinates.len()!=1{continue;}
+        let (tv,ep)=*coordinates.iter().next().unwrap();
+        if episode_crosswalk::canonical_asid(&target.id,local).is_none()
+            ||!(1..=9_999).contains(&tv)||!(1..=99_999).contains(&ep){
+            continue;
+        }
+        *slot=Some(episode_crosswalk::Episode{
+            imdb_id:imdb.into(),season:tv,episode:ep,
+            anidb_id:target.id.clone(),anidb_episode:local,
+        });
     }
-    if locals.len()!=1{return Ok(None);}
-    let local=*locals.iter().next().unwrap();
-    let coordinates:BTreeSet<_>=rows.iter().filter(|(_,_,start,end)|
-        local>=(*start).max(1)&&(*end<=0||local<=*end))
-        .map(|(tv,offset,_,_)|(*tv,local+offset)).collect();
-    if coordinates.len()!=1{return Ok(None);}
-    let (tv,ep)=*coordinates.iter().next().unwrap();
-    // A named anime part can use an open-ended or offset crosswalk too.
-    // Refuse out-of-range AniDB episodes before creating an ASID.
-    if episode_crosswalk::canonical_asid(&target.id,local).is_none()
-        || !(1..=9_999).contains(&tv)
-        || !(1..=99_999).contains(&ep){return Ok(None);}
-    Ok(Some(episode_crosswalk::Episode{imdb_id:imdb.into(),season:tv,
-        episode:ep,anidb_id:target.id.clone(),anidb_episode:local}))
+    Ok(results)
+}
+
+pub fn resolve(db:&Connection,imdb:&str,title:&str,season:i64,episode:i64)
+    ->rusqlite::Result<Option<episode_crosswalk::Episode>>{
+    Ok(resolve_range(db,imdb,title,season,episode,episode)?
+        .into_iter().next().flatten())
 }
 
 pub fn has_specific_alias(db:&Connection,imdb:&str,title:&str)->rusqlite::Result<bool>{
