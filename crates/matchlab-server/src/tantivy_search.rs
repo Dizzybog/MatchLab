@@ -672,7 +672,7 @@ fn title_aliases_exact_uncached(db:&Connection,key:&str)->Result<Vec<TitleAlias>
 /// completions. The matcher independently verifies the complete raw words,
 /// minimum coverage and the release's technical-metadata boundary.
 /// Never search title substrings or scan SQLite for title candidates.
-pub fn title_aliases_at_release_prefixes(
+fn title_aliases_at_release_prefixes_uncached(
     db:&Connection,keys:&[String],
 )->Result<Vec<TitleAlias>,String>{
     let Some(shortest)=keys.first().filter(|key|!key.is_empty())else{
@@ -704,7 +704,7 @@ pub fn title_aliases_at_release_prefixes(
 /// the original release, ending at the first season/episode/quality marker.
 /// One bounded indexed prefix query replaces N per-word searches. The
 /// matcher rejects all unsafe partial words/coverage after retrieval.
-pub fn title_aliases_at_release_suffixes(
+fn title_aliases_at_release_suffixes_uncached(
     db:&Connection,keys:&[String],
 )->Result<Vec<TitleAlias>,String>{
     if keys.is_empty(){return Ok(Vec::new());}
@@ -733,6 +733,35 @@ pub fn title_aliases_at_release_suffixes(
     drop(reader);drop(search);
     if let Some(dir)=memory_dir{let _=std::fs::remove_dir_all(dir);}
     Ok(aliases)
+}
+
+/// Memoize source-derived release prefix/suffix unions just like the
+/// existing alias lookups. These indexed candidate sets are independent of
+/// file episode coordinates and are shared across sibling paths; full-title
+/// Unicode/word-boundary validation still runs on every request.
+pub fn title_aliases_at_release_prefixes(
+    db:&Connection,keys:&[String],
+)->Result<Vec<TitleAlias>,String>{
+    if keys.is_empty(){return Ok(Vec::new());}
+    let joined=keys.join("\u{1f}");
+    if let Some(id)=lookup_cache_key(db,"release_prefixes",&joined){
+        TITLE_LOOKUPS.get_or_init(||QueryCache::new(LOOKUP_CAP,LOOKUP_TTL))
+            .get_or_compute(id,
+                ||title_aliases_at_release_prefixes_uncached(db,keys),
+                |rows|rows.len()<=LOOKUP_MAX_ALIASES)
+    }else{title_aliases_at_release_prefixes_uncached(db,keys)}
+}
+pub fn title_aliases_at_release_suffixes(
+    db:&Connection,keys:&[String],
+)->Result<Vec<TitleAlias>,String>{
+    if keys.is_empty(){return Ok(Vec::new());}
+    let joined=keys.join("\u{1f}");
+    if let Some(id)=lookup_cache_key(db,"release_suffixes",&joined){
+        TITLE_LOOKUPS.get_or_init(||QueryCache::new(LOOKUP_CAP,LOOKUP_TTL))
+            .get_or_compute(id,
+                ||title_aliases_at_release_suffixes_uncached(db,keys),
+                |rows|rows.len()<=LOOKUP_MAX_ALIASES)
+    }else{title_aliases_at_release_suffixes_uncached(db,keys)}
 }
 
 /// Find complete IMDb alias prefixes AND suffixes inside the parsed title.
