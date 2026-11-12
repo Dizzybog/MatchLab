@@ -708,7 +708,25 @@ fn bottom_up_imdb_path_match(
             let exact=imdb_matcher::clean_title(trimmed);
             found.retain(|hit|imdb_matcher::clean_title(&hit.matched_title)==exact);
         }
-        let found=eligible(found);
+        let mut found=eligible(found);
+        // The later episode-bound gate rejects unsupported candidates only
+        // if more than two identities remain. Apply that same condition
+        // before accepting a directory, otherwise all candidates can vanish
+        // after leaf selection without ever trying a valid parent.
+        if found.len()>2 && has_episode && season>0
+            && let Some(episode)=numbers(parsed.get("episodes")).first().copied()
+        {
+            let absolute_hint=parsed.get("absolute_episode_candidate")
+                .and_then(Value::as_i64);
+            found.retain(|candidate|
+                candidate_has_episode(db,&candidate.imdb_id,season,episode)
+                    .unwrap_or(false)
+                ||verified_chinese_absolute_fallback(
+                    db,&candidate.imdb_id,season,episode,absolute_hint)
+                    .ok().flatten().is_some()
+                ||imdb_matcher::has_longer_title_evidence_in_release(
+                    trimmed,raw,&candidate.matched_title));
+        }
         if !found.is_empty(){
             return Ok(Some((trimmed.to_owned(),found)));
         }
@@ -2709,6 +2727,29 @@ mod tests {
             |hits|filter_request_imdb_candidates(&db,hits,gate)
         ).unwrap().expect("season-pack eligibility must permit fallback");
         assert_eq!(recovered.1[0].imdb_id,"ttgein");
+
+        // When three same-name leaf identities all have a proven lower
+        // episode maximum, the final >2-candidate episode filter must not
+        // suppress a valid parent identity.
+        db.execute_batch("CREATE TABLE season_episodes(
+                imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
+            INSERT INTO season_episodes VALUES('tt2004',1,24,24);
+            INSERT INTO titles VALUES
+                ('ttbad01','Bad Show','badshow',2010,'series','',1,0,'tvSeries'),
+                ('ttbad02','Bad Show','badshow',2011,'series','',1,0,'tvSeries'),
+                ('ttbad03','Bad Show','badshow',2012,'series','',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('ttbad01',2),('ttbad02',2),('ttbad03',2);
+            INSERT INTO season_episodes VALUES
+                ('ttbad01',1,10,10),('ttbad02',1,10,10),('ttbad03',1,10,10);
+            INSERT INTO imdb_ratings VALUES
+                ('ttbad01',4000),('ttbad02',3000),('ttbad03',2000);")
+            .unwrap();
+        let parsed=matchlab_parser::parse_title(
+            "Monster/Bad.Show.S01E20.mkv",false).unwrap();
+        let fallback=bottom_up_imdb_path_match(
+            &db,&parsed,None,true,1,true,|hits|hits
+        ).unwrap().expect("episode-ineligible leaf must allow parent fallback");
+        assert_eq!(fallback.1[0].imdb_id,"tt2004");
 
         // Generic folder names use the EXACT same metadata-only parser
         // guard as title inheritance, even when a coincidental IMDb
