@@ -231,20 +231,22 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
         // independent raw syntax with the untouched canonical parser.
         crate::corrective_learning::observe(&tx,&title,&base,
             &mut corrective_evidence)?;
-        model.observe_canonical_fields(&tx,&title,&clean)?;
+        // One title normalization / holdout hash shared by all ML observers.
+        let features=crate::online_model::TitleFeatureContext::new(&title);
+        model.observe_canonical_fields_with_context(&tx,&title,&clean,&features)?;
         for (field,signal) in crate::tv_learning::observe(
             &tx,&title,&clean,&mut tv_evidence)? {
-            model.observe(&tx,&title,&field,&signal)?;
+            model.observe_with_context(&tx,&title,&field,&signal,&features)?;
         }
         if let Some(ref metadata)=meta{
             crate::learned_regex::observe(&tx,metadata,&title,&details,&base)?;
         }
         for (field,signal) in crate::field_learning::observe_with_budget(
             &tx,&title,&details,&clean,&mut evidence)?{
-            model.observe(&tx,&title,&field,&signal)?;
+            model.observe_with_context(&tx,&title,&field,&signal,&features)?;
         }
-        crate::candidate_discovery::observe(&tx,&title,&clean,
-            &model,&mut discovery)?;
+        crate::candidate_discovery::observe_with_context(&tx,&title,&clean,
+            &model,&mut discovery,&features)?;
         // Several field errors from the same torrent share one normalized
         // source identity. Calculate it lazily and only once per title.
         let mut normalized_source=None::<String>;
