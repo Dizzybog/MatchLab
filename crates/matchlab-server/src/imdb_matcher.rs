@@ -1,6 +1,7 @@
 //! Deterministic IMDb title matcher (independent of AniDB identity selection).
-//! Ordered stages prioritize exact aliases, then title and season eligibility,
-//! year proximity and stable tie-breaking. Source metadata comes from Tantivy.
+//! Collect all safe exact/prefix/suffix candidates before ranking them by
+//! release-title evidence. Season/year/region/votes remain deterministic;
+//! only indexed Tantivy alias queries discover candidate titles.
 use rusqlite::{params, Connection};
 use std::collections::{BTreeMap, HashSet};
 use serde::Serialize;
@@ -475,10 +476,9 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             .filter(|row|title_in_original_release_fit(
                 &semantic_full_release,&semantic_release,max_title_words,row).is_some())
             .collect::<Vec<_>>();
-        // The original-release words already proved title relevance. The
-        // ordinary containment guard is only valid for COMPLETE alias names.
-        let accepted=filter_eligible(db,matching,series,year,required_season)?;
-        for candidate in accepted {
+        // The original release already proves lexical relevance; defer
+        // all media/season SQL eligibility to the single shared final pass.
+        for candidate in matching {
             extended_title_matches.insert((candidate.imdb_id.clone(),
                 candidate.title.clone()));
             rows.push(candidate);
@@ -498,8 +498,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
         let matching=found.into_iter().map(Aka::from)
             .filter(|row|title_suffix_in_original_release_fit(
                 &semantic_content,row).is_some()).collect::<Vec<_>>();
-        let accepted=filter_eligible(db,matching,series,year,required_season)?;
-        for candidate in accepted {
+        for candidate in matching {
             suffix_title_matches.insert((candidate.imdb_id.clone(),
                 candidate.title.clone()));
             rows.push(candidate);
@@ -519,8 +518,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             let matching=found.into_iter()
                 .filter(|row|release_is_imdb_title_suffix_fit(
                     &semantic_content,row).is_some()).collect::<Vec<_>>();
-            for candidate in filter_eligible(
-                db,matching,series,year,required_season)?{
+            for candidate in matching {
                 imdb_title_suffix_matches.insert((candidate.imdb_id.clone(),
                     candidate.title.clone()));
                 rows.push(candidate);
