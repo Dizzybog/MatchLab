@@ -39,13 +39,15 @@ fn is_stop(token:&str)->bool{
         &&b.bytes().all(|c|c.is_ascii_digit())){return true;}
     false
 }
-pub fn candidates(raw:&str)->Vec<String>{
+/// A country marker explicitly present at the end of the release title,
+/// before technical tags. This is independent of the host's locale.
+pub fn qualified(raw:&str)->Option<(&'static str,Vec<String>)>{
     let normalized=raw.replace(['.','_','-']," ");
     let words:Vec<_>=normalized.split_whitespace().collect();
     let stop=words.iter().position(|w|is_stop(w)).unwrap_or(words.len());
     let title=words[..stop].join(" ");
     let title=title.trim();
-    if title.is_empty(){return vec![];}
+    if title.is_empty(){return None;}
     let lower=title.to_lowercase();
     for (code,aliases) in COUNTRIES {
         let mut ordered=aliases.to_vec();
@@ -61,16 +63,27 @@ pub fn candidates(raw:&str)->Vec<String>{
                 let key=clean_title(&format!("{prefix} {variant}"));
                 if !key.is_empty()&&seen.insert(key.clone()){out.push(key);}
             }
-            return out;
+            return Some((*code,out));
         }
     }
-    vec![]
+    None
+}
+pub fn candidates(raw:&str)->Vec<String>{
+    qualified(raw).map(|(_,aliases)|aliases).unwrap_or_default()
 }
 #[cfg(test)]
 mod tests{
     use super::*;
     #[test]fn country_edition(){let c=candidates("The Voice US S03E01 1080p");
         assert!(c.contains(&"thevoiceusa".to_string()));assert!(c.contains(&"thevoiceunitedstates".to_string()));}
+    #[test]fn explicit_region_only_when_title_has_country_suffix(){
+        assert_eq!(qualified("The Voice Norge S01E01").unwrap().0,"NO");
+        assert_eq!(qualified("The Voice UK S01E01").unwrap().0,"UK");
+        assert_eq!(qualified("Example.2020.1080p"),None);
+        assert_eq!(qualified("Example.MULTI.1080p"),None);
+        assert_eq!(qualified("Norway.S01E01"),None,
+            "a country alone is not an explicit title qualifier");
+    }
     #[test]fn ignores_language_tags(){assert!(candidates("The Voice MULTI S03E01").is_empty());}
     #[test]fn nordic(){assert!(candidates("The Voice Norge S01E01").contains(&"thevoiceno".to_string()));}
 }
