@@ -5420,6 +5420,63 @@ mod tests {
         assert_eq!(matched["anidb_episode"],37);
     }
     #[test]
+    fn lego_masters_au_public_match_selects_australian_imdb_series(){
+        // AU is explicit *source-title* identity evidence; IMDb votes are
+        // only a tie-breaker. IMDb's actual primary title for the Australian
+        // series is the expanded "Lego Masters Australia".
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-lego-au-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,
+                clean_title TEXT,year INTEGER,category TEXT,region TEXT,
+                original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES
+                ('tt10285320','Lego Masters Australia',
+                    'legomastersaustralia',2019,'series','',1,0,'tvSeries'),
+                ('tt9615014','Lego Masters','legomasters',
+                    2020,'series','',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt10285320',8),('tt9615014',5);
+            INSERT INTO season_episodes VALUES
+                ('tt10285320',3,14,14),('tt9615014',3,16,16);
+            INSERT INTO imdb_ratings VALUES
+                ('tt10285320',1),('tt9615014',1000000);").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        for (raw,expected) in [
+            ("LEGO Masters AU S03E09 HDTV x264-FQM","tt10285320"),
+            ("Lego.Masters.Australia.S03E09.HDTV.x264-FQM","tt10285320"),
+            ("LEGO Masters S03E09 HDTV x264-FQM","tt9615014"),
+        ] {
+            let result=diagnose(&path,&MatchRequest{
+                title:raw.into(),year:None,series:None}).unwrap();
+            let winner=result.selected.expect("IMDb series must be selected");
+            assert_eq!(winner["imdb_id"],expected,
+                "{raw}: winner={winner:?}, candidates={:?}",result.imdb_candidates);
+            assert_eq!(public_match_response(Some(winner)),json!({
+                "sid_start":format!("{expected}:3:9"),
+                "sid_end":format!("{expected}:3:9"),
+                "asid_start":null,"asid_end":null
+            }),"{raw}");
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
     fn parent_chinese_episode_with_advertising_only_leaf_is_not_a_season_pack(){
         // Absolute episode 62 is independent of the S01 directory label.
         // The fixture's S02E03 mapping is synthetic: actual coordinates
