@@ -2794,6 +2794,59 @@ mod tests {
         assert_eq!(from_parent.0,"Monster");
         assert_eq!(from_parent.1[0].imdb_id,"tt2004");
 
+        // Do not stop on the closest lexical hit if the public identity
+        // gate rejects it. Without a season or quality signal, explicit
+        // release year must validate the identity before the layer wins.
+        let parsed=matchlab_parser::parse_title(
+            "Monster/The.Ed.Gein.Story/E02.mkv",false).unwrap();
+        let gate=ImdbIdentityGate{
+            policy:MatchPolicy::PublicApi,year:Some(2004),
+            has_season:false,has_quality:false,season_range_end:None,
+            verified_anime_range:None,verified_absolute_episode:None,
+        };
+        let recovered=bottom_up_imdb_path_match(
+            &db,&parsed,Some(2004),true,0,true,
+            |hits|filter_request_imdb_candidates(&db,hits,gate)
+        ).unwrap().expect("an ineligible leaf must allow parent fallback");
+        assert_eq!(recovered.0,"Monster");
+        assert_eq!(recovered.1[0].imdb_id,"tt2004");
+
+        // Season discovery tolerates a one-season metadata lag, but a
+        // multi-season pack must reject a smaller title before climbing.
+        let parsed=matchlab_parser::parse_title(
+            "The.Ed.Gein.Story/Monster/S02/E02.mkv",false).unwrap();
+        let gate=ImdbIdentityGate{
+            policy:MatchPolicy::PublicApi,year:None,
+            has_season:true,has_quality:false,season_range_end:Some(2),
+            verified_anime_range:None,verified_absolute_episode:None,
+        };
+        let recovered=bottom_up_imdb_path_match(
+            &db,&parsed,None,true,2,true,
+            |hits|filter_request_imdb_candidates(&db,hits,gate)
+        ).unwrap().expect("season-pack eligibility must permit fallback");
+        assert_eq!(recovered.1[0].imdb_id,"ttgein");
+
+        // Numeric show names remain valid through exact IMDb evidence,
+        // but nested bare season numbers must not hijack their parent.
+        db.execute_batch("INSERT INTO titles VALUES
+            ('tt24','24','24',2001,'series','US',1,0,'tvSeries'),
+            ('tt6','6','6',2006,'series','US',1,0,'tvSeries'),
+            ('ttcops','Cops','cops',1989,'series','US',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt24',8),('tt6',10),('ttcops',36);
+            INSERT INTO imdb_ratings VALUES
+                ('tt24',50000),('tt6',200000),('ttcops',10);").unwrap();
+        let numeric=matchlab_parser::parse_title("24/S01/E02.mkv",false).unwrap();
+        let found=bottom_up_imdb_path_match(
+            &db,&numeric,None,true,1,true,|hits|hits
+        ).unwrap().expect("a genuine numeric series must remain matchable");
+        assert_eq!(found.1[0].imdb_id,"tt24");
+        let structural=matchlab_parser::parse_title("Cops/6/S06E10.mkv",false)
+            .unwrap();
+        let found=bottom_up_imdb_path_match(
+            &db,&structural,None,true,6,true,|hits|hits
+        ).unwrap().expect("the parent title must win over a season directory");
+        assert_eq!(found.1[0].imdb_id,"ttcops");
+
         // A file leaf with its own recognized show name wins before
         // the parent folder, without mixing the levels.
         let parsed=matchlab_parser::parse_title(
@@ -4369,6 +4422,25 @@ mod tests {
         assert_eq!(selected["episode"],24);
         assert_eq!(public_match_response(Some(selected))["sid_start"],
             "tt0096697:9:24");
+
+        // The matcher may choose a valid leaf even when the legacy
+        // presentation-normalizer recognized an unrelated parent. All
+        // downstream identity checks must use the chosen leaf's key.
+        let release="Different Show Season 9/The.Simpsons.S09E24.mkv";
+        let leaf=diagnose(&path,&MatchRequest{
+            title:release.into(),year:None,series:None}).unwrap();
+        assert_eq!(leaf.normalized_title,"thesimpsons");
+        assert_eq!(leaf.selected.as_ref().unwrap()["imdb_id"],"tt0096697");
+
+        // Two episode files share parsed folder components, never the final
+        // episode identity, even when ML persistent cache is disabled.
+        for (leaf,sid) in [("S09E23.mkv","tt0096697:9:23"),
+                            ("S09E24.mkv","tt0096697:9:24")]{
+            let cached=whole_torrent_cached_diagnose(&path,&MatchRequest{
+                title:format!("The Simpsons Season 9/{leaf}"),
+                year:None,series:None}).unwrap();
+            assert_eq!(cached.selected.unwrap()["sid"],sid);
+        }
 
         for release in ["Cops Seasons 1-24/s6e10.avi",
             "Cops Seasons 1-24/6/s6e10.avi",
