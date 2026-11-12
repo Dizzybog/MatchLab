@@ -197,6 +197,19 @@ fn full_release_title_fit(
         longest_first:-(title_len as i64)})
 }
 
+/// Whether an IMDb match was recovered from a complete title in the
+/// original release that is longer than the parser's truncated title.
+/// Other identity mechanisms must not replace this candidate with a merely
+/// shorter anime alias, even if the latter has a mapped episode.
+pub fn has_longer_full_title_in_release(
+    parsed_title:&str,raw_release:&str,matched_title:&str,
+)->bool{
+    let parsed=semantic_words(parsed_title);
+    let release=semantic_words(raw_release);
+    let candidate=semantic_words(matched_title);
+    candidate.len()>parsed.len()&&release.starts_with(&candidate)
+}
+
 /// Title relevance is ranked by the caller. After that, use release-year
 /// distance, region preference, IMDb votes, and the earliest production year.
 /// When no release year was supplied, its distance is neutral for all works.
