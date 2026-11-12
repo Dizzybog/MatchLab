@@ -103,6 +103,32 @@ fn matchlab_parser_benches(c: &mut Criterion) {
         });
     });
 
+    // Throughput comparison with mixed unique file paths and repeated parent
+    // folders; explicitly exercises the component cache under batch load.
+    let path_corpus=[
+        "Cops Seasons 1-24/6/s6e10.avi",
+        "Lord of All Lords/Season 1/【发布 https://example.org】EP01.mkv",
+        "JoJos Bizarre Adventure/Stone Ocean/S05E03.1080p.WEB-DL.mkv",
+        "The Daily Show/2018/02.13.2018.720p.WEB.x264.mkv",
+        "LEGO Masters AU/S03/LEGO.Masters.AU.S03E09.1080p.mkv",
+        "Bleach/S16/Bleach_320.1080p.WEB.x265.mkv",
+    ];
+    group.bench_function("parse_many_512_mixed_paths_parallel",|b|{
+        b.iter_batched(
+            ||(0..512).map(|i|path_corpus[i%path_corpus.len()])
+                .collect::<Vec<_>>(),
+            |batch|black_box(parse_many(batch.into_iter(),false).unwrap()),
+            BatchSize::SmallInput);
+    });
+    group.bench_function("parse_many_512_mixed_paths_sequential",|b|{
+        b.iter(||{
+            let result=(0..512).map(|i|
+                parse_title(black_box(path_corpus[i%path_corpus.len()]),false))
+                .collect::<Result<Vec<_>,_>>().unwrap();
+            black_box(result);
+        });
+    });
+
     group.finish();
 }
 

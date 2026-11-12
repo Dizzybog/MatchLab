@@ -467,8 +467,14 @@ impl ParserEngine {
                 let start = match_result.match_index.min(title.len());
                 let end = (match_result.match_index + match_result.match_len).min(title.len());
                 if start <= end && title.is_char_boundary(start) && title.is_char_boundary(end) {
+                    let previous_len=title.len();
                     title.replace_range(start..end, "");
-                    if PREFILTER {
+                    // Removing an entire prefix or suffix cannot create a
+                    // *new* literal match in the remaining text. Keeping
+                    // already-set gates is conservative (false positives are
+                    // checked by PCRE2), while rescanning an interior deletion
+                    // is essential: newly adjacent words may form a literal.
+                    if PREFILTER && start>0 && end<previous_len {
                         self.prefilter.scan(&title, &mut hits);
                     }
                 }
@@ -2721,22 +2727,27 @@ fn standalone_special_marker(raw:&str, result:&Map<String,Value>) -> Option<(Str
 // re-run the full native regex catalogue for their shared folder names.
 // A new handler patch generation invalidates cached component parses.
 static PATH_COMPONENT_CACHE:std::sync::OnceLock<Mutex<HashMap<
-    (String,bool),(u64,std::time::Instant,Map<String,Value>)
+    (String,bool),(u64,std::time::Instant,Arc<Map<String,Value>>)
 >>>=std::sync::OnceLock::new();
 fn cached_path_component(raw:&str,translate_languages:bool)
     ->Result<Map<String,Value>,ParseError>{
     let generation=handler_patch_revision();
     let key=(raw.to_owned(),translate_languages);
     let cache=PATH_COMPONENT_CACHE.get_or_init(||Mutex::new(HashMap::new()));
-    if let Ok(guard)=cache.try_lock(){
-        if let Some((revision,at,result))=guard.get(&key){
-            if *revision==generation&&at.elapsed()<std::time::Duration::from_secs(30)
-                &&handler_patch_revision()==generation {
-                return Ok(result.clone());
-            }
-        }
+    // Copy only the Arc under the global cache lock, not the nested JSON
+    // map. The regex generation is rechecked *after* releasing the lock.
+    let cached=cache.try_lock().ok().and_then(|guard|{
+        guard.get(&key)
+            .filter(|(revision,at,_)|
+                *revision==generation
+                &&at.elapsed()<std::time::Duration::from_secs(30))
+            .map(|(_,_,value)|Arc::clone(value))
+    });
+    if let Some(value)=cached {
+        if handler_patch_revision()==generation{return Ok((*value).clone());}
     }
     let result=parse_path_component(raw,translate_languages)?;
+    let cache_copy=Arc::new(result.clone());
     if handler_patch_revision()==generation {
         if let Ok(mut guard)=cache.try_lock(){
             const MAX_COMPONENTS:usize=2048;
@@ -2748,7 +2759,7 @@ fn cached_path_component(raw:&str,translate_languages:bool)
                 if let Some(oldest)=guard.iter().min_by_key(|(_,(_,at,_))|*at)
                     .map(|(key,_)|key.clone()){guard.remove(&oldest);}
             }
-            guard.insert(key,(generation,std::time::Instant::now(),result.clone()));
+            guard.insert(key,(generation,std::time::Instant::now(),cache_copy));
         }
     }
     Ok(result)
@@ -4383,7 +4394,7 @@ mod tests {
         {
             let cache=PATH_COMPONENT_CACHE.get().unwrap();
             cache.lock().unwrap().insert(key.clone(),(
-                u64::MAX,std::time::Instant::now(),wrong));
+                u64::MAX,std::time::Instant::now(),Arc::new(wrong)));
         }
         let current=cached_path_component(&key.0,false).unwrap();
         assert_ne!(current.get("title"),Some(&json!("incorrect old regex title")));
@@ -4399,7 +4410,7 @@ mod tests {
         let key=(parent.to_owned(),false);
         let cache=PATH_COMPONENT_CACHE.get_or_init(||Mutex::new(HashMap::new()));
         cache.lock().unwrap().insert(key.clone(),(
-            handler_patch_revision(),std::time::Instant::now(),counterfeit));
+            handler_patch_revision(),std::time::Instant::now(),Arc::new(counterfeit)));
         let parsed=parse_title_canonical(&format!("{parent}/E02.mkv"),false).unwrap();
         assert_ne!(parsed["path_layers"][0]["parsed"]["title"],
             json!("unsafe live title"));
@@ -4513,6 +4524,31 @@ mod tests {
             parse_many(titles.iter().copied(), false).expect("batch parse"),
             expected
         );
+    }
+
+    #[test]
+    fn prefilter_removals_preserve_exhaustive_parser_behavior(){
+        // Prefix/suffix removals may retain supersets of literal gates.
+        // Interior removals MUST still rescan because joining two words can
+        // introduce a newly required regex literal.
+        let releases=[
+            "The.Movie.2026.1080p.WEB-DL.x265.mkv",
+            "[TGx]The.Series.S03E06.2160p.BluRay.DTS.x264",
+            "The.Walking.Dead.S05E03.720p.WEB-DL.x264-ASAP[ettv]",
+            "Lord of All Lords/Season 01/【发布 https://example.org】EP01.mp4",
+            "[Group] BLEACH 千年血戦篇 S01E08 1080p WEB-DL",
+            "Cops Seasons 1-24/6/s6e10.avi",
+            "Game.Of.Thrones.2011.S02E09.1080p.WEB-DL.mkv",
+            "The.Daily.Show.2018.02.13.1080p.WEB.x264.mkv",
+            "[www.release.example] [Group] Show S01E01",
+            "The.Matrix.1999.REMUX.2160p.HEVC.TrueHD.Atmos",
+        ];
+        for title in releases {
+            let prefiltered=ENGINE.parse_context_impl::<true>(title,false).unwrap();
+            let exhaustive=ENGINE.parse_context_impl::<false>(title,false).unwrap();
+            assert_eq!(prefiltered.result,exhaustive.result,"{title}");
+            assert_eq!(prefiltered.working_title,exhaustive.working_title,"{title}");
+        }
     }
 
     #[test]

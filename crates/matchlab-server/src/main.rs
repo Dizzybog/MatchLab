@@ -108,7 +108,8 @@ struct Diagnostic {
 // belongs to an exact active regex generation; obsolete entries are NEVER
 // returned. When rules change, a request performs a fresh base parse.
 const PARSE_TTL:Duration=Duration::from_secs(30);
-static PARSE_CACHE:OnceLock<Mutex<HashMap<String,(Instant,u64,Value)>>>=OnceLock::new();
+// Ready parses are immutable; large JSON clones happen outside the global lock.
+static PARSE_CACHE:OnceLock<Mutex<HashMap<String,(Instant,u64,Arc<Value>)>>>=OnceLock::new();
 fn cache_generation_current(saved:u64,at:Instant,current:u64)->bool{
     saved==current && at.elapsed()<PARSE_TTL
 }
@@ -124,16 +125,15 @@ fn parse_cached(title:&str)->Result<Value,String>{
     }
     let generation=parse_rules_revision();
     let cache=PARSE_CACHE.get_or_init(||Mutex::new(HashMap::new()));
-    // Clone only the base cached value under the lock, then release it
-    // before running learned regex checks. Concurrent API requests must
-    // never serialize behind the potentially expensive rule validation.
+    // Arc clone under the mutex, expensive JSON clone after unlocking.
+    // A rule update between the lookup and return still forces a fresh parse.
     let cached=cache.lock().ok().and_then(|guard|{
         guard.get(title).and_then(|(at,saved_generation,value)|
             cache_generation_current(*saved_generation,*at,generation)
-                .then(||value.clone()))
+                .then(||Arc::clone(value)))
     });
     if let Some(value)=cached {
-        if parse_rules_revision()==generation {return Ok(value);}
+        if parse_rules_revision()==generation {return Ok((*value).clone());}
         // A concurrent source-regex update requires a fresh parser run.
     }
     // Persisted hits are likewise strict current-namespace only. On a
@@ -154,6 +154,7 @@ fn parse_cached(title:&str)->Result<Value,String>{
     // The base parser output is stored, not an ML-decorated response. This
     // ensures retired learned patterns never survive as cached coordinates.
     learning_cache::put_parser(title,&value);
+    let cache_value=Arc::new(value.clone());
     if let Ok(mut guard)=cache.lock(){
         const CAPACITY:usize=1024;
         if guard.len()>=CAPACITY {
@@ -166,7 +167,7 @@ fn parse_cached(title:&str)->Result<Value,String>{
                 }
             }
         }
-        guard.insert(title.to_string(),(Instant::now(),parse_rules_revision(),value.clone()));
+        guard.insert(title.to_string(),(Instant::now(),parse_rules_revision(),cache_value));
     }
     Ok(value)
 }
@@ -405,8 +406,8 @@ fn mapped_season_episode_range(
             .map_err(|e|e.to_string())?
     };
     let resolved=if specific {
-        (start..=end).map(|episode|anime_title::resolve(db,imdb,title,season,episode)
-            .map_err(|e|e.to_string())).collect::<Result<Vec<_>,_>>()?
+        anime_title::resolve_range(db,imdb,title,season,start,end)
+            .map_err(|e|e.to_string())?
     }else{
         episode_crosswalk::resolve_season_range(db,imdb,season,start,end)
             .map_err(|e|e.to_string())?
@@ -1851,12 +1852,12 @@ fn enrich_selected_anime_episode(
 // Unlike the existing persistent ML cache this is available with ML disabled;
 // unlike candidate caches, it never shares a final SID across different files.
 static TORRENT_MATCH_CACHE:OnceLock<query_cache::QueryCache<Diagnostic>>=OnceLock::new();
+// Reuse the generation already checked by diagnose_logged, rather than
+// recomputing the filesystem/WAL SHA-256 to enter the same cache.
 fn whole_torrent_cached_diagnose(
-    db_path:&PathBuf,req:&MatchRequest,
+    db_path:&PathBuf,req:&MatchRequest,metadata:Option<&str>,
 )->Result<Diagnostic,String>{
-    let Some(metadata)=learning_cache::match_fingerprint(db_path)else{
-        return diagnose(db_path,req);
-    };
+    let Some(metadata)=metadata else{return diagnose(db_path,req);};
     let regex_revision=parse_rules_revision();
     let key=format!("{metadata}:{regex_revision:016x}:{:?}:{:?}:{}",
         req.year,req.series,req.title);
@@ -1865,7 +1866,16 @@ fn whole_torrent_cached_diagnose(
         key,||diagnose(db_path,req),
         |_|parse_rules_revision()==regex_revision
             &&learning_cache::match_fingerprint(db_path)
-                .as_deref()==Some(metadata.as_str()))
+                .as_deref()==Some(metadata))
+}
+
+// The optional persistent ML cache and always-on match cache share an
+// identical fingerprint. This remains a fresh per-request snapshot: do not
+// memoize filesystem/regex generations across requests or SQLite refreshes.
+fn match_generations(db_path:&PathBuf)->(Option<String>,Option<String>){
+    let fingerprint=learning_cache::match_fingerprint(db_path);
+    let namespace=if learning_cache::enabled(){fingerprint.clone()}else{None};
+    (namespace,fingerprint)
 }
 
 fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result<Diagnostic,String>{
@@ -1874,60 +1884,55 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result
     // caches. /match and strict /debug/match use the identical PublicApi
     // eligibility policy and may share verified cache entries.
     let cacheable=matches!(policy,MatchPolicy::PublicApi);
-    let mut generation=if cacheable{
-        learning_cache::match_namespace(&state.db)
-    }else{None};
-    let mut whole_path_generation=if cacheable{
-        learning_cache::match_fingerprint(&state.db)
-    }else{None};
+    // Snapshot generation once: the persistent ML namespace is the same
+    // fingerprint when ML is enabled, but the always-on cache also works
+    // without ML. Avoid hashing metadata/WAL twice for the same snapshot.
+    let (mut generation,mut whole_path_generation)=if cacheable{
+        match_generations(&state.db)
+    }else{(None,None)};
     let mut result=if cacheable{
         if let Some(snapshot)=generation.as_deref().and_then(|ns|
             learning_cache::get_match(&req.title,req.year,req.series,ns)){
             match serde_json::from_value::<Diagnostic>(snapshot){
                 Ok(diagnostic)=>Ok(diagnostic),
-                Err(_)=>whole_torrent_cached_diagnose(&state.db,req),
+                Err(_)=>whole_torrent_cached_diagnose(
+                    &state.db,req,whole_path_generation.as_deref()),
             }
-        }else{whole_torrent_cached_diagnose(&state.db,req)}
+        }else{whole_torrent_cached_diagnose(
+            &state.db,req,whole_path_generation.as_deref())}
     }else{
         diagnose_with_policy(&state.db,req,policy)
     };
-    // The in-memory whole-path cache remains coherent even when the
-    // opt-in persistent ML cache is off. A database replacement while a
-    // request is running requires re-evaluation against the new generation.
-    if cacheable && whole_path_generation!=learning_cache::match_fingerprint(&state.db){
-        whole_path_generation=learning_cache::match_fingerprint(&state.db);
-        result=whole_torrent_cached_diagnose(&state.db,req);
-    }
-    if cacheable && whole_path_generation!=learning_cache::match_fingerprint(&state.db){
-        return Err("matching metadata changed during request; retry".into());
-    }
-    // A metadata, index or learned regex generation can change mid-request.
-    // Recheck the strict production outcome against the latest generation.
-    if cacheable && generation!=learning_cache::match_namespace(&state.db){
-        generation=learning_cache::match_namespace(&state.db);
-        result=whole_torrent_cached_diagnose(&state.db,req);
-    }
-    if cacheable && generation!=learning_cache::match_namespace(&state.db){
-        return Err("matching metadata or learned regex changed during request; retry".into());
-    }
-    if cacheable
-        && let Ok(ref diagnostic)=result
-        && let Ok(snapshot)=serde_json::to_value(diagnostic){
-        if let Some(ref ns)=generation{
-            learning_cache::put_match(
-                &req.title,req.year,req.series,ns,&snapshot);
+    // Re-evaluate at most once after a metadata or rule generation change.
+    // Refresh both related fingerprints together; never accept a stale SID.
+    if cacheable {
+        let (latest_namespace,latest_fingerprint)=match_generations(&state.db);
+        if latest_fingerprint!=whole_path_generation || latest_namespace!=generation {
+            generation=latest_namespace;
+            whole_path_generation=latest_fingerprint;
+            result=whole_torrent_cached_diagnose(
+                &state.db,req,whole_path_generation.as_deref());
+        }
+        if match_generations(&state.db)!=(generation.clone(),whole_path_generation.clone()){
+            return Err("matching metadata or learned regex changed during request; retry".into());
         }
     }
     let elapsed=start.elapsed().as_millis() as u64;
     match &result{
         Ok(d)=>{
-            let status=if d.selected.is_some(){"matched"}else{"unmatched"};
+            // One serialization for the optional ML cache and bounded
+            // history queue; ownership is transferred to the writer.
             let details=serde_json::to_value(d).unwrap_or(Value::Null);
+            if cacheable && let Some(ref ns)=generation {
+                learning_cache::put_match(
+                    &req.title,req.year,req.series,ns,&details);
+            }
+            let status=if d.selected.is_some(){"matched"}else{"unmatched"};
             dashboard_history::record_async(
-                &state.history,&req.title,status,d.selected.as_ref(),&details,elapsed);
+                &state.history,&req.title,status,d.selected.as_ref(),details,elapsed);
         },
         Err(error)=>dashboard_history::record_async(
-            &state.history,&req.title,"error",None,&json!({"error":error}),elapsed),
+            &state.history,&req.title,"error",None,json!({"error":error}),elapsed),
     }
     result
 }
@@ -4548,9 +4553,10 @@ mod tests {
         // episode identity, even when ML persistent cache is disabled.
         for (leaf,sid) in [("S09E23.mkv","tt0096697:9:23"),
                             ("S09E24.mkv","tt0096697:9:24")]{
+            let fingerprint=learning_cache::match_fingerprint(&path);
             let cached=whole_torrent_cached_diagnose(&path,&MatchRequest{
                 title:format!("The Simpsons Season 9/{leaf}"),
-                year:None,series:None}).unwrap();
+                year:None,series:None},fingerprint.as_deref()).unwrap();
             assert_eq!(cached.selected.unwrap()["sid"],sid);
         }
 

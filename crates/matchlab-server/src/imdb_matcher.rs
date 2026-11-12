@@ -46,18 +46,69 @@ fn eligible(db:&Connection,r:&Aka,season:i64)->rusqlite::Result<bool>{
 use rusqlite::OptionalExtension;
 fn filter_eligible(db:&Connection,rows:Vec<Aka>,series:bool,year:Option<i32>,season:i64)
     ->rusqlite::Result<Vec<Aka>>{
-    let mut eligibility=std::collections::HashMap::new();
-    let mut result=Vec::new();
-    for row in rows {
-        if !allowed(&row.media_type,series,year){continue;}
-        let yes=if let Some(&cached)=eligibility.get(&row.imdb_id){cached}else{
-            let value=eligible(db,&row,season)?;
-            eligibility.insert(row.imdb_id.clone(),value);
-            value
-        };
-        if yes{result.push(row);}
+    let rows=rows.into_iter()
+        .filter(|row|allowed(&row.media_type,series,year))
+        .collect::<Vec<_>>();
+    if season<=0 {return Ok(rows);}
+    // IMDb title discovery often returns several aliases per work. Query
+    // season eligibility in bounded ID batches rather than one SQL statement
+    // for every candidate. Neither season bounds nor AniDB fallback criteria
+    // are relaxed; order and duplicate aliases are preserved.
+    let ids=rows.iter().filter(|row|is_series(&row.media_type))
+        .map(|row|row.imdb_id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter().collect::<Vec<_>>();
+    if ids.is_empty(){return Ok(rows);}
+    // Most ordinary exact matches involve one or two IMDb identities.
+    // Avoid building dynamic SQL and collecting a full ID set for the
+    // small-candidate path; retain the original memoized checks instead.
+    if ids.len()<=4 {
+        let mut memo=std::collections::HashMap::new();
+        let mut result=Vec::with_capacity(rows.len());
+        for row in rows {
+            if !is_series(&row.media_type){result.push(row);continue;}
+            let yes=if let Some(&yes)=memo.get(&row.imdb_id){yes}else{
+                let yes=eligible(db,&row,season)?;
+                memo.insert(row.imdb_id.clone(),yes);
+                yes
+            };
+            if yes{result.push(row);}
+        }
+        return Ok(result);
     }
-    Ok(result)
+    let threshold=std::cmp::max(1,season-1);
+    let mut eligible_ids=std::collections::HashSet::new();
+    for batch in ids.chunks(256){
+        let markers=vec!["?";batch.len()].join(",");
+        let sql=format!("SELECT imdb_id,max_season FROM seasons
+            WHERE imdb_id IN ({markers})");
+        let mut stmt=db.prepare(&sql)?;
+        for row in stmt.query_map(rusqlite::params_from_iter(batch.iter()),
+            |r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<i64>>(1)?)))? {
+            let (id,max)=row?;
+            if max.unwrap_or(0)>=threshold{eligible_ids.insert(id);}
+        }
+    }
+    let remaining=ids.iter().filter(|id|!eligible_ids.contains(*id))
+        .collect::<Vec<_>>();
+    for batch in remaining.chunks(256){
+        let markers=vec!["?";batch.len()].join(",");
+        let sql=format!("SELECT DISTINCT l.imdb_id
+            FROM anime_series_map l JOIN episode_map m ON m.anidb_id=l.anidb_id
+            WHERE l.imdb_id IN ({markers})
+              AND (m.tvdb_season=? OR l.trakt_season=?)");
+        let mut args=batch.iter().map(|id|*id as &dyn rusqlite::ToSql)
+            .collect::<Vec<_>>();
+        args.push(&season);
+        args.push(&season);
+        let mut stmt=db.prepare(&sql)?;
+        for id in stmt.query_map(rusqlite::params_from_iter(args),
+            |r|r.get::<_,String>(0))? {
+            eligible_ids.insert(id?);
+        }
+    }
+    Ok(rows.into_iter().filter(|row|
+        !is_series(&row.media_type)||eligible_ids.contains(&row.imdb_id)).collect())
 }
 fn filter(db:&Connection,rows:Vec<Aka>,release:&str,series:bool,year:Option<i32>,season:i64)
     ->rusqlite::Result<Vec<Aka>>{
@@ -114,13 +165,17 @@ fn semantic_extension(short:&[String],long:&[String])->Option<TitleFit>{
         edge:if prefix{0}else{1},longest_first:-(matched as i64)})
 }
 fn title_fit(key:&str,words:&[String],release_words:&[String],row:&Aka,
-    semantic_release:&[String])->Option<TitleFit>{
+    semantic_release:&[String],cached_alias:Option<&[String]>)->Option<TitleFit>{
     if row.clean==key{
         // An identical ASCII index key is not necessarily an identical
         // Unicode title. Prefer complete identity to partial prefix/suffix.
-        let full=semantic_words(&row.title);
-        if let Some(partial)=semantic_extension(semantic_release,&full)
-            .or_else(||semantic_extension(&full,semantic_release)){
+        let computed;
+        let full=match cached_alias{
+            Some(words)=>words,
+            None=>{computed=semantic_words(&row.title);&computed}
+        };
+        if let Some(partial)=semantic_extension(semantic_release,full)
+            .or_else(||semantic_extension(full,semantic_release)){
             return Some(partial);
         }
         return Some(TitleFit::exact());
@@ -457,7 +512,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     // original release, so keep the historical word-boundary and containment
     // checks. Only the raw-release validation below can admit longer names.
     discovered.retain(|row|release.contains(&row.clean)
-        && title_fit(&key,&words,&release_words,row,&semantic_release).is_some());
+        && title_fit(&key,&words,&release_words,row,&semantic_release,None).is_some());
     for row in discovered{
         ordinary_title_matches.insert((row.imdb_id.clone(),row.title.clone()));
         rows.push(row);
@@ -584,12 +639,17 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     // Repeat appearances via exact/forward/reverse retrieval do not change
     // the winner, and aliases of the same IMDb work are compared as one work.
     let mut groups:BTreeMap<String,Vec<(Aka,TitleFit)>>=BTreeMap::new();
+    let semantic_content_length=semantic_content.iter()
+        .map(|word|word.chars().count()).sum::<usize>();
     for row in rows{
+        // Reuse the Unicode tokenization for the candidate's title-fit
+        // evidence and exact-source comparison in this scoring pass.
+        let alias_semantic=semantic_words(&row.title);
         let alias_key=(row.imdb_id.clone(),row.title.clone());
         let mut evidence=Vec::new();
         if ordinary_title_matches.contains(&alias_key){
             if let Some(fit)=title_fit(&key,&words,&release_words,
-                &row,&semantic_release){evidence.push(fit);}
+                &row,&semantic_release,Some(&alias_semantic)){evidence.push(fit);}
         }
         if country_title_matches.contains(&alias_key){
             // AU and "Australia" are equivalent *complete* release title
@@ -602,9 +662,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             // Score the length of the original qualified title instead,
             // keeping ordinary lexical fit/season gates and the later
             // regional vote tie-breakers unchanged.
-            let matched=semantic_content.iter()
-                .map(|word|word.chars().count()).sum::<usize>();
-            evidence.push(TitleFit{tier:0,longest_first:-(matched as i64),
+            evidence.push(TitleFit{tier:0,longest_first:-(semantic_content_length as i64),
                 unmatched_bp:0,edge:0});
         }
         if extended_title_matches.contains(&alias_key){
@@ -624,10 +682,8 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             &semantic_content,&row){evidence.push(fit);}
         // Score the full source title consistently, including exact-match
         // rows that are also returned by a different discovery direction.
-        if semantic_words(&row.title)==semantic_content{
-            let matched=semantic_content.iter()
-                .map(|word|word.chars().count()).sum::<usize>();
-            evidence.push(TitleFit{tier:0,longest_first:-(matched as i64),
+        if alias_semantic==semantic_content{
+            evidence.push(TitleFit{tier:0,longest_first:-(semantic_content_length as i64),
                 unmatched_bp:0,edge:0});
         }
         let fit=evidence.into_iter().min().unwrap_or(TitleFit::fallback(
@@ -1643,5 +1699,46 @@ mod tests{
         assert_eq!(series[0].imdb_id,"tt3");
         let rejected=search(&db,"Breaking Bad",None,true,9,"Breaking.Bad.S09E02",true,20).unwrap();
         assert!(rejected.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod batch_eligibility_tests {
+    use super::*;
+
+    #[test]
+    fn batched_season_gating_matches_individual_sql_across_chunk_boundaries(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_season INTEGER);")
+            .unwrap();
+        let mut rows=Vec::new();
+        for index in 0..310 {
+            let id=format!("tt{index:07}");
+            let max_season=if index%3==0{8}else{4};
+            db.execute("INSERT INTO seasons VALUES (?1,?2)",
+                params![&id,max_season]).unwrap();
+            if index%7==0 {
+                let anidb=format!("a{index}");
+                db.execute("INSERT INTO anime_series_map VALUES(?1,?2,0)",
+                    params![&id,&anidb]).unwrap();
+                db.execute("INSERT INTO episode_map VALUES(?1,8)",
+                    [&anidb]).unwrap();
+            }
+            let row=Aka{imdb_id:id,title:"Example".into(),clean:"example".into(),
+                year:2020,category:"series".into(),region:None,
+                ordering:0,media_type:"tvSeries".into()};
+            rows.push(row.clone());
+            // Multiple IMDb AKA rows must not cause duplicate eligibility SQL.
+            if index%4==0 {rows.push(row);}
+        }
+        let expected=rows.iter()
+            .filter(|row|eligible(&db,row,8).unwrap())
+            .map(|row|row.imdb_id.clone()).collect::<Vec<_>>();
+        let actual=filter_eligible(&db,rows,true,None,8).unwrap()
+            .into_iter().map(|row|row.imdb_id).collect::<Vec<_>>();
+        assert_eq!(actual,expected);
     }
 }

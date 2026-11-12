@@ -223,10 +223,6 @@ pub fn match_fingerprint(metadata:&Path)->Option<String>{
     // refresh or regex revision produces a different cache key.
     namespace("match",Some(metadata))
 }
-pub fn match_namespace(metadata:&Path)->Option<String>{
-    if !enabled(){return None;}
-    match_fingerprint(metadata)
-}
 fn key(namespace:&str,title:&str,year:Option<i32>,series:Option<bool>)->String{
     digest(&format!("{namespace}\0{title}\0{year:?}\0{series:?}"))
 }

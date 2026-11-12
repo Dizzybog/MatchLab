@@ -98,3 +98,53 @@ a cache-only benchmark overstates gains.
 **Merge policy:** Keep the optimization PR stacked on #120 while that PR is
 open. Do not auto-merge. CI and representative before/after performance results
 are required before claiming the speed target has been reached.
+
+## Second-pass CPU audit — Graphify index `60927db` (November 12, 2026)
+
+Graphify reindexed the merged #120/#121 state (1,913 nodes / 5,567
+relationships). Source-level review identified the following additional
+work. Each item must preserve production `/match`, `/debug/match`,
+`/parse`, Unicode ranking and verified SID/ASID behavior.
+
+| Component | Optimization | Correctness barrier |
+| --- | --- | --- |
+| `tantivy_search::titles_by_ids` | One `TermSetQuery` instead of a loop of `TermQuery` calls | Exact ID union; no alias loss or TopDocs truncation |
+| `main::diagnose_logged` | One shared metadata/WAL fingerprint for both cache namespace and request retry gates | Recheck after computation, replay on generation change and fail closed on a second change |
+| `main::parse_cached` | Clone shared `Arc<Value>` after releasing the global mutex | Exact parser generation and 30-second TTL |
+| `imdb_matcher::filter_eligible` | Query unique IMDb candidates in at most 256-ID batches; separate season bounds from AniDB fallback | Same season threshold, SQL fallback, aliases and input order |
+| `anime_title::resolve_range` | Preselect part aliases/family/rows, resolve ordinary and remapped episode ranges in one crosswalk snapshot | Per-episode uniqueness, season bounds and exact AniDB identity |
+| `matchlab-parser::parse_context_impl` | Skip rescanning prefilter after edge removals; rescan interior deletions | No newly joined literal can be created by removing a complete prefix or suffix |
+| `cached_path_component` | Clone parsed JSON after dropping the shared cache lock | Never reuse an obsolete parser-patch generation |
+| `imdb_matcher::search` | Reuse Unicode title tokens and source length in candidate rank computation | Same title-fit tiers and tie-break scores |
+| `dashboard_history::record_async` | Move already-serialized diagnostics into bounded history queue | History remains nonblocking; errors and selected ID stay recorded |
+
+### Reproduction / verification
+
+```bash
+cargo test --workspace
+cargo test -p matchlab-parser
+cargo test -p matchlab-server
+cargo bench -p matchlab-parser --bench matchlab_parser_bench
+```
+
+The parser benchmark includes 128- and 512-item sequential/parallel
+comparisons with common title roots, anime, CJK URL banners and TV path
+hierarchies. Benchmark execution (not merely compilation) must be run
+on the target CPU quota with the same metadata and environment in both
+branches; benchmark setup and caches can strongly influence the result.
+For production, additionally compare 1/2/4/8/16/32 concurrent HTTP
+`/match` requests on cold and warm candidate sets while recording
+CPU seconds per 1000 calls, p50/p95/p99 latency, allocations and peak RSS.
+No numerical gains are asserted without those measurements.
+
+### Non-goals / invariants
+
+- No entire-database SQLite title scans; title identity discovery remains
+  Tantivy-only. Season eligibility, IMDb ratings and verified AniDB/TVDB
+  crosswalks remain relational.
+- No guessed episode defaults, altered rank tie-breakers, early TopDocs
+  truncation, or shared final SID across distinct full torrent paths.
+- No unbounded worker spawning. `MATCHLAB_MAX_CONCURRENT_MATCHES`
+  remains configurable; on a single CPU, higher configured concurrency
+  may harm throughput/latency and needs load testing.
+- No automatic activation of unverified ML rules and no API/schema changes.
