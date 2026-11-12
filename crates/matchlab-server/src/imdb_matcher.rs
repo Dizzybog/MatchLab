@@ -1679,3 +1679,44 @@ mod tests{
         assert!(rejected.is_empty());
     }
 }
+
+#[cfg(test)]
+mod batch_eligibility_tests {
+    use super::*;
+
+    #[test]
+    fn batched_season_gating_matches_individual_sql_across_chunk_boundaries(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_season INTEGER);")
+            .unwrap();
+        let mut rows=Vec::new();
+        for index in 0..310 {
+            let id=format!("tt{index:07}");
+            let max_season=if index%3==0{8}else{4};
+            db.execute("INSERT INTO seasons VALUES (?1,?2)",
+                params![&id,max_season]).unwrap();
+            if index%7==0 {
+                let anidb=format!("a{index}");
+                db.execute("INSERT INTO anime_series_map VALUES(?1,?2,0)",
+                    params![&id,&anidb]).unwrap();
+                db.execute("INSERT INTO episode_map VALUES(?1,8)",
+                    [&anidb]).unwrap();
+            }
+            let row=Aka{imdb_id:id,title:"Example".into(),clean:"example".into(),
+                year:2020,category:"series".into(),region:None,
+                ordering:0,media_type:"tvSeries".into()};
+            rows.push(row.clone());
+            // Multiple IMDb AKA rows must not cause duplicate eligibility SQL.
+            if index%4==0 {rows.push(row);}
+        }
+        let expected=rows.iter()
+            .filter(|row|eligible(&db,row,8).unwrap())
+            .map(|row|row.imdb_id.clone()).collect::<Vec<_>>();
+        let actual=filter_eligible(&db,rows,true,None,8).unwrap()
+            .into_iter().map(|row|row.imdb_id).collect::<Vec<_>>();
+        assert_eq!(actual,expected);
+    }
+}
