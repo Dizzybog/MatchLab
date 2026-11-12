@@ -4555,9 +4555,10 @@ mod tests {
         // episode identity, even when ML persistent cache is disabled.
         for (leaf,sid) in [("S09E23.mkv","tt0096697:9:23"),
                             ("S09E24.mkv","tt0096697:9:24")]{
+            let fingerprint=learning_cache::match_fingerprint(&path);
             let cached=whole_torrent_cached_diagnose(&path,&MatchRequest{
                 title:format!("The Simpsons Season 9/{leaf}"),
-                year:None,series:None}).unwrap();
+                year:None,series:None},fingerprint.as_deref()).unwrap();
             assert_eq!(cached.selected.unwrap()["sid"],sid);
         }
 
