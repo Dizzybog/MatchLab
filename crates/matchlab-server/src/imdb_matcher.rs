@@ -340,6 +340,7 @@ fn release_is_imdb_title_suffix_fit(
 pub fn has_longer_title_evidence_in_release(
     parsed_title:&str,raw_release:&str,matched_title:&str,
 )->bool{
+    let raw_release=release_component_for_title(raw_release,parsed_title);
     let keys=longer_release_title_prefixes(parsed_title,raw_release);
     let release=semantic_words(raw_release);
     let parsed=semantic_words(parsed_title);
@@ -353,6 +354,35 @@ pub fn has_longer_title_evidence_in_release(
         &release,&parsed,content.len(),&candidate).is_some())
         ||title_suffix_in_original_release_fit(&content,&candidate).is_some()
         ||release_is_imdb_title_suffix_fit(&content,&candidate).is_some()
+}
+
+/// On a torrent hierarchy, title relevance belongs to ONE meaningful
+/// path component, never the concatenation of folder names, episode
+/// coordinates, and the file extension. The parser already extracts fields
+/// per level and chooses the nearest meaningful title; use that title to
+/// identify the matching original component for bidirectional IMDb search.
+/// Prefer the closest aligned component. Keep a conservative descriptive
+/// fallback only when the parser normalized a title differently.
+fn release_component_for_title<'a>(raw:&'a str,title:&str)->&'a str{
+    if !raw.bytes().any(|c|c==b'/'||c==b'\\'){return raw;}
+    let parsed=semantic_words(title);
+    let mut fallback=None;
+    for component in raw.rsplit(&['/','\\'][..]).filter(|s|!s.is_empty()){
+        let content=semantic_release_content_words(component);
+        if content.is_empty(){continue;}
+        if !parsed.is_empty()
+            && (content.starts_with(&parsed)||content.ends_with(&parsed)){
+            return component;
+        }
+        // Do not choose numeric intermediate folders or leaf-only episode /
+        // technical components as the source of a recovered IMDb title.
+        let meaningful=content.len()>=2
+            && !matches!(content[0].as_str(),"season"|"seasons"
+                |"episode"|"episodes"|"specials"|"extras"|"subtitles"
+                |"library"|"archive"|"movies"|"tv");
+        if meaningful&&fallback.is_none(){fallback=Some(component);}
+    }
+    fallback.unwrap_or(raw)
 }
 
 /// Title relevance is ranked by the caller. After that, use release-year
@@ -374,6 +404,11 @@ fn rank(r:&Aka,year:Option<i32>,duplicate:bool,country:Option<&str>,votes:i64)
 }
 pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_season:i64,
     release_title:&str,_has_episode:bool,limit:usize)->rusqlite::Result<Vec<Match>>{
+    // The parser has already inherited season/episode/year across the
+    // hierarchy. Only the lexical candidate discovery should operate on
+    // the original component containing its chosen title, not on a joined
+    // parent/child path that is not a real IMDb title.
+    let release_title=release_component_for_title(release_title,title);
     let key=clean_title(title);
     let release=clean_title(release_title);
     if key.is_empty()||limit==0{return Ok(vec![]);}
