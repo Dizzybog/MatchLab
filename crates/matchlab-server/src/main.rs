@@ -678,6 +678,7 @@ fn filter_request_imdb_candidates(
 fn bottom_up_imdb_path_match(
     db:&Connection,parsed:&serde_json::Map<String,Value>,
     year:Option<i32>,series:bool,season:i64,has_episode:bool,
+    check_episode_bounds:bool,
     eligible:impl Fn(Vec<imdb_matcher::Match>)->Vec<imdb_matcher::Match>,
 )->Result<Option<(String,Vec<imdb_matcher::Match>)>,String>{
     let Some(layers)=parsed.get("path_layers").and_then(Value::as_array)else{
@@ -713,7 +714,7 @@ fn bottom_up_imdb_path_match(
         // if more than two identities remain. Apply that same condition
         // before accepting a directory, otherwise all candidates can vanish
         // after leaf selection without ever trying a valid parent.
-        if found.len()>2 && has_episode && season>0
+        if found.len()>2 && check_episode_bounds && season>0
             && let Some(episode)=numbers(parsed.get("episodes")).first().copied()
         {
             let absolute_hint=parsed.get("absolute_episode_candidate")
@@ -1078,7 +1079,8 @@ fn diagnose_with_policy(
         .and_then(Value::as_bool)==Some(true){None}else{
         bottom_up_imdb_path_match(
             &db,parsed,year,series,seasons.iter().copied().max().unwrap_or(0),
-            has_episode,|hits|filter_request_imdb_candidates(&db,hits,gate))?
+            has_episode,seasons.len()==1&&episodes.len()==1,
+            |hits|filter_request_imdb_candidates(&db,hits,gate))?
     };
     let (layer_title,imdb)=if let Some((name,matches))=chosen_layer{
         (Some(name),matches)
@@ -2675,7 +2677,7 @@ mod tests {
             "monster\\the.ed.gein.story\\S01\\E02.mkv",
         ]{
             let parsed=matchlab_parser::parse_title(path,false).unwrap();
-            let result=bottom_up_imdb_path_match(&db,&parsed,None,true,1,true,|hits|hits)
+            let result=bottom_up_imdb_path_match(&db,&parsed,None,true,1,true,true,|hits|hits)
                 .unwrap().expect("a named directory must resolve independently");
             assert_eq!(result.0,
                 parsed["path_layers"][1]["parsed"]["title"].as_str().unwrap(),
@@ -2691,7 +2693,7 @@ mod tests {
         // "Monster" must not be concatenated into a synthetic alias.
         let parsed=matchlab_parser::parse_title(
             "Monster/Not.A.Real.Show/S01/E02.mkv",false).unwrap();
-        let from_parent=bottom_up_imdb_path_match(&db,&parsed,None,true,1,true,|hits|hits)
+        let from_parent=bottom_up_imdb_path_match(&db,&parsed,None,true,1,true,true,|hits|hits)
             .unwrap().expect("climb to a matching parent");
         assert_eq!(from_parent.0,"Monster");
         assert_eq!(from_parent.1[0].imdb_id,"tt2004");
@@ -2707,7 +2709,7 @@ mod tests {
             verified_anime_range:None,verified_absolute_episode:None,
         };
         let recovered=bottom_up_imdb_path_match(
-            &db,&parsed,Some(2004),true,0,true,
+            &db,&parsed,Some(2004),true,0,true,true,
             |hits|filter_request_imdb_candidates(&db,hits,gate)
         ).unwrap().expect("an ineligible leaf must allow parent fallback");
         assert_eq!(recovered.0,"Monster");
@@ -2723,7 +2725,7 @@ mod tests {
             verified_anime_range:None,verified_absolute_episode:None,
         };
         let recovered=bottom_up_imdb_path_match(
-            &db,&parsed,None,true,2,true,
+            &db,&parsed,None,true,2,true,true,
             |hits|filter_request_imdb_candidates(&db,hits,gate)
         ).unwrap().expect("season-pack eligibility must permit fallback");
         assert_eq!(recovered.1[0].imdb_id,"ttgein");
@@ -2747,7 +2749,7 @@ mod tests {
         let parsed=matchlab_parser::parse_title(
             "Monster/Bad.Show.S01E20.mkv",false).unwrap();
         let fallback=bottom_up_imdb_path_match(
-            &db,&parsed,None,true,1,true,|hits|hits
+            &db,&parsed,None,true,1,true,true,|hits|hits
         ).unwrap().expect("episode-ineligible leaf must allow parent fallback");
         assert_eq!(fallback.1[0].imdb_id,"tt2004");
 
@@ -2761,7 +2763,7 @@ mod tests {
         let generic=matchlab_parser::parse_title("Monster/Library/S01/E02.mkv",false)
             .unwrap();
         let found=bottom_up_imdb_path_match(
-            &db,&generic,None,true,1,true,|hits|hits
+            &db,&generic,None,true,1,true,true,|hits|hits
         ).unwrap().expect("library folder must not steal the series");
         assert_eq!(found.1[0].imdb_id,"tt2004");
 
@@ -2776,13 +2778,13 @@ mod tests {
                 ('tt24',50000),('tt6',200000),('ttcops',10);").unwrap();
         let numeric=matchlab_parser::parse_title("24/S01/E02.mkv",false).unwrap();
         let found=bottom_up_imdb_path_match(
-            &db,&numeric,None,true,1,true,|hits|hits
+            &db,&numeric,None,true,1,true,true,|hits|hits
         ).unwrap().expect("a genuine numeric series must remain matchable");
         assert_eq!(found.1[0].imdb_id,"tt24");
         let structural=matchlab_parser::parse_title("Cops/6/S06E10.mkv",false)
             .unwrap();
         let found=bottom_up_imdb_path_match(
-            &db,&structural,None,true,6,true,|hits|hits
+            &db,&structural,None,true,6,true,true,|hits|hits
         ).unwrap().expect("the parent title must win over a season directory");
         assert_eq!(found.1[0].imdb_id,"ttcops");
 
@@ -2790,7 +2792,7 @@ mod tests {
         // the parent folder, without mixing the levels.
         let parsed=matchlab_parser::parse_title(
             "Monster/The.Ed.Gein.Story.S01E02.mkv",false).unwrap();
-        let leaf=bottom_up_imdb_path_match(&db,&parsed,None,true,1,true,|hits|hits)
+        let leaf=bottom_up_imdb_path_match(&db,&parsed,None,true,1,true,true,|hits|hits)
             .unwrap().expect("leaf named release must win");
         assert_eq!(leaf.1[0].imdb_id,"ttgein");
     }
@@ -4299,7 +4301,8 @@ mod tests {
             let episodes=numbers(parsed.get("episodes"));
             bottom_up_imdb_path_match(
                 &db,&parsed,None,true,seasons.iter().copied().max().unwrap_or(0),
-                !episodes.is_empty(),|hits|hits
+                !episodes.is_empty(),seasons.len()==1&&episodes.len()==1,
+                |hits|hits
             ).unwrap().expect("a valid path title").1[0].imdb_id.clone()
         };
         assert_eq!(select(release),"tt0096697");
