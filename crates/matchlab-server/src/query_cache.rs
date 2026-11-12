@@ -3,16 +3,20 @@
 //! diagnostic, the caller MUST key it by the complete original path,
 //! per-request overrides and current parser/metadata generation.
 use std::{
-    collections::HashMap,
+    collections::{HashMap,VecDeque},
     sync::{Arc,Mutex},
     time::{Duration,Instant},
 };
 
 // Share finished responses across threads without cloning large candidate
 // vectors while holding the process-wide cache mutex.
-struct Ready<T> { at:Instant, value:Arc<T> }
+struct Ready<T> { at:Instant, sequence:u64, value:Arc<T> }
 struct Inner<T> {
     ready:HashMap<String,Ready<T>>,
+    // Exact insertion order for O(1)-amortized eviction. Sequence tags
+    // distinguish stale tickets after a key expires and is reinserted.
+    eviction:VecDeque<(String,u64)>,
+    next_sequence:u64,
     // One short lock per key, so distinct titles are never serialized while
     // simultaneous requests for a single torrent share the same lookup.
     flights:HashMap<String,Arc<Mutex<()>>>,
@@ -25,7 +29,9 @@ pub struct QueryCache<T> {
 }
 impl<T:Clone> QueryCache<T> {
     pub fn new(max_entries:usize,ttl:Duration)->Self{
-        Self{inner:Mutex::new(Inner{ready:HashMap::new(),flights:HashMap::new()}),
+        Self{inner:Mutex::new(Inner{
+                ready:HashMap::new(),eviction:VecDeque::new(),
+                next_sequence:0,flights:HashMap::new()}),
             max_entries,ttl}
     }
 
@@ -72,16 +78,31 @@ impl<T:Clone> QueryCache<T> {
         // evict expired/oldest results to avoid unbounded memory growth.
         if let Ok(mut inner)=self.inner.lock(){
             if let Some(value)=cache_copy {
-                if inner.ready.len()>=self.max_entries{
-                    inner.ready.retain(|_,entry|entry.at.elapsed()<self.ttl);
-                }
                 if inner.ready.len()>=self.max_entries {
-                    if let Some(oldest)=inner.ready.iter().min_by_key(|(_,e)|e.at)
-                        .map(|(key,_)|key.clone()) {
-                        inner.ready.remove(&oldest);
+                    // The oldest live entry is first. Skip stale tickets
+                    // from invalidated/replaced cache entries in O(1).
+                    while let Some((old_key,sequence))=inner.eviction.pop_front(){
+                        if inner.ready.get(&old_key)
+                            .is_some_and(|entry|entry.sequence==sequence){
+                            inner.ready.remove(&old_key);
+                            break;
+                        }
                     }
                 }
-                inner.ready.insert(key.clone(),Ready{at:Instant::now(),value});
+                inner.next_sequence=inner.next_sequence.wrapping_add(1);
+                let sequence=inner.next_sequence;
+                inner.ready.insert(key.clone(),
+                    Ready{at:Instant::now(),sequence,value});
+                inner.eviction.push_back((key.clone(),sequence));
+                // Repeated expiration/reinsertion of the same key leaves
+                // stale tickets; compact infrequently to cap queue memory.
+                if inner.eviction.len()>self.max_entries.saturating_mul(2).max(8){
+                    let mut live=inner.ready.iter()
+                        .map(|(key,entry)|(entry.at,key.clone(),entry.sequence))
+                        .collect::<Vec<_>>();
+                    live.sort_unstable_by_key(|(at,_,_)|*at);
+                    inner.eviction=live.into_iter().map(|(_,key,seq)|(key,seq)).collect();
+                }
             }
             inner.flights.remove(&key);
         }
@@ -165,6 +186,31 @@ mod tests{
             },|v|v.len()<=100).unwrap();
         }
         assert_eq!(n.load(Ordering::SeqCst),2);
+    }
+
+    #[test]
+    fn unique_key_churn_keeps_eviction_index_bounded_and_evicts_oldest(){
+        let cache=QueryCache::<usize>::new(12,Duration::from_secs(60));
+        for n in 0..400 {
+            let key=format!("unique-{n}");
+            assert_eq!(cache.get_or_compute(key,||Ok(n),|_|true).unwrap(),n);
+        }
+        let inner=cache.inner.lock().unwrap();
+        assert_eq!(inner.ready.len(),12);
+        assert!(inner.eviction.len()<=24);
+        for n in 0..388 {assert!(!inner.ready.contains_key(&format!("unique-{n}")));}
+        for n in 388..400 {assert!(inner.ready.contains_key(&format!("unique-{n}")));}
+    }
+
+    #[test]
+    fn repeated_expired_key_does_not_accumulate_stale_eviction_tickets(){
+        let cache=QueryCache::<usize>::new(4,Duration::ZERO);
+        for n in 0..100 {
+            assert_eq!(cache.get_or_compute("same".to_owned(),||Ok(n),|_|true).unwrap(),n);
+        }
+        let inner=cache.inner.lock().unwrap();
+        assert_eq!(inner.ready.len(),1);
+        assert!(inner.eviction.len()<=8,"stale eviction records must be compacted");
     }
 
     #[test]

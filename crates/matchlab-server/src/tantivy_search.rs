@@ -1040,6 +1040,47 @@ pub fn anime_aliases_for_title(
     Ok(results)
 }
 
+/// Check all title-identity collisions in one exact postings query. A large
+/// IMDb shortlist previously ran a Tantivy query per distinct normalized
+/// alias; this stays exhaustive and applies the same positive-year filter
+/// as has_duplicate_title_uncached. Small sets keep their single-flight
+/// per-key cache, avoiding a multi-term query for common exact matches.
+pub fn duplicate_titles(
+    db:&Connection,keys:&BTreeSet<String>,
+)->Result<std::collections::HashSet<String>,String>{
+    let mut duplicates=std::collections::HashSet::new();
+    if keys.len()<=4 {
+        for key in keys {
+            if has_duplicate_title(db,key)?{duplicates.insert(key.clone());}
+        }
+        return Ok(duplicates);
+    }
+    let (search,memory_dir)=open_search(db)?;
+    let reader=search.reader.searcher();
+    for batch in keys.iter().collect::<Vec<_>>().chunks(128){
+        let query=TermSetQuery::new(batch.iter()
+            .map(|key|Term::from_field_text(search.forward,key)));
+        let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
+        let mut first=HashMap::<String,String>::new();
+        for addr in hits {
+            let doc:tantivy::TantivyDocument=reader.doc(addr)
+                .map_err(|e|e.to_string())?;
+            if doc.get_first(search.year).and_then(|value|value.as_i64())
+                .unwrap_or(0)<=0 {continue;}
+            let (Some(title),Some(id))=(
+                doc.get_first(search.forward).and_then(|value|value.as_str()),
+                doc.get_first(search.id).and_then(|value|value.as_str()))
+                else{continue};
+            if let Some(previous)=first.get(title){
+                if previous.as_str()!=id{duplicates.insert(title.to_owned());}
+            }else{first.insert(title.to_owned(),id.to_owned());}
+        }
+    }
+    drop(reader);drop(search);
+    if let Some(dir)=memory_dir{let _=std::fs::remove_dir_all(dir);}
+    Ok(duplicates)
+}
+
 pub fn has_duplicate_title(db:&Connection,key:&str)->Result<bool,String>{
     if let Some(id)=lookup_cache_key(db,"duplicate_title",key){
         DUPLICATE_LOOKUPS.get_or_init(||QueryCache::new(LOOKUP_CAP,LOOKUP_TTL))
@@ -1119,6 +1160,36 @@ mod persistence_tests {
         assert_eq!(actual,expected);
         assert_eq!(actual.len(),3);
         assert!(titles_by_ids(&db,&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn batch_duplicate_aliases_match_single_title_checks(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
+            region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            INSERT INTO titles VALUES
+            ('tt0000001','Shared Title','sharedtitle',2020,'movie','',1,0,'movie'),
+            ('tt0000002','Shared Title','sharedtitle',2021,'movie','',1,0,'movie'),
+            ('tt0000003','Single Title','singletitle',2019,'movie','',1,0,'movie'),
+            ('tt0000003','Single Title','singletitle',2019,'movie','US',0,1,'movie'),
+            ('tt0000004','Other Title','othertitle',2018,'movie','',1,0,'movie'),
+            ('tt0000005','Unreleased','unreleased',0,'movie','',1,0,'movie'),
+            ('tt0000006','Unreleased','unreleased',0,'movie','US',0,1,'movie'),
+            ('tt0000007','First Extras','firstextras',2015,'movie','',1,0,'movie'),
+            ('tt0000008','Second Extras','secondextras',2015,'movie','',1,0,'movie');")
+            .unwrap();
+        let keys=["sharedtitle","singletitle","othertitle","unreleased",
+                  "firstextras","secondextras","absent"]
+            .into_iter().map(str::to_owned).collect::<BTreeSet<_>>();
+        let batched=duplicate_titles(&db,&keys).unwrap();
+        let expected=keys.iter().filter(|key|
+            has_duplicate_title(&db,key).unwrap()).cloned()
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(batched,expected);
+        assert_eq!(batched,
+            std::collections::HashSet::from(["sharedtitle".to_owned()]));
+        assert!(duplicate_titles(&db,&BTreeSet::new()).unwrap().is_empty());
     }
 
     #[test]

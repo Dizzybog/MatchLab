@@ -654,24 +654,50 @@ struct ImdbIdentityGate<'a>{
 fn filter_request_imdb_candidates(
     db:&Connection,hits:Vec<imdb_matcher::Match>,gate:ImdbIdentityGate<'_>,
 )->Vec<imdb_matcher::Match>{
-    hits.into_iter().filter(|candidate|{
-        if matches!(gate.policy,MatchPolicy::PublicApi)
-            && !year_signal_eligible(
+    let mut filtered=hits.into_iter().filter(|candidate|{
+        !matches!(gate.policy,MatchPolicy::PublicApi)
+            ||year_signal_eligible(
                 gate.year,candidate.year,gate.has_season,
                 !candidate.anime_ids.is_empty()
                     ||gate.verified_anime_range==Some(candidate.imdb_id.as_str())
                     ||gate.verified_absolute_episode==Some(candidate.imdb_id.as_str()),
                 gate.has_quality,
-            ){
-            return false;
-        }
-        // An explicit season range is stricter than the season-1 tolerance
-        // used for provisional title candidate discovery.
-        gate.season_range_end.is_none_or(|end|
+            )
+    }).collect::<Vec<_>>();
+    // An explicit season range is stricter than the season-1 tolerance
+    // used for provisional title discovery. No range -> no SQL at all.
+    let Some(end)=gate.season_range_end else{return filtered;};
+    // Keep the low-overhead scalar path for the usual tiny shortlist.
+    if filtered.len()<=4 {
+        filtered.retain(|candidate|
             db.query_row("SELECT max_season FROM seasons WHERE imdb_id=?1",
                 [&candidate.imdb_id],|row|row.get::<_,i64>(0))
-                .is_ok_and(|max|max>=end))
-    }).collect()
+                .is_ok_and(|max|max>=end));
+        return filtered;
+    }
+    // Only IDs that passed the public year gate need season validation.
+    // Preserve input order and duplicate IDs while replacing N lookups
+    // with bounded relational reads. Missing/corrupt bounds still reject.
+    let ids=filtered.iter().map(|candidate|candidate.imdb_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter().collect::<Vec<_>>();
+    let mut allowed=std::collections::HashSet::<String>::new();
+    for batch in ids.chunks(200){
+        let markers=vec!["?";batch.len()].join(",");
+        let sql=format!("SELECT imdb_id,max_season FROM seasons
+            WHERE imdb_id IN ({markers})");
+        if let Ok(mut stmt)=db.prepare(&sql){
+            if let Ok(rows)=stmt.query_map(
+                rusqlite::params_from_iter(batch.iter().copied()),|row|
+                Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?))){
+                for row in rows.flatten(){
+                    if row.1>=end {allowed.insert(row.0);}
+                }
+            }
+        }
+    }
+    filtered.retain(|candidate|allowed.contains(&candidate.imdb_id));
+    filtered
 }
 
 /// Match independently parsed levels leaf-first. A level wins only after
@@ -5078,6 +5104,42 @@ mod tests {
         assert_eq!(gap["complete"],false);
         assert!(gap["end_season"].is_null());
     }
+    #[test]
+    fn large_shortlist_season_gate_matches_original_scalar_queries(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE seasons(
+            imdb_id TEXT PRIMARY KEY,max_season INTEGER);").unwrap();
+        let mut hits=Vec::new();
+        for n in 0..345 {
+            let id=format!("tt{n:07}");
+            if n%8!=0 {
+                db.execute("INSERT INTO seasons VALUES(?1,?2)",
+                    rusqlite::params![id,if n%3==0{12}else{5}]).unwrap();
+            }
+            let hit=imdb_matcher::Match{
+                imdb_id:id.clone(),title:"Series".into(),year:2020,
+                category:"series".into(),matched_title:"Series".into(),
+                anime_ids:std::collections::BTreeMap::new(),media_type:"tvSeries".into(),
+            };
+            hits.push(hit.clone());
+            if n%17==0 {hits.push(hit);}
+        }
+        let expected=hits.iter().filter(|candidate|
+            db.query_row("SELECT max_season FROM seasons WHERE imdb_id=?1",
+                [&candidate.imdb_id],|row|row.get::<_,i64>(0))
+                .is_ok_and(|max|max>=9))
+            .map(|candidate|candidate.imdb_id.clone()).collect::<Vec<_>>();
+        let gate=ImdbIdentityGate{
+            policy:MatchPolicy::DashboardDiagnostic,
+            year:None,has_season:true,has_quality:true,
+            season_range_end:Some(9),verified_anime_range:None,
+            verified_absolute_episode:None,
+        };
+        let actual=filter_request_imdb_candidates(&db,hits,gate)
+            .into_iter().map(|c|c.imdb_id).collect::<Vec<_>>();
+        assert_eq!(actual,expected);
+    }
+
     #[test]
     fn explicit_multi_season_packs_keep_both_bounds() {
         assert_eq!(explicit_season_range("Gary.Unmarried.S01-S02.1080p"),Some((1,2)));

@@ -54,8 +54,11 @@ fn hash_bytes(parts:&[&[u8]])->usize{
 fn hash(s:&str)->usize{hash_bytes(&[s.as_bytes()])}
 fn identity_group(title:&str)->String{
     let mut group=Vec::new();
+    // The holdout identity uses only the first eight source words. Scanning
+    // four additional words and allocating a second Vec never affected the
+    // hash, but happened for every observed torrent.
     for word in title.split(|c:char|!c.is_ascii_alphanumeric())
-        .filter(|s|!s.is_empty()).take(12){
+        .filter(|s|!s.is_empty()).take(8){
         let lower=word.to_ascii_lowercase();
         let season_episode=lower.starts_with('s')&&lower[1..].bytes()
             .next().is_some_and(|c|c.is_ascii_digit());
@@ -71,7 +74,7 @@ fn identity_group(title:&str)->String{
         }
         group.push(lower);
     }
-    group.into_iter().take(8).collect::<Vec<_>>().join(" ")
+    group.join(" ")
 }
 // Per-release structural context: shared between up to 64 field observations
 // and between all candidate-discovery scores for a title. Never persisted.
@@ -103,9 +106,14 @@ impl TitleFeatureContext{
         features.push(hash_bytes(&[b"f:",field_bytes]));
         features.push(hash_bytes(&[b"s:",signal_bytes]));
         features.push(hash_bytes(&[b"fs:",field_bytes,b":",signal_bytes]));
+        // Canonical technical markers are overwhelmingly ASCII. When
+        // the entire signal is ASCII, every n-gram is valid UTF-8 and
+        // individual validation is redundant. Keep identical feature hashes
+        // and the exact legacy validation for non-ASCII signals.
+        let ascii=signal_bytes.is_ascii();
         for (span,prefix) in [(2,&b"g2:"[..]),(3,&b"g3:"[..]),(4,&b"g4:"[..])]{
             for chunk in signal_bytes.windows(span).take(32){
-                if std::str::from_utf8(chunk).is_ok(){
+                if ascii||std::str::from_utf8(chunk).is_ok(){
                     features.push(hash_bytes(&[prefix,field_bytes,b":",chunk]));
                 }
             }
@@ -423,7 +431,8 @@ mod tests{
             let lower=title.to_ascii_lowercase();
             for (field,signal) in [("codec","x265"),("resolution","2160p"),
                 ("episodes","episode_coordinates"),("quality","WEB-DL"),
-                ("year","four_digit_year"),("audio","aac"),("group","part_2")]{
+                ("year","four_digit_year"),("audio","aac"),
+                ("group","part_2"),("subbed","café"),("audio","日本語")]{
                 let mut legacy=BTreeSet::new();
                 legacy.insert(hash("bias"));
                 legacy.insert(hash(&format!("f:{field}")));
