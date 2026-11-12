@@ -252,3 +252,30 @@ ambiguous duplicate titles, ML enabled/disabled and cold/warm caches.
 Report CPU-seconds per 1,000 requests, matches/s, p50/p95/p99,
 peak RSS and SQLite/Tantivy query counts. The fastest configuration on a
 one-core CPU quota may have *lower* match concurrency than on four cores.
+
+## Fourth-pass ML CPU audit — Graphify main `eb97d37` (November 12, 2026)
+
+The native online FTRL ranker stores 16,384 feature positions in 128 KiB.
+The following changes preserve FTRL, hashed feature IDs, exact feature sort
+order, holdout identity, counterfactual negative labels, persistent SHA-256
+deduplication, SQLite transaction/cursor semantics and all regex promotion
+validators. Public parser, match and diagnostic responses are not changed.
+
+- **One feature context per torrent:** reuse normalization, technical marker
+  flags and deterministic holdout identity for canonical fields, TV signals,
+  field evidence and unknown-token discovery. Existing public methods remain.
+- **Zero extra scoring buffers per candidate:** one reusable 110-slot vector
+  covers the complete unknown-marker / possible-field scoring matrix.
+- **One training feature buffer per label:** sequentially build positive and
+  counterfactual features in the same vector. The positive FTRL update still
+  precedes the negative, and holdout scoring uses the original model weights.
+- **Differential tests:** compare owned/reused hash indices and model scores
+  on ASCII/Unicode signals, train both paths and assert identical FTRL arrays,
+  counts, holdout and SQLite deduplication, and verify candidate review rows.
+
+This is an algorithmic CPU/allocation reduction, **not a benchmarked speedup**.
+Reproduce on the same ARM64 CPU quota, metadata and torrent corpus with
+`cargo test --workspace`, `benchmark_native_model()` and per-1,000
+training-observation CPU, WAL writes, throughput and rule-proposal metrics.
+Changing crash recovery, revision invalidation or regex safety gates is out of
+scope without differential fault-injection tests.
