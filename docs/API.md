@@ -312,12 +312,15 @@ skip candidate sets larger than 256 items to avoid retaining expensive
 high-cardinality title lookups. Simultaneous requests for the same key
 share a single in-flight lookup instead of independently executing it.
 
-**Crucially, final SID/ASID results are not shared between files.** The
-`year`, `series`, season, episode, anime subfolder/part, and all
-crosswalk validation are still applied **for each file**. This avoids
-accidentally returning the episode 1 SID for episode 2, or conflating
-different anime parts. Lookup errors are not cached. SQLite relational
-metadata is not cached, and all text discovery remains in Tantivy.
+**Crucially, final SID/ASID results are never shared between different
+file paths.** Per-title Tantivy candidates can be reused across sibling
+episodes, but the 30-second whole-request hot cache includes the **complete
+original path**, year/series overrides and metadata/regex generation.
+Season/episode inheritance, anime subfolder/part and crosswalk validation
+therefore remain per-file decisions. Exact repeated /match requests can
+reuse their completed match; different episode leaves never receive another
+file's SID/ASID. Lookup errors are not cached. SQLite relational metadata
+is not cached, and all text discovery remains in Tantivy.
 
 The metadata generation key prevents old title candidates from being reused
 after a full IMDb/AniDB refresh. In-memory SQLite databases bypass the
@@ -361,9 +364,10 @@ an eligible IMDb identity already found from the leaf title, the **nearest**
 matching subdirectory title takes precedence **for anime episode mapping only**.
 For instance, `Sword Art Online/Sword Art Online Alicization/Sword.Art.Online.S01E01.mkv`
 can identify the Alicization part even when the file uses the base series
-title. Non-anime matches do not receive this override. Parent titles are
-never accepted on their own as evidence to silently change an unrelated
-IMDb identity.
+title. Non-anime matches do not receive this override. Parent and leaf names are never concatenated into a synthetic IMDb title.
+The normal IMDb hierarchy walker independently validates each named
+component, with the nearest eligible title winning. A verified anime part
+is protected from an unrelated folder overriding its identity.
 
 An explicitly supplied API `year` overrides the parsed value, including the
 deepest component's year. This operates on the path **string** provided to
@@ -466,8 +470,12 @@ title length. For otherwise eligible IMDb candidates, the ranking is:
    `E02` and `S01` are skipped for title identity, and the
    `the.ed.gein.story` component can match the suffix of
    `Monster: The Ed Gein Story`; the `monster` parent is used only if
-   the closer title cannot be verified. Numeric library folders are not
-   automatically promoted to titles.
+   the closer title has no candidate **surviving the same public identity and
+   explicit-season-range eligibility checks** applied to flat titles.
+   Technical/generic folders use the parser's shared structural guard;
+   numerically named series (such as `24`) require an exact IMDb alias.
+   A nested bare season-number directory is structural, not title evidence.
+   A uniquely verified anime part bypasses the ordinary path override.
 
    **Whole-torrent cache:** the exact original torrent path, optional
    year/series overrides, and active parser/metadata generation are used
@@ -478,6 +486,10 @@ title length. For otherwise eligible IMDb candidates, the ranking is:
    30 seconds (up to 2048 entries, handler-generation-aware). Thus sibling
    files under the same main torrent reuse their already-parsed parent
    folders while each leaf continues to supply its own episode fields.
+   Canonical ML labels and parser replay bypass this component cache to
+   prevent active live regex results from contaminating offline evaluation.
+   Source-prefix/suffix Tantivy unions also use the existing bounded,
+   generation-aware single-flight candidate cache.
    Separate episode leaves have separate cache keys and can never share
    final SID/ASID endpoints. The opt-in persistent ML cache remains
    available; old regex/metadata generations never serve live results.
