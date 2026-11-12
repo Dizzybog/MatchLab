@@ -144,12 +144,16 @@ pub fn observe_with_context(db:&Connection,title:&str,parsed:&Value,
     context:&crate::online_model::TitleFeatureContext)->Result<(),String>{
     let name=parsed["title"].as_str().unwrap_or("").to_ascii_lowercase();
     if !(4..=120).contains(&name.len()) {return Ok(());}
+    // Ordinary releases have no unknown trailing markers. Avoid a SHA-256
+    // title identity and scoring allocation altogether in that common case.
+    let markers=unknown_tokens(title);
+    if markers.is_empty(){return Ok(());}
     let source_build=build();
     let identity=hash(&format!("{source_build}:{name}"));
     // Scores for multiple markers and source fields share immutable release
     // context instead of lowercasing and scanning the title repeatedly.
     let mut scratch=Vec::with_capacity(110);
-    for marker in unknown_tokens(title){
+    for marker in markers{
         if remaining.examples>=crate::ml_config::get().unknown_examples
             && !reclaim_unqualified(db,remaining)?{break;}
         // Learning predictions are only for review prioritization. The
