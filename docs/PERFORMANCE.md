@@ -194,3 +194,61 @@ claim compare this PR against `0456e4f` on equivalent hardware, identical
 metadata, cold/warm lookup mixes, 1/2/4/8/16/32 concurrent callers and
 identical response JSON. Record CPU seconds per 1,000 matches, latency
 p50/p95/p99, requests/second and peak memory. No speedup has yet been measured.
+
+### Final end-to-end hot-path audit (same Graphify index)
+
+Beyond the initial crosswalk, candidate enrichment and cache changes, the
+expanded call-path review covered the full `/match` -> parser -> Tantivy ->
+IMDb ranker -> AniDB season/absolute mapping -> ML/history chain.
+
+- **Split-cour verification:** A precomputed crosswalk membership index
+  replaces repeated nested scans of linked AniDB works and TVDB mapping
+  rows for every episode. The indexed predicate is regression-tested against
+  the original nested reference across unrelated families, duplicate links,
+  and indirect links. It remains an exact per-snapshot check, not a
+  cross-request cache.
+- **Duplicate-title IMDb evidence:** When several unique aliases tie after
+  lexical rank filtering, one bounded Tantivy exact-term union identifies
+  aliases belonging to more than one IMDb identity with a positive
+  production year. This replaces a separate Tantivy reader/query for every
+  alias. Small shortlists retain their existing single-flight lookup.
+  Independent batch-vs-scalar index tests cover aliases, zero-year titles,
+  missing aliases and multiple IMDb identities.
+- **Avoid inner ranking allocations:** IMDb ID is the final *between-work*
+  tie-break, but it is identical for all AKA titles in one work. The
+  per-alias rank tuple now omits this cloned string and retains the
+  original ID-bearing tuple for final work comparison.
+- **IMDb bulk import:** When `primaryTitle` equals `originalTitle`, skip
+  the second normalization/INSERT attempt. The composite primary key
+  already ignored this duplicate (both rows have the same IMDb ID, clean
+  title, year, region and ordering). Different original titles are
+  still imported and normalized.
+- **FTRL observation CPU:** ASCII feature n-grams bypass redundant UTF-8
+  validation, while non-ASCII n-grams retain exact validation. A
+  multilingual feature-hash parity test compares the optimized path with
+  the original implementation; feature IDs, weight update ordering,
+  negative controls and holdout groups remain unchanged. The holdout
+  identity scans only its first eight effective tokens, not twelve;
+  multiple error flags for one title share its normalized identity.
+- **Learned field safety:** One ASCII-normalized title per safety check,
+  not one normalization per forbidden secret/URL fragment. The same
+  fragments still reject training input.
+
+**Deliberately not changed:** the parser's precheck/PCRE2-capture strategy,
+which avoids capture allocations for most negative handlers; per-request
+SQLite/WAL generation validation, essential to avoid stale SID/ASID after a
+metadata refresh; Tantivy's exhaustive candidate collection and ranking;
+and relational indexes that already cover the AniDB join paths.
+Additional indexing or regex changes would require a measured benefit
+and stronger behavioral equivalence evidence.
+
+### Production measurement to close the optimization audit
+
+This PR's GitHub CI verifies correctness and compile targets; it does not
+measure speed. For meaningful ARM64 results, record **before and after**
+against main `0456e4f` using the same IMDb/AniDB snapshot and CPU quota.
+Include low- and high-cardinality torrent names, 100-300 episode packs,
+ambiguous duplicate titles, ML enabled/disabled and cold/warm caches.
+Report CPU-seconds per 1,000 requests, matches/s, p50/p95/p99,
+peak RSS and SQLite/Tantivy query counts. The fastest configuration on a
+one-core CPU quota may have *lower* match concurrency than on four cores.
