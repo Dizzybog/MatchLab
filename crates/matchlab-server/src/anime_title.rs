@@ -58,8 +58,12 @@ fn within_known_season_bounds(
 pub fn resolve_range(
     db:&Connection,imdb:&str,title:&str,season:i64,start:i64,end:i64,
 )->rusqlite::Result<Vec<Option<episode_crosswalk::Episode>>>{
-    if season<=0||start<=0||end<start||end-start>=1_000 {
-        return Ok(Vec::new());
+    if season<=0||start<=0||end<start{return Ok(Vec::new());}
+    // Preserve very large interval behavior without allocating an unbounded
+    // batch context. Ordinary packs use the optimized shared-snapshot path.
+    if end-start>=1_000 {
+        return (start..=end).map(|episode|
+            resolve(db,imdb,title,season,episode)).collect();
     }
     let mut results=vec![None;(end-start+1) as usize];
     let key=imdb_matcher::clean_title(title);
@@ -101,8 +105,11 @@ pub fn resolve_range(
             };
             if upper.is_some_and(|max|candidate.episode>max){continue;}
             let valid=if candidate.anidb_id==*selected {true}else{
-                let begins=*begins.get_or_insert(
-                    begins_tvdb_season(db,selected,mapped_season)?);
+                let begins=if let Some(value)=begins {value}else{
+                    let value=begins_tvdb_season(db,selected,mapped_season)?;
+                    begins=Some(value);
+                    value
+                };
                 if !begins {false}else if let Some(&value)=shared.get(&candidate.anidb_id){
                     value
                 }else{
