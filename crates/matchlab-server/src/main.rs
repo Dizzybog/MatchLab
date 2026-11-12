@@ -1085,11 +1085,18 @@ fn diagnose_with_policy(
     let imdb = imdb_matcher::search(&db,title,year,series,seasons.iter().copied().max().unwrap_or(0),&req.title,
         !episodes.is_empty()||parsed.contains_key("episode_start"),20)
         .map_err(|e|e.to_string())?;
+    // A complete longer title found in the ORIGINAL torrent is stronger
+    // identity evidence than a short anime alias created by a truncated
+    // parser title. Preserve this across all episode/anime selection paths.
+    let full_release_imdb=imdb.first().and_then(|candidate|
+        imdb_matcher::has_longer_title_evidence_in_release(
+            title,&req.title,&candidate.matched_title)
+            .then_some(candidate.imdb_id.clone()));
     // A same-name older OVA may win an exact IMDb alias even though it
-    // cannot contain S02E37. When a *unique* modern anime has verified
-    // season/episode coverage in IMDb or AniDB, prefer that identity.
-    // Only query the anime Tantivy index on a verified-episode miss.
-    let imdb=if series && year.is_none() && seasons.len()==1 && episodes.len()==1{
+    // cannot contain S02E37. Prefer verified episode evidence only when
+    // there is no more specific complete IMDb title in the original release.
+    let imdb=if full_release_imdb.is_none()
+        && series && year.is_none() && seasons.len()==1 && episodes.len()==1{
         // A known release production year is stronger identity evidence
         // than episode presence in another same-name show (Doctor Who).
         imdb_matcher::prefer_verified_episode_identity(
@@ -1141,18 +1148,24 @@ fn diagnose_with_policy(
                             chinese_absolute_by_imdb.insert(candidate.imdb_id.clone(),mapped);
                             Some(candidate)
                         }
-                        Ok(None)=>(!apply_episode_filter).then_some(candidate),
+                        Ok(None)=>(!apply_episode_filter
+                            ||full_release_imdb.as_deref()==Some(candidate.imdb_id.as_str()))
+                            .then_some(candidate),
                         Err(error)=>{
                             tracing::debug!(imdb_id=%candidate.imdb_id,%error,
                                 "Chinese absolute episode crosswalk unavailable");
-                            (!apply_episode_filter).then_some(candidate)
+                            (!apply_episode_filter
+                                ||full_release_imdb.as_deref()==Some(candidate.imdb_id.as_str()))
+                                .then_some(candidate)
                         }
                     }
                 },
                 Err(error)=>{
                     tracing::debug!(imdb_id=%candidate.imdb_id,%error,
                         "season episode metadata unavailable for candidate");
-                    (!apply_episode_filter).then_some(candidate)
+                    (!apply_episode_filter
+                        ||full_release_imdb.as_deref()==Some(candidate.imdb_id.as_str()))
+                        .then_some(candidate)
                 }
             }
         }).collect::<Vec<_>>()
@@ -1237,6 +1250,12 @@ fn diagnose_with_policy(
     });
     let anime = anime.filter(|a| {
         let anime_id=a["imdb_id"].as_str().unwrap_or_default();
+        // An AniDB match on the truncated short title ("Monster") may have
+        // an episode map yet still be the WRONG show. A complete longer IMDb
+        // title literally present in the source cannot be overridden by it.
+        if full_release_imdb.as_deref().is_some_and(|id|id!=anime_id){
+            return false;
+        }
         !imdb.iter().any(|c| {
             (c.media_type=="tvSeries" || c.media_type=="tvMiniSeries")
                 && imdb_matcher::clean_title(&c.matched_title)==key && c.imdb_id!=anime_id
@@ -1270,7 +1289,8 @@ fn diagnose_with_policy(
         // The original anime-aware crosswalk remains authoritative when
         // a season marker or unverified unmarked episode leaves several
         // IMDb candidates. The standalone AniDB verifier is additive.
-        if series && verified_absolute_episode_imdb.is_none() {
+        if series && verified_absolute_episode_imdb.is_none()
+            && full_release_imdb.is_none() {
             if let Some(ep)=episodes.first().copied(){
                 for (index,candidate) in imdb.iter().enumerate(){
                     let mapped=match seasons.first().copied(){
@@ -2598,6 +2618,59 @@ mod tests {
             assert_eq!(response["sid_end"],end,"{release}: {response}");
         }
         std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn monster_ed_gein_full_torrent_title_beats_older_anime_episode_mapping(){
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-monster-long-title-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES
+                ('tt0434706','Monster','monster',2004,'series','JP',1,0,'tvSeries'),
+                ('tt13207736','Monster: The Ed Gein Story',
+                    'monstertheedgeinstory',2025,'series','US',0,10,'tvSeries');
+            INSERT INTO seasons VALUES('tt0434706',1),('tt13207736',3);
+            INSERT INTO season_episodes VALUES
+                ('tt0434706',1,74,74),('tt13207736',3,8,8);
+            INSERT INTO imdb_ratings VALUES('tt0434706',100000),
+                ('tt13207736',10);
+            INSERT INTO anime_series_map VALUES('tt0434706','100','monsteranidb',0);
+            INSERT INTO anidb_titles VALUES('100','Monster','monster','main','en');
+            INSERT INTO episode_map VALUES('100','monsteranidb',1,1,1,74,0,'');")
+            .unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        for title in [
+            "Monster.the.ed.gein.story.s1.e1",
+            "Monster.The.Ed.Gein.Story.S01E01.1080p.WEB-DL",
+            "Monster.the.ed.gein.s1.e1",
+            "Monster.The.Ed.Gein.S01E01.1080p.WEB-DL",
+        ] {
+            let result=diagnose(&path,&MatchRequest{
+                title:title.into(),year:None,series:None}).unwrap();
+            let selected=result.selected.expect("full Ed Gein title match");
+            assert_eq!(selected["imdb_id"],"tt13207736",
+                "a less relevant but episode-verified anime cannot hijack {title}: {selected}");
+            assert_eq!(selected["match_source"],"imdb");
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
     }
 
     #[test]

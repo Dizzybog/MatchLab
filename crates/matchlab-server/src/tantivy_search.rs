@@ -666,6 +666,40 @@ fn title_aliases_exact_uncached(db:&Connection,key:&str)->Result<Vec<TitleAlias>
     Ok(aliases)
 }
 
+/// Recover complete AND incomplete IMDb titles extending the original
+/// release's word-boundary prefix after parsing stopped early. Every supplied
+/// key extends the first, so one indexed prefix query discovers all candidate
+/// completions. The matcher independently verifies the complete raw words,
+/// minimum coverage and the release's technical-metadata boundary.
+/// Never search title substrings or scan SQLite for title candidates.
+pub fn title_aliases_at_release_prefixes(
+    db:&Connection,keys:&[String],
+)->Result<Vec<TitleAlias>,String>{
+    let Some(shortest)=keys.first().filter(|key|!key.is_empty())else{
+        return Ok(Vec::new());
+    };
+    let (search,memory_dir)=open_search(db)?;
+    // All keys are made from compact normalized title words, but escape
+    // regex operators defensively to avoid altering the lookup semantics.
+    let mut literal=String::new();
+    for ch in shortest.chars(){
+        if ".+*?()[]{}|^$\\".contains(ch){literal.push('\\');}
+        literal.push(ch);
+    }
+    let query=RegexQuery::from_pattern(&format!("{literal}.*"),search.forward)
+        .map_err(|e|e.to_string())?;
+    let reader=search.reader.searcher();
+    let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
+    let mut aliases=Vec::with_capacity(hits.len());
+    for addr in hits {
+        let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
+        if let Some(alias)=read_title(&doc,&search){aliases.push(alias);}
+    }
+    drop(reader);drop(search);
+    if let Some(dir)=memory_dir{let _=std::fs::remove_dir_all(dir);}
+    Ok(aliases)
+}
+
 /// Find complete IMDb alias prefixes AND suffixes inside the parsed title.
 /// One Tantivy term-union query discovers the candidates; a separate word-
 /// boundary-aware ranker rejects fragments of longer words.
