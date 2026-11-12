@@ -69,30 +69,54 @@ fn exact(db:&Connection,key:&str)->rusqlite::Result<Vec<Aka>>{
 #[derive(Clone,Copy,Debug,PartialEq,Eq,PartialOrd,Ord)]
 struct TitleFit{
     tier:u8,               // exact/country, full-word edge, last-resort fallback
-    alias_exact:u8,        // exact title.basics entry before exact AKA, if undated
     unmatched_bp:u32,     // relative unmatched share (basis points)
     edge:u8,              // prefix before suffix only when coverage is equal
     longest_first:i64,    // length only breaks otherwise equivalent ties
 }
 impl TitleFit{
-    fn exact()->Self{Self{tier:0,alias_exact:0,unmatched_bp:0,edge:0,longest_first:0}}
-    fn exact_aka()->Self{Self{tier:0,alias_exact:1,unmatched_bp:0,edge:0,longest_first:0}}
+    fn exact()->Self{Self{tier:0,unmatched_bp:0,edge:0,longest_first:0}}
     fn fallback(length:usize)->Self{
-        Self{tier:2,alias_exact:0,unmatched_bp:0,edge:0,longest_first:-(length as i64)}
+        Self{tier:2,unmatched_bp:0,edge:0,longest_first:-(length as i64)}
     }
 }
+/// Preserve non-Latin title words for ranking. Legacy index keys fold to ASCII:
+/// "BLEACH 千年血戦篇" and "Bleach" both have the same old key.
+fn semantic_words(raw:&str)->Vec<String>{
+    use unicode_normalization::{UnicodeNormalization,char::is_combining_mark};
+    let folded=raw.to_lowercase()
+        .replace('æ',"ae").replace('ø',"o").replace('œ',"oe")
+        .replace('ß',"ss").replace("'", "");
+    let folded=folded.nfkd().filter(|c|!is_combining_mark(*c))
+        .collect::<String>();
+    folded.split(|c:char|!c.is_alphanumeric())
+        .filter(|word|!word.is_empty() && *word!="and")
+        .map(str::to_owned).collect()
+}
+/// Check whole-word containment in *both* directions; score the proportion
+/// of the longer title not covered by the shorter title.
+fn semantic_extension(short:&[String],long:&[String])->Option<TitleFit>{
+    if short.is_empty()||short.len()>=long.len(){return None;}
+    let prefix=long.starts_with(short);
+    let suffix=long.ends_with(short);
+    if !prefix&&!suffix{return None;}
+    let matched=short.iter().map(|s|s.chars().count()).sum::<usize>();
+    let total=long.iter().map(|s|s.chars().count()).sum::<usize>();
+    if total==0{return None;}
+    Some(TitleFit{tier:1,
+        unmatched_bp:((total-matched)*10_000/total) as u32,
+        edge:if prefix{0}else{1},longest_first:-(matched as i64)})
+}
 fn title_fit(key:&str,words:&[String],release_words:&[String],row:&Aka,
-    prefer_primary:bool)->Option<TitleFit>{
+    semantic_release:&[String])->Option<TitleFit>{
     if row.clean==key{
-        // An IMDb AKA can abbreviate a different work to the same short
-        // title as an established series (Bleach 2004 vs TYBW 2022).
-        // Match the full title.basics identity before the abbreviated AKA
-        // only for undated, country-unqualified releases. An explicit year
-        // or country still disambiguates using the established ranking.
-        let from_basics=row.ordering==0 && row.region.as_deref().unwrap_or("").is_empty();
-        return Some(if prefer_primary && !from_basics {
-            TitleFit::exact_aka()
-        }else{TitleFit::exact()});
+        // An identical ASCII index key is not necessarily an identical
+        // Unicode title. Prefer complete identity to partial prefix/suffix.
+        let full=semantic_words(&row.title);
+        if let Some(partial)=semantic_extension(semantic_release,&full)
+            .or_else(||semantic_extension(&full,semantic_release)){
+            return Some(partial);
+        }
+        return Some(TitleFit::exact());
     }
     let short=key.len().min(row.clean.len());
     let long=key.len().max(row.clean.len());
@@ -104,7 +128,7 @@ fn title_fit(key:&str,words:&[String],release_words:&[String],row:&Aka,
     // source release (checked by filter). Never accept a partial word.
     if row.clean.strip_prefix(key).is_some_and(|tail|
         !tail.is_empty() && tail.bytes().all(|b|b.is_ascii_digit())){
-        return Some(TitleFit{tier:1,alias_exact:0,unmatched_bp,edge:0,
+        return Some(TitleFit{tier:1,unmatched_bp,edge:0,
             longest_first:-(short as i64)});
     }
     let alias_words=crate::title_normalization::clean_words(&row.title);
@@ -116,13 +140,13 @@ fn title_fit(key:&str,words:&[String],release_words:&[String],row:&Aka,
     if row.clean.starts_with(key)
         && release_words.windows(alias_words.len())
             .any(|window|window==alias_words.as_slice()){
-        return Some(TitleFit{tier:1,alias_exact:0,unmatched_bp,edge:0,
+        return Some(TitleFit{tier:1,unmatched_bp,edge:0,
             longest_first:-(short as i64)});
     }
     let prefix=words.starts_with(&alias_words)||alias_words.starts_with(words);
     let suffix=words.ends_with(&alias_words)||alias_words.ends_with(words);
     if !prefix&&!suffix{return None;}
-    Some(TitleFit{tier:1,alias_exact:0,unmatched_bp,edge:if prefix{0}else{1},
+    Some(TitleFit{tier:1,unmatched_bp,edge:if prefix{0}else{1},
         longest_first:-(short as i64)})
 }
 
@@ -162,7 +186,8 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     // canonical country-title aliases and the regional tie-breaker.
     let country_qualified=crate::country_aliases::qualified(release_title);
     let country=country_qualified.as_ref().map(|(code,_)|*code);
-    let prefer_primary=year.is_none() && country.is_none();
+    // The title-relevance gate is identical with and without a release year.
+    let semantic_release=semantic_words(title);
     // Exact country-qualified aliases precede generic prefix matching.
     if series {
         if let Some((_,aliases))=&country_qualified {
@@ -193,7 +218,8 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
                 .map_err(index_error)?.into_iter().map(Aka::from));
             // Avoid eligibility SQL joins for candidates that only match
             // fragments of a word (e.g. Dune vs Duneland).
-            discovered.retain(|row|title_fit(&key,&words,&release_words,row,prefer_primary).is_some());
+            discovered.retain(|row|title_fit(&key,&words,&release_words,row,
+                &semantic_release).is_some());
             rows=filter(db,discovered,&release,series,year,required_season)?;
         }
     }
@@ -251,14 +277,59 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     for row in rows{
         let fit=if stage=="country_exact"{TitleFit::exact()}
             else if stage=="aligned"{
-                title_fit(&key,&words,&release_words,&row,prefer_primary)
+                title_fit(&key,&words,&release_words,&row,&semantic_release)
                     .unwrap_or(TitleFit::fallback(row.clean.len()))
             }else{TitleFit::fallback(row.clean.len())};
         groups.entry(row.imdb_id.clone()).or_default().push((row,fit));
     }
-    // Title fit is primary (including canonical vs abbreviated AKA for
-    // undated searches), then year distance, conditional country preference
-    // and votes, followed by earliest year as the final semantic tie-breaker.
+    // A shorter AKA can otherwise tie a complete title, e.g. "Bleach" for
+    // a later "BLEACH 千年血戦篇" work. Compare full title.basics names
+    // through Tantivy only when distinct IDs share an exact alias. All
+    // comparisons are Unicode-preserving and work in both directions.
+    let exact_ids=groups.iter().filter_map(|(id,aliases)|
+        aliases.iter().any(|(_,fit)|fit.tier==0).then_some(id.clone()))
+        .collect::<Vec<_>>();
+    if exact_ids.len()>1 {
+        let mut full_titles=BTreeMap::<String,Vec<Vec<String>>>::new();
+        for id in &exact_ids {
+            let forms=groups.get(id).unwrap().iter()
+                .filter(|(a,_)|a.ordering==0
+                    && a.region.as_deref().unwrap_or("").is_empty())
+                .map(|(a,_)|semantic_words(&a.title)).collect::<Vec<_>>();
+            if !forms.is_empty(){full_titles.insert(id.clone(),forms);}
+        }
+        let missing=exact_ids.iter().filter(|id|!full_titles.contains_key(*id))
+            .cloned().collect::<Vec<_>>();
+        if !missing.is_empty(){
+            let fetched=crate::tantivy_search::titles_by_ids(db,&missing)
+                .map_err(index_error)?;
+            for item in fetched {
+                if item.ordering==0
+                    && item.region.as_deref().unwrap_or("").is_empty(){
+                    full_titles.entry(item.imdb_id).or_default()
+                        .push(semantic_words(&item.title));
+                }
+            }
+        }
+        for id in exact_ids {
+            let Some(forms)=full_titles.get(&id)else{continue};
+            if forms.iter().any(|full|full==&semantic_release){continue;}
+            // Penalize a demonstrably shortened name, but NOT unrelated
+            // translated aliases (e.g. exact English vs Japanese main title).
+            let extension=forms.iter()
+                .filter_map(|full|semantic_extension(&semantic_release,full))
+                .min();
+            if let Some(extension)=extension {
+                if let Some(aliases)=groups.get_mut(&id){
+                    for (_,fit) in aliases {
+                        if fit.tier==0{*fit=extension;}
+                    }
+                }
+            }
+        }
+    }
+    // Full-title fit ranks first, even when a year is provided. Year
+    // distance (if any), votes/region and earliest year follow.
     // Candidates below the lexical rank at `limit` cannot be returned.
     // Retain the entire tied boundary for the remaining criteria.
     // This avoids most per-IMDb rating, anime-ID and duplicate-title lookups.
@@ -459,7 +530,7 @@ mod tests{
         let candidate=|id:&str,year:i32,region:&str|{
             Aka{imdb_id:id.into(),title:"Example".into(),clean:"example".into(),
                 year,category:"movie".into(),region:Some(region.into()),
-                media_type:"movie".into()}
+                ordering:0,media_type:"movie".into()}
         };
         let us_old=candidate("ttus",2018,"US");
         let no_exact=candidate("ttno",2020,"NO");
