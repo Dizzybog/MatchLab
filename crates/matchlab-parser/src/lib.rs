@@ -2727,22 +2727,27 @@ fn standalone_special_marker(raw:&str, result:&Map<String,Value>) -> Option<(Str
 // re-run the full native regex catalogue for their shared folder names.
 // A new handler patch generation invalidates cached component parses.
 static PATH_COMPONENT_CACHE:std::sync::OnceLock<Mutex<HashMap<
-    (String,bool),(u64,std::time::Instant,Map<String,Value>)
+    (String,bool),(u64,std::time::Instant,Arc<Map<String,Value>>)
 >>>=std::sync::OnceLock::new();
 fn cached_path_component(raw:&str,translate_languages:bool)
     ->Result<Map<String,Value>,ParseError>{
     let generation=handler_patch_revision();
     let key=(raw.to_owned(),translate_languages);
     let cache=PATH_COMPONENT_CACHE.get_or_init(||Mutex::new(HashMap::new()));
-    if let Ok(guard)=cache.try_lock(){
-        if let Some((revision,at,result))=guard.get(&key){
-            if *revision==generation&&at.elapsed()<std::time::Duration::from_secs(30)
-                &&handler_patch_revision()==generation {
-                return Ok(result.clone());
-            }
-        }
+    // Copy only the Arc under the global cache lock, not the nested JSON
+    // map. The regex generation is rechecked *after* releasing the lock.
+    let cached=cache.try_lock().ok().and_then(|guard|{
+        guard.get(&key)
+            .filter(|(revision,at,_)|
+                *revision==generation
+                &&at.elapsed()<std::time::Duration::from_secs(30))
+            .map(|(_,_,value)|Arc::clone(value))
+    });
+    if let Some(value)=cached {
+        if handler_patch_revision()==generation{return Ok((*value).clone());}
     }
     let result=parse_path_component(raw,translate_languages)?;
+    let cache_copy=Arc::new(result.clone());
     if handler_patch_revision()==generation {
         if let Ok(mut guard)=cache.try_lock(){
             const MAX_COMPONENTS:usize=2048;
@@ -2754,7 +2759,7 @@ fn cached_path_component(raw:&str,translate_languages:bool)
                 if let Some(oldest)=guard.iter().min_by_key(|(_,(_,at,_))|*at)
                     .map(|(key,_)|key.clone()){guard.remove(&oldest);}
             }
-            guard.insert(key,(generation,std::time::Instant::now(),result.clone()));
+            guard.insert(key,(generation,std::time::Instant::now(),cache_copy));
         }
     }
     Ok(result)
