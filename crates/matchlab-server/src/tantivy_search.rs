@@ -1109,7 +1109,7 @@ mod persistence_tests {
                      "tt0000001".into(),"tt9999999".into()];
         let found=titles_by_ids(&db,&ids).unwrap();
         let expected=ids.iter().collect::<std::collections::BTreeSet<_>>()
-            .into_iter().map(|id|titles_by_ids(&db,&[id.clone()]).unwrap())
+            .into_iter().map(|id|titles_by_ids(&db,&[(*id).clone()]).unwrap())
             .flatten().map(|r|(r.imdb_id,r.title,r.clean,r.year,r.category,
                 r.region,r.original,r.ordering,r.media_type))
             .collect::<std::collections::BTreeSet<_>>();
