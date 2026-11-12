@@ -3,7 +3,7 @@
 //! module converts IMDb season coordinates using verified mapping data.
 use rusqlite::{Connection};
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet,HashMap};
 
 #[derive(Clone,Debug)]
 struct Link {anidb:String,tvdb:String,trakt:i64,direct:bool}
@@ -58,9 +58,23 @@ fn mappings(db:&Connection,links:&[Link],include_absolute:bool)->rusqlite::Resul
     }
     Ok(out)
 }
-fn split(link:&Link,m:&Mapping,links:&[Link],maps:&[Mapping])->bool{
-    link.trakt>0&&links.iter().any(|other|other.anidb!=link.anidb&&other.trakt>0&&other.trakt!=link.trakt
-        &&maps.iter().any(|x|x.anidb==other.anidb&&x.tvdb==m.tvdb&&x.tv_season==m.tv_season))
+// Identify split-cour partners once per immutable crosswalk snapshot.
+// Previously each candidate episode did a nested scan of links and maps.
+type SplitIndex<'a>=HashMap<(&'a str,i64),Vec<(&'a str,i64)>>;
+fn split_index<'a>(links:&'a[Link],maps:&'a[Mapping])->SplitIndex<'a>{
+    let mut index=SplitIndex::new();
+    for link in links.iter().filter(|link|link.trakt>0){
+        for map in maps.iter().filter(|map|map.anidb==link.anidb){
+            index.entry((map.tvdb.as_str(),map.tv_season)).or_default()
+                .push((link.anidb.as_str(),link.trakt));
+        }
+    }
+    index
+}
+fn split(link:&Link,m:&Mapping,index:&SplitIndex<'_>)->bool{
+    link.trakt>0&&index.get(&(m.tvdb.as_str(),m.tv_season))
+        .is_some_and(|other|other.iter().any(|(id,trakt)|
+            *id!=link.anidb.as_str() && *trakt!=link.trakt))
 }
 fn explicit_pairs(map:&str)->Vec<(i64,i64)>{
     let mut pairs=vec![];
@@ -77,7 +91,8 @@ pub fn resolve_season(db:&Connection,imdb:&str,season:i64,episode:i64)->rusqlite
     if season<=0||episode<=0{return Ok(None);}
     let links=links(db,imdb)?;
     let maps=mappings(db,&links,false)?;
-    Ok(resolve_season_preloaded(imdb,season,episode,&links,&maps))
+    let splits=split_index(&links,&maps);
+    Ok(resolve_season_preloaded(imdb,season,episode,&links,&maps,&splits))
 }
 
 /// Resolve a season-specific batch with one snapshot of the crosswalk. This
@@ -88,18 +103,20 @@ pub fn resolve_season_range(
     if season<=0||start<=0||end<start||end-start>=1_000{return Ok(Vec::new());}
     let links=links(db,imdb)?;
     let maps=mappings(db,&links,false)?;
+    let splits=split_index(&links,&maps);
     Ok((start..=end).map(|episode|
-        resolve_season_preloaded(imdb,season,episode,&links,&maps)).collect())
+        resolve_season_preloaded(imdb,season,episode,&links,&maps,&splits)).collect())
 }
 
 fn resolve_season_preloaded(
     imdb:&str,season:i64,episode:i64,links:&[Link],maps:&[Mapping],
+    splits:&SplitIndex<'_>,
 )->Option<Episode>{
     if season<=0||episode<=0{return None;}
     let mut candidates=vec![];
     for link in links {for m in maps{
         if m.anidb!=link.anidb||(!link.tvdb.is_empty()&&link.tvdb!=m.tvdb){continue;}
-        let is_split=split(link,m,&links,&maps);
+        let is_split=split(link,m,splits);
         if is_split&&link.trakt!=season{continue;}
         if !is_split&&m.tv_season!=season{continue;}
         if !is_split{
@@ -127,7 +144,8 @@ pub fn resolve_absolute(db:&Connection,imdb:&str,episode:i64)->rusqlite::Result<
     if episode<=0{return Ok(None);}
     let links=links(db,imdb)?;
     let maps=mappings(db,&links,true)?;
-    Ok(resolve_absolute_preloaded(imdb,episode,&links,&maps))
+    let splits=split_index(&links,&maps);
+    Ok(resolve_absolute_preloaded(imdb,episode,&links,&maps,&splits))
 }
 
 /// Check two absolute episode endpoints against one crosswalk snapshot.
@@ -142,9 +160,10 @@ pub fn resolve_absolute_endpoints(
     }
     let links=links(db,imdb)?;
     let maps=mappings(db,&links,true)?;
+    let splits=split_index(&links,&maps);
     Ok((
-        resolve_absolute_preloaded(imdb,start,&links,&maps),
-        resolve_absolute_preloaded(imdb,end,&links,&maps),
+        resolve_absolute_preloaded(imdb,start,&links,&maps,&splits),
+        resolve_absolute_preloaded(imdb,end,&links,&maps,&splits),
     ))
 }
 
@@ -157,12 +176,14 @@ pub fn resolve_absolute_range(
     if start<=0||end<start||end-start>9_999{return Ok(Vec::new());}
     let links=links(db,imdb)?;
     let maps=mappings(db,&links,true)?;
+    let splits=split_index(&links,&maps);
     Ok((start..=end).map(|episode|resolve_absolute_preloaded(
-        imdb,episode,&links,&maps)).collect())
+        imdb,episode,&links,&maps,&splits)).collect())
 }
 
 fn resolve_absolute_preloaded(
     imdb:&str,episode:i64,links:&[Link],maps:&[Mapping],
+    splits:&SplitIndex<'_>,
 )->Option<Episode>{
     if !(1..=99_999).contains(&episode){return None;}
     // A TVDB family includes sequels, movies and cours with different AniDB
@@ -201,7 +222,7 @@ fn resolve_absolute_preloaded(
             if !m.explicit.is_empty(){
                 for &(ani,tv) in &m.explicit {
                     if ani==local&&tv>0{
-                        let season=if split(link,m,links,maps){link.trakt}else{m.tv_season};
+                        let season=if split(link,m,splits){link.trakt}else{m.tv_season};
                         if season>0{
                             register((link.anidb.clone(),local,season,tv),3);
                         }
@@ -214,7 +235,7 @@ fn resolve_absolute_preloaded(
             // that this IMDb title owns every episode of an open-ended
             // sequel. Indirect links require a finite range or exact pair.
             if !link.direct && (m.start<=0 || m.end<=0){continue;}
-            let is_split=split(link,m,links,maps);
+            let is_split=split(link,m,splits);
             let season=if is_split{link.trakt}else{m.tv_season};
             let tv=if is_split{
                 local-m.start.max(1)+1
@@ -267,12 +288,13 @@ pub fn resolve_anidb(
         if !crate::metadata_import::valid_imdb_id(&imdb){continue;}
         let linked=links(db,&imdb)?;
         let maps=mappings(db,&linked,false)?;
+        let splits=split_index(&linked,&maps);
         let relevant=linked.iter().filter(|l|l.anidb==anidb_id)
             .collect::<Vec<_>>();
         for link in relevant {
             for m in maps.iter().filter(|m|m.anidb==anidb_id &&
                 (link.tvdb.is_empty()||link.tvdb==m.tvdb)&&m.tv_season>0){
-                let split_part=split(link,m,&linked,&maps);
+                let split_part=split(link,m,&splits);
                 let season=if split_part{link.trakt}else{m.tv_season};
                 if season<=0||season>9_999{continue;}
                 let ep_candidates:Vec<i64>=if split_part{
@@ -296,7 +318,7 @@ pub fn resolve_anidb(
                     // *preloaded* snapshot. Reject aliases/overlap where it
                     // chooses a different AniDB episode or returns None.
                     if let Some(forward)=resolve_season_preloaded(
-                        &imdb,season,tv_episode,&linked,&maps)
+                        &imdb,season,tv_episode,&linked,&maps,&splits)
                         && forward.anidb_id==anidb_id
                         && forward.anidb_episode==episode {
                         results.insert((imdb.clone(),season,tv_episode));
