@@ -3049,6 +3049,40 @@ fn normalize_slash_dates(input:&str)->Cow<'_,str>{
     if day==input {Cow::Borrowed(input)} else{Cow::Owned(day.into_owned())}
 }
 
+/// Separate *actual* path levels without splitting URLs or alternate
+/// title text inside complete release annotations. An advertising banner
+/// such as `【site https://example.org/download】` is one lexical field,
+/// never two fake folder names. Keep original component slices zero-copy.
+fn split_release_path(raw:&str)->Vec<&str>{
+    let mut components=Vec::new();
+    let mut brackets=Vec::new();
+    let mut start=0;
+    for (index,ch) in raw.char_indices(){
+        match ch {
+            '['=>brackets.push(']'),
+            '【'=>brackets.push('】'),
+            '('=>brackets.push(')'),
+            '{'=>brackets.push('}'),
+            ']'|'】'|')'|'}'=>{
+                if brackets.last().copied()==Some(ch){brackets.pop();}
+            },
+            '/'|'\\' if brackets.is_empty()=>{
+                let part=&raw[start..index];
+                if !part.is_empty()&&part!="."&&part!=".."{
+                    components.push(part);
+                }
+                start=index+ch.len_utf8();
+            },
+            _=>{},
+        }
+    }
+    let part=&raw[start..];
+    if !part.is_empty()&&part!="."&&part!=".."{
+        components.push(part);
+    }
+    components
+}
+
 /// Parse a hierarchical torrent path from ancestor to leaf. Any explicit,
 /// non-empty metadata value on a deeper level overrides the same field from
 /// an ancestor (year, season, episode, quality, resolution, codec, etc.).
@@ -3060,8 +3094,7 @@ pub fn parse_title(
 ) -> Result<Map<String, Value>, ParseError> {
     let date_normalized=normalize_slash_dates(raw_title);
     let raw_title=date_normalized.as_ref();
-    let components:Vec<&str>=raw_title.split(&['/','\\'][..])
-        .filter(|part|!part.is_empty() && *part!="." && *part!="..").collect();
+    let components=split_release_path(raw_title);
     let mut merged=Map::new();
     let mut fallback_parent_title:Option<String>=None;
     // Preserve title candidates separately. The parser cannot determine if
