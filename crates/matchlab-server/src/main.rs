@@ -93,7 +93,7 @@ struct Candidate {
     source: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Diagnostic {
     parsed: Value,
     normalized_title: String,
