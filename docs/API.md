@@ -474,6 +474,10 @@ title length. For otherwise eligible IMDb candidates, the ranking is:
    as the cache key. `/parse` retains its 30-second bounded memory cache.
    Public matching additionally uses an always-on bounded 30-second
    single-flight result cache (512 entries), even when ML is disabled.
+   The native parser also caches each **individual path component** for
+   30 seconds (up to 2048 entries, handler-generation-aware). Thus sibling
+   files under the same main torrent reuse their already-parsed parent
+   folders while each leaf continues to supply its own episode fields.
    Separate episode leaves have separate cache keys and can never share
    final SID/ASID endpoints. The opt-in persistent ML cache remains
    available; old regex/metadata generations never serve live results.
