@@ -27,6 +27,7 @@ fn historical_explicit_season_episode_titles(){
         ("Cops Seasons 1-24/s6e10.avi",6,10),
         ("Cops Seasons 1-24/6/s6e10.avi",6,10),
         ("The Simpsons Season 9/Season 9/S09E24 Lost Our Lisa.mkv",9,24),
+        ("The Simpsons Season 9/S09E24 Lost Our Lisa.mkv",9,24),
         ("The.Show.2005.S01.2160p/Season.2.720p/The.Show.E06.1080p.mkv",2,6),
     ]{
         let p=parse(raw);
@@ -64,6 +65,8 @@ fn historical_absolute_anime_numbers_stay_tentative(){
         ("Bleach.300","Bleach",300),
         ("Bleach_320","Bleach",320),
         ("Bleach_338","Bleach",338),
+        ("Bleach 326","Bleach",326),
+        ("Bleach 400","Bleach",400),
         ("Bleach_345","Bleach",345),
         ("Naruto Shippuuden 291","Naruto Shippuuden",291),
     ]{
@@ -77,6 +80,9 @@ fn historical_absolute_anime_numbers_stay_tentative(){
     assert_eq!(ranged["anime_episode_range_candidate"]["end"],360);
     assert!(ranged.get("episode_start").is_none(),
         "parser cannot verify an absolute anime interval without metadata");
+    let overwide=parse("Bleach_320 - 400");
+    assert!(overwide.get("episode_start").is_none(),
+        "overwide anime pack must not publish a verified range: {overwide:?}");
 }
 
 #[test]
