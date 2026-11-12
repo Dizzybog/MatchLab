@@ -176,12 +176,25 @@ fn resolve_absolute_preloaded(
             .or_insert(strength);
     };
     for link in links{
-        let associated:Vec<_>=maps.iter().filter(|m|m.anidb==link.anidb&&(link.tvdb.is_empty()||m.tvdb==link.tvdb)).collect();
-        let absolutes:Vec<_>=associated.iter().filter(|m|m.tv_season==-1).collect();
-        let offset=if absolutes.len()==1{absolutes[0].offset}else{0};
+        // Do not allocate two Vecs of mapping references for every episode
+        // in a full-season batch. The first absolute row remains authoritative
+        // for its end bound even when multiple absolute rows are present.
+        let belongs=|m:&Mapping|m.anidb==link.anidb
+            &&(link.tvdb.is_empty()||m.tvdb==link.tvdb);
+        let mut first_absolute:Option<&Mapping>=None;
+        let mut absolute_count=0usize;
+        for m in maps.iter().filter(|m|belongs(m)){
+            if m.tv_season==-1{
+                absolute_count+=1;
+                if first_absolute.is_none(){first_absolute=Some(m);}
+            }
+        }
+        let offset=if absolute_count==1{
+            first_absolute.map_or(0,|m|m.offset)
+        }else{0};
         let local=episode-offset;
-        if local<=0||absolutes.first().is_some_and(|m|m.end>0&&local>m.end){continue;}
-        for m in &associated{
+        if local<=0||first_absolute.is_some_and(|m|m.end>0&&local>m.end){continue;}
+        for m in maps.iter().filter(|m|belongs(m)){
             if m.tv_season<=0{continue;}
             // Explicit episode pairs are authoritative even if the mapping
             // range describes another numbering domain.
