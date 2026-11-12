@@ -1085,11 +1085,18 @@ fn diagnose_with_policy(
     let imdb = imdb_matcher::search(&db,title,year,series,seasons.iter().copied().max().unwrap_or(0),&req.title,
         !episodes.is_empty()||parsed.contains_key("episode_start"),20)
         .map_err(|e|e.to_string())?;
+    // A complete longer title found in the ORIGINAL torrent is stronger
+    // identity evidence than a short anime alias created by a truncated
+    // parser title. Preserve this across all episode/anime selection paths.
+    let full_release_imdb=imdb.first().and_then(|candidate|
+        imdb_matcher::has_longer_full_title_in_release(
+            title,&req.title,&candidate.matched_title)
+            .then_some(candidate.imdb_id.clone()));
     // A same-name older OVA may win an exact IMDb alias even though it
-    // cannot contain S02E37. When a *unique* modern anime has verified
-    // season/episode coverage in IMDb or AniDB, prefer that identity.
-    // Only query the anime Tantivy index on a verified-episode miss.
-    let imdb=if series && year.is_none() && seasons.len()==1 && episodes.len()==1{
+    // cannot contain S02E37. Prefer verified episode evidence only when
+    // there is no more specific complete IMDb title in the original release.
+    let imdb=if full_release_imdb.is_none()
+        && series && year.is_none() && seasons.len()==1 && episodes.len()==1{
         // A known release production year is stronger identity evidence
         // than episode presence in another same-name show (Doctor Who).
         imdb_matcher::prefer_verified_episode_identity(
@@ -1141,18 +1148,24 @@ fn diagnose_with_policy(
                             chinese_absolute_by_imdb.insert(candidate.imdb_id.clone(),mapped);
                             Some(candidate)
                         }
-                        Ok(None)=>(!apply_episode_filter).then_some(candidate),
+                        Ok(None)=>(!apply_episode_filter
+                            ||full_release_imdb.as_deref()==Some(candidate.imdb_id.as_str()))
+                            .then_some(candidate),
                         Err(error)=>{
                             tracing::debug!(imdb_id=%candidate.imdb_id,%error,
                                 "Chinese absolute episode crosswalk unavailable");
-                            (!apply_episode_filter).then_some(candidate)
+                            (!apply_episode_filter
+                                ||full_release_imdb.as_deref()==Some(candidate.imdb_id.as_str()))
+                                .then_some(candidate)
                         }
                     }
                 },
                 Err(error)=>{
                     tracing::debug!(imdb_id=%candidate.imdb_id,%error,
                         "season episode metadata unavailable for candidate");
-                    (!apply_episode_filter).then_some(candidate)
+                    (!apply_episode_filter
+                        ||full_release_imdb.as_deref()==Some(candidate.imdb_id.as_str()))
+                        .then_some(candidate)
                 }
             }
         }).collect::<Vec<_>>()
@@ -1237,6 +1250,12 @@ fn diagnose_with_policy(
     });
     let anime = anime.filter(|a| {
         let anime_id=a["imdb_id"].as_str().unwrap_or_default();
+        // An AniDB match on the truncated short title ("Monster") may have
+        // an episode map yet still be the WRONG show. A complete longer IMDb
+        // title literally present in the source cannot be overridden by it.
+        if full_release_imdb.as_deref().is_some_and(|id|id!=anime_id){
+            return false;
+        }
         !imdb.iter().any(|c| {
             (c.media_type=="tvSeries" || c.media_type=="tvMiniSeries")
                 && imdb_matcher::clean_title(&c.matched_title)==key && c.imdb_id!=anime_id
@@ -1270,7 +1289,8 @@ fn diagnose_with_policy(
         // The original anime-aware crosswalk remains authoritative when
         // a season marker or unverified unmarked episode leaves several
         // IMDb candidates. The standalone AniDB verifier is additive.
-        if series && verified_absolute_episode_imdb.is_none() {
+        if series && verified_absolute_episode_imdb.is_none()
+            && full_release_imdb.is_none() {
             if let Some(ep)=episodes.first().copied(){
                 for (index,candidate) in imdb.iter().enumerate(){
                     let mapped=match seasons.first().copied(){
