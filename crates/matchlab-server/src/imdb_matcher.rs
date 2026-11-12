@@ -458,6 +458,65 @@ fn rank(r:&Aka,year:Option<i32>,duplicate:bool,country:Option<&str>,votes:i64)
     let earliest_year=if r.year>0{r.year}else{i32::MAX};
     (distance,region,-votes,earliest_year,r.imdb_id.clone())
 }
+// For a tied IMDb shortlist, the scalar ranker used one ratings query,
+// one anime_ids query and often one anime_series_map query per identity.
+// All shortlisted IDs already have a verified lexical fit; read only these
+// exact relational rows in bounded IN batches, never the title catalogue.
+// Keep small shortlists on their existing prepared-statement-friendly path.
+fn shortlist_metadata(
+    db:&Connection,ids:&[String],
+)->rusqlite::Result<HashMap<String,(i64,BTreeMap<String,String>)>>{
+    let mut metadata=ids.iter().map(|id|(id.clone(),(0,BTreeMap::new())))
+        .collect::<HashMap<_,_>>();
+    for batch in ids.chunks(200){
+        let markers=vec!["?";batch.len()].join(",");
+        let params=||rusqlite::params_from_iter(batch.iter());
+        // The historical votes lookup treated a missing/malformed rating
+        // as zero, even if ratings import was unavailable. Preserve that
+        // nonfatal behavior; anime ID queries still propagate SQL errors.
+        let sql=format!("SELECT imdb_id,num_votes FROM imdb_ratings
+            WHERE imdb_id IN ({markers})");
+        if let Ok(mut stmt)=db.prepare(&sql) {
+            if let Ok(rows)=stmt.query_map(params(),|row|
+                Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?))){
+                for row in rows.flatten(){
+                    if let Some(entry)=metadata.get_mut(&row.0){entry.0=row.1;}
+                }
+            }
+        }
+        let sql=format!("SELECT group_id,type,value FROM anime_ids
+            WHERE group_id IN ({markers}) ORDER BY group_id,type,value");
+        let mut stmt=db.prepare(&sql)?;
+        for row in stmt.query_map(params(),|row|Ok((
+            row.get::<_,String>(0)?,row.get::<_,String>(1)?,
+            row.get::<_,String>(2)?)))?{
+            let (id,kind,value)=row?;
+            if let Some(entry)=metadata.get_mut(&id){
+                entry.1.insert(kind,value);
+            }
+        }
+        let sql=format!("SELECT DISTINCT imdb_id,anidb_id FROM anime_series_map
+            WHERE imdb_id IN ({markers})");
+        let mut stmt=db.prepare(&sql)?;
+        let mut links=HashMap::<String,std::collections::BTreeSet<String>>::new();
+        for row in stmt.query_map(params(),|row|
+            Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))?{
+            let (id,anidb)=row?;
+            if metadata.get(&id).is_some_and(|(_,values)|!values.contains_key("anidb")){
+                links.entry(id).or_default().insert(anidb);
+            }
+        }
+        for (id,linked) in links {
+            if linked.len()==1 {
+                if let Some(entry)=metadata.get_mut(&id){
+                    entry.1.insert("anidb".into(),linked.into_iter().next().unwrap());
+                }
+            }
+        }
+    }
+    Ok(metadata)
+}
+
 pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_season:i64,
     release_title:&str,_has_episode:bool,limit:usize)->rusqlite::Result<Vec<Match>>{
     // The parser has already inherited season/episode/year across the
@@ -778,23 +837,33 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     // With no release year, every eligible work has zero distance.
     // Region always precedes votes, including season/episode releases.
     // Title fit and verified episode eligibility still outrank both.
+    let mut metadata=if ranked_groups.len()>4 {
+        let ids=ranked_groups.iter().map(|(_,id,_)|id.clone()).collect::<Vec<_>>();
+        Some(shortlist_metadata(db,&ids)?)
+    }else{None};
     let mut output=Vec::new();
     for (_,id,aliases) in ranked_groups{
-        let votes:i64=db.query_row("SELECT num_votes FROM imdb_ratings WHERE imdb_id=?1",[&id],|r|r.get(0))
-            .optional().unwrap_or(None).unwrap_or(0);
+        let prefetched=metadata.as_mut().and_then(|rows|rows.remove(&id));
+        let votes:i64=if let Some((votes,_))=prefetched.as_ref() {*votes}else{
+            db.query_row("SELECT num_votes FROM imdb_ratings WHERE imdb_id=?1",[&id],|r|r.get(0))
+                .optional().unwrap_or(None).unwrap_or(0)
+        };
         let (best,fit)=aliases.into_iter().min_by_key(|(r,fit)|
             (*fit,rank(r,year,duplicates.contains(&r.clean),country,votes))
         ).unwrap();
-        let mut ids=BTreeMap::new();
-        let mut stmt=db.prepare("SELECT type,value FROM anime_ids WHERE group_id=?1")?;
-        for item in stmt.query_map([&id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?{
-            let (k,v)=item?;ids.insert(k,v);
-        }
-        if !ids.contains_key("anidb"){
-            let mut stmt=db.prepare("SELECT DISTINCT anidb_id FROM anime_series_map WHERE imdb_id=?1")?;
-            let linked=stmt.query_map([&id],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-            if linked.len()==1{ids.insert("anidb".into(),linked[0].clone());}
-        }
+        let ids=if let Some((_,ids))=prefetched{ids}else{
+            let mut ids=BTreeMap::new();
+            let mut stmt=db.prepare("SELECT type,value FROM anime_ids WHERE group_id=?1")?;
+            for item in stmt.query_map([&id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?{
+                let (k,v)=item?;ids.insert(k,v);
+            }
+            if !ids.contains_key("anidb"){
+                let mut stmt=db.prepare("SELECT DISTINCT anidb_id FROM anime_series_map WHERE imdb_id=?1")?;
+                let linked=stmt.query_map([&id],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                if linked.len()==1{ids.insert("anidb".into(),linked[0].clone());}
+            }
+            ids
+        };
         let score=(fit,rank(&best,year,duplicates.contains(&best.clean),country,votes));
         output.push((score,Match{imdb_id:id,title:best.title.clone(),year:best.year,
             category:best.category,matched_title:best.title,anime_ids:ids,media_type:best.media_type}));
