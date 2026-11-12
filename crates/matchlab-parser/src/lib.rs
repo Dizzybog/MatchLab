@@ -2754,6 +2754,30 @@ fn cached_path_component(raw:&str,translate_languages:bool)
     Ok(result)
 }
 
+// Publisher/download banners can occur before a show's actual title,
+// or be the entire media filename. Only complete leading bracket blocks
+// containing a URL are stripped; fansub groups and legitimate Chinese
+// titles are not advertisements. Retain the original input for metadata.
+fn release_without_leading_site_banners(raw:&str)->Option<&str>{
+    let mut remaining=raw.trim_start();
+    let mut removed=false;
+    loop {
+        let (open,close)=if remaining.starts_with('【'){('【','】')}
+            else if remaining.starts_with('['){('[',']')}
+            else {break};
+        let Some(rest)=remaining.strip_prefix(open) else {break};
+        let Some(end)=rest.find(close) else {break};
+        let content=&rest[..end];
+        if !contains_ascii_fold(content,"www.")
+            && !contains_ascii_fold(content,"https://")
+            && !contains_ascii_fold(content,"http://")
+        {break;}
+        remaining=rest[end+close.len_utf8()..].trim_start();
+        removed=true;
+    }
+    removed.then_some(remaining)
+}
+
 // Parse each directory entry independently. The path-level merge below
 // never concatenates release names (which could confuse episode coordinates).
 fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<String,Value>,ParseError> {
@@ -2761,6 +2785,22 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
     let normalized = normalize_release_confusables(raw);
     let raw = normalized.as_ref();
     let mut result=engine_parse(raw,translate_languages)?;
+    if let Some(content)=release_without_leading_site_banners(raw){
+        // Correct only the title. Site, source, quality, language and all
+        // other fields still come from the original raw release.
+        let clean=engine_parse(content,translate_languages)?;
+        let title=clean.get("title").and_then(Value::as_str)
+            .filter(|title|!generic_path_title(title)
+                && clean.get("extension").and_then(Value::as_str)
+                    .is_none_or(|ext|!title.eq_ignore_ascii_case(ext))
+                && clean.get("container").and_then(Value::as_str)
+                    .is_none_or(|container|!title.eq_ignore_ascii_case(container)));
+        if let Some(title)=title{
+            result.insert("title".into(),json!(title));
+        }else{
+            result.remove("title");
+        }
+    }
     if !result.contains_key("extension") && raw.contains('.')
         && let Some(caps)=SOURCE_EXTENSION_RE.captures(raw)
         && let Some(extension)=caps.get(1)
