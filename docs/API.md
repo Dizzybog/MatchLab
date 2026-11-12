@@ -454,6 +454,30 @@ title length. For otherwise eligible IMDb candidates, the ranking is:
    Only after that do year, region, votes, and earliest year break ties.
    AniDB title identity is a separate fallback if no eligible IMDb title
    match was found.
+
+   **Hierarchical releases:** Each folder/file component is independently
+   parsed; its raw source and per-component fields are preserved as
+   `path_layers` alongside the existing merged `/parse` result. The matcher
+   checks meaningful title components **from leaf to root**, applying the
+   same pooled IMDb prefix/suffix search to each. Explicit year, season,
+   episode, and technical fields inherit from the closest valid component,
+   without turning directory names into a single invented IMDb title.
+   For `monster/the.ed.gein.story/S01/E02.mkv`, the coordinate-only
+   `E02` and `S01` are skipped for title identity, and the
+   `the.ed.gein.story` component can match the suffix of
+   `Monster: The Ed Gein Story`; the `monster` parent is used only if
+   the closer title cannot be verified. Numeric library folders are not
+   automatically promoted to titles.
+
+   **Whole-torrent cache:** the exact original torrent path, optional
+   year/series overrides, and active parser/metadata generation are used
+   as the cache key. `/parse` retains its 30-second bounded memory cache.
+   Public matching additionally uses an always-on bounded 30-second
+   single-flight result cache (512 entries), even when ML is disabled.
+   Separate episode leaves have separate cache keys and can never share
+   final SID/ASID endpoints. The opt-in persistent ML cache remains
+   available; old regex/metadata generations never serve live results.
+   Exploratory dashboard diagnostics bypass the match cache.
 2. **Distance from the release year**, when one was provided; otherwise all
    candidates have the same distance (zero), regardless of season/episode.
 3. **Region preference**: for duplicate normalized IMDb titles, prefer
