@@ -103,9 +103,14 @@ impl TitleFeatureContext{
         features.push(hash_bytes(&[b"f:",field_bytes]));
         features.push(hash_bytes(&[b"s:",signal_bytes]));
         features.push(hash_bytes(&[b"fs:",field_bytes,b":",signal_bytes]));
+        // Canonical technical markers are overwhelmingly ASCII. When
+        // the entire signal is ASCII, every n-gram is valid UTF-8 and
+        // individual validation is redundant. Keep identical feature hashes
+        // and the exact legacy validation for non-ASCII signals.
+        let ascii=signal_bytes.is_ascii();
         for (span,prefix) in [(2,&b"g2:"[..]),(3,&b"g3:"[..]),(4,&b"g4:"[..])]{
             for chunk in signal_bytes.windows(span).take(32){
-                if std::str::from_utf8(chunk).is_ok(){
+                if ascii||std::str::from_utf8(chunk).is_ok(){
                     features.push(hash_bytes(&[prefix,field_bytes,b":",chunk]));
                 }
             }
