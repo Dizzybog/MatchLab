@@ -418,6 +418,20 @@ title length. For otherwise eligible IMDb candidates, the ranking is:
    incomplete one. An unrelated word before the release metadata (e.g.
    `Storyline` instead of `Story`) does not authenticate that title.
    This lexical ranking is independent of release year, region and votes.
+   The same recovery now applies to **suffixes** of the original release's
+   content title: for example, `Scene.Monster.The.Ed.Gein.S01E01` can select
+   `Monster: The Ed Gein Story` because the final four source-title words
+   form a whole-word prefix of the IMDb title. The corresponding complete
+   title suffix outranks the partial title, and a longer complete title
+   occupying the entire release outranks a shorter title occupying only its
+   suffix. Prefix and suffix share the same >=50% coverage and <=16 missing
+   character limits, length-first priority and explicit metadata boundary.
+   Suffix recovery requires at least two source-title words and only searches
+   a bounded number of trailing word boundaries to avoid isolated generic
+   words hijacking a release. Unmatched words before the season/technical
+   boundary, partial-word matches and release-group names alone are never
+   sufficient identity evidence. All suffix discoveries use a single
+   indexed Tantivy query, not a SQLite title scan.
 2. **Distance from the release year**, when one was provided; otherwise all
    candidates have the same distance (zero), regardless of season/episode.
 3. **Region preference**: for duplicate normalized IMDb titles, prefer
