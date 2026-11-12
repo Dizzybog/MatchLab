@@ -662,8 +662,10 @@ mod tests{
             CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
             INSERT INTO titles VALUES
                 ('tt0434665','Bleach','bleach',2004,'series','',0,0,'tvSeries'),
+                ('tt14986406','BLEACH 千年血戦篇',
+                    'bleach',2022,'series','',0,0,'tvSeries'),
                 ('tt14986406','Bleach: Thousand-Year Blood War',
-                    'bleachthousandyearbloodwar',2022,'series','',0,0,'tvSeries'),
+                    'bleachthousandyearbloodwar',2022,'series','US',0,17,'tvSeries'),
                 ('tt14986406','Bleach','bleach',2022,'series','US',0,42,'tvSeries');
             INSERT INTO imdb_ratings VALUES('tt0434665',90000),('tt14986406',120000);
             INSERT INTO seasons VALUES('tt0434665',16),('tt14986406',4);")
@@ -679,10 +681,23 @@ mod tests{
         let sequel=search(&db,"Bleach Thousand Year Blood War",None,true,1,
             "Bleach.Thousand.Year.Blood.War.S01",false,1).unwrap();
         assert_eq!(sequel[0].imdb_id,"tt14986406");
-        // An explicitly supplied production year must remain authoritative.
+        // Title fit ALWAYS precedes year: a full canonical title wins over
+        // the sequel's abbreviated AKA even with 2022 explicitly supplied.
         let year=search(&db,"Bleach",Some(2022),true,1,
             "Bleach.2022.S01",false,1).unwrap();
-        assert_eq!(year[0].imdb_id,"tt14986406");
+        assert_eq!(year[0].imdb_id,"tt0434665");
+        // The full Japanese title contains additional significant Unicode
+        // words and must NOT normalize into an exact plain "bleach" title.
+        let original_japanese=search(&db,"BLEACH 千年血戦篇",None,true,1,
+            "BLEACH 千年血戦篇.S01",false,1).unwrap();
+        assert_eq!(original_japanese[0].imdb_id,"tt14986406");
+        let japanese_with_year=search(&db,"BLEACH 千年血戦篇",Some(2022),
+            true,1,"BLEACH 千年血戦篇.2022.S01",false,1).unwrap();
+        assert_eq!(japanese_with_year[0].imdb_id,"tt14986406");
+        assert_eq!(semantic_words("BLEACH 千年血戦篇"),
+            vec!["bleach","千年血戦篇"]);
+        assert!(semantic_extension(&semantic_words("Bleach"),
+            &semantic_words("BLEACH 千年血戦篇")).is_some());
         // The older series still survives the 1-season import tolerance;
         // the newer series must not be selected for the older show's S17.
         let season=search(&db,"Bleach",None,true,17,
@@ -706,7 +721,11 @@ mod tests{
         let hits=search(&db,"Dune",None,false,0,
             "Dune.1080p",false,1).unwrap();
         assert_eq!(hits[0].imdb_id,"tt2021",
-            "popularity must win when both candidates actually share the primary title");
+            "popularity must win when both candidates share the full title");
+        let with_year=search(&db,"Dune",Some(1984),false,0,
+            "Dune.1984.1080p",false,1).unwrap();
+        assert_eq!(with_year[0].imdb_id,"tt1984",
+            "year distance is used only AFTER equal full-title relevance");
     }
     #[test] fn normalization(){assert_eq!(clean_title("Pokémon and Ægir"),"pokemonaegir");}
     #[test] fn short_titles_require_exact_match_instead_of_broad_tantivy_prefix(){
