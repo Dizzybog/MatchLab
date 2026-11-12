@@ -217,9 +217,15 @@ fn namespace(kind:&str,metadata:Option<&Path>)->Option<String>{
 /// Snapshot of the exact parser/regex/metadata version that produced a
 /// match. Callers use it to avoid publishing or caching an answer computed
 /// across a concurrent ruleset or metadata refresh.
+pub fn match_fingerprint(metadata:&Path)->Option<String>{
+    // Safe for the always-on, short-lived whole-torrent hot cache even when
+    // the opt-in persistent ML learning cache is disabled. A metadata file
+    // refresh or regex revision produces a different cache key.
+    namespace("match",Some(metadata))
+}
 pub fn match_namespace(metadata:&Path)->Option<String>{
     if !enabled(){return None;}
-    namespace("match",Some(metadata))
+    match_fingerprint(metadata)
 }
 fn key(namespace:&str,title:&str,year:Option<i32>,series:Option<bool>)->String{
     digest(&format!("{namespace}\0{title}\0{year:?}\0{series:?}"))

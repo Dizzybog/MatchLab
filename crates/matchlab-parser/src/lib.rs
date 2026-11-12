@@ -2716,6 +2716,44 @@ fn standalone_special_marker(raw:&str, result:&Map<String,Value>) -> Option<(Str
     None
 }
 
+// Different episode leaves in a torrent commonly share the same ancestor
+// components. Cache each independent component briefly so siblings do not
+// re-run the full native regex catalogue for their shared folder names.
+// A new handler patch generation invalidates cached component parses.
+static PATH_COMPONENT_CACHE:std::sync::OnceLock<Mutex<HashMap<
+    (String,bool),(u64,std::time::Instant,Map<String,Value>)
+>>>=std::sync::OnceLock::new();
+fn cached_path_component(raw:&str,translate_languages:bool)
+    ->Result<Map<String,Value>,ParseError>{
+    let generation=handler_patch_revision();
+    let key=(raw.to_owned(),translate_languages);
+    let cache=PATH_COMPONENT_CACHE.get_or_init(||Mutex::new(HashMap::new()));
+    if let Ok(guard)=cache.try_lock(){
+        if let Some((revision,at,result))=guard.get(&key){
+            if *revision==generation&&at.elapsed()<std::time::Duration::from_secs(30)
+                &&handler_patch_revision()==generation {
+                return Ok(result.clone());
+            }
+        }
+    }
+    let result=parse_path_component(raw,translate_languages)?;
+    if handler_patch_revision()==generation {
+        if let Ok(mut guard)=cache.try_lock(){
+            const MAX_COMPONENTS:usize=2048;
+            if guard.len()>=MAX_COMPONENTS{
+                guard.retain(|_,(rev,at,_)|
+                    *rev==generation&&at.elapsed()<std::time::Duration::from_secs(30));
+            }
+            if guard.len()>=MAX_COMPONENTS{
+                if let Some(oldest)=guard.iter().min_by_key(|(_,(_,at,_))|*at)
+                    .map(|(key,_)|key.clone()){guard.remove(&oldest);}
+            }
+            guard.insert(key,(generation,std::time::Instant::now(),result.clone()));
+        }
+    }
+    Ok(result)
+}
+
 // Parse each directory entry independently. The path-level merge below
 // never concatenates release names (which could confuse episode coordinates).
 fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<String,Value>,ParseError> {
@@ -2902,7 +2940,9 @@ fn merge_path_metadata(merged:&mut Map<String,Value>, layer:&Map<String,Value>){
     }
 }
 
-fn generic_path_title(title:&str)->bool{
+/// Shared structural-title guard for the metadata-only parser and IMDb
+/// hierarchy walker. A technical directory must not become a show identity.
+pub fn generic_path_title(title:&str)->bool{
     let lowercase=title.trim().to_lowercase();
     // A leaf like "S6E1-8 ..." can be reduced by the upstream parser to
     // just "S". It is a coordinate marker, not a stronger title than its
@@ -2988,8 +3028,19 @@ pub fn parse_title(
     // a title is anime; the matcher may use a verified AniDB *part* alias in
     // a subfolder, without changing the ordinary series/movie title.
     let mut parent_title_candidates:Vec<String>=Vec::new();
+    // Retain the ORIGINAL component and its independently parsed fields.
+    // Matchers can walk leaf-to-root without reparsing, guessing titles,
+    // or concatenating unrelated folder names into one IMDb title.
+    let mut path_layers=Vec::new();
     let mut leaf_title=String::new();
     let mut leaf_title_generic=false;
+    // Offline ML replay and canonical labels must not consume production
+    // component-cache results: their active parser engines differ even when
+    // the installed live handler revision is unchanged.
+    let share_components=components.len()>1
+        && !CANONICAL_ONLY.with(Cell::get)
+        && REPLAY_ENGINE.with(|slot|slot.borrow().is_none())
+        && !CAPTURE_ALL_MATCHES.with(Cell::get);
     for (index,component) in components.iter().enumerate(){
         let is_parent=index+1<components.len();
         // A bare numeric folder is structurally ambiguous. It can be a
@@ -2999,7 +3050,14 @@ pub fn parse_title(
         // parser-only fallback. Four-digit year directories remain eligible.
         let bare_number_directory=is_parent && component.trim().len()<=3
             && component.trim().bytes().all(|b|b.is_ascii_digit());
-        let layer=parse_path_component(component,translate_languages)?;
+        let layer=if share_components{
+            cached_path_component(component,translate_languages)?
+        }else{
+            parse_path_component(component,translate_languages)?
+        };
+        if components.len()>1 {
+            path_layers.push(json!({"raw":component,"parsed":layer.clone()}));
+        }
         if let Some(title)=layer.get("title").and_then(Value::as_str){
             let title=title.trim();
             if !is_parent{
@@ -3032,6 +3090,9 @@ pub fn parse_title(
     if !title.is_empty(){merged.insert("title".into(),Value::String(title));}
     if !parent_title_candidates.is_empty() {
         merged.insert("path_title_candidates".into(),json!(parent_title_candidates));
+    }
+    if !path_layers.is_empty(){
+        merged.insert("path_layers".into(),Value::Array(path_layers));
     }
     // The upstream parser exposes empty season/episode arrays even when
     // nothing was recognized. Keep this established /parse API behavior,
@@ -4213,6 +4274,76 @@ mod tests {
         assert_eq!(inherited["seasons"],json!([2]));
         assert_eq!(inherited["episodes"],json!([6]));
         assert!(!inherited["title"].as_str().unwrap_or("").is_empty());
+    }
+
+    #[test]
+    fn sibling_episode_paths_reuse_parent_component_parses_not_episode_fields(){
+        let root="MatchLab.Unique.Parent.Cache.Test.S01";
+        let first=parse_title(&format!("{root}/E01.mkv"),false).unwrap();
+        let second=parse_title(&format!("{root}/E02.mkv"),false).unwrap();
+        assert_eq!(first["seasons"],json!([1]));
+        assert_eq!(second["seasons"],json!([1]));
+        assert_eq!(first["episodes"],json!([1]));
+        assert_eq!(second["episodes"],json!([2]));
+        // The parent parse is shared and immutable; each leaf's independent
+        // coordinate still wins in the merged, whole-path result.
+        assert_eq!(first["path_layers"][0],second["path_layers"][0]);
+        let cached=PATH_COMPONENT_CACHE.get().unwrap().lock().unwrap();
+        assert!(cached.contains_key(&(root.to_owned(),false)),
+            "the parent directory must be cached across sibling files");
+        assert!(cached.contains_key(&("E01.mkv".to_owned(),false)));
+        assert!(cached.contains_key(&("E02.mkv".to_owned(),false)));
+        drop(cached);
+        // An obsolete regex generation must never leak a cached title.
+        let key=("MatchLab.Obsolete.Path.Cache.S01".to_owned(),false);
+        let mut wrong=Map::new();
+        wrong.insert("title".into(),json!("incorrect old regex title"));
+        {
+            let cache=PATH_COMPONENT_CACHE.get().unwrap();
+            cache.lock().unwrap().insert(key.clone(),(
+                u64::MAX,std::time::Instant::now(),wrong));
+        }
+        let current=cached_path_component(&key.0,false).unwrap();
+        assert_ne!(current.get("title"),Some(&json!("incorrect old regex title")));
+    }
+
+    #[test]
+    fn canonical_hierarchical_parsing_ignores_live_component_cache(){
+        // ML's canonical labels must be computed from native handlers,
+        // never a cached result produced by a different live generation.
+        let parent="MatchLab.Canonical.Path.Cache.S01";
+        let mut counterfeit=Map::new();
+        counterfeit.insert("title".into(),json!("unsafe live title"));
+        let key=(parent.to_owned(),false);
+        let cache=PATH_COMPONENT_CACHE.get_or_init(||Mutex::new(HashMap::new()));
+        cache.lock().unwrap().insert(key.clone(),(
+            handler_patch_revision(),std::time::Instant::now(),counterfeit));
+        let parsed=parse_title_canonical(&format!("{parent}/E02.mkv"),false).unwrap();
+        assert_ne!(parsed["path_layers"][0]["parsed"]["title"],
+            json!("unsafe live title"));
+        cache.lock().unwrap().remove(&key);
+    }
+
+    #[test]
+    fn independent_path_layers_keep_fields_and_bottom_up_source_order(){
+        let raw="monster/the.ed.gein.story/S01/E02.mkv";
+        let parsed=parse_title(raw,false).unwrap();
+        let layers=parsed.get("path_layers").and_then(Value::as_array).unwrap();
+        assert_eq!(layers.len(),4);
+        assert_eq!(layers[0]["raw"],"monster");
+        assert_eq!(layers[1]["raw"],"the.ed.gein.story");
+        assert_eq!(layers[2]["raw"],"S01");
+        assert_eq!(layers[3]["raw"],"E02.mkv");
+        assert_eq!(layers[0]["parsed"]["title"],"monster");
+        // Each parsed field must originate from its own component;
+        // only the whole-path result inherits closest valid coordinates.
+        assert!(layers[0]["parsed"]["seasons"].is_null()
+            ||layers[0]["parsed"]["seasons"].as_array().is_some_and(Vec::is_empty));
+        assert_eq!(parsed["seasons"],json!([1]));
+        assert_eq!(parsed["episodes"],json!([2]));
+        // All parsed layers are a snapshot of the ORIGINAL independent
+        // parses, not an accumulation of inherited ancestor fields.
+        assert_ne!(layers[1]["parsed"].get("episodes"),Some(&json!([2])));
     }
 
     #[test]

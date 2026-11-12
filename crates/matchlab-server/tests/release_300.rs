@@ -1,6 +1,8 @@
 //! 300 release-name regression inputs: 100 movies, 100 TV, 100 anime.
-//! These are parser smoke tests, not IMDb/AniDB identity-parity assertions.
+//! Check actual year, season and episode coordinates, not only parse success.
+//! IMDb/AniDB identity-parity assertions remain in metadata-backed tests.
 use matchlab_parser::parse_title;
+use serde_json::json;
 
 fn variants(title: &str, year: u16, season: u8, episode: u16, series: bool) -> Vec<String> {
     let dot = title.replace(' ', ".");
@@ -64,6 +66,12 @@ fn parse_300_movie_tv_anime_variants() {
                 .unwrap_or_else(|e|panic!("movie parser failed on {raw:?}: {e}"));
             assert!(!result.get("title").and_then(|v|v.as_str()).unwrap_or("").is_empty(),
                 "movie title empty: {raw}");
+            assert_eq!(result.get("year"),Some(&json!(year)),
+                "movie release year not parsed correctly: {raw}: {result:?}");
+            assert_eq!(result.get("seasons"),Some(&json!([])),
+                "movie must not contain an invented TV season: {raw}: {result:?}");
+            assert_eq!(result.get("episodes"),Some(&json!([])),
+                "movie must not contain an invented TV episode: {raw}: {result:?}");
             count[0] += 1;
         }
     }
@@ -77,6 +85,10 @@ fn parse_300_movie_tv_anime_variants() {
                     .unwrap_or_else(|e|panic!("series parser failed on {raw:?}: {e}"));
                 assert!(!result.get("title").and_then(|v|v.as_str()).unwrap_or("").is_empty(),
                     "series title empty: {raw}");
+                assert_eq!(result.get("seasons"),Some(&json!([season])),
+                    "TV/anime season mismatch: {raw}: {result:?}");
+                assert_eq!(result.get("episodes"),Some(&json!([episode])),
+                    "TV/anime episode mismatch: {raw}: {result:?}");
                 count[group] += 1;
             }
         }
@@ -84,4 +96,44 @@ fn parse_300_movie_tv_anime_variants() {
     assert_eq!(count,[100,100,100]);
     println!("Parser smoke-tested {} movies, {} TV episodes and {} anime episodes",
         count[0],count[1],count[2]);
+}
+
+
+#[test]
+fn every_committed_real_release_title_is_executed(){
+    let mut checked=0;
+    for raw in include_str!("release_titles.txt").lines()
+        .map(str::trim).filter(|line|!line.is_empty()&&!line.starts_with('#'))
+    {
+        let p=parse_title(raw,false)
+            .unwrap_or_else(|error|panic!("real title parse failed: {raw}: {error}"));
+        assert!(p.get("title").and_then(|v|v.as_str())
+            .is_some_and(|title|!title.is_empty()),
+            "real title lost all identity words: {raw}: {p:?}");
+        checked+=1;
+    }
+    assert!(checked>=15,"committed title corpus was unexpectedly reduced: {checked}");
+}
+
+#[test]
+fn committed_tv_titles_have_correct_explicit_episode_coordinates(){
+    for (raw,season,episode) in [
+        ("Breaking.Bad.S01E01.1080p.BluRay",1,1),
+        ("The.Voice.US.S03E02.1080p.WEB-DL",3,2),
+        ("The.Office.US.S02E03.1080p.WEB-DL",2,3),
+        ("The.Simpsons.S10E05.1080p.WEB-DL",10,5),
+        ("Bobs.Burgers.S10E05.720p.WEB.x264",10,5),
+        ("90.Day.Fiance.S12E15.1080p.WEB",12,15),
+        ("Sousou.no.Frieren.S01E01.1080p.WEB-DL",1,1),
+        ("Frieren.Beyond.Journeys.End.S01E02.1080p",1,2),
+        ("Food.Wars.The.Third.Plate.S03E11.1080p",3,11),
+        ("Pokemon.S20E01.1080p",20,1),
+        ("Attack.on.Titan.S04E01.1080p",4,1),
+    ] {
+        let p=parse_title(raw,false).unwrap_or_else(|error|panic!("{raw}: {error}"));
+        assert_eq!(p.get("seasons"),Some(&json!([season])),
+            "season differs for {raw}: {p:?}");
+        assert_eq!(p.get("episodes"),Some(&json!([episode])),
+            "episode differs for {raw}: {p:?}");
+    }
 }
