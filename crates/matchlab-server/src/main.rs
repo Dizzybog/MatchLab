@@ -406,8 +406,8 @@ fn mapped_season_episode_range(
             .map_err(|e|e.to_string())?
     };
     let resolved=if specific {
-        (start..=end).map(|episode|anime_title::resolve(db,imdb,title,season,episode)
-            .map_err(|e|e.to_string())).collect::<Result<Vec<_>,_>>()?
+        anime_title::resolve_range(db,imdb,title,season,start,end)
+            .map_err(|e|e.to_string())?
     }else{
         episode_crosswalk::resolve_season_range(db,imdb,season,start,end)
             .map_err(|e|e.to_string())?
