@@ -57,3 +57,24 @@ fn demon_hunter_advertising_only_leaf_inherits_parent_title_and_absolute_hint(){
     assert_eq!(p["episodes"],json!([]),
         "must not invent a verified season-local episode: {p:?}");
 }
+
+#[test]
+fn url_banner_cleanup_is_generic_and_does_not_erase_release_metadata(){
+    // Not Chinese-specific: source websites can advertise themselves in
+    // bracket blocks of any script. Preserve fields from the original name
+    // while removing only untrusted publisher words from title identity.
+    let raw="[Published at www.scene.example]Example.Show.S02E04.2024.1080p.WEB-DL/【下载 www.other.example】【镜像 https://mirror.example】.mkv";
+    let p=parse_title(raw,false).unwrap();
+    assert_eq!(p["title"],json!("Example Show"),"{p:?}");
+    assert_eq!(p["year"],json!(2024),"{p:?}");
+    assert_eq!(p["seasons"],json!([2]),"{p:?}");
+    assert_eq!(p["episodes"],json!([4]),"{p:?}");
+    assert_eq!(p["resolution"],json!("1080p"),"{p:?}");
+    assert_eq!(p["quality"],json!("WEB-DL"),"{p:?}");
+    assert_eq!(p["extension"],json!("mkv"),"{p:?}");
+    let layers=p["path_layers"].as_array().unwrap();
+    assert_eq!(layers.len(),2);
+    assert_eq!(layers[0]["parsed"]["title"],"Example Show");
+    assert!(layers[1]["parsed"].get("title").is_none(),
+        "ad-only leaf cannot become a show title: {layers:?}");
+}
