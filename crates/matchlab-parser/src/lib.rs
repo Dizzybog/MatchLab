@@ -4268,6 +4268,37 @@ mod tests {
     }
 
     #[test]
+    fn sibling_episode_paths_reuse_parent_component_parses_not_episode_fields(){
+        let root="MatchLab.Unique.Parent.Cache.Test.S01";
+        let first=parse_title(&format!("{root}/E01.mkv"),false).unwrap();
+        let second=parse_title(&format!("{root}/E02.mkv"),false).unwrap();
+        assert_eq!(first["seasons"],json!([1]));
+        assert_eq!(second["seasons"],json!([1]));
+        assert_eq!(first["episodes"],json!([1]));
+        assert_eq!(second["episodes"],json!([2]));
+        // The parent parse is shared and immutable; each leaf's independent
+        // coordinate still wins in the merged, whole-path result.
+        assert_eq!(first["path_layers"][0],second["path_layers"][0]);
+        let cached=PATH_COMPONENT_CACHE.get().unwrap().lock().unwrap();
+        assert!(cached.contains_key(&(root.to_owned(),false)),
+            "the parent directory must be cached across sibling files");
+        assert!(cached.contains_key(&("E01.mkv".to_owned(),false)));
+        assert!(cached.contains_key(&("E02.mkv".to_owned(),false)));
+        drop(cached);
+        // An obsolete regex generation must never leak a cached title.
+        let key=("MatchLab.Obsolete.Path.Cache.S01".to_owned(),false);
+        let mut wrong=Map::new();
+        wrong.insert("title".into(),json!("incorrect old regex title"));
+        {
+            let cache=PATH_COMPONENT_CACHE.get().unwrap();
+            cache.lock().unwrap().insert(key.clone(),(
+                u64::MAX,std::time::Instant::now(),wrong));
+        }
+        let current=cached_path_component(&key.0,false).unwrap();
+        assert_ne!(current.get("title"),Some(&json!("incorrect old regex title")));
+    }
+
+    #[test]
     fn independent_path_layers_keep_fields_and_bottom_up_source_order(){
         let raw="monster/the.ed.gein.story/S01/E02.mkv";
         let parsed=parse_title(raw,false).unwrap();
