@@ -1,0 +1,11 @@
+# Normalized main series title<TAB>explicit country code<TAB>IMDb series ID
+# This is a curated fallback for independent regional productions sharing an
+# identical IMDb title. It is NOT a guess from IMDb title.akas region, which
+# describes title localization rather than production country.
+# Use only independently verified identities. The source title is normalized
+# with title_normalization::clean_title (lowercase, no punctuation/spaces).
+# Codes must match country_aliases::COUNTRIES. Add both directions when known.
+# Ex on the Beach (US): https://www.imdb.com/title/tt8285922/
+# Ex on the Beach (UK): https://www.imdb.com/title/tt3522052/
+exonthebeach	US	tt8285922
+exonthebeach	UK	tt3522052
