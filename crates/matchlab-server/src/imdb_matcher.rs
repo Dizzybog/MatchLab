@@ -433,14 +433,18 @@ mod tests{
         assert!(rank(&no_exact,Some(2020),true,1)
             <rank(&us_old,Some(2020),true,1_000_000));
         // At identical year distance, US region preference beats popularity.
+        let no_old=candidate("ttno",2018,"NO");
         assert!(rank(&us_old,Some(2018),true,1)
-            <rank(&no_exact,Some(2018),true,1_000_000));
+            <rank(&no_old,Some(2018),true,1_000_000));
         // With no release year, region still applies before votes.
         assert!(rank(&us_old,None,true,1)
-            <rank(&no_exact,None,true,1_000_000));
+            <rank(&no_old,None,true,1_000_000));
         // Region is neutral when no other IMDb work shares the alias.
-        assert!(rank(&no_exact,Some(2020),false,2)
-            <rank(&us_old,Some(2020),false,1));
+        assert!(rank(&no_old,Some(2018),false,2)
+            <rank(&us_old,Some(2018),false,1));
+        // Vote count (not older candidate year) wins on otherwise equal fit.
+        assert!(rank(&no_exact,None,false,10)
+            <rank(&us_old,None,false,1));
         // Exact ties use IMDb ID only for deterministic output.
         let first=candidate("ttaaa",2020,"US");
         let second=candidate("ttbbb",2020,"US");
