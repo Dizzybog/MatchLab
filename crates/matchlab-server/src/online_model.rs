@@ -428,7 +428,8 @@ mod tests{
             let lower=title.to_ascii_lowercase();
             for (field,signal) in [("codec","x265"),("resolution","2160p"),
                 ("episodes","episode_coordinates"),("quality","WEB-DL"),
-                ("year","four_digit_year"),("audio","aac"),("group","part_2")]{
+                ("year","four_digit_year"),("audio","aac"),
+                ("group","part_2"),("subbed","café"),("audio","日本語")]{
                 let mut legacy=BTreeSet::new();
                 legacy.insert(hash("bias"));
                 legacy.insert(hash(&format!("f:{field}")));
