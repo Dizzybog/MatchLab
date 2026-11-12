@@ -1089,7 +1089,7 @@ fn diagnose_with_policy(
     // identity evidence than a short anime alias created by a truncated
     // parser title. Preserve this across all episode/anime selection paths.
     let full_release_imdb=imdb.first().and_then(|candidate|
-        imdb_matcher::has_longer_full_title_in_release(
+        imdb_matcher::has_longer_title_evidence_in_release(
             title,&req.title,&candidate.matched_title)
             .then_some(candidate.imdb_id.clone()));
     // A same-name older OVA may win an exact IMDb alias even though it
