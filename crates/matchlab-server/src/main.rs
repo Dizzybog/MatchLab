@@ -5105,6 +5105,42 @@ mod tests {
         assert!(gap["end_season"].is_null());
     }
     #[test]
+    fn large_shortlist_season_gate_matches_original_scalar_queries(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE seasons(
+            imdb_id TEXT PRIMARY KEY,max_season INTEGER);").unwrap();
+        let mut hits=Vec::new();
+        for n in 0..345 {
+            let id=format!("tt{n:07}");
+            if n%8!=0 {
+                db.execute("INSERT INTO seasons VALUES(?1,?2)",
+                    rusqlite::params![id,if n%3==0{12}else{5}]).unwrap();
+            }
+            let hit=imdb_matcher::Match{
+                imdb_id:id.clone(),title:"Series".into(),year:2020,
+                category:"series".into(),matched_title:"Series".into(),
+                anime_ids:std::collections::BTreeMap::new(),media_type:"tvSeries".into(),
+            };
+            hits.push(hit.clone());
+            if n%17==0 {hits.push(hit);}
+        }
+        let expected=hits.iter().filter(|candidate|
+            db.query_row("SELECT max_season FROM seasons WHERE imdb_id=?1",
+                [&candidate.imdb_id],|row|row.get::<_,i64>(0))
+                .is_ok_and(|max|max>=9))
+            .map(|candidate|candidate.imdb_id.clone()).collect::<Vec<_>>();
+        let gate=ImdbIdentityGate{
+            policy:MatchPolicy::DashboardDiagnostic,
+            year:None,has_season:true,has_quality:true,
+            season_range_end:Some(9),verified_anime_range:None,
+            verified_absolute_episode:None,
+        };
+        let actual=filter_request_imdb_candidates(&db,hits,gate)
+            .into_iter().map(|c|c.imdb_id).collect::<Vec<_>>();
+        assert_eq!(actual,expected);
+    }
+
+    #[test]
     fn explicit_multi_season_packs_keep_both_bounds() {
         assert_eq!(explicit_season_range("Gary.Unmarried.S01-S02.1080p"),Some((1,2)));
         assert_eq!(explicit_season_range("Supernatural S01-S02"),Some((1,2)));
