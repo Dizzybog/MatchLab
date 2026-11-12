@@ -392,14 +392,18 @@ relative coverage, leading versus trailing edge (only on equal coverage), then
 title length. For otherwise eligible IMDb candidates, the ranking is:
 
 1. **Title relevance** (exact match, relative coverage, whole-word edge and length).
-   For a release **without a production year or explicit country qualifier**,
-   a full canonical IMDb `title.basics` title outranks an abbreviated AKA
-   that happens to have the same exact normalized text. For example,
-   `Bleach.S01` refers to the original `Bleach` title (2004), not the
-   newer `Bleach: Thousand-Year Blood War` (2022), whose AKA is `Bleach`.
-   This is a **title-identity relevance distinction**, not the former
-   `isOriginalTitle` or AKA-ordering tie-breaker. If a year is supplied,
-   the candidates remain equally exact so year proximity can disambiguate.
+   This comparison is **identical whether a release year is present or not**.
+   For collisions on a shorter alternative title, MatchLab compares each
+   candidate's complete title in both directions using Unicode-preserving
+   whole-word boundaries: a full title that extends beyond the release is
+   only a partial match, never a second exact title. For example,
+   `BLEACH 千年血戦篇` is *not* exactly `Bleach`: the Japanese words
+   remain significant in lexical scoring even though the legacy ASCII
+   Tantivy key is `bleach`. A verified complete alternative title (including
+   a genuine translation) remains usable. This resolves `Bleach.S01` to
+   the original `Bleach` work instead of `Bleach: Thousand-Year Blood War`,
+   regardless of whether the torrent specifies a production year.
+   **Only candidates with equal title relevance proceed to year distance.**
 2. **Distance from the release year**, when one was provided; otherwise all
    candidates have the same distance (zero), regardless of season/episode.
 3. **IMDb `numVotes`** (descending), unless the release explicitly qualifies
