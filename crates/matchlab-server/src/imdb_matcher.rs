@@ -911,6 +911,11 @@ mod tests{
             ("Monster.the.ed.gein.story.s1.e1",None),
             ("Monster.the.ed.gein.story.2025.s1.e1",Some(2025)),
             ("Monster.The.Ed.Gein.Story.S01E01.1080p.WEB-DL",None),
+            // The source omits "Story": this must still outrank "Monster"
+            // because 4 complete title words match before the episode.
+            ("Monster.the.ed.gein.s1.e1",None),
+            ("Monster.the.ed.gein.2025.s1.e1",Some(2025)),
+            ("Monster.The.Ed.Gein.S01E01.1080p.WEB-DL",None),
         ] {
             let parsed=matchlab_parser::parse_title(raw,false).unwrap();
             let parser_title=parsed["title"].as_str().unwrap();
@@ -920,6 +925,19 @@ mod tests{
             assert_eq!(hits[0].imdb_id,"tt13207736",
                 "raw={raw:?} parsed={parser_title:?} hits={hits:?}");
         }
+
+        // A complete shorter title ending at the same word boundary wins
+        // against a title that has further unmatched words. Both still
+        // outrank the unrelated bare "Monster" show.
+        db.execute("INSERT INTO titles VALUES
+            ('ttshort','Monster: The Ed Gein','monstertheedgein',2025,
+             'series','US',0,0,'tvSeries')",[]).unwrap();
+        db.execute("INSERT INTO seasons VALUES('ttshort',3)",[]).unwrap();
+        db.execute("INSERT INTO imdb_ratings VALUES('ttshort',1)",[]).unwrap();
+        let shorter=search(&db,"Monster the",None,true,1,
+            "Monster.the.ed.gein.s1.e1",true,5).unwrap();
+        assert_eq!(shorter[0].imdb_id,"ttshort",
+            "a complete full-length prefix must beat an equally long partial IMDb name");
 
         // No complete matching title, no upgrade to a generic anime title.
         let wrong=search(&db,"Monster The Jeffrey Dahmer Story",None,true,1,
@@ -939,6 +957,42 @@ mod tests{
         let chosen=search(&db,parsed["title"].as_str().unwrap(),None,true,1,
             source,true,1).unwrap();
         assert_eq!(chosen[0].imdb_id,"tt13207736");
+    }
+
+    #[test]
+    fn original_release_partial_title_prefix_requires_real_word_boundary_and_coverage(){
+        let row=Aka{imdb_id:"tt1".into(),title:"Monster: The Ed Gein Story".into(),
+            clean:"monstertheedgeinstory".into(),year:2025,category:"series".into(),
+            region:None,ordering:0,media_type:"tvSeries".into()};
+        let parsed=semantic_words("Monster the");
+        for original in [
+            "Monster.the.ed.gein.s1.e1",
+            "Monster.the.ed.gein.2025.s1.e1",
+            "Monster.the.ed.gein.1080p.WEB-DL",
+        ] {
+            let keys=longer_release_title_prefixes("Monster the",original);
+            assert_eq!(keys.last().map(String::as_str),Some("monstertheedgein"));
+            let fit=title_in_original_release_fit(
+                &semantic_words(original),&parsed,parsed.len()+keys.len(),&row)
+                .expect("valid 4-word prefix of the longer IMDb title");
+            assert_eq!(fit.tier,0);
+            assert!(has_longer_title_evidence_in_release("Monster the",original,&row.title));
+        }
+        let fragment="Monster.the.ed.gein.storyline.s1.e1";
+        let keys=longer_release_title_prefixes("Monster the",fragment);
+        assert!(title_in_original_release_fit(&semantic_words(fragment),
+            &parsed,parsed.len()+keys.len(),&row).is_none(),
+            "an unrelated word after the prefix must not be ignored");
+
+        let weak=Aka{title:"Monster the Ed Gein Story of Eighty Other Things".into(),
+            ..row.clone()};
+        let raw="Monster.the.ed.gein.s1.e1";
+        let keys=longer_release_title_prefixes("Monster the",raw);
+        assert!(title_in_original_release_fit(&semantic_words(raw),&parsed,
+            parsed.len()+keys.len(),&weak).is_none(),
+            "less than 50% or more than 16 unmatched characters is not a safe partial match");
+        assert!(!has_longer_title_evidence_in_release(
+            "Monster","Monster.S01E01",&row.title));
     }
 
     #[test]
