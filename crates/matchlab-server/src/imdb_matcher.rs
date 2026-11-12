@@ -592,9 +592,20 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
                 &row,&semantic_release){evidence.push(fit);}
         }
         if country_title_matches.contains(&alias_key){
-            // Country-qualified aliases are exact lexical evidence from
-            // the imported IMDb aliases, not an automatic identity winner.
-            evidence.push(TitleFit::exact());
+            // AU and "Australia" are equivalent *complete* release title
+            // qualifiers when an exact imported IMDb alias confirms the
+            // expanded form. A full qualified title must outrank a shorter
+            // unqualified prefix ("Lego Masters"), regardless of votes.
+            //
+            // TitleFit::exact() has longest_first=0, which inadvertently
+            // ranks BELOW a shorter prefix with a negative matched length.
+            // Score the length of the original qualified title instead,
+            // keeping ordinary lexical fit/season gates and the later
+            // regional vote tie-breakers unchanged.
+            let matched=semantic_content.iter()
+                .map(|word|word.chars().count()).sum::<usize>();
+            evidence.push(TitleFit{tier:0,longest_first:-(matched as i64),
+                unmatched_bp:0,edge:0});
         }
         if extended_title_matches.contains(&alias_key){
             if let Some(fit)=title_in_original_release_fit(
