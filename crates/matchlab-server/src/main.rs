@@ -2664,6 +2664,11 @@ mod tests {
             "Scene.Monster.The.Ed.Gein.Story.S01E01.1080p.WEB-DL",
             "Scene.Monster.The.Ed.Gein.S01E01.1080p.WEB-DL",
             "Scene.Monster.The.Ed.Gein.2025.S01E01",
+            // The torrent is a suffix OF the IMDb title. No "Monster"
+            // word is present in the release at all.
+            "The.ed.gein.story.s01e01",
+            "The.Ed.Gein.Story.2025.S01E01",
+            "Ed.Gein.Story.S01E01.1080p.WEB-DL",
         ] {
             let result=diagnose(&path,&MatchRequest{
                 title:title.into(),year:None,series:None}).unwrap();
