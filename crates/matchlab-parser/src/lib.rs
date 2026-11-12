@@ -4394,7 +4394,7 @@ mod tests {
         {
             let cache=PATH_COMPONENT_CACHE.get().unwrap();
             cache.lock().unwrap().insert(key.clone(),(
-                u64::MAX,std::time::Instant::now(),wrong));
+                u64::MAX,std::time::Instant::now(),Arc::new(wrong)));
         }
         let current=cached_path_component(&key.0,false).unwrap();
         assert_ne!(current.get("title"),Some(&json!("incorrect old regex title")));
@@ -4410,7 +4410,7 @@ mod tests {
         let key=(parent.to_owned(),false);
         let cache=PATH_COMPONENT_CACHE.get_or_init(||Mutex::new(HashMap::new()));
         cache.lock().unwrap().insert(key.clone(),(
-            handler_patch_revision(),std::time::Instant::now(),counterfeit));
+            handler_patch_revision(),std::time::Instant::now(),Arc::new(counterfeit)));
         let parsed=parse_title_canonical(&format!("{parent}/E02.mkv"),false).unwrap();
         assert_ne!(parsed["path_layers"][0]["parsed"]["title"],
             json!("unsafe live title"));
