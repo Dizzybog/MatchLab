@@ -105,10 +105,15 @@ fn leaf(title: &str) -> &str {
     title.rsplit(&['/', '\\'][..]).next().unwrap_or(title)
 }
 fn safe_title(title: &str) -> bool {
-    title.len() <= MAX_TITLE_BYTES
-        && !title.contains(['/', '\\', '@', '\n', '\r', '\0'])
-        && !["http:", "https:", "magnet:", "token=", "password=", "apikey=",
-            "secret="].iter().any(|fragment| title.to_ascii_lowercase().contains(fragment))
+    if title.len()>MAX_TITLE_BYTES
+        || title.contains(['/', '\\', '@', '\n', '\r', '\0']){
+        return false;
+    }
+    // Lowercase once, not once per blocked keyword. Still reject the
+    // identical secret/URL fragments before any title enters ML evidence.
+    let lower=title.to_ascii_lowercase();
+    !["http:", "https:", "magnet:", "token=", "password=", "apikey=",
+        "secret="].iter().any(|fragment|lower.contains(fragment))
 }
 fn technical_field(field: &str) -> bool {
     matches!(field, "resolution" | "codec" | "quality" | "audio"
