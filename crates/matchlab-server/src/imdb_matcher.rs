@@ -592,9 +592,20 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
                 &row,&semantic_release){evidence.push(fit);}
         }
         if country_title_matches.contains(&alias_key){
-            // Country-qualified aliases are exact lexical evidence from
-            // the imported IMDb aliases, not an automatic identity winner.
-            evidence.push(TitleFit::exact());
+            // AU and "Australia" are equivalent *complete* release title
+            // qualifiers when an exact imported IMDb alias confirms the
+            // expanded form. A full qualified title must outrank a shorter
+            // unqualified prefix ("Lego Masters"), regardless of votes.
+            //
+            // TitleFit::exact() has longest_first=0, which inadvertently
+            // ranks BELOW a shorter prefix with a negative matched length.
+            // Score the length of the original qualified title instead,
+            // keeping ordinary lexical fit/season gates and the later
+            // regional vote tie-breakers unchanged.
+            let matched=semantic_content.iter()
+                .map(|word|word.chars().count()).sum::<usize>();
+            evidence.push(TitleFit{tier:0,longest_first:-(matched as i64),
+                unmatched_bp:0,edge:0});
         }
         if extended_title_matches.contains(&alias_key){
             if let Some(fit)=title_in_original_release_fit(
@@ -655,6 +666,18 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
         for id in exact_ids {
             let Some(forms)=full_titles.get(&id)else{continue};
             if forms.iter().any(|full|full==&semantic_release){continue;}
+            // The parser can strip an AU/US country suffix and report only
+            // "Lego Masters" even though the original release explicitly
+            // reads "Lego Masters AU". Its canonical IMDb title may be the
+            // fully equivalent "Lego Masters Australia". Do not demote that
+            // verified country-qualified exact match as if it were a
+            // shortened sequel title. Only exempt canonical forms that are
+            // themselves *exact* expanded source-country aliases.
+            let qualified_canonical=country_qualified.as_ref().is_some_and(|(_,keys)|
+                groups.get(&id).is_some_and(|aliases|aliases.iter().any(|(a,_)|
+                    country_title_matches.contains(&(a.imdb_id.clone(),a.title.clone()))))
+                && forms.iter().any(|words|keys.contains(&clean_title(&words.join(" ")))));
+            if qualified_canonical {continue;}
             // Penalize a demonstrably shortened name, but NOT unrelated
             // translated aliases (e.g. exact English vs Japanese main title).
             let extension=forms.iter()
@@ -1094,6 +1117,47 @@ mod tests{
         assert!(partial.is_empty(),"broken short title must not trigger broad prefix matching");
         let full=search(&db,"The100",None,true,1,"The100.s01",false,5).unwrap();
         assert_eq!(full[0].imdb_id,"tt0000003");
+    }
+    #[test]
+    fn lego_masters_au_country_alias_beats_unqualified_us_title(){
+        // Real IMDb identity names: the Australian 2019 series uses the
+        // long-form "Lego Masters Australia", while releases write "AU".
+        // The US 2020 series is simply called "Lego Masters" and may have
+        // more IMDb votes. An explicit country-qualified full alias must
+        // not lose to the shorter unqualified prefix.
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,
+                clean_title TEXT,year INTEGER,category TEXT,region TEXT,
+                original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('tt9615014','Lego Masters','legomasters',2020,'series','',1,0,'tvSeries'),
+                ('tt10285320','Lego Masters Australia','legomastersaustralia',2019,'series','',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt9615014',5),('tt10285320',8);
+            INSERT INTO imdb_ratings VALUES('tt9615014',1000000),('tt10285320',1);")
+            .unwrap();
+        for release in [
+            "LEGO Masters AU S03E09 HDTV x264-FQM",
+            "Lego.Masters.Australia.S03E09.HDTV.x264-FQM",
+        ]{
+            let parsed=matchlab_parser::parse_title(release,false).unwrap();
+            assert_eq!(parsed["seasons"],serde_json::json!([3]),"{parsed:?}");
+            assert_eq!(parsed["episodes"],serde_json::json!([9]),"{parsed:?}");
+            let title=parsed["title"].as_str().unwrap();
+            let hits=search(&db,title,None,true,3,release,true,5).unwrap();
+            assert_eq!(hits.first().map(|hit|hit.imdb_id.as_str()),
+                Some("tt10285320"),
+                "AU qualifier must select the matching complete IMDb title: {release}; parsed={title}; hits={hits:?}");
+        }
+        // The country marker is a useful identity signal, not an excuse
+        // to discard the shorter US work when no qualifier was supplied.
+        let unqualified=search(&db,"LEGO Masters",None,true,3,
+            "LEGO Masters S03E09 HDTV x264-FQM",true,5).unwrap();
+        assert_eq!(unqualified.first().map(|hit|hit.imdb_id.as_str()),
+            Some("tt9615014"));
     }
     #[test] fn country_specific_series_beats_generic_alias() {
         let db=Connection::open_in_memory().unwrap();

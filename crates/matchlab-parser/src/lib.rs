@@ -2754,6 +2754,30 @@ fn cached_path_component(raw:&str,translate_languages:bool)
     Ok(result)
 }
 
+// Publisher/download banners can occur before a show's actual title,
+// or be the entire media filename. Only complete leading bracket blocks
+// containing a URL are stripped; fansub groups and legitimate Chinese
+// titles are not advertisements. Retain the original input for metadata.
+fn release_without_leading_site_banners(raw:&str)->Option<&str>{
+    let mut remaining=raw.trim_start();
+    let mut removed=false;
+    loop {
+        let (open,close)=if remaining.starts_with('【'){('【','】')}
+            else if remaining.starts_with('['){('[',']')}
+            else {break};
+        let Some(rest)=remaining.strip_prefix(open) else {break};
+        let Some(end)=rest.find(close) else {break};
+        let content=&rest[..end];
+        if !contains_ascii_fold(content,"www.")
+            && !contains_ascii_fold(content,"https://")
+            && !contains_ascii_fold(content,"http://")
+        {break;}
+        remaining=rest[end+close.len_utf8()..].trim_start();
+        removed=true;
+    }
+    removed.then_some(remaining)
+}
+
 // Parse each directory entry independently. The path-level merge below
 // never concatenates release names (which could confuse episode coordinates).
 fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<String,Value>,ParseError> {
@@ -2761,6 +2785,22 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
     let normalized = normalize_release_confusables(raw);
     let raw = normalized.as_ref();
     let mut result=engine_parse(raw,translate_languages)?;
+    if let Some(content)=release_without_leading_site_banners(raw){
+        // Correct only the title. Site, source, quality, language and all
+        // other fields still come from the original raw release.
+        let clean=engine_parse(content,translate_languages)?;
+        let title=clean.get("title").and_then(Value::as_str)
+            .filter(|title|!generic_path_title(title)
+                && clean.get("extension").and_then(Value::as_str)
+                    .is_none_or(|ext|!title.eq_ignore_ascii_case(ext))
+                && clean.get("container").and_then(Value::as_str)
+                    .is_none_or(|container|!title.eq_ignore_ascii_case(container)));
+        if let Some(title)=title{
+            result.insert("title".into(),json!(title));
+        }else{
+            result.remove("title");
+        }
+    }
     if !result.contains_key("extension") && raw.contains('.')
         && let Some(caps)=SOURCE_EXTENSION_RE.captures(raw)
         && let Some(extension)=caps.get(1)
@@ -3009,6 +3049,40 @@ fn normalize_slash_dates(input:&str)->Cow<'_,str>{
     if day==input {Cow::Borrowed(input)} else{Cow::Owned(day.into_owned())}
 }
 
+/// Separate *actual* path levels without splitting URLs or alternate
+/// title text inside complete release annotations. An advertising banner
+/// such as `【site https://example.org/download】` is one lexical field,
+/// never two fake folder names. Keep original component slices zero-copy.
+fn split_release_path(raw:&str)->Vec<&str>{
+    let mut components=Vec::new();
+    let mut brackets=Vec::new();
+    let mut start=0;
+    for (index,ch) in raw.char_indices(){
+        match ch {
+            '['=>brackets.push(']'),
+            '【'=>brackets.push('】'),
+            '('=>brackets.push(')'),
+            '{'=>brackets.push('}'),
+            ']'|'】'|')'|'}'=>{
+                if brackets.last().copied()==Some(ch){brackets.pop();}
+            },
+            '/'|'\\' if brackets.is_empty()=>{
+                let part=&raw[start..index];
+                if !part.is_empty()&&part!="."&&part!=".."{
+                    components.push(part);
+                }
+                start=index+ch.len_utf8();
+            },
+            _=>{},
+        }
+    }
+    let part=&raw[start..];
+    if !part.is_empty()&&part!="."&&part!=".."{
+        components.push(part);
+    }
+    components
+}
+
 /// Parse a hierarchical torrent path from ancestor to leaf. Any explicit,
 /// non-empty metadata value on a deeper level overrides the same field from
 /// an ancestor (year, season, episode, quality, resolution, codec, etc.).
@@ -3020,8 +3094,7 @@ pub fn parse_title(
 ) -> Result<Map<String, Value>, ParseError> {
     let date_normalized=normalize_slash_dates(raw_title);
     let raw_title=date_normalized.as_ref();
-    let components:Vec<&str>=raw_title.split(&['/','\\'][..])
-        .filter(|part|!part.is_empty() && *part!="." && *part!="..").collect();
+    let components=split_release_path(raw_title);
     let mut merged=Map::new();
     let mut fallback_parent_title:Option<String>=None;
     // Preserve title candidates separately. The parser cannot determine if

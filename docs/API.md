@@ -94,6 +94,32 @@ A release such as `【高清剧集网发布 …】少年白马醉春风2[第41�
 
 The public matcher may reinterpret such a conflicting `S02E41` marker **only** when IMDb metadata proves that season 2 does not extend to episode 41, a unique verified AniDB/TVDB crosswalk maps absolute episode 41 into season 2, and the resulting canonical season/episode passes metadata bounds. For example, when that crosswalk yields season 2 episode 21, the returned SID is `ttID:2:21` and the ASID comes from the same verified mapping. An ambiguous or missing crosswalk does not justify inventing `S02E21`; a known valid canonical `S02E41` remains authoritative.
 
+### Website banners and country-qualified titles
+
+Leading website/publisher blocks such as `【发布 www.example.com】` or
+`[Shared at www.example.com]` are not TV/movie titles. The parser removes
+**only leading URL-bearing bracket blocks from the title-identity extraction**;
+the source site's other parsed metadata remains available. If the leaf
+filename is made entirely of download-site banners, the nearest genuine
+parent series title wins. Ordinary release-group tags without URLs
+(e.g. `[SubsPlease]`) remain untouched.
+
+A Chinese `[第62集]` in an ancestor means *tentative absolute episode 62*.
+When the leaf has no explicit coordinates, it must **not** be expanded as
+a complete season pack or assumed to mean `S01E62`. A canonical SID/ASID
+may be published only if the chosen IMDb identity has a unique verified
+AniDB/TVDB crosswalk for that absolute ordinal; otherwise the title
+identity is preserved without invented episode endpoints.
+
+When a torrent explicitly qualifies a title with `AU`, `US`, `UK` etc.,
+the matcher checks indexed IMDb aliases for equivalent long-form country
+names (e.g. `LEGO Masters AU` → `Lego Masters Australia`). An exact
+country-equivalent alias is scored as a **complete release-title match**,
+ahead of the shorter unqualified prefix `Lego Masters`. This is not an
+unconditional country override: the IMDb alias, series type, and season
+eligibility must all be verified first. IMDb country-qualified AKA
+metadata is different from a work's country of production.
+
 ### Full parser API — `/parse`
 
 `GET /parse` and `POST /parse` return the **complete structured parser output** for the torrent title, without requiring an IMDb/AniDB database lookup.
