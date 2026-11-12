@@ -445,6 +445,15 @@ title length. For otherwise eligible IMDb candidates, the ranking is:
    unmatched. The length of the actually matched title words outranks
    shorter matches, while a complete exact title wins at equal matched
    length. No broad substring scan or parser-specific exception is used.
+   **All IMDb title candidates are collected before the ranking step:**
+   exact aliases, qualified country aliases, indexed forward/reverse
+   candidates, and the word-validated prefix and suffix matches in both
+   title directions. Finding one short prefix does not suppress discovery
+   of a longer suffix; the search paths contribute candidates to the
+   same pool and are evaluated on a shared title-relevance scale.
+   Only after that do year, region, votes, and earliest year break ties.
+   AniDB title identity is a separate fallback if no eligible IMDb title
+   match was found.
 2. **Distance from the release year**, when one was provided; otherwise all
    candidates have the same distance (zero), regardless of season/episode.
 3. **Region preference**: for duplicate normalized IMDb titles, prefer
