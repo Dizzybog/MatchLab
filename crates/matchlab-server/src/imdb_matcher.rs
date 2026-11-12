@@ -10,13 +10,12 @@ pub use crate::title_normalization::clean_title;
 #[derive(Clone,Debug)]
 struct Aka {
     imdb_id:String, title:String, clean:String, year:i32, category:String,
-    region:Option<String>, original:bool, ordering:i32, media_type:String,
+    region:Option<String>, media_type:String,
 }
 impl From<crate::tantivy_search::TitleAlias> for Aka {
     fn from(a:crate::tantivy_search::TitleAlias)->Self{
         Self{imdb_id:a.imdb_id,title:a.title,clean:a.clean,year:a.year,
-            category:a.category,region:a.region,original:a.original,
-            ordering:a.ordering,media_type:a.media_type}
+            category:a.category,region:a.region,media_type:a.media_type}
     }
 }
 fn index_error(error:String)->rusqlite::Error{
@@ -113,19 +112,17 @@ fn title_fit(key:&str,words:&[String],release_words:&[String],row:&Aka)->Option<
         longest_first:-(short as i64)})
 }
 
-fn type_rank(t:&str)->i32{
-    match t{"movie"=>0,"tvMovie"=>1,"short"=>2,"tvShort"=>3,"tvSpecial"=>4,"tvSeries"=>5,_=>6}
-}
-fn rank(r:&Aka,year:Option<i32>,series:bool,duplicate:bool,count_first:bool,votes:i64)
-    -> (i64,i32,i32,i32,i32,i32,i64,i32,String) {
-    let original=if !duplicate||r.original{0}else{1};
-    let us=if !duplicate||r.region.as_deref()==Some("US"){0}else{1};
-    let (distance,original_order,year_order)=if let Some(y)=year{
-        ((r.year-y).abs(),original,r.year)
-    }else{(original,r.year,0)};
-    (-if count_first{votes}else{0},distance,original_order,year_order,
-        if series{0}else{type_rank(&r.media_type)},us,
-        -if count_first{0}else{votes},r.ordering,r.imdb_id.clone())
+/// Only four business ranking criteria are used: lexical title relevance
+/// (applied by the caller), requested-year distance, duplicate-title region
+/// preference, and IMDb numVotes. The IMDb ID only breaks perfect ties to
+/// ensure reproducible results, not as a semantic ranking signal.
+fn rank(r:&Aka,year:Option<i32>,duplicate:bool,votes:i64)
+    -> (i64,i32,i64,String) {
+    let distance=year.map_or(0,|y|(i64::from(r.year)-i64::from(y)).abs());
+    // Preserve the existing conditional US preference only for titles
+    // actually shared by different IMDb works. Otherwise region is neutral.
+    let region=if !duplicate||r.region.as_deref()==Some("US"){0}else{1};
+    (distance,region,-votes,r.imdb_id.clone())
 }
 pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_season:i64,
     release_title:&str,_has_episode:bool,limit:usize)->rusqlite::Result<Vec<Match>>{
@@ -228,10 +225,9 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             }else{TitleFit::fallback(row.clean.len())};
         groups.entry(row.imdb_id.clone()).or_default().push((row,fit));
     }
-    // Final sort is lexical fit first, followed by votes/year/type tie-breakers.
-    // Any candidate strictly
-    // below the lexical rank at position `limit` can never be returned.
-    // Retain the entire tied boundary so votes/year still choose fairly.
+    // Title fit is primary; year distance, region and IMDb votes follow.
+    // Candidates below the lexical rank at `limit` cannot be returned.
+    // Retain the entire tied boundary for the remaining criteria.
     // This avoids most per-IMDb rating, anime-ID and duplicate-title lookups.
     let mut ranked_groups=groups.into_iter().map(|(id,aliases)|{
         let best_fit=aliases.iter().map(|(_,fit)|*fit).min().unwrap();
@@ -253,16 +249,14 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             }
         }
     }
-    // Without a release year, IMDb vote count breaks equal-title matches before
-    // the candidate's start year, even for season- or episode-based releases.
-    // Lexical fit and eligibility remain higher-priority constraints.
-    let count_first=year.is_none();
+    // A missing release year means zero distance for every eligible work;
+    // region and vote count still apply even when season/episode is present.
     let mut output=Vec::new();
     for (_,id,aliases) in ranked_groups{
         let votes:i64=db.query_row("SELECT num_votes FROM imdb_ratings WHERE imdb_id=?1",[&id],|r|r.get(0))
             .optional().unwrap_or(None).unwrap_or(0);
         let (best,fit)=aliases.into_iter().min_by_key(|(r,fit)|
-            (*fit,rank(r,year,series,duplicates.contains(&r.clean),count_first,votes))
+            (*fit,rank(r,year,duplicates.contains(&r.clean),votes))
         ).unwrap();
         let mut ids=BTreeMap::new();
         let mut stmt=db.prepare("SELECT type,value FROM anime_ids WHERE group_id=?1")?;
@@ -274,7 +268,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             let linked=stmt.query_map([&id],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
             if linked.len()==1{ids.insert("anidb".into(),linked[0].clone());}
         }
-        let score=(fit,rank(&best,year,series,duplicates.contains(&best.clean),count_first,votes));
+        let score=(fit,rank(&best,year,duplicates.contains(&best.clean),votes));
         output.push((score,Match{imdb_id:id,title:best.title.clone(),year:best.year,
             category:best.category,matched_title:best.title,anime_ids:ids,media_type:best.media_type}));
     }
@@ -425,6 +419,78 @@ mod tests{
         let eligible=search(&db,"Example",None,true,4,
             "Example.S04E37",true,1).unwrap();
         assert_eq!(eligible[0].imdb_id,"ttold");
+    }
+    #[test]
+    fn ranking_uses_only_year_distance_region_then_votes(){
+        let candidate=|id:&str,year:i32,region:&str|{
+            Aka{imdb_id:id.into(),title:"Example".into(),clean:"example".into(),
+                year,category:"movie".into(),region:Some(region.into()),
+                media_type:"movie".into()}
+        };
+        let us_old=candidate("ttus",2018,"US");
+        let no_exact=candidate("ttno",2020,"NO");
+        // An explicit year beats region and a massively larger vote count.
+        assert!(rank(&no_exact,Some(2020),true,1)
+            <rank(&us_old,Some(2020),true,1_000_000));
+        // At identical year distance, US region preference beats popularity.
+        assert!(rank(&us_old,Some(2018),true,1)
+            <rank(&no_exact,Some(2018),true,1_000_000));
+        // With no release year, region still applies before votes.
+        assert!(rank(&us_old,None,true,1)
+            <rank(&no_exact,None,true,1_000_000));
+        // Region is neutral when no other IMDb work shares the alias.
+        assert!(rank(&no_exact,Some(2020),false,2)
+            <rank(&us_old,Some(2020),false,1));
+        // Exact ties use IMDb ID only for deterministic output.
+        let first=candidate("ttaaa",2020,"US");
+        let second=candidate("ttbbb",2020,"US");
+        assert!(rank(&first,Some(2020),true,100)
+            <rank(&second,Some(2020),true,100));
+    }
+
+    #[test]
+    fn region_precedes_votes_but_votes_break_equal_region_and_year(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('ttus','Example','example',2020,'movie','US',0,99,'movie'),
+                ('ttno','Example','example',2020,'movie','NO',1,0,'tvMovie'),
+                ('ttgb','Example','example',2020,'movie','GB',1,0,'movie');
+            INSERT INTO imdb_ratings VALUES('ttus',10),('ttno',100000),('ttgb',1000);")
+            .unwrap();
+        // Regional preference outranks IMDb votes, original-title flag,
+        // medium, and AKA ordering, for otherwise identical title/year fit.
+        for specified_year in [None,Some(2020)]{
+            let found=search(&db,"Example",specified_year,false,0,
+                "Example.1080p",false,3).unwrap();
+            assert_eq!(found[0].imdb_id,"ttus");
+            assert_eq!(found[1].imdb_id,"ttno",
+                "votes must decide among equally preferred regions");
+            assert_eq!(found[2].imdb_id,"ttgb");
+        }
+    }
+
+    #[test]
+    fn votes_break_equal_movie_type_and_title_alias_ties(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('ttmovie','Same','same',2020,'movie','US',1,0,'movie'),
+                ('tttv','Same','same',2020,'movie','US',0,99,'tvMovie');
+            INSERT INTO imdb_ratings VALUES('ttmovie',10),('tttv',10000);")
+            .unwrap();
+        let found=search(&db,"Same",Some(2020),false,0,
+            "Same.2020",false,1).unwrap();
+        assert_eq!(found[0].imdb_id,"tttv",
+            "media type, original flag and alias order are not ranking factors");
     }
     #[test] fn normalization(){assert_eq!(clean_title("Pokémon and Ægir"),"pokemonaegir");}
     #[test] fn short_titles_require_exact_match_instead_of_broad_tantivy_prefix(){
