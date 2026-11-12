@@ -245,10 +245,14 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
         }
         crate::candidate_discovery::observe(&tx,&title,&clean,
             &model,&mut discovery)?;
+        // Several field errors from the same torrent share one normalized
+        // source identity. Calculate it lazily and only once per title.
+        let mut normalized_source=None::<String>;
         for flag in flags{
             let Some((code,group))=pattern(&flag,&base,&details["selected"])else{continue};
             if samples>=max_examples(){continue;}
-            let sample=digest(&format!("{group}:{}",normalized(&title)));
+            let source=normalized_source.get_or_insert_with(||normalized(&title));
+            let sample=digest(&format!("{group}:{source}"));
             // The PRIMARY KEY is the dedup check. No preliminary SELECT
             // and no per-observation transactions.
             let known:i64=tx.query_row(
