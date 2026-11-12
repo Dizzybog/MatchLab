@@ -2661,6 +2661,9 @@ mod tests {
             "Monster.The.Ed.Gein.Story.S01E01.1080p.WEB-DL",
             "Monster.the.ed.gein.s1.e1",
             "Monster.The.Ed.Gein.S01E01.1080p.WEB-DL",
+            "Scene.Monster.The.Ed.Gein.Story.S01E01.1080p.WEB-DL",
+            "Scene.Monster.The.Ed.Gein.S01E01.1080p.WEB-DL",
+            "Scene.Monster.The.Ed.Gein.2025.S01E01",
         ] {
             let result=diagnose(&path,&MatchRequest{
                 title:title.into(),year:None,series:None}).unwrap();
