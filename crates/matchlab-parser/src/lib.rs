@@ -4527,6 +4527,31 @@ mod tests {
     }
 
     #[test]
+    fn prefilter_removals_preserve_exhaustive_parser_behavior(){
+        // Prefix/suffix removals may retain supersets of literal gates.
+        // Interior removals MUST still rescan because joining two words can
+        // introduce a newly required regex literal.
+        let releases=[
+            "The.Movie.2026.1080p.WEB-DL.x265.mkv",
+            "[TGx]The.Series.S03E06.2160p.BluRay.DTS.x264",
+            "The.Walking.Dead.S05E03.720p.WEB-DL.x264-ASAP[ettv]",
+            "Lord of All Lords/Season 01/【发布 https://example.org】EP01.mp4",
+            "[Group] BLEACH 千年血戦篇 S01E08 1080p WEB-DL",
+            "Cops Seasons 1-24/6/s6e10.avi",
+            "Game.Of.Thrones.2011.S02E09.1080p.WEB-DL.mkv",
+            "The.Daily.Show.2018.02.13.1080p.WEB.x264.mkv",
+            "[www.release.example] [Group] Show S01E01",
+            "The.Matrix.1999.REMUX.2160p.HEVC.TrueHD.Atmos",
+        ];
+        for title in releases {
+            let prefiltered=ENGINE.parse_context_impl::<true>(title,false).unwrap();
+            let exhaustive=ENGINE.parse_context_impl::<false>(title,false).unwrap();
+            assert_eq!(prefiltered.result,exhaustive.result,"{title}");
+            assert_eq!(prefiltered.working_title,exhaustive.working_title,"{title}");
+        }
+    }
+
+    #[test]
     fn prefilter_covers_most_regex_handlers() {
         let regex_handlers = ENGINE
             .handlers
