@@ -31,6 +31,8 @@ const L2:f32=1.0;
 pub struct OnlineModel{
     z:Vec<f32>,
     n:Vec<f32>,
+    // Owned scratch space: one allocation per model load, not per label.
+    scratch:Vec<usize>,
     positives:i64,
     negatives:i64,
     holdout:i64,
@@ -38,18 +40,30 @@ pub struct OnlineModel{
     recent_window:u32,
     recent_count:u8,
 }
-fn digest(s:&str)->String{format!("{:x}",Sha256::digest(s.as_bytes()))}
-fn hash_bytes(parts:&[&[u8]])->usize{
-    // Byte-exact FNV-1a over virtual concatenation: no String allocation
-    // for dozens of field/feature n-grams per model prediction.
-    let mut h=0xcbf29ce484222325u64;
-    for part in parts{
-        for &byte in *part{
-            h^=u64::from(byte);
-            h=h.wrapping_mul(0x100000001b3);
-        }
+fn sample_digest(field:&str,signal:&str,title:&str)->String{
+    // Streaming the exact legacy key bytes avoids allocating/copying
+    // "epoch:field:signal:title" for every training label.
+    let mut digest=Sha256::new();
+    let epoch=EPOCH.to_string();
+    for part in [epoch.as_bytes(),b":",field.as_bytes(),b":",
+        signal.as_bytes(),b":",title.as_bytes()]{
+        digest.update(part);
     }
-    (h as usize)&(DIM-1)
+    format!("{:x}",digest.finalize())
+}
+const FNV_OFFSET:u64=0xcbf29ce484222325;
+fn extend_hash(mut state:u64,bytes:&[u8])->u64{
+    for &byte in bytes {
+        state^=u64::from(byte);
+        state=state.wrapping_mul(0x100000001b3);
+    }
+    state
+}
+fn hash_bytes(parts:&[&[u8]])->usize{
+    // Byte-exact FNV-1a, also used by incremental n-gram prefix hashing.
+    let mut state=FNV_OFFSET;
+    for part in parts {state=extend_hash(state,part);}
+    (state as usize)&(DIM-1)
 }
 fn hash(s:&str)->usize{hash_bytes(&[s.as_bytes()])}
 fn identity_group(title:&str)->String{
@@ -96,10 +110,15 @@ impl TitleFeatureContext{
         Self{lower,contexts,holdout}
     }
     fn features(&self,field:&str,signal:&str)->Vec<usize>{
+        let mut features=Vec::with_capacity(110);
+        self.features_into(field,signal,&mut features);
+        features
+    }
+    fn features_into(&self,field:&str,signal:&str,features:&mut Vec<usize>){
         // Preserve the exact legacy FNV-1a feature IDs and sorted-unique order
         // so pretrained FTRL state and floating-point update order are stable.
         // A short Vec avoids a balanced-tree allocation for each feature.
-        let mut features=Vec::with_capacity(110);
+        features.clear();
         let field_bytes=field.as_bytes();
         let signal_bytes=signal.as_bytes();
         features.push(hash("bias"));
@@ -112,9 +131,14 @@ impl TitleFeatureContext{
         // and the exact legacy validation for non-ASCII signals.
         let ascii=signal_bytes.is_ascii();
         for (span,prefix) in [(2,&b"g2:"[..]),(3,&b"g3:"[..]),(4,&b"g4:"[..])]{
+            // Prefix and field bytes are identical for every n-gram window.
+            // Prehash them once; extending the FNV state produces the exact
+            // same indices as hashing virtual concatenated bytes each time.
+            let state=extend_hash(extend_hash(
+                extend_hash(FNV_OFFSET,prefix),field_bytes),b":");
             for chunk in signal_bytes.windows(span).take(32){
                 if ascii||std::str::from_utf8(chunk).is_ok(){
-                    features.push(hash_bytes(&[prefix,field_bytes,b":",chunk]));
+                    features.push((extend_hash(state,chunk) as usize)&(DIM-1));
                 }
             }
         }
@@ -134,7 +158,6 @@ impl TitleFeatureContext{
         }
         features.sort_unstable();
         features.dedup();
-        features
     }
 }
 #[cfg(test)]
@@ -143,7 +166,8 @@ fn features(field:&str,signal:&str,title:&str)->Vec<usize>{
 }
 impl OnlineModel{
     pub fn new()->Self{
-        Self{z:vec![0.0;DIM],n:vec![0.0;DIM],positives:0,negatives:0,
+        Self{z:vec![0.0;DIM],n:vec![0.0;DIM],scratch:Vec::with_capacity(110),
+            positives:0,negatives:0,
             holdout:0,correct:0,recent_window:0,recent_count:0}
     }
     fn weight(&self,i:usize)->f32{
@@ -176,6 +200,13 @@ impl OnlineModel{
         context:&TitleFeatureContext)->Option<f32>{
         if self.positives<16||self.negatives<16{return None;}
         Some(self.raw_score(&context.features(field,signal)))
+    }
+    /// Reuse hashed feature memory across independent candidate fields.
+    pub fn score_prepared_reusing(&self,field:&str,signal:&str,
+        context:&TitleFeatureContext,scratch:&mut Vec<usize>)->Option<f32>{
+        if self.positives<16||self.negatives<16{return None;}
+        context.features_into(field,signal,scratch);
+        Some(self.raw_score(scratch))
     }
     #[cfg(test)]
     pub fn trained(&self)->(i64,i64){(self.positives,self.negatives)}
@@ -309,8 +340,19 @@ impl OnlineModel{
     /// resolution and anime markers. Labels are replayed from the unmodified
     /// canonical parser. They are advisory, never rule-promotion truth.
     /// A fixed per-release cap bounds SQLite writes and CPU use.
+    // Retained for standalone callers and differential tests; production
+    // worker uses observe_canonical_fields_with_context to avoid rework.
+    #[allow(dead_code)]
     pub fn observe_canonical_fields(
         &mut self,db:&Connection,title:&str,canonical:&Value
+    )->Result<usize,String>{
+        let context=TitleFeatureContext::new(title);
+        self.observe_canonical_fields_with_context(db,title,canonical,&context)
+    }
+    /// Reuse one immutable per-release title context across ML learners.
+    pub fn observe_canonical_fields_with_context(
+        &mut self,db:&Connection,title:&str,canonical:&Value,
+        context:&TitleFeatureContext
     )->Result<usize,String>{
         let Some(fields)=canonical.as_object()else{return Ok(0);};
         let mut examples=Vec::new();
@@ -358,10 +400,9 @@ impl OnlineModel{
         if examples.is_empty(){return Ok(0);}
         let rotation=hash(title)%examples.len();
         examples.rotate_left(rotation);
-        let context=TitleFeatureContext::new(title);
         let mut seen=0;
         for (field,signal) in examples.into_iter().take(64){
-            if self.observe_prepared(db,title,field,&signal,&context)?{seen+=1;}
+            if self.observe_prepared(db,title,field,&signal,context)?{seen+=1;}
         }
         Ok(seen)
     }
@@ -371,6 +412,13 @@ impl OnlineModel{
             ||field.len()>40||signal.len()>32{return Ok(false);}
         self.observe_prepared(db,title,field,signal,&TitleFeatureContext::new(title))
     }
+    /// Same deduplication, FTRL updates and holdout partition as observe().
+    pub fn observe_with_context(&mut self,db:&Connection,title:&str,field:&str,
+        signal:&str,context:&TitleFeatureContext)->Result<bool,String>{
+        if self.positives>=MAX_EXAMPLES||title.len()>240
+            ||field.len()>40||signal.len()>32{return Ok(false);}
+        self.observe_prepared(db,title,field,signal,context)
+    }
     fn observe_prepared(&mut self,db:&Connection,title:&str,field:&str,
         signal:&str,context:&TitleFeatureContext)->Result<bool,String>{
         if self.positives>=MAX_EXAMPLES||title.len()>240
@@ -378,7 +426,7 @@ impl OnlineModel{
         // The original Rust parser and field validator already established
         // the positive. A mismatched field is a safe counterfactual negative,
         // not an inferred claim about the film or the final match.
-        let sample=digest(&format!("{EPOCH}:{field}:{signal}:{title}"));
+        let sample=sample_digest(field,signal,title);
         let inserted=db.prepare_cached(
             "INSERT OR IGNORE INTO online_model_seen(sample_hash,seen_at)
              VALUES(?1,strftime('%s','now'))")
@@ -397,31 +445,161 @@ impl OnlineModel{
                     .map_err(|e|e.to_string())?;
             }
         }
-        let real=context.features(field,signal);
+        // Generate the counterfactual only after positive scoring/update.
+        // Both feature sets are pure, and the FTRL update order is identical.
+        let mut features=std::mem::take(&mut self.scratch);
+        context.features_into(field,signal,&mut features);
         let false_field=if field=="codec"{"resolution"}else{"codec"};
-        let negative=context.features(false_field,signal);
         // A deterministic title-group holdout prevents ordinary examples
         // for the same recognized work leaking between train and review.
         // This is an advisory pairwise check, NOT calibrated production
         // precision or independently verified IMDb matching accuracy.
         if context.holdout{
             if self.positives>=16&&self.negatives>=16{
-                let passed=self.raw_score(&real)>self.raw_score(&negative);
+                let positive_score=self.raw_score(&features);
+                context.features_into(false_field,signal,&mut features);
+                let passed=positive_score>self.raw_score(&features);
                 self.holdout+=1;
                 if passed{self.correct+=1;}
                 self.recent_window=(self.recent_window<<1)|u32::from(passed);
                 self.recent_count=self.recent_count.saturating_add(1).min(32);
             }
         }else{
-            self.learn(&real,true);
-            self.learn(&negative,false);
+            self.learn(&features,true);
+            context.features_into(false_field,signal,&mut features);
+            self.learn(&features,false);
         }
+        self.scratch=features;
         Ok(true)
     }
 }
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn streaming_sample_sha_is_identical_to_persisted_key_format(){
+        for (field,signal,title) in [
+            ("resolution","2160p","Example.S02E07.2160p.WEB-DL"),
+            ("audio","日本語","Série:2025.日本語"),
+            ("codec","x265","Film:x265"),
+            ("title","title_boundary","JoJo's Bizarre Adventure")
+        ] {
+            let legacy=format!("{:x}",Sha256::digest(
+                format!("{EPOCH}:{field}:{signal}:{title}").as_bytes()));
+            assert_eq!(sample_digest(field,signal,title),legacy);
+        }
+    }
+
+    #[test]
+    fn reusable_model_scratch_matches_legacy_pairwise_ftrl_updates(){
+        // This independent scalar reference models the former two-Vec path,
+        // including positive-before-negative updates and holdout accounting.
+        let db=Connection::open_in_memory().unwrap();
+        let mut actual=OnlineModel::load(&db).unwrap();
+        let mut expected=OnlineModel::new();
+        for i in 0..120 {
+            let title=format!("FeatureSeries{i}.S02E07.2160p.WEB-DL.x265");
+            let context=TitleFeatureContext::new(&title);
+            let positive=context.features("codec","x265");
+            let negative=context.features("resolution","x265");
+            if context.holdout {
+                if expected.positives>=16&&expected.negatives>=16 {
+                    let passed=expected.raw_score(&positive)>expected.raw_score(&negative);
+                    expected.holdout+=1;
+                    if passed {expected.correct+=1;}
+                    expected.recent_window=(expected.recent_window<<1)|u32::from(passed);
+                    expected.recent_count=expected.recent_count.saturating_add(1).min(32);
+                }
+            }else{
+                expected.learn(&positive,true);
+                expected.learn(&negative,false);
+            }
+            assert!(actual.observe(&db,&title,"codec","x265").unwrap());
+        }
+        assert!(actual.holdout>0);
+        assert_eq!(actual.z,expected.z);
+        assert_eq!(actual.n,expected.n);
+        assert_eq!(actual.positives,expected.positives);
+        assert_eq!(actual.negatives,expected.negatives);
+        assert_eq!(actual.holdout,expected.holdout);
+        assert_eq!(actual.correct,expected.correct);
+        assert_eq!(actual.recent_count,expected.recent_count);
+        assert_eq!(actual.recent_window,expected.recent_window);
+        assert!(actual.scratch.capacity()>=110);
+    }
+
+    #[test]
+    fn cached_ngram_prefix_preserves_full_fnv_hash(){
+        for (field,signal) in [("resolution","2160p"),
+            ("audio","日本語"),("edition","café"),("codec","h265")]{
+            for (span,prefix) in [(2,&b"g2:"[..]),(3,&b"g3:"[..]),(4,&b"g4:"[..])]{
+                let state=extend_hash(extend_hash(
+                    extend_hash(FNV_OFFSET,prefix),field.as_bytes()),b":");
+                for chunk in signal.as_bytes().windows(span){
+                    assert_eq!((extend_hash(state,chunk) as usize)&(DIM-1),
+                        hash_bytes(&[prefix,field.as_bytes(),b":",chunk]));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reusable_feature_buffer_preserves_hashed_indices_and_scores(){
+        let mut scratch=Vec::new();
+        let mut model=OnlineModel::new();
+        for i in 0..48 {
+            let title=format!("Learning{i}.2160p.WEB-DL.x265");
+            model.learn(&features("resolution","2160p",&title),true);
+            model.learn(&features("codec","2160p",&title),false);
+        }
+        for title in ["Film.2160p.x265.WEB-DL","Série.S02E07.日本語.AAC",
+            "JoJo's Bizarre Adventure Stone Ocean 27"] {
+            let ctx=TitleFeatureContext::new(title);
+            for (field,signal) in [("codec","x265"),("resolution","2160p"),
+                ("group","part_2"),("audio","日本語"),("year","four_digit_year")] {
+                ctx.features_into(field,signal,&mut scratch);
+                assert_eq!(scratch,ctx.features(field,signal));
+                let owned=model.score_prepared(field,signal,&ctx);
+                let reused=model.score_prepared_reusing(field,signal,&ctx,&mut scratch);
+                assert_eq!(owned,reused);
+            }
+        }
+    }
+
+    #[test]
+    fn shared_release_context_preserves_weights_holdout_and_dedup(){
+        let old_db=Connection::open_in_memory().unwrap();
+        let new_db=Connection::open_in_memory().unwrap();
+        let mut old=OnlineModel::load(&old_db).unwrap();
+        let mut new=OnlineModel::load(&new_db).unwrap();
+        let fields=json!({"title":"Film","year":2024,"seasons":[2],
+            "episodes":[7],"resolution":"2160p","codec":"x265",
+            "quality":"WEB-DL","audio":"AAC","network":"Example"});
+        for i in 0..90 {
+            let title=format!("Film{i}.2024.S02E07.2160p.WEB-DL.x265");
+            let ctx=TitleFeatureContext::new(&title);
+            assert_eq!(
+                old.observe_canonical_fields(&old_db,&title,&fields).unwrap(),
+                new.observe_canonical_fields_with_context(&new_db,&title,&fields,&ctx).unwrap()
+            );
+            for (field,signal) in [("codec","x265"),("audio","aac"),("group","Team")] {
+                assert_eq!(
+                    old.observe(&old_db,&title,field,signal).unwrap(),
+                    new.observe_with_context(&new_db,&title,field,signal,&ctx).unwrap()
+                );
+            }
+        }
+        assert_eq!(old.z,new.z);
+        assert_eq!(old.n,new.n);
+        assert_eq!(old.positives,new.positives);
+        assert_eq!(old.negatives,new.negatives);
+        assert_eq!(old.holdout,new.holdout);
+        assert_eq!(old.correct,new.correct);
+        let count=|db:&Connection|db.query_row("SELECT COUNT(*) FROM online_model_seen",[],
+            |r|r.get::<_,i64>(0)).unwrap();
+        assert_eq!(count(&old_db),count(&new_db));
+    }
+
     #[test]
     fn prepared_features_preserve_original_ftrl_indices_and_scoring(){
         use std::collections::BTreeSet;
