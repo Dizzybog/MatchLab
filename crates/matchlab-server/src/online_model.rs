@@ -54,8 +54,11 @@ fn hash_bytes(parts:&[&[u8]])->usize{
 fn hash(s:&str)->usize{hash_bytes(&[s.as_bytes()])}
 fn identity_group(title:&str)->String{
     let mut group=Vec::new();
+    // The holdout identity uses only the first eight source words. Scanning
+    // four additional words and allocating a second Vec never affected the
+    // hash, but happened for every observed torrent.
     for word in title.split(|c:char|!c.is_ascii_alphanumeric())
-        .filter(|s|!s.is_empty()).take(12){
+        .filter(|s|!s.is_empty()).take(8){
         let lower=word.to_ascii_lowercase();
         let season_episode=lower.starts_with('s')&&lower[1..].bytes()
             .next().is_some_and(|c|c.is_ascii_digit());
@@ -71,7 +74,7 @@ fn identity_group(title:&str)->String{
         }
         group.push(lower);
     }
-    group.into_iter().take(8).collect::<Vec<_>>().join(" ")
+    group.join(" ")
 }
 // Per-release structural context: shared between up to 64 field observations
 // and between all candidate-discovery scores for a title. Never persisted.
