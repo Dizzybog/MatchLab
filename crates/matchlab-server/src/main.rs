@@ -1208,9 +1208,13 @@ fn diagnose_with_policy(
         && series && year.is_none() && seasons.len()==1 && episodes.len()==1{
         // A known release production year is stronger identity evidence
         // than episode presence in another same-name show (Doctor Who).
-        imdb_matcher::prefer_verified_episode_identity(
-            &db,imdb,title,seasons[0],episodes[0])
-            .map_err(|e|e.to_string())?
+        // The crosswalk resolver may introduce a newly verified identity
+        // that was absent from the lexical result. Apply the same public
+        // eligibility gates to that additional candidate before publishing.
+        filter_request_imdb_candidates(
+            &db,imdb_matcher::prefer_verified_episode_identity(
+                &db,imdb,title,seasons[0],episodes[0])
+                .map_err(|e|e.to_string())?,gate)
     }else{imdb};
     let chinese_absolute_hint=parsed.get("absolute_episode_candidate").and_then(Value::as_i64);
     let mut chinese_absolute_by_imdb=HashMap::<String,episode_crosswalk::Episode>::new();
