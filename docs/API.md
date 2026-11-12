@@ -404,16 +404,20 @@ title length. For otherwise eligible IMDb candidates, the ranking is:
    the original `Bleach` work instead of `Bleach: Thousand-Year Blood War`,
    regardless of whether the torrent specifies a production year.
    **Only candidates with equal title relevance proceed to year distance.**
-   If the parser stopped too early on a metadata-like token (such as the name
-   `Ed` in `Monster.the.ed.gein.story.s1.e1`), the IMDb matcher also
-   checks **longer complete IMDb aliases appearing as whole-word prefixes
-   of the original torrent name**, before the season/episode/technical suffix.
-   Such a fully present title outranks a shorter compatible title, even
-   when the shorter title is all the parser retained; the regular partial
-   title coverage limits still apply to other matches. This recovery uses
-   one exact-term Tantivy query, never a SQLite title scan, and rechecks
-   original Unicode word boundaries so `Dune` never matches `Duneland`.
-   It is independent of the requested year, region and vote count.
+   If the parser stopped too early on a metadata-like token (such as
+   `Ed` in `Monster.the.ed.gein.s1.e1`), IMDb title relevance also checks
+   **the original torrent name**, up to the episode/season/technical suffix.
+   It retrieves longer IMDb title candidates with a **single indexed Tantivy
+   prefix query**, never a SQLite title scan. A complete title present in
+   the torrent beats a shorter title. A *partial* IMDb-title prefix such as
+   `Monster The Ed Gein` is also eligible to outrank the shorter `Monster`
+   when every title word matches at word boundaries, the prefix covers at
+   least 50% of the candidate title and leaves no more than 16 unmatched
+   characters. Among eligible candidates, **more matched title characters
+   come first**; at an identical matched length a complete title beats an
+   incomplete one. An unrelated word before the release metadata (e.g.
+   `Storyline` instead of `Story`) does not authenticate that title.
+   This lexical ranking is independent of release year, region and votes.
 2. **Distance from the release year**, when one was provided; otherwise all
    candidates have the same distance (zero), regardless of season/episode.
 3. **Region preference**: for duplicate normalized IMDb titles, prefer
