@@ -741,19 +741,52 @@ fn preferred_regular_series_parent_title(
     Ok(None)
 }
 
-/// Match each independently parsed path component from leaf to root.
-/// The parser has already merged nearest-first field values (year/season/
-/// episode/etc.) into the parent Diagnostic. We never concatenate folder
-/// names, and a coordinate-only component cannot replace a show title.
-/// Every component performs the SAME pooled IMDb prefix/suffix ranking.
+/// Use identical production gates for both a filename and each parent directory.
+/// A candidate rejected later must not prevent the search from climbing.
+#[derive(Clone,Copy)]
+struct ImdbIdentityGate<'a>{
+    policy:MatchPolicy,
+    year:Option<i32>,
+    has_season:bool,
+    has_quality:bool,
+    season_range_end:Option<i64>,
+    verified_anime_range:Option<&'a str>,
+    verified_absolute_episode:Option<&'a str>,
+}
+fn filter_request_imdb_candidates(
+    db:&Connection,hits:Vec<imdb_matcher::Match>,gate:ImdbIdentityGate<'_>,
+)->Vec<imdb_matcher::Match>{
+    hits.into_iter().filter(|candidate|{
+        if matches!(gate.policy,MatchPolicy::PublicApi)
+            && !year_signal_eligible(
+                gate.year,candidate.year,gate.has_season,
+                !candidate.anime_ids.is_empty()
+                    ||gate.verified_anime_range==Some(candidate.imdb_id.as_str())
+                    ||gate.verified_absolute_episode==Some(candidate.imdb_id.as_str()),
+                gate.has_quality,
+            ){
+            return false;
+        }
+        // An explicit season range is stricter than the season-1 tolerance
+        // used for provisional title candidate discovery.
+        gate.season_range_end.is_none_or(|end|
+            db.query_row("SELECT max_season FROM seasons WHERE imdb_id=?1",
+                [&candidate.imdb_id],|row|row.get::<_,i64>(0))
+                .is_ok_and(|max|max>=end))
+    }).collect()
+}
+
+/// Match independently parsed levels leaf-first. A level wins only after
+/// public identity/season eligibility; otherwise fall back to the parent.
 fn bottom_up_imdb_path_match(
     db:&Connection,parsed:&serde_json::Map<String,Value>,
     year:Option<i32>,series:bool,season:i64,has_episode:bool,
+    eligible:impl Fn(Vec<imdb_matcher::Match>)->Vec<imdb_matcher::Match>,
 )->Result<Option<(String,Vec<imdb_matcher::Match>)>,String>{
     let Some(layers)=parsed.get("path_layers").and_then(Value::as_array)else{
         return Ok(None);
     };
-    for layer in layers.iter().rev(){
+    for (depth,layer) in layers.iter().enumerate().rev(){
         let Some(raw)=layer.get("raw").and_then(Value::as_str)else{continue};
         let Some(fields)=layer.get("parsed").and_then(Value::as_object)else{
             continue
@@ -763,22 +796,29 @@ fn bottom_up_imdb_path_match(
         };
         let trimmed=title.trim();
         let lower=trimmed.to_ascii_lowercase();
-        // A path leaf like E02.mkv, 6, Season 1, or S01 is metadata,
-        // not independent title evidence. Short legitimate titles such as
-        // "Up" are still eligible through exact IMDb alias matching.
+        let numeric=!lower.is_empty()&&lower.bytes().all(|b|b.is_ascii_digit());
+        // Sxx, Exx, extensions and structural season directories cannot
+        // supply IMDb identity. A real numeric series (e.g. "24") is
+        // eligible only when an exact indexed IMDb alias independently proves it.
         let coordinate_only=lower.is_empty()
             || matches!(lower.as_str(),"s"|"e"|"ep"|"episode"|"episodes"
                 |"season"|"seasons"|"series"|"mkv"|"mp4"|"avi"
                 |"extras"|"specials"|"subtitles")
-            ||lower.bytes().all(|b|b.is_ascii_digit())
-            ||(lower.len()<=4 && lower.starts_with('s')
-                && lower[1..].bytes().all(|b|b.is_ascii_digit()))
-            ||(lower.len()<=5 && lower.starts_with('e')
-                && lower[1..].bytes().all(|b|b.is_ascii_digit()));
+            ||(lower.len()<=4&&lower.starts_with('s')
+                &&lower[1..].bytes().all(|b|b.is_ascii_digit()))
+            ||(lower.len()<=5&&lower.starts_with('e')
+                &&lower[1..].bytes().all(|b|b.is_ascii_digit()))
+            ||(numeric&&depth>0
+                &&(lower.len()==1||lower.parse::<i64>().ok()==Some(season)));
         if coordinate_only{continue;}
-        let found=imdb_matcher::search(
+        let mut found=imdb_matcher::search(
             db,trimmed,year,series,season,raw,has_episode,20)
             .map_err(|e|e.to_string())?;
+        if numeric{
+            let exact=imdb_matcher::clean_title(trimmed);
+            found.retain(|hit|imdb_matcher::clean_title(&hit.matched_title)==exact);
+        }
+        let found=eligible(found);
         if !found.is_empty(){
             return Ok(Some((trimmed.to_owned(),found)));
         }
@@ -1133,21 +1173,34 @@ fn diagnose_with_policy(
             .map_err(|e|e.to_string())?.is_some()
             || exact_anime_identity(&db,&key)?.is_some(),
     };
-    let chosen_layer=bottom_up_imdb_path_match(
-        &db,parsed,year,series,seasons.iter().copied().max().unwrap_or(0),
-        !episodes.is_empty()||parsed.contains_key("episode_start"))?;
+    let gate=ImdbIdentityGate{
+        policy,year,has_season:series&&!seasons.is_empty(),
+        has_quality:parsed_quality,
+        season_range_end:season_range.map(|(_,end)|end),
+        verified_anime_range:verified_anime_range_imdb.as_deref(),
+        verified_absolute_episode:verified_absolute_episode_imdb.as_deref(),
+    };
+    let has_episode=!episodes.is_empty()||parsed.contains_key("episode_start");
+    // A verified anime part identity must not be replaced by an unrelated
+    // ordinary-series folder; its original crosswalk resolver stays in charge.
+    let chosen_layer=if parsed.get("anime_title_verified")
+        .and_then(Value::as_bool)==Some(true){None}else{
+        bottom_up_imdb_path_match(
+            &db,parsed,year,series,seasons.iter().copied().max().unwrap_or(0),
+            has_episode,|hits|filter_request_imdb_candidates(&db,hits,gate))?
+    };
     let (layer_title,imdb)=if let Some((name,matches))=chosen_layer{
         (Some(name),matches)
     }else{
-        (None,imdb_matcher::search(
-            &db,title,year,series,seasons.iter().copied().max().unwrap_or(0),
-            &req.title,!episodes.is_empty()||parsed.contains_key("episode_start"),20)
-            .map_err(|e|e.to_string())?)
+        (None,filter_request_imdb_candidates(
+            &db,imdb_matcher::search(
+                &db,title,year,series,seasons.iter().copied().max().unwrap_or(0),
+                &req.title,has_episode,20).map_err(|e|e.to_string())?,gate))
     };
-    // Keep the winning level's title for identity checks while all
-    // season/episode/year/quality fields remain merged from their nearest
-    // source in the original whole-path parse.
+    // Keep parser metadata independent of IMDb candidate discovery. All
+    // downstream title comparisons use the actual selected component.
     let title=layer_title.as_deref().unwrap_or(title);
+    let key=imdb_matcher::clean_title(title);
     // A complete longer title found in the ORIGINAL torrent is stronger
     // identity evidence than a short anime alias created by a truncated
     // parser title. Preserve this across all episode/anime selection paths.
@@ -1165,29 +1218,6 @@ fn diagnose_with_policy(
         imdb_matcher::prefer_verified_episode_identity(
             &db,imdb,title,seasons[0],episodes[0])
             .map_err(|e|e.to_string())?
-    }else{imdb};
-    // Enforce strict production-year/quality identity only for GET/POST /match.
-    // The dashboard's /debug/match must still rank plain titles like "Fight Club".
-    // Other season/episode, anime and ranking checks remain shared.
-    // Exact, uniquely verified AniDB absolute ranges are an independent
-    // anime identity signal even if the optional anime_ids metadata is absent.
-    // Unverified bare number suffixes do not qualify for this exception.
-    let imdb=if matches!(policy,MatchPolicy::PublicApi){
-        imdb.into_iter().filter(|candidate|
-            year_signal_eligible(year,candidate.year,series&&!seasons.is_empty(),
-                !candidate.anime_ids.is_empty()
-                    || verified_anime_range_imdb.as_deref()==Some(candidate.imdb_id.as_str())
-                    || verified_absolute_episode_imdb.as_deref()==Some(candidate.imdb_id.as_str()),
-                parsed_quality)
-        ).collect::<Vec<_>>()
-    }else{imdb};
-    // Require every candidate for a multi-season pack to contain the final season.
-    let imdb=if let Some((_,end))=season_range {
-        imdb.into_iter().filter(|candidate|{
-            db.query_row("SELECT max_season FROM seasons WHERE imdb_id=?1",
-                [&candidate.imdb_id],|row|row.get::<_,i64>(0))
-                .is_ok_and(|max|max>=end)
-        }).collect::<Vec<_>>()
     }else{imdb};
     let chinese_absolute_hint=parsed.get("absolute_episode_candidate").and_then(Value::as_i64);
     let mut chinese_absolute_by_imdb=HashMap::<String,episode_crosswalk::Episode>::new();
@@ -2743,7 +2773,7 @@ mod tests {
             "monster\\the.ed.gein.story\\S01\\E02.mkv",
         ]{
             let parsed=matchlab_parser::parse_title(path,false).unwrap();
-            let result=bottom_up_imdb_path_match(&db,&parsed,None,true,1,true)
+            let result=bottom_up_imdb_path_match(&db,&parsed,None,true,1,true,|hits|hits)
                 .unwrap().expect("a named directory must resolve independently");
             assert_eq!(result.0,
                 parsed["path_layers"][1]["parsed"]["title"].as_str().unwrap(),
@@ -2759,7 +2789,7 @@ mod tests {
         // "Monster" must not be concatenated into a synthetic alias.
         let parsed=matchlab_parser::parse_title(
             "Monster/Not.A.Real.Show/S01/E02.mkv",false).unwrap();
-        let from_parent=bottom_up_imdb_path_match(&db,&parsed,None,true,1,true)
+        let from_parent=bottom_up_imdb_path_match(&db,&parsed,None,true,1,true,|hits|hits)
             .unwrap().expect("climb to a matching parent");
         assert_eq!(from_parent.0,"Monster");
         assert_eq!(from_parent.1[0].imdb_id,"tt2004");
@@ -2768,7 +2798,7 @@ mod tests {
         // the parent folder, without mixing the levels.
         let parsed=matchlab_parser::parse_title(
             "Monster/The.Ed.Gein.Story.S01E02.mkv",false).unwrap();
-        let leaf=bottom_up_imdb_path_match(&db,&parsed,None,true,1,true)
+        let leaf=bottom_up_imdb_path_match(&db,&parsed,None,true,1,true,|hits|hits)
             .unwrap().expect("leaf named release must win");
         assert_eq!(leaf.1[0].imdb_id,"ttgein");
     }
