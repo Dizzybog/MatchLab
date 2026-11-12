@@ -72,21 +72,26 @@ pub fn qualified_with_base(raw:&str)->Option<(&'static str,String,Vec<String>)>{
 /// two *different* IMDb series with the same unqualified display title.
 /// IMDb title.akas 'region' describes localized display titles, not origin.
 pub fn regional_series_id(base_title:&str,country:&str)->Option<&'static str>{
-    static REGISTRY:OnceLock<HashMap<(&'static str,&'static str),&'static str>>
-        =OnceLock::new();
+    // Nested maps let us query borrowed &str keys without allocations.
+    // The registry is built once and contains only verified exceptions.
+    type Registry=HashMap<&'static str,HashMap<&'static str,&'static str>>;
+    static REGISTRY:OnceLock<Registry>=OnceLock::new();
     REGISTRY.get_or_init(||{
-        include_str!("../data/regional_series.tsv").lines()
-            .filter(|line|!line.is_empty()&&!line.starts_with('#'))
-            .filter_map(|line|{
-                let mut fields=line.split('\t');
-                let (Some(base),Some(code),Some(id),None)=
-                    (fields.next(),fields.next(),fields.next(),fields.next())
-                    else{return None};
-                (id.starts_with("tt")&&id[2..].bytes().all(|c|c.is_ascii_digit())
-                    &&!base.is_empty()&&!code.is_empty())
-                    .then_some(((base,code),id))
-            }).collect()
-    }).get(&(base_title,country)).copied()
+        let mut entries=Registry::new();
+        for line in include_str!("../data/regional_series.tsv").lines()
+            .filter(|line|!line.is_empty()&&!line.starts_with('#')){
+            let mut fields=line.split('\t');
+            let (Some(base),Some(code),Some(id),None)=
+                (fields.next(),fields.next(),fields.next(),fields.next())
+                else{continue};
+            if id.starts_with("tt")&&!id[2..].is_empty()
+                &&id[2..].bytes().all(|c|c.is_ascii_digit())
+                &&!base.is_empty()&&!code.is_empty(){
+                entries.entry(base).or_default().insert(code,id);
+            }
+        }
+        entries
+    }).get(base_title).and_then(|by_country|by_country.get(country)).copied()
 }
 #[cfg(test)]
 pub fn qualified(raw:&str)->Option<(&'static str,Vec<String>)>{
