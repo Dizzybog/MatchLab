@@ -180,13 +180,17 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     let mut rows=Vec::new();
     // Detect explicit country qualifiers once. Reuse the same detection for
     // canonical country-title aliases and the regional tie-breaker.
-    let country_qualified=crate::country_aliases::qualified(release_title);
-    let country=country_qualified.as_ref().map(|(code,_)|*code);
+    let country_qualified=crate::country_aliases::qualified_with_base(release_title);
+    let country=country_qualified.as_ref().map(|(code,_,_)|*code);
+    // This mapping identifies production variants, not localized AKA regions.
+    // It is absent for most titles, leaving the established ranking intact.
+    let regional_id=country_qualified.as_ref()
+        .and_then(|(code,base,_)|crate::country_aliases::regional_series_id(base,code));
     // The title-relevance gate is identical with and without a release year.
     let semantic_release=semantic_words(title);
     // Exact country-qualified aliases precede generic prefix matching.
     if series {
-        if let Some((_,aliases))=&country_qualified {
+        if let Some((_,_,aliases))=&country_qualified {
             for candidate in aliases {
                 let found=exact(db,candidate)?;
                 for row in found {
@@ -197,6 +201,20 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             }
         }
         if !rows.is_empty(){stage="country_exact";}
+        // A recognized country suffix can describe a separate production
+        // even when IMDb has no corresponding localized title alias. Only
+        // enter this lane if an independently curated IMDb identity exists
+        // among the exact *base-title* series candidates. Keep ALL competing
+        // base-title identities so year distance remains ahead of region.
+        if rows.is_empty()
+            && let (Some((_,base,_)),Some(expected_id))=
+                (country_qualified.as_ref(),regional_id) {
+            let base_rows=filter(db,exact(db,base)?,&release,series,year,required_season)?;
+            if base_rows.iter().any(|candidate|candidate.imdb_id==expected_id) {
+                rows=base_rows;
+                stage="regional_base_exact";
+            }
+        }
     }
     if rows.is_empty(){
         // Exact aliases are authoritative and fast, including "Up" and "It".
@@ -271,7 +289,8 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     // are rejected before season eligibility and expensive ID lookups.
     let mut groups:BTreeMap<String,Vec<(Aka,TitleFit)>>=BTreeMap::new();
     for row in rows{
-        let fit=if stage=="country_exact"{TitleFit::exact()}
+        let fit=if stage=="country_exact"||stage=="regional_base_exact"{
+                TitleFit::exact()}
             else if stage=="aligned"{
                 title_fit(&key,&words,&release_words,&row,&semantic_release)
                     .unwrap_or(TitleFit::fallback(row.clean.len()))
@@ -352,12 +371,21 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     // With no release year, every eligible work has zero distance.
     // Region always precedes votes, including season/episode releases.
     // Title fit and verified episode eligibility still outrank both.
+    // Only when an explicit regional production is independently documented
+    // does the region score refer to the *IMDb work*, not the AKA locale.
+    let contextual_rank=|r:&Aka,duplicate:bool,votes:i64|{
+        let (distance,aka_region,negative_votes,earliest,imdb)=
+            rank(r,year,duplicate,country,votes);
+        let region=regional_id.map_or(aka_region,|expected|
+            if r.imdb_id==expected{0}else{1});
+        (distance,region,negative_votes,earliest,imdb)
+    };
     let mut output=Vec::new();
     for (_,id,aliases) in ranked_groups{
         let votes:i64=db.query_row("SELECT num_votes FROM imdb_ratings WHERE imdb_id=?1",[&id],|r|r.get(0))
             .optional().unwrap_or(None).unwrap_or(0);
         let (best,fit)=aliases.into_iter().min_by_key(|(r,fit)|
-            (*fit,rank(r,year,duplicates.contains(&r.clean),country,votes))
+            (*fit,contextual_rank(r,duplicates.contains(&r.clean),votes))
         ).unwrap();
         let mut ids=BTreeMap::new();
         let mut stmt=db.prepare("SELECT type,value FROM anime_ids WHERE group_id=?1")?;
@@ -369,7 +397,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             let linked=stmt.query_map([&id],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
             if linked.len()==1{ids.insert("anidb".into(),linked[0].clone());}
         }
-        let score=(fit,rank(&best,year,duplicates.contains(&best.clean),country,votes));
+        let score=(fit,contextual_rank(&best,duplicates.contains(&best.clean),votes));
         output.push((score,Match{imdb_id:id,title:best.title.clone(),year:best.year,
             category:best.category,matched_title:best.title,anime_ids:ids,media_type:best.media_type}));
     }
@@ -722,6 +750,49 @@ mod tests{
             "Dune.1984.1080p",false,1).unwrap();
         assert_eq!(with_year[0].imdb_id,"tt1984",
             "year distance is used only AFTER equal full-title relevance");
+    }
+    #[test]
+    fn regional_series_fallback_resolves_country_without_an_imdb_country_alias(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_season INTEGER);
+            INSERT INTO titles VALUES
+                ('tt3522052','Ex on the Beach','exonthebeach',2014,'series','',0,0,'tvSeries'),
+                ('tt8285922','Ex on the Beach','exonthebeach',2018,'series','',0,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt3522052',11),('tt8285922',6);
+            INSERT INTO imdb_ratings VALUES('tt3522052',100000),('tt8285922',500);")
+            .unwrap();
+        // There is NO indexed 'Ex on the Beach US' alias. Production
+        // identity evidence must outrank both the default country
+        // localization preference and overwhelming IMDb popularity.
+        for (release,id) in [
+            ("ex.on.the.beach.us.s01","tt8285922"),
+            ("ex.on.the.beach.usa.s01","tt8285922"),
+            ("ex.on.the.beach.uk.s01","tt3522052"),
+            ("ex.on.the.beach.gb.s01","tt3522052"),
+        ]{
+            let titles=search(&db,"Ex on the Beach",None,true,1,release,false,4)
+                .unwrap();
+            assert_eq!(titles[0].imdb_id,id,"release {release}");
+        }
+        // Explicit year remains ahead of country evidence, as promised.
+        let year=search(&db,"Ex on the Beach",Some(2014),true,1,
+            "Ex.on.the.Beach.US.2014.S01",false,4).unwrap();
+        assert_eq!(year[0].imdb_id,"tt3522052");
+        // Without a country qualifier, this registry must not interfere.
+        let no_country=search(&db,"Ex on the Beach",None,true,1,
+            "Ex.on.the.Beach.S01",false,4).unwrap();
+        assert_eq!(no_country[0].imdb_id,"tt3522052");
+        // A season outside US production bounds cannot be rescued by a
+        // country hint. The existing eligibility filter remains authoritative.
+        let later=search(&db,"Ex on the Beach",None,true,11,
+            "Ex.on.the.Beach.US.S11",false,4).unwrap();
+        assert_eq!(later[0].imdb_id,"tt3522052");
     }
     #[test] fn normalization(){assert_eq!(clean_title("Pokémon and Ægir"),"pokemonaegir");}
     #[test] fn short_titles_require_exact_match_instead_of_broad_tantivy_prefix(){
