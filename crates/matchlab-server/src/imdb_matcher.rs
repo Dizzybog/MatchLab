@@ -377,55 +377,54 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     let key=clean_title(title);
     let release=clean_title(release_title);
     if key.is_empty()||limit==0{return Ok(vec![]);}
-    // Most lookups resolve exactly: avoid two extra Unicode folds and word
-    // vector allocations on that hot path.
-    let mut words=Vec::new();
-    let mut release_words=Vec::new();
-    let mut stage="aligned";
+    // Discover ALL eligible lexical identities before assigning a winner:
+    // parsed exact aliases, forward/reversed title lookups, and both title
+    // edges in the original torrent are evidence for the SAME ranking pool.
+    // No prefix hit, exact hit, or country-qualified hit can suppress a
+    // potentially more relevant title discovered through another direction.
+    let words=crate::title_normalization::clean_words(title);
+    let release_words=crate::title_normalization::clean_words(release_title);
     let mut rows=Vec::new();
-    // Detect explicit country qualifiers once. Reuse the same detection for
-    // canonical country-title aliases and the regional tie-breaker.
+    let mut ordinary_title_matches=HashSet::new();
+    let mut country_title_matches=HashSet::new();
     let country_qualified=crate::country_aliases::qualified(release_title);
     let country=country_qualified.as_ref().map(|(code,_)|*code);
-    // Title relevance is independent of release year. The unmodified source
-    // may contain more of the title than the parser was able to preserve.
     let semantic_release=semantic_words(title);
     let semantic_full_release=semantic_words(release_title);
     let semantic_content=semantic_release_content_words(release_title);
-    // Exact country-qualified aliases precede generic prefix matching.
-    if series {
-        if let Some((_,aliases))=&country_qualified {
-            for candidate in aliases {
-                let found=exact(db,candidate)?;
-                for row in found {
-                    if is_series(&row.media_type) && eligible(db,&row,required_season)? {
+
+    // Recognized, explicitly country-qualified TV aliases remain eligible,
+    // but do not preempt more specific names on another search path.
+    if series{
+        if let Some((_,aliases))=&country_qualified{
+            for name in aliases {
+                for row in exact(db,name)?{
+                    if is_series(&row.media_type){
+                        country_title_matches.insert((row.imdb_id.clone(),
+                            row.title.clone()));
                         rows.push(row);
                     }
                 }
             }
         }
-        if !rows.is_empty(){stage="country_exact";}
     }
-    if rows.is_empty(){
-        // Exact aliases are authoritative and fast, including "Up" and "It".
-        rows=filter(db,exact(db,&key)?,&release,series,year,required_season)?;
-        if rows.is_empty()&&key.len()>=4{
-            words=crate::title_normalization::clean_words(title);
-            release_words=crate::title_normalization::clean_words(release_title);
-            // Compare forward, reverse and embedded edge matches together;
-            // never let the first nonempty strategy decide the winning title.
-            let mut discovered=tantivy_aliases(db,&key,false)?;
-            if key.len()>=8{
-                discovered.extend(tantivy_aliases(db,&key,true)?);
-            }
-            discovered.extend(crate::tantivy_search::title_aliases_inside(db,&key)
-                .map_err(index_error)?.into_iter().map(Aka::from));
-            // Avoid eligibility SQL joins for candidates that only match
-            // fragments of a word (e.g. Dune vs Duneland).
-            discovered.retain(|row|title_fit(&key,&words,&release_words,row,
-                &semantic_release).is_some());
-            rows=filter(db,discovered,&release,series,year,required_season)?;
+    let mut discovered=exact(db,&key)?;
+    if key.len()>=4{
+        discovered.extend(tantivy_aliases(db,&key,false)?);
+        if key.len()>=8{
+            discovered.extend(tantivy_aliases(db,&key,true)?);
         }
+        discovered.extend(crate::tantivy_search::title_aliases_inside(db,&key)
+            .map_err(index_error)?.into_iter().map(Aka::from));
+    }
+    // Lexical discovery from a parser title is less trustworthy than the
+    // original release, so keep the historical word-boundary and containment
+    // checks. Only the raw-release validation below can admit longer names.
+    discovered.retain(|row|release.contains(&row.clean)
+        && title_fit(&key,&words,&release_words,row,&semantic_release).is_some());
+    for row in discovered{
+        ordinary_title_matches.insert((row.imdb_id.clone(),row.title.clone()));
+        rows.push(row);
     }
     // The parser can truncate a real title on a metadata-like word.
     // Recover full IMDb titles and legitimate longer partial prefixes from
@@ -454,14 +453,9 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     // content title, not only to the parser's already-truncated title.
     // Never search in technical metadata, require complete word edges, and
     // reject stray source-title words that are not covered by the candidate.
-    let suffix_keys=if rows.iter().any(|row|
-        semantic_words(&row.title)==semantic_content) {
-        // An already discovered *complete* title occupying the whole
-        // source is longer than any suffix of it. No lookup is needed.
-        Vec::new()
-    }else{
-        longer_release_title_suffix_keys(release_title)
-    };
+    // Always collect suffix evidence, even if an exact/prefix candidate
+    // already exists. Every candidate must be compared in one global rank.
+    let suffix_keys=longer_release_title_suffix_keys(release_title);
     let mut suffix_title_matches=HashSet::new();
     if !suffix_keys.is_empty(){
         let found=crate::tantivy_search::title_aliases_at_release_suffixes(
@@ -483,9 +477,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     // one targeted lookup. Ordinary filter(release.contains(alias)) cannot
     // be used here: by definition the IMDb name is longer than the source.
     let mut imdb_title_suffix_matches=HashSet::new();
-    if semantic_content.len()>=2
-        && !rows.iter().any(|row|semantic_words(&row.title)==semantic_content)
-    {
+    if semantic_content.len()>=2 {
         let suffix_key=clean_title(&semantic_content.join(" "));
         if suffix_key.len()>=6{
             let found=tantivy_aliases(db,&suffix_key,true)?;
@@ -500,8 +492,13 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             }
         }
     }
-    // Do not fall back to a half-word prefix: such matches are not
-    // independently meaningful, and caused short titles to hijack long ones.
+    // Apply media-type and season eligibility once, after lexical discovery
+    // has exhausted EVERY path. A more specific suffix can no longer be
+    // starved by a shorter prefix/alias.
+    let eligible_rows=filter_eligible(db,rows,series,year,required_season)?;
+    let mut rows=eligible_rows;
+    // The AniDB-only title lookup remains a separate *fallback* when none
+    // of the IMDb title search paths found any eligible identity.
     if rows.is_empty()&&series&&key.len()>=4{
         // IMDb's English primary title need not appear in the release at
         // all: e.g. Shinigami Bocchan to Kuro Maid is indexed under its
@@ -545,50 +542,52 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
                     &release,series,year,required_season)?;
             }
         }
-        if !rows.is_empty(){stage="anime_alias";}
     }
     if rows.is_empty(){return Ok(vec![]);}
     // Keep all plausible identities until ranked. Unrelated word fragments
     // are rejected before season eligibility and expensive ID lookups.
+    // Score every (IMDb title alias, source) independently and use its
+    // strongest verifiable alignment. The discovery order is irrelevant.
+    // Repeat appearances via exact/forward/reverse retrieval do not change
+    // the winner, and aliases of the same IMDb work are compared as one work.
     let mut groups:BTreeMap<String,Vec<(Aka,TitleFit)>>=BTreeMap::new();
     for row in rows{
         let alias_key=(row.imdb_id.clone(),row.title.clone());
-        let fit=if extended_title_matches.contains(&alias_key){
-            title_in_original_release_fit(&semantic_full_release,&semantic_release,
-                semantic_content.len(),&row)
-                .unwrap_or(TitleFit::fallback(row.clean.len()))
-        }else if suffix_title_matches.contains(&alias_key){
-            title_suffix_in_original_release_fit(&semantic_content,&row)
-                .unwrap_or(TitleFit::fallback(row.clean.len()))
-        }else if imdb_title_suffix_matches.contains(&alias_key){
-            release_is_imdb_title_suffix_fit(&semantic_content,&row)
-                .unwrap_or(TitleFit::fallback(row.clean.len()))
-        }else if stage=="country_exact"{TitleFit::exact()}
-            else if stage=="aligned"{
-                title_fit(&key,&words,&release_words,&row,&semantic_release)
-                    .unwrap_or(TitleFit::fallback(row.clean.len()))
-            }else{TitleFit::fallback(row.clean.len())};
-        // Previously discovered prefix rows and newly recovered suffixes
-        // must use the SAME title-length scale. Otherwise a same-length
-        // suffix gets an artificial advantage from tier 0 over an ordinary
-        // lexical prefix. Keep the original prefix preference at equal fit.
-        let mut fit=fit;
-        if !suffix_title_matches.contains(&alias_key)
-            && !imdb_title_suffix_matches.contains(&alias_key)
-            && !extended_title_matches.contains(&alias_key) {
-            if let Some(source_prefix)=title_prefix_in_original_release_fit(
-                &semantic_content,&row){
-                fit=source_prefix;
-            }
+        let mut evidence=Vec::new();
+        if ordinary_title_matches.contains(&alias_key){
+            if let Some(fit)=title_fit(&key,&words,&release_words,
+                &row,&semantic_release){evidence.push(fit);}
         }
-        // Full parsed names occupying the entire content span are exact,
-        // even when no additional release-prefix lookup was necessary.
-        if fit.tier==0 && semantic_words(&row.title)==semantic_content {
+        if country_title_matches.contains(&alias_key){
+            // Country-qualified aliases are exact lexical evidence from
+            // the imported IMDb aliases, not an automatic identity winner.
+            evidence.push(TitleFit::exact());
+        }
+        if extended_title_matches.contains(&alias_key){
+            if let Some(fit)=title_in_original_release_fit(
+                &semantic_full_release,&semantic_release,
+                semantic_content.len(),&row){evidence.push(fit);}
+        }
+        if suffix_title_matches.contains(&alias_key){
+            if let Some(fit)=title_suffix_in_original_release_fit(
+                &semantic_content,&row){evidence.push(fit);}
+        }
+        if imdb_title_suffix_matches.contains(&alias_key){
+            if let Some(fit)=release_is_imdb_title_suffix_fit(
+                &semantic_content,&row){evidence.push(fit);}
+        }
+        if let Some(fit)=title_prefix_in_original_release_fit(
+            &semantic_content,&row){evidence.push(fit);}
+        // Score the full source title consistently, including exact-match
+        // rows that are also returned by a different discovery direction.
+        if semantic_words(&row.title)==semantic_content{
             let matched=semantic_content.iter()
                 .map(|word|word.chars().count()).sum::<usize>();
-            fit.longest_first=-(matched as i64);
-            fit.edge=0;
+            evidence.push(TitleFit{tier:0,longest_first:-(matched as i64),
+                unmatched_bp:0,edge:0});
         }
+        let fit=evidence.into_iter().min().unwrap_or(TitleFit::fallback(
+            row.clean.len()));
         groups.entry(row.imdb_id.clone()).or_default().push((row,fit));
     }
     // A shorter AKA can otherwise tie a complete title, e.g. "Bleach" for
