@@ -2746,6 +2746,11 @@ mod tests {
             INSERT INTO imdb_ratings VALUES
                 ('ttbad01',4000),('ttbad02',3000),('ttbad03',2000);")
             .unwrap();
+        let bad_candidates=imdb_matcher::search(
+            &db,"Bad Show",None,true,1,"Bad.Show.S01E20.mkv",true,20)
+            .unwrap();
+        assert!(bad_candidates.len()>2,
+            "regression must exercise the multi-candidate episode gate");
         let parsed=matchlab_parser::parse_title(
             "Monster/Bad.Show.S01E20.mkv",false).unwrap();
         let fallback=bottom_up_imdb_path_match(
