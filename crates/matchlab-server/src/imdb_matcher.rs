@@ -1084,6 +1084,115 @@ mod tests{
     }
 
     #[test]
+    fn source_suffix_words_use_same_partial_title_coverage_as_source_prefix(){
+        let candidate=Aka{
+            imdb_id:"ttlong".into(),title:"Monster: The Ed Gein Story".into(),
+            clean:"monstertheedgeinstory".into(),year:2025,
+            category:"series".into(),region:Some("US".into()),
+            ordering:0,media_type:"tvSeries".into()
+        };
+        for (raw,complete) in [
+            ("Scene.Monster.the.Ed.Gein.S01E01",false),
+            ("Scene.Monster.the.Ed.Gein.2025.S01E01",false),
+            ("Scene.Monster.the.Ed.Gein.1080p.WEB-DL",false),
+            ("Scene.Monster.the.Ed.Gein.Story.S01E01",true),
+        ]{
+            let content=semantic_release_content_words(raw);
+            let fit=title_suffix_in_original_release_fit(&content,&candidate)
+                .unwrap_or_else(||panic!("expected valid suffix in {raw}"));
+            assert_eq!(fit.tier,0);
+            assert_eq!(fit.edge,if complete{0}else{1});
+            let keys=longer_release_title_suffix_keys(raw);
+            assert!(keys.iter().any(|key|key=="monsterthe"),"{keys:?}");
+            assert!(has_longer_title_evidence_in_release(
+                "Scene Monster the",raw,&candidate.title));
+        }
+        for raw in [
+            "Scene.Monster.the.Ed.Gein.Storyline.S01E01",
+            "Scene.Monster.the.Ed.Gein.Story.Extra.S01E01",
+            "Scene.Monster.the.Jeffrey.Dahmer.Story.S01E01",
+            "Scene.Monster.the.Ed.Gein.OtherTitle.S01E01",
+        ] {
+            assert!(title_suffix_in_original_release_fit(
+                &semantic_release_content_words(raw),&candidate).is_none(),
+                "unmatched source words may not be ignored: {raw}");
+        }
+        let too_long=Aka{title:"Monster The Ed Gein Story Of Many Entirely Different Episodes".into(),
+            ..candidate.clone()};
+        assert!(title_suffix_in_original_release_fit(
+            &semantic_release_content_words("Scene.Monster.the.Ed.Gein.S01E01"),
+            &too_long).is_none(),
+            "require >=50% coverage and <=16 unmatched characters");
+        assert!(longer_release_title_suffix_keys("Scene.Monster.S01E01").is_empty(),
+            "an isolated generic title cannot justify new suffix discovery");
+        assert!(!has_longer_title_evidence_in_release(
+            "Scene Monster","Scene.Monster.S01E01",&candidate.title));
+    }
+
+    #[test]
+    fn longest_suffix_in_original_release_beats_shorter_title_and_anime(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO titles VALUES
+                ('tt2004','Monster','monster',2004,'series','JP',1,0,'tvSeries'),
+                ('tt2025','Monster: The Ed Gein Story','monstertheedgeinstory',
+                    2025,'series','US',0,7,'tvSeries'),
+                ('ttshort','Monster The Ed Gein','monstertheedgein',
+                    2025,'series','US',0,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt2004',1),('tt2025',3),('ttshort',3);
+            INSERT INTO imdb_ratings VALUES('tt2004',500000),('tt2025',10),
+                ('ttshort',1);")
+            .unwrap();
+
+        for raw in [
+            "Scene.Monster.the.Ed.Gein.Story.S01E01",
+            "Scene.Monster.the.Ed.Gein.Story.2025.S01E01",
+        ]{
+            let hits=search(&db,"Scene Monster the",None,true,1,raw,true,5).unwrap();
+            assert_eq!(hits[0].imdb_id,"tt2025",
+                "longest complete title in source suffix: {raw}: {hits:?}");
+        }
+        for raw in [
+            "Scene.Monster.the.Ed.Gein.S01E01",
+            "Scene.Monster.the.Ed.Gein.2025.S01E01",
+            "Scene.Monster.the.Ed.Gein.1080p.WEB-DL",
+        ]{
+            let hits=search(&db,"Scene Monster the",None,true,1,raw,true,5).unwrap();
+            assert_eq!(hits[0].imdb_id,"ttshort",
+                "equal matched length: full title before partial: {raw}: {hits:?}");
+        }
+        // The original long candidate still matches when the full shorter
+        // title isn't indexed, even when a more popular Monster exists.
+        db.execute("DELETE FROM titles WHERE imdb_id='ttshort'",[]).unwrap();
+        let hits=search(&db,"Scene Monster the",None,true,1,
+            "Scene.Monster.the.Ed.Gein.S01E01",true,5).unwrap();
+        assert_eq!(hits[0].imdb_id,"tt2025");
+
+        // An exact full title is stronger than a shorter exact suffix:
+        // rank by the length actually matched, not whether the word span
+        // was recovered using the new suffix path.
+        db.execute_batch("INSERT INTO titles VALUES
+            ('ttoffice','The Office US','theofficeus',2005,'series','US',1,0,'tvSeries'),
+            ('ttshortoffice','Office US','officeus',2010,'series','US',0,0,'tvSeries');
+            INSERT INTO seasons VALUES('ttoffice',9),('ttshortoffice',9);
+            INSERT INTO imdb_ratings VALUES('ttoffice',1),('ttshortoffice',900000);")
+            .unwrap();
+        let office=search(&db,"The Office US",None,true,1,
+            "The.Office.US.S01E01",true,5).unwrap();
+        assert_eq!(office[0].imdb_id,"ttoffice",
+            "suffix discovery must not hijack a longer exact original title");
+        let not_a_word=search(&db,"Scene Monster the",None,true,1,
+            "Scene.Monster.the.Ed.Gein.Storyline.S01E01",true,5).unwrap();
+        assert!(!not_a_word.iter().any(|m|m.imdb_id=="tt2025"),
+            "a source word 'Storyline' cannot match a title word 'Story'");
+    }
+
+    #[test]
     fn monster_dahmer_release_never_becomes_monster_2004_anime(){
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
