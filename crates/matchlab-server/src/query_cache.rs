@@ -1,6 +1,7 @@
-//! Bounded, single-flight cache for immutable metadata search results.
-//! This intentionally caches lookup *candidates*, not the final per-file SID
-//! or ASID: season/episode coordinates must always be resolved per request.
+//! Bounded, single-flight cache for generation-scoped query results.
+//! Reuse immutable candidate sets between files; when holding a finished
+//! diagnostic, the caller MUST key it by the complete original path,
+//! per-request overrides and current parser/metadata generation.
 use std::{
     collections::HashMap,
     sync::{Arc,Mutex},
