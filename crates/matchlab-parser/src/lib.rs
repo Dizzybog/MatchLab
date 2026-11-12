@@ -3128,9 +3128,6 @@ pub fn parse_title(
         }else{
             parse_path_component(component,translate_languages)?
         };
-        if components.len()>1 {
-            path_layers.push(json!({"raw":component,"parsed":layer.clone()}));
-        }
         if let Some(title)=layer.get("title").and_then(Value::as_str){
             let title=title.trim();
             if !is_parent{
@@ -3153,6 +3150,11 @@ pub fn parse_title(
         }
         if !bare_number_directory {
             merge_path_metadata(&mut merged,&layer);
+        }
+        // Retain the independently parsed layer without cloning its nested
+        // JSON values. All consumers above have finished borrowing it.
+        if components.len()>1 {
+            path_layers.push(json!({"raw":component,"parsed":layer}));
         }
     }
     let title=if !leaf_title.is_empty()&&!leaf_title_generic{
