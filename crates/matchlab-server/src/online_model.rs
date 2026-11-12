@@ -96,10 +96,15 @@ impl TitleFeatureContext{
         Self{lower,contexts,holdout}
     }
     fn features(&self,field:&str,signal:&str)->Vec<usize>{
+        let mut features=Vec::with_capacity(110);
+        self.features_into(field,signal,&mut features);
+        features
+    }
+    fn features_into(&self,field:&str,signal:&str,features:&mut Vec<usize>){
         // Preserve the exact legacy FNV-1a feature IDs and sorted-unique order
         // so pretrained FTRL state and floating-point update order are stable.
         // A short Vec avoids a balanced-tree allocation for each feature.
-        let mut features=Vec::with_capacity(110);
+        features.clear();
         let field_bytes=field.as_bytes();
         let signal_bytes=signal.as_bytes();
         features.push(hash("bias"));
@@ -134,7 +139,6 @@ impl TitleFeatureContext{
         }
         features.sort_unstable();
         features.dedup();
-        features
     }
 }
 #[cfg(test)]
@@ -176,6 +180,13 @@ impl OnlineModel{
         context:&TitleFeatureContext)->Option<f32>{
         if self.positives<16||self.negatives<16{return None;}
         Some(self.raw_score(&context.features(field,signal)))
+    }
+    /// Reuse hashed feature memory across independent candidate fields.
+    pub fn score_prepared_reusing(&self,field:&str,signal:&str,
+        context:&TitleFeatureContext,scratch:&mut Vec<usize>)->Option<f32>{
+        if self.positives<16||self.negatives<16{return None;}
+        context.features_into(field,signal,scratch);
+        Some(self.raw_score(scratch))
     }
     #[cfg(test)]
     pub fn trained(&self)->(i64,i64){(self.positives,self.negatives)}
@@ -312,6 +323,14 @@ impl OnlineModel{
     pub fn observe_canonical_fields(
         &mut self,db:&Connection,title:&str,canonical:&Value
     )->Result<usize,String>{
+        let context=TitleFeatureContext::new(title);
+        self.observe_canonical_fields_with_context(db,title,canonical,&context)
+    }
+    /// Reuse one immutable per-release title context across ML learners.
+    pub fn observe_canonical_fields_with_context(
+        &mut self,db:&Connection,title:&str,canonical:&Value,
+        context:&TitleFeatureContext
+    )->Result<usize,String>{
         let Some(fields)=canonical.as_object()else{return Ok(0);};
         let mut examples=Vec::new();
         for (field,value) in fields {
@@ -358,10 +377,9 @@ impl OnlineModel{
         if examples.is_empty(){return Ok(0);}
         let rotation=hash(title)%examples.len();
         examples.rotate_left(rotation);
-        let context=TitleFeatureContext::new(title);
         let mut seen=0;
         for (field,signal) in examples.into_iter().take(64){
-            if self.observe_prepared(db,title,field,&signal,&context)?{seen+=1;}
+            if self.observe_prepared(db,title,field,&signal,context)?{seen+=1;}
         }
         Ok(seen)
     }
@@ -370,6 +388,13 @@ impl OnlineModel{
         if self.positives>=MAX_EXAMPLES||title.len()>240
             ||field.len()>40||signal.len()>32{return Ok(false);}
         self.observe_prepared(db,title,field,signal,&TitleFeatureContext::new(title))
+    }
+    /// Same deduplication, FTRL updates and holdout partition as observe().
+    pub fn observe_with_context(&mut self,db:&Connection,title:&str,field:&str,
+        signal:&str,context:&TitleFeatureContext)->Result<bool,String>{
+        if self.positives>=MAX_EXAMPLES||title.len()>240
+            ||field.len()>40||signal.len()>32{return Ok(false);}
+        self.observe_prepared(db,title,field,signal,context)
     }
     fn observe_prepared(&mut self,db:&Connection,title:&str,field:&str,
         signal:&str,context:&TitleFeatureContext)->Result<bool,String>{
@@ -397,24 +422,28 @@ impl OnlineModel{
                     .map_err(|e|e.to_string())?;
             }
         }
-        let real=context.features(field,signal);
+        // Generate the counterfactual only after positive scoring/update.
+        // Both feature sets are pure, and the FTRL update order is identical.
+        let mut features=context.features(field,signal);
         let false_field=if field=="codec"{"resolution"}else{"codec"};
-        let negative=context.features(false_field,signal);
         // A deterministic title-group holdout prevents ordinary examples
         // for the same recognized work leaking between train and review.
         // This is an advisory pairwise check, NOT calibrated production
         // precision or independently verified IMDb matching accuracy.
         if context.holdout{
             if self.positives>=16&&self.negatives>=16{
-                let passed=self.raw_score(&real)>self.raw_score(&negative);
+                let positive_score=self.raw_score(&features);
+                context.features_into(false_field,signal,&mut features);
+                let passed=positive_score>self.raw_score(&features);
                 self.holdout+=1;
                 if passed{self.correct+=1;}
                 self.recent_window=(self.recent_window<<1)|u32::from(passed);
                 self.recent_count=self.recent_count.saturating_add(1).min(32);
             }
         }else{
-            self.learn(&real,true);
-            self.learn(&negative,false);
+            self.learn(&features,true);
+            context.features_into(false_field,signal,&mut features);
+            self.learn(&features,false);
         }
         Ok(true)
     }
@@ -422,6 +451,63 @@ impl OnlineModel{
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn reusable_feature_buffer_preserves_hashed_indices_and_scores(){
+        let mut scratch=Vec::new();
+        let mut model=OnlineModel::new();
+        for i in 0..48 {
+            let title=format!("Learning{i}.2160p.WEB-DL.x265");
+            model.learn(&features("resolution","2160p",&title),true);
+            model.learn(&features("codec","2160p",&title),false);
+        }
+        for title in ["Film.2160p.x265.WEB-DL","Série.S02E07.日本語.AAC",
+            "JoJo's Bizarre Adventure Stone Ocean 27"] {
+            let ctx=TitleFeatureContext::new(title);
+            for (field,signal) in [("codec","x265"),("resolution","2160p"),
+                ("group","part_2"),("audio","日本語"),("year","four_digit_year")] {
+                ctx.features_into(field,signal,&mut scratch);
+                assert_eq!(scratch,ctx.features(field,signal));
+                let owned=model.score_prepared(field,signal,&ctx);
+                let reused=model.score_prepared_reusing(field,signal,&ctx,&mut scratch);
+                assert_eq!(owned,reused);
+            }
+        }
+    }
+
+    #[test]
+    fn shared_release_context_preserves_weights_holdout_and_dedup(){
+        let old_db=Connection::open_in_memory().unwrap();
+        let new_db=Connection::open_in_memory().unwrap();
+        let mut old=OnlineModel::load(&old_db).unwrap();
+        let mut new=OnlineModel::load(&new_db).unwrap();
+        let fields=json!({"title":"Film","year":2024,"seasons":[2],
+            "episodes":[7],"resolution":"2160p","codec":"x265",
+            "quality":"WEB-DL","audio":"AAC","network":"Example"});
+        for i in 0..90 {
+            let title=format!("Film{i}.2024.S02E07.2160p.WEB-DL.x265");
+            let ctx=TitleFeatureContext::new(&title);
+            assert_eq!(
+                old.observe_canonical_fields(&old_db,&title,&fields).unwrap(),
+                new.observe_canonical_fields_with_context(&new_db,&title,&fields,&ctx).unwrap()
+            );
+            for (field,signal) in [("codec","x265"),("audio","aac"),("group","Team")] {
+                assert_eq!(
+                    old.observe(&old_db,&title,field,signal).unwrap(),
+                    new.observe_with_context(&new_db,&title,field,signal,&ctx).unwrap()
+                );
+            }
+        }
+        assert_eq!(old.z,new.z);
+        assert_eq!(old.n,new.n);
+        assert_eq!(old.positives,new.positives);
+        assert_eq!(old.negatives,new.negatives);
+        assert_eq!(old.holdout,new.holdout);
+        assert_eq!(old.correct,new.correct);
+        let count=|db:&Connection|db.query_row("SELECT COUNT(*) FROM online_model_seen",[],
+            |r|r.get::<_,i64>(0)).unwrap();
+        assert_eq!(count(&old_db),count(&new_db));
+    }
+
     #[test]
     fn prepared_features_preserve_original_ftrl_indices_and_scoring(){
         use std::collections::BTreeSet;
