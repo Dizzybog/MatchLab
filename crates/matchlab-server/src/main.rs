@@ -2682,6 +2682,58 @@ mod tests {
     }
 
     #[test]
+    fn hierarchy_matches_each_independent_level_from_leaf_then_parents(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('tt2004','Monster','monster',2004,'series','JP',1,0,'tvSeries'),
+                ('ttgein','Monster: The Ed Gein Story','monstertheedgeinstory',
+                    2025,'series','US',1,0,'tvSeries'),
+                ('ttshort','The Ed','theed',2025,'series','US',0,11,'tvSeries');
+            INSERT INTO seasons VALUES('tt2004',1),('ttgein',3),('ttshort',1);
+            INSERT INTO imdb_ratings VALUES('tt2004',300000),('ttgein',3),
+                ('ttshort',100000);")
+            .unwrap();
+        for path in [
+            "monster/the.ed.gein.story/S01/E02.mkv",
+            "monster/the.ed.gein.story/S01E02.mkv",
+            "monster/the.ed.gein.story/Season.1/E02.mkv",
+            "monster\\the.ed.gein.story\\S01\\E02.mkv",
+        ]{
+            let parsed=matchlab_parser::parse_title(path,false).unwrap();
+            let result=bottom_up_imdb_path_match(&db,&parsed,None,true,1,true)
+                .unwrap().expect("a named directory must resolve independently");
+            assert_eq!(result.0.to_ascii_lowercase(),"the ed gein story",
+                "wrong component selected: {path}: {:?}",parsed["path_layers"]);
+            assert_eq!(result.1[0].imdb_id,"ttgein",
+                "long complete-title suffix wins from nearest named directory");
+            assert_eq!(parsed["seasons"],json!([1]),"{path}");
+            assert_eq!(parsed["episodes"],json!([2]),"{path}");
+        }
+        // The closest meaningful title level wins. Directory prefix
+        // "Monster" must not be concatenated into a synthetic alias.
+        let parsed=matchlab_parser::parse_title(
+            "Monster/Not.A.Real.Show/S01/E02.mkv",false).unwrap();
+        let from_parent=bottom_up_imdb_path_match(&db,&parsed,None,true,1,true)
+            .unwrap().expect("climb to a matching parent");
+        assert_eq!(from_parent.0,"Monster");
+        assert_eq!(from_parent.1[0].imdb_id,"tt2004");
+
+        // A file leaf with its own recognized show name wins before
+        // the parent folder, without mixing the levels.
+        let parsed=matchlab_parser::parse_title(
+            "Monster/The.Ed.Gein.Story.S01E02.mkv",false).unwrap();
+        let leaf=bottom_up_imdb_path_match(&db,&parsed,None,true,1,true)
+            .unwrap().expect("leaf named release must win");
+        assert_eq!(leaf.1[0].imdb_id,"ttgein");
+    }
+
+    #[test]
     fn monster_ed_gein_full_torrent_title_beats_older_anime_episode_mapping(){
         let stamp=std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
