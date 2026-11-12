@@ -449,7 +449,7 @@ mod tests{
         let no_old=candidate("ttno",2018,"NO");
         // An explicit release year always beats popularity and region.
         assert!(rank(&no_exact,Some(2020),true,None,1)
-            <rank(&us_old,Some(2020),true,1_000_000));
+            <rank(&us_old,Some(2020),true,None,1_000_000));
         // No country qualifier: votes are ahead of the region preference.
         assert!(rank(&no_old,Some(2018),true,None,1_000_000)
             <rank(&us_old,Some(2018),true,None,1));
