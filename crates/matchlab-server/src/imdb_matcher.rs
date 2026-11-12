@@ -156,39 +156,64 @@ fn title_fit(key:&str,words:&[String],release_words:&[String],row:&Aka,
         longest_first:-(short as i64)})
 }
 
-/// Indexable complete-word prefixes of the original release which extend
-/// beyond the parser's title. The parser may stop at a false metadata marker
-/// (e.g. "Ed" in "Monster the Ed Gein Story"). Build only *longer* titles
-/// and stop at ordinary release coordinates/technical tags. A single
-/// Tantivy union lookup resolves these prefixes, without scanning SQLite.
+/// Parser-independent title boundary shared by prefix and suffix
+/// recovery. Technical metadata, an explicit production year or TV
+/// coordinates delimit the meaningful words in the original release.
+fn release_metadata_boundary(word:&str)->bool{
+    let season=word.strip_prefix('s').is_some_and(|suffix|{
+        let (s,e)=suffix.split_once('e').unwrap_or((suffix,""));
+        !s.is_empty()&&s.len()<=3&&s.bytes().all(|b|b.is_ascii_digit())
+            &&(e.is_empty()||e.bytes().all(|b|b.is_ascii_digit()))
+    });
+    let episode=word.strip_prefix("ep").or_else(||word.strip_prefix('e'))
+        .is_some_and(|digits|!digits.is_empty()&&digits.len()<=5
+            &&digits.bytes().all(|b|b.is_ascii_digit()));
+    let quality=matches!(word,"web"|"webdl"|"webrip"|"bluray"|"brrip"
+        |"dvdrip"|"hdtv"|"x264"|"x265"|"h264"|"h265"|"hevc"
+        |"av1"|"aac"|"ac3"|"dts"|"mkv"|"mp4"|"avi"|"proper"
+        |"repack"|"hdr"|"remux"|"dubbed"|"subbed"|"multi"
+        |"720p"|"1080p"|"2160p"|"480p"|"4k");
+    let production_year=word.len()==4
+        && word.bytes().all(|b|b.is_ascii_digit())
+        && word.parse::<i32>().is_ok_and(|n|(1900..=2099).contains(&n));
+    season||episode||quality||production_year
+}
+fn release_content_words(release_title:&str)->Vec<String>{
+    crate::title_normalization::clean_words(release_title).into_iter()
+        .take(32).take_while(|word|!release_metadata_boundary(word))
+        .collect()
+}
+fn semantic_release_content_words(release_title:&str)->Vec<String>{
+    semantic_words(release_title).into_iter()
+        .take(32).take_while(|word|!release_metadata_boundary(word))
+        .collect()
+}
+/// Recover longer complete/partial IMDb titles beginning at the source
+/// title's first word, even when the parser stopped early.
 fn longer_release_title_prefixes(parsed_title:&str,release_title:&str)->Vec<String>{
     let parsed=crate::title_normalization::clean_words(parsed_title);
-    let release=crate::title_normalization::clean_words(release_title);
+    let release=release_content_words(release_title);
     if parsed.is_empty()||!release.starts_with(&parsed){return Vec::new();}
     let mut joined=parsed.concat();
     let mut keys=Vec::new();
-    for word in release.iter().skip(parsed.len()).take(32) {
-        // Coordinates and release tags mark the end of the content title.
-        let lower=word.as_str();
-        let season=lower.strip_prefix('s').is_some_and(|suffix|{
-            let (s,e)=suffix.split_once('e').unwrap_or((suffix,""));
-            !s.is_empty()&&s.len()<=3&&s.bytes().all(|b|b.is_ascii_digit())
-                &&(e.is_empty()||e.bytes().all(|b|b.is_ascii_digit()))
-        });
-        let episode=lower.strip_prefix("ep").or_else(||lower.strip_prefix('e'))
-            .is_some_and(|digits|!digits.is_empty()&&digits.len()<=5
-                &&digits.bytes().all(|b|b.is_ascii_digit()));
-        let quality=matches!(lower,"web"|"webdl"|"webrip"|"bluray"|"brrip"
-            |"dvdrip"|"hdtv"|"x264"|"x265"|"h264"|"h265"|"hevc"
-            |"av1"|"aac"|"ac3"|"dts"|"mkv"|"mp4"|"avi"|"proper"
-            |"repack"|"hdr"|"remux"|"dubbed"|"subbed"|"multi"
-            |"720p"|"1080p"|"2160p"|"480p"|"4k");
-        let production_year=lower.len()==4
-            && lower.bytes().all(|b|b.is_ascii_digit())
-            && lower.parse::<i32>().is_ok_and(|n|(1900..=2099).contains(&n));
-        if season||episode||quality||production_year{break;}
+    for word in release.iter().skip(parsed.len()){
         joined.push_str(word);
         keys.push(joined.clone());
+    }
+    keys
+}
+/// Candidate IMDb titles whose START is at a later complete word boundary
+/// and whose matching span reaches the END of the source's content title.
+/// Requiring two source words avoids treating an isolated generic tag/word
+/// as sufficient suffix evidence. At most 14 trailing words are searched.
+fn longer_release_title_suffix_keys(release_title:&str)->Vec<String>{
+    let content=release_content_words(release_title);
+    if content.len()<3{return Vec::new();}
+    let mut keys=Vec::new();
+    let start=content.len().saturating_sub(14).max(1);
+    for idx in start..content.len()-1{
+        let key=format!("{}{}",content[idx],content[idx+1]);
+        if key.len()>=4 && !keys.contains(&key){keys.push(key);}
     }
     keys
 }
@@ -222,6 +247,36 @@ fn title_in_original_release_fit(
         edge:if full{0}else{1}})
 }
 
+/// Symmetric raw-release suffix evidence: a complete IMDb title must equal
+/// the entire final title span, or the entire span must be a whole-word
+/// prefix of the IMDb title (bounded partial match). Stray words between
+/// the title and the metadata boundary invalidate the candidate.
+fn title_suffix_in_original_release_fit(
+    content:&[String],row:&Aka,
+)->Option<TitleFit>{
+    let title=semantic_words(&row.title);
+    if content.len()<3||title.len()<2{return None;}
+    let mut best=None;
+    let start=content.len().saturating_sub(14).max(1);
+    for idx in start..content.len()-1{
+        let suffix=&content[idx..];
+        if !title.starts_with(suffix){continue;}
+        let matched=suffix.iter().map(|w|w.chars().count()).sum::<usize>();
+        let total=title.iter().map(|w|w.chars().count()).sum::<usize>();
+        if total==0{continue;}
+        let unmatched=total-matched;
+        let full=unmatched==0;
+        if !full && (matched<4||matched.saturating_mul(2)<total||unmatched>16){
+            continue;
+        }
+        let fit=TitleFit{tier:0,longest_first:-(matched as i64),
+            unmatched_bp:((unmatched as u64*10_000)/total as u64) as u32,
+            edge:if full{0}else{1}};
+        if best.is_none_or(|old|fit<old){best=Some(fit);}
+    }
+    best
+}
+
 /// Stronger original-release evidence suppresses an unrelated shorter anime
 /// identity even if that anime has a mapped episode. This covers complete
 /// full-title matches AND validated partial prefix matches.
@@ -229,16 +284,17 @@ pub fn has_longer_title_evidence_in_release(
     parsed_title:&str,raw_release:&str,matched_title:&str,
 )->bool{
     let keys=longer_release_title_prefixes(parsed_title,raw_release);
-    if keys.is_empty(){return false;}
     let release=semantic_words(raw_release);
     let parsed=semantic_words(parsed_title);
+    let content=semantic_release_content_words(raw_release);
     let candidate=Aka{
         imdb_id:String::new(),title:matched_title.into(),clean:String::new(),
         year:0,category:String::new(),region:None,ordering:0,
         media_type:String::new(),
     };
-    title_in_original_release_fit(&release,&parsed,parsed.len()+keys.len(),&candidate)
-        .is_some()
+    (!keys.is_empty() && title_in_original_release_fit(
+        &release,&parsed,content.len(),&candidate).is_some())
+        ||title_suffix_in_original_release_fit(&content,&candidate).is_some()
 }
 
 /// Title relevance is ranked by the caller. After that, use release-year
@@ -277,6 +333,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     // may contain more of the title than the parser was able to preserve.
     let semantic_release=semantic_words(title);
     let semantic_full_release=semantic_words(release_title);
+    let semantic_content=semantic_release_content_words(release_title);
     // Exact country-qualified aliases precede generic prefix matching.
     if series {
         if let Some((_,aliases))=&country_qualified {
@@ -319,7 +376,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     let extended_keys=longer_release_title_prefixes(title,release_title);
     let mut extended_title_matches=HashSet::new();
     if !extended_keys.is_empty(){
-        let max_title_words=semantic_release.len()+extended_keys.len();
+        let max_title_words=semantic_content.len();
         let found=crate::tantivy_search::title_aliases_at_release_prefixes(
             db,&extended_keys).map_err(index_error)?;
         let matching=found.into_iter().map(Aka::from)
@@ -331,6 +388,25 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
         let accepted=filter_eligible(db,matching,series,year,required_season)?;
         for candidate in accepted {
             extended_title_matches.insert((candidate.imdb_id.clone(),
+                candidate.title.clone()));
+            rows.push(candidate);
+        }
+    }
+    // The same recovery strategy also applies to suffixes of the source's
+    // content title, not only to the parser's already-truncated title.
+    // Never search in technical metadata, require complete word edges, and
+    // reject stray source-title words that are not covered by the candidate.
+    let suffix_keys=longer_release_title_suffix_keys(release_title);
+    let mut suffix_title_matches=HashSet::new();
+    if !suffix_keys.is_empty(){
+        let found=crate::tantivy_search::title_aliases_at_release_suffixes(
+            db,&suffix_keys).map_err(index_error)?;
+        let matching=found.into_iter().map(Aka::from)
+            .filter(|row|title_suffix_in_original_release_fit(
+                &semantic_content,row).is_some()).collect::<Vec<_>>();
+        let accepted=filter_eligible(db,matching,series,year,required_season)?;
+        for candidate in accepted {
+            suffix_title_matches.insert((candidate.imdb_id.clone(),
                 candidate.title.clone()));
             rows.push(candidate);
         }
@@ -387,10 +463,13 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     // are rejected before season eligibility and expensive ID lookups.
     let mut groups:BTreeMap<String,Vec<(Aka,TitleFit)>>=BTreeMap::new();
     for row in rows{
-        let fit=if extended_title_matches.contains(
-            &(row.imdb_id.clone(),row.title.clone())){
+        let alias_key=(row.imdb_id.clone(),row.title.clone());
+        let fit=if extended_title_matches.contains(&alias_key){
             title_in_original_release_fit(&semantic_full_release,&semantic_release,
-                semantic_release.len()+extended_keys.len(),&row)
+                semantic_content.len(),&row)
+                .unwrap_or(TitleFit::fallback(row.clean.len()))
+        }else if suffix_title_matches.contains(&alias_key){
+            title_suffix_in_original_release_fit(&semantic_content,&row)
                 .unwrap_or(TitleFit::fallback(row.clean.len()))
         }else if stage=="country_exact"{TitleFit::exact()}
             else if stage=="aligned"{
