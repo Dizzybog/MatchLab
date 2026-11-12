@@ -2656,8 +2656,12 @@ mod tests {
             .unwrap();
         tantivy_search::warmup(&db).unwrap();
         drop(db);
-        for title in ["Monster.the.ed.gein.story.s1.e1",
-            "Monster.The.Ed.Gein.Story.S01E01.1080p.WEB-DL"] {
+        for title in [
+            "Monster.the.ed.gein.story.s1.e1",
+            "Monster.The.Ed.Gein.Story.S01E01.1080p.WEB-DL",
+            "Monster.the.ed.gein.s1.e1",
+            "Monster.The.Ed.Gein.S01E01.1080p.WEB-DL",
+        ] {
             let result=diagnose(&path,&MatchRequest{
                 title:title.into(),year:None,series:None}).unwrap();
             let selected=result.selected.expect("full Ed Gein title match");
