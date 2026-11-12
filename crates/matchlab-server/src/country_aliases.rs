@@ -1,7 +1,7 @@
 //! MatchLab country-qualified TV-series alias expansion.
 //! Only an explicit trailing country marker is expanded; language tags are not countries.
 use crate::imdb_matcher::clean_title;
-use std::collections::HashSet;
+use std::{collections::{HashMap,HashSet},sync::OnceLock};
 
 const COUNTRIES:&[(&str,&[&str])]=&[
 ("US",&["us","usa","united states","america"]),
@@ -41,7 +41,7 @@ fn is_stop(token:&str)->bool{
 }
 /// A country marker explicitly present at the end of the release title,
 /// before technical tags. This is independent of the host's locale.
-pub fn qualified(raw:&str)->Option<(&'static str,Vec<String>)>{
+pub fn qualified_with_base(raw:&str)->Option<(&'static str,String,Vec<String>)>{
     let normalized=raw.replace(['.','_','-']," ");
     let words:Vec<_>=normalized.split_whitespace().collect();
     let stop=words.iter().position(|w|is_stop(w)).unwrap_or(words.len());
@@ -63,10 +63,34 @@ pub fn qualified(raw:&str)->Option<(&'static str,Vec<String>)>{
                 let key=clean_title(&format!("{prefix} {variant}"));
                 if !key.is_empty()&&seen.insert(key.clone()){out.push(key);}
             }
-            return Some((*code,out));
+            return Some((*code,clean_title(prefix),out));
         }
     }
     None
+}
+/// An independently verified regional-series identity that can disambiguate
+/// two *different* IMDb series with the same unqualified display title.
+/// IMDb title.akas 'region' describes localized display titles, not origin.
+pub fn regional_series_id(base_title:&str,country:&str)->Option<&'static str>{
+    static REGISTRY:OnceLock<HashMap<(&'static str,&'static str),&'static str>>
+        =OnceLock::new();
+    REGISTRY.get_or_init(||{
+        include_str!("../data/regional_series.tsv").lines()
+            .filter(|line|!line.is_empty()&&!line.starts_with('#'))
+            .filter_map(|line|{
+                let mut fields=line.split('\t');
+                let (Some(base),Some(code),Some(id),None)=
+                    (fields.next(),fields.next(),fields.next(),fields.next())
+                    else{return None};
+                (id.starts_with("tt")&&id[2..].bytes().all(|c|c.is_ascii_digit())
+                    &&!base.is_empty()&&!code.is_empty())
+                    .then_some(((base,code),id))
+            }).collect()
+    }).get(&(base_title,country)).copied()
+}
+#[cfg(test)]
+pub fn qualified(raw:&str)->Option<(&'static str,Vec<String>)>{
+    qualified_with_base(raw).map(|(code,_,aliases)|(code,aliases))
 }
 #[cfg(test)]
 pub fn candidates(raw:&str)->Vec<String>{
@@ -77,6 +101,15 @@ mod tests{
     use super::*;
     #[test]fn country_edition(){let c=candidates("The Voice US S03E01 1080p");
         assert!(c.contains(&"thevoiceusa".to_string()));assert!(c.contains(&"thevoiceunitedstates".to_string()));}
+    #[test]fn curated_regional_series_id_requires_exact_base_and_country(){
+        let (country,base,_)=qualified_with_base("Ex.on.the.Beach.US.S01").unwrap();
+        assert_eq!((country,base.as_str()),("US","exonthebeach"));
+        assert_eq!(regional_series_id(&base,country),Some("tt8285922"));
+        assert_eq!(regional_series_id("exonthebeach","UK"),Some("tt3522052"));
+        assert_eq!(regional_series_id("thevoice","US"),None);
+        assert_eq!(regional_series_id("exonthebeach","NO"),None);
+        assert_eq!(qualified_with_base("Ex.on.the.Beach.S01"),None);
+    }
     #[test]fn explicit_region_only_when_title_has_country_suffix(){
         assert_eq!(qualified("The Voice Norge S01E01").unwrap().0,"NO");
         assert_eq!(qualified("The Voice UK S01E01").unwrap().0,"UK");
