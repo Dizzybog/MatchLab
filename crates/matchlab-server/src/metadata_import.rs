@@ -108,7 +108,13 @@ fn import_imdb_with_index_plan(
                 let id=r.get(id).unwrap_or("");
                 let yr=r.get(year).unwrap_or("").parse::<i32>().unwrap_or(0);
                 let category=if t=="tvSeries"||t=="tvMiniSeries"{"series"}else{"movie"};
-                for (title,is_original) in [(r.get(primary).unwrap_or(""),0),(r.get(original).unwrap_or(""),1)]{
+                let primary_title=r.get(primary).unwrap_or("");
+                for (title,is_original) in [(primary_title,0),(r.get(original).unwrap_or(""),1)]{
+                    // IMDb frequently repeats the primary title verbatim as
+                    // originalTitle. The second row would be ignored by the
+                    // existing composite PK, but normalization and a SQLite
+                    // INSERT were still executed for every duplicate.
+                    if is_original==1 && title==primary_title {continue;}
                     let key=clean(title);
                     if !key.is_empty(){
                         insert.execute(params![id,title,key,yr,category,is_original,t])?;
