@@ -1,6 +1,6 @@
 //! MatchLab's persistent Tantivy search engine for IMDb and AniDB titles.
 //! Exact/prefix/suffix lookups share immutable metadata index generations.
-use std::{collections::{HashMap,BTreeSet},fs::File,path::{Path,PathBuf},sync::{Mutex,OnceLock,atomic::{AtomicU64,Ordering}},time::{Duration,SystemTime,UNIX_EPOCH}};
+use std::{collections::{HashMap,BTreeSet},fs::File,path::{Path,PathBuf},sync::{RwLock,OnceLock,atomic::{AtomicU64,Ordering}},time::{Duration,SystemTime,UNIX_EPOCH}};
 use crate::query_cache::QueryCache;
 use rusqlite::{Connection,OptionalExtension};
 use tantivy::{collector::DocSetCollector,doc,query::{RegexQuery,TermQuery,TermSetQuery},schema::{Schema,STORED,STRING,Value,IndexRecordOption},Index,IndexReader,ReloadPolicy,Term};
@@ -37,7 +37,9 @@ pub struct TitleAlias {
     pub ordering:i32,pub media_type:String,
 }
 
-static CACHE:OnceLock<Mutex<HashMap<String,SearchIndex>>>=OnceLock::new();
+// SearchIndex generations are immutable after publication. Concurrent
+// queries only need a shared read lock; index opening uses the write path.
+static CACHE:OnceLock<RwLock<HashMap<String,SearchIndex>>>=OnceLock::new();
 static MEMORY_INDEX_NONCE:AtomicU64=AtomicU64::new(0);
 
 // Reuse identical immutable Tantivy lookups across files belonging to the
@@ -363,29 +365,36 @@ fn open_search(db:&Connection)->Result<(SearchIndex,Option<PathBuf>),String>{
     let search=if let Some(ref directory)=memory_dir {
         build(db,directory)?
     }else{
-        let cache=CACHE.get_or_init(||Mutex::new(HashMap::new()));
-        let mut guard=cache.lock().map_err(|e|e.to_string())?;
-        // Keep several immutable generations cached simultaneously. In-flight
-        // requests may hold an older SQLite snapshot after a refresh; evicting
-        // every other generation on each query would cause cache thrashing.
-        if !guard.contains_key(&path) {
-            let location=index_dir(Path::new(source),&generation_id);
-            // Never index millions of titles on an HTTP request. The importer
-            // publishes completed generations before SQLite; startup warmup
-            // is responsible for recovering genuinely missing indices.
-            if !location.join(".matchlab-complete").is_file(){
-                return Err(format!("Tantivy generation not ready: {}",location.display()));
-            }
-            let opened=build(db,&location)?;
-            const MAX_GENERATIONS:usize=12;
-            if guard.len()>=MAX_GENERATIONS {
-                if let Some(victim)=guard.keys().find(|k|k.as_str()!=path).cloned() {
-                    guard.remove(&victim);
+        let cache=CACHE.get_or_init(||RwLock::new(HashMap::new()));
+        // No exclusive process-wide lock on the ordinary warmed-index path.
+        let cached={
+            let guard=cache.read().map_err(|e|e.to_string())?;
+            guard.get(&path).cloned()
+        };
+        if let Some(cached)=cached{
+            cached
+        }else{
+            let mut guard=cache.write().map_err(|e|e.to_string())?;
+            // Double-check after acquiring the exclusive lock: a concurrent
+            // request may have loaded this same generation already.
+            if !guard.contains_key(&path) {
+                let location=index_dir(Path::new(source),&generation_id);
+                // Never index millions of titles on an HTTP request.
+                if !location.join(".matchlab-complete").is_file(){
+                    return Err(format!("Tantivy generation not ready: {}",location.display()));
                 }
+                let opened=build(db,&location)?;
+                // Preserve immutable generations for old SQLite snapshots.
+                const MAX_GENERATIONS:usize=12;
+                if guard.len()>=MAX_GENERATIONS {
+                    if let Some(victim)=guard.keys().find(|k|k.as_str()!=path).cloned() {
+                        guard.remove(&victim);
+                    }
+                }
+                guard.insert(path.clone(),opened);
             }
-            guard.insert(path.clone(),opened);
+            guard.get(&path).ok_or("index missing")?.clone()
         }
-        guard.get(&path).ok_or("index missing")?.clone()
     };
     Ok((search,memory_dir))
 }
