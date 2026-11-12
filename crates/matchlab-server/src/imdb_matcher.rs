@@ -476,6 +476,15 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
                 title_fit(&key,&words,&release_words,&row,&semantic_release)
                     .unwrap_or(TitleFit::fallback(row.clean.len()))
             }else{TitleFit::fallback(row.clean.len())};
+        // A complete parsed IMDb name occupying the entire source-title
+        // span must not lose to a shorter fully matching suffix. Give
+        // *every* complete original-release title the same length metric.
+        let mut fit=fit;
+        if fit.tier==0 && semantic_words(&row.title)==semantic_content {
+            let matched=semantic_content.iter()
+                .map(|word|word.chars().count()).sum::<usize>();
+            fit.longest_first=-(matched as i64);
+        }
         groups.entry(row.imdb_id.clone()).or_default().push((row,fit));
     }
     // A shorter AKA can otherwise tie a complete title, e.g. "Bleach" for
