@@ -3115,7 +3115,8 @@ mod tests {
                 ('tt0434665','Bleach','bleach',2004,'series','',1,0,'tvSeries');
             INSERT INTO imdb_ratings VALUES('tt0434665',90000);
             INSERT INTO seasons VALUES('tt0434665',16);
-            INSERT INTO season_episodes VALUES('tt0434665',7,20,20);
+            INSERT INTO season_episodes VALUES
+                ('tt0434665',7,20,20),('tt0434665',15,26,26);
             INSERT INTO anime_series_map VALUES
                 ('tt0434665','2369','74796',0);
             INSERT INTO anime_ids VALUES('tt0434665','anidb','2369');
@@ -3123,7 +3124,8 @@ mod tests {
                 ('2369','Bleach','bleach','main','en');
             INSERT INTO episode_map VALUES
                 ('2369','74796',1,-1,1,366,0,''),
-                ('2369','74796',1,7,132,151,-131,'');").unwrap();
+                ('2369','74796',1,7,132,151,-131,''),
+                ('2369','74796',1,15,317,342,-316,'');").unwrap();
         tantivy_search::warmup(&db).unwrap();
         drop(db);
         for (release,start,end,asid_start,asid_end) in [
@@ -3142,6 +3144,28 @@ mod tests {
                 "asid_end":format!("2369:{asid_end}")
             }),"{release}");
         }
+        // The production Anime-Lists mapping for season 15 is 317..342,
+        // offset -316. This is different from older synthetic tests, which
+        // intentionally modeled a different season boundary.
+        for raw in ["Bleach 320","Bleach_320","Bleach.320"] {
+            let result=diagnose(&path,&MatchRequest{
+                title:raw.into(),year:None,series:None}).unwrap();
+            let selected=result.selected.expect("Bleach absolute episode 320");
+            assert_eq!(selected["imdb_id"],"tt0434665");
+            assert_eq!(public_match_response(Some(selected)),json!({
+                "sid_start":"tt0434665:15:4","sid_end":"tt0434665:15:4",
+                "asid_start":"2369:320","asid_end":"2369:320"
+            }),"{raw}");
+        }
+        // The learner must not retroactively turn an unverified raw
+        // episode 400 into a fake published episode/ASID.
+        let invalid=diagnose(&path,&MatchRequest{
+            title:"Bleach 400".into(),year:None,series:None}).unwrap();
+        let selected=invalid.selected.expect("retain Bleach IMDb title only");
+        assert_eq!(selected["imdb_id"],"tt0434665");
+        let resp=public_match_response(Some(selected));
+        assert!(resp["asid_start"].is_null()&&resp["asid_end"].is_null(),
+            "out-of-range anime absolute episode must not publish ASID: {resp}");
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
     }
