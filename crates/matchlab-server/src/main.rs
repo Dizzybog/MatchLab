@@ -1003,20 +1003,6 @@ fn diagnose_with_policy(
         }
     }
     let parsed=parsed_value.as_object().ok_or("parser returned no object")?;
-        // Retain the established parser-facing parent-title normalization,
-        // especially when the leaf is an episode name instead of a show.
-        // This does NOT force the IMDb identity: the new bottom-up matcher
-        // independently gathers each component and picks the closest
-        // verified identity after all of that component's prefix/suffix
-        // candidates have been ranked.
-        preferred_regular_series_parent_title(&db,req,parsed)?
-    };
-    if let Some(parent)=preferred_parent {
-        if let Some(parsed)=parsed_value.as_object_mut(){
-            parsed.insert("title".into(),json!(parent));
-        }
-    }
-    let parsed=parsed_value.as_object().ok_or("parser returned no object")?;
     let parsed_title = parsed.get("title").and_then(Value::as_str).unwrap_or("");
     let title_owned = if explicit_absolute_episode(&req.title).is_some() && numbers(parsed.get("seasons")).is_empty() {
         let parts:Vec<_>=parsed_title.split(|c:char|!c.is_ascii_alphanumeric()).filter(|x|!x.is_empty()).collect();
