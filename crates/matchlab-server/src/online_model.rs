@@ -39,17 +39,19 @@ pub struct OnlineModel{
     recent_count:u8,
 }
 fn digest(s:&str)->String{format!("{:x}",Sha256::digest(s.as_bytes()))}
-fn hash_bytes(parts:&[&[u8]])->usize{
-    // Byte-exact FNV-1a over virtual concatenation: no String allocation
-    // for dozens of field/feature n-grams per model prediction.
-    let mut h=0xcbf29ce484222325u64;
-    for part in parts{
-        for &byte in *part{
-            h^=u64::from(byte);
-            h=h.wrapping_mul(0x100000001b3);
-        }
+const FNV_OFFSET:u64=0xcbf29ce484222325;
+fn extend_hash(mut state:u64,bytes:&[u8])->u64{
+    for &byte in bytes {
+        state^=u64::from(byte);
+        state=state.wrapping_mul(0x100000001b3);
     }
-    (h as usize)&(DIM-1)
+    state
+}
+fn hash_bytes(parts:&[&[u8]])->usize{
+    // Byte-exact FNV-1a, also used by incremental n-gram prefix hashing.
+    let mut state=FNV_OFFSET;
+    for part in parts {state=extend_hash(state,part);}
+    (state as usize)&(DIM-1)
 }
 fn hash(s:&str)->usize{hash_bytes(&[s.as_bytes()])}
 fn identity_group(title:&str)->String{
@@ -117,9 +119,14 @@ impl TitleFeatureContext{
         // and the exact legacy validation for non-ASCII signals.
         let ascii=signal_bytes.is_ascii();
         for (span,prefix) in [(2,&b"g2:"[..]),(3,&b"g3:"[..]),(4,&b"g4:"[..])]{
+            // Prefix and field bytes are identical for every n-gram window.
+            // Prehash them once; extending the FNV state produces the exact
+            // same indices as hashing virtual concatenated bytes each time.
+            let state=extend_hash(extend_hash(
+                extend_hash(FNV_OFFSET,prefix),field_bytes),b":");
             for chunk in signal_bytes.windows(span).take(32){
                 if ascii||std::str::from_utf8(chunk).is_ok(){
-                    features.push(hash_bytes(&[prefix,field_bytes,b":",chunk]));
+                    features.push((extend_hash(state,chunk) as usize)&(DIM-1));
                 }
             }
         }
@@ -451,6 +458,21 @@ impl OnlineModel{
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn cached_ngram_prefix_preserves_full_fnv_hash(){
+        for (field,signal) in [("resolution","2160p"),
+            ("audio","日本語"),("edition","café"),("codec","h265")]{
+            for (span,prefix) in [(2,&b"g2:"[..]),(3,&b"g3:"[..]),(4,&b"g4:"[..])]{
+                let state=extend_hash(extend_hash(
+                    extend_hash(FNV_OFFSET,prefix),field.as_bytes()),b":");
+                for chunk in signal.as_bytes().windows(span){
+                    assert_eq!((extend_hash(state,chunk) as usize)&(DIM-1),
+                        hash_bytes(&[prefix,field.as_bytes(),b":",chunk]));
+                }
+            }
+        }
+    }
+
     #[test]
     fn reusable_feature_buffer_preserves_hashed_indices_and_scores(){
         let mut scratch=Vec::new();
