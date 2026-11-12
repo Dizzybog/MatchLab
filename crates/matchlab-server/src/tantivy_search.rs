@@ -666,6 +666,30 @@ fn title_aliases_exact_uncached(db:&Connection,key:&str)->Result<Vec<TitleAlias>
     Ok(aliases)
 }
 
+/// Recover full IMDb aliases at whole-word prefixes of the ORIGINAL release
+/// when parsing stopped early (for example because a person's name was
+/// mistaken for release metadata). Query every supplied prefix in ONE
+/// Tantivy term-union search; never scan SQLite titles or search substrings.
+pub fn title_aliases_at_release_prefixes(
+    db:&Connection,keys:&[String],
+)->Result<Vec<TitleAlias>,String>{
+    if keys.is_empty(){return Ok(Vec::new());}
+    let (search,memory_dir)=open_search(db)?;
+    let terms=keys.iter().filter(|key|!key.is_empty())
+        .map(|key|Term::from_field_text(search.forward,key));
+    let query=TermSetQuery::new(terms);
+    let reader=search.reader.searcher();
+    let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
+    let mut aliases=Vec::with_capacity(hits.len());
+    for addr in hits {
+        let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
+        if let Some(alias)=read_title(&doc,&search){aliases.push(alias);}
+    }
+    drop(reader);drop(search);
+    if let Some(dir)=memory_dir{let _=std::fs::remove_dir_all(dir);}
+    Ok(aliases)
+}
+
 /// Find complete IMDb alias prefixes AND suffixes inside the parsed title.
 /// One Tantivy term-union query discovers the candidates; a separate word-
 /// boundary-aware ranker rejects fragments of longer words.
