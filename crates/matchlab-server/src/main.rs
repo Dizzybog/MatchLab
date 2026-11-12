@@ -800,14 +800,7 @@ fn bottom_up_imdb_path_match(
         // Sxx, Exx, extensions and structural season directories cannot
         // supply IMDb identity. A real numeric series (e.g. "24") is
         // eligible only when an exact indexed IMDb alias independently proves it.
-        let coordinate_only=lower.is_empty()
-            || matches!(lower.as_str(),"s"|"e"|"ep"|"episode"|"episodes"
-                |"season"|"seasons"|"series"|"mkv"|"mp4"|"avi"
-                |"extras"|"specials"|"subtitles")
-            ||(lower.len()<=4&&lower.starts_with('s')
-                &&lower[1..].bytes().all(|b|b.is_ascii_digit()))
-            ||(lower.len()<=5&&lower.starts_with('e')
-                &&lower[1..].bytes().all(|b|b.is_ascii_digit()))
+        let coordinate_only=matchlab_parser::generic_path_title(trimmed)
             ||(numeric&&depth>0
                 &&(lower.len()==1||lower.parse::<i64>().ok()==Some(season)));
         if coordinate_only{continue;}
@@ -2825,6 +2818,20 @@ mod tests {
             |hits|filter_request_imdb_candidates(&db,hits,gate)
         ).unwrap().expect("season-pack eligibility must permit fallback");
         assert_eq!(recovered.1[0].imdb_id,"ttgein");
+
+        // Generic folder names use the EXACT same metadata-only parser
+        // guard as title inheritance, even when a coincidental IMDb
+        // title such as "Library" would otherwise pass lexical matching.
+        db.execute_batch("INSERT INTO titles VALUES
+            ('ttlibrary','Library','library',2000,'series','US',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('ttlibrary',20);
+            INSERT INTO imdb_ratings VALUES('ttlibrary',200000);").unwrap();
+        let generic=matchlab_parser::parse_title("Monster/Library/S01/E02.mkv",false)
+            .unwrap();
+        let found=bottom_up_imdb_path_match(
+            &db,&generic,None,true,1,true,|hits|hits
+        ).unwrap().expect("library folder must not steal the series");
+        assert_eq!(found.1[0].imdb_id,"tt2004");
 
         // Numeric show names remain valid through exact IMDb evidence,
         // but nested bare season numbers must not hijack their parent.
