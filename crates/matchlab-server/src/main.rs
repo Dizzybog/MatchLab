@@ -3407,6 +3407,69 @@ mod tests {
     }
 
     #[test]
+    fn historical_jujutsu_title_episodes_do_not_select_unrelated_anime_part(){
+        // A minimal exact-ID fixture based on previously reported Jujutsu
+        // titles; the anime crosswalk is explicit test data, not a claim
+        // that the metadata imported on every server has this shape.
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-jujutsu-history-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+                imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,
+                category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES
+                ('tt10601584','Jujutsu Kaisen','jujutsukaisen',2020,
+                    'series','',1,0,'tvSeries');
+            INSERT INTO imdb_ratings VALUES('tt10601584',100000);
+            INSERT INTO seasons VALUES('tt10601584',2);
+            INSERT INTO season_episodes VALUES
+                ('tt10601584',1,24,24),('tt10601584',2,24,24);
+            INSERT INTO anime_series_map VALUES
+                ('tt10601584','16169','jujutsu-tvdb',0);
+            INSERT INTO anime_ids VALUES
+                ('tt10601584','anidb','16169');
+            INSERT INTO anidb_titles VALUES
+                ('16169','Jujutsu Kaisen','jujutsukaisen','main','en');
+            INSERT INTO episode_map VALUES
+                ('16169','jujutsu-tvdb',1,1,1,24,0,''),
+                ('16169','jujutsu-tvdb',1,2,1,24,0,'');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        for (title,season,episode) in [
+            ("Jujutsu Kaisen - 10",1,10),
+            ("Jujutsu Kaisen S2 - 07",2,7),
+        ]{
+            let d=diagnose(&path,&MatchRequest{
+                title:title.into(),year:None,series:None}).unwrap();
+            let selected=d.selected.expect("historical Jujutsu IMDb identity");
+            assert_eq!(selected["imdb_id"],"tt10601584","{title}: {selected}");
+            assert_eq!(selected["season"],season,"{title}: {selected}");
+            assert_eq!(selected["episode"],episode,"{title}: {selected}");
+            let response=public_match_response(Some(selected));
+            assert_eq!(response["sid_start"],
+                format!("tt10601584:{season}:{episode}"),"{title}: {response}");
+            assert_eq!(response["asid_start"],
+                format!("16169:{episode}"),"{title}: {response}");
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
     fn bare_jojo_episode_uses_exact_anime_alias_before_mapping(){
         let stamp=std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
