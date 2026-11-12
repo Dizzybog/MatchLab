@@ -3054,6 +3054,13 @@ fn normalize_slash_dates(input:&str)->Cow<'_,str>{
 /// such as `【site https://example.org/download】` is one lexical field,
 /// never two fake folder names. Keep original component slices zero-copy.
 fn split_release_path(raw:&str)->Vec<&str>{
+    // Most torrent names are a single file, not a directory hierarchy.
+    // Avoid a Unicode char-by-char bracket scan for this common case.
+    if !raw.as_bytes().iter().any(|&b|b==b'/'||b==b'\\'){
+        return if raw.is_empty()||raw=="."||raw==".."{
+            Vec::new()
+        }else{vec![raw]};
+    }
     let mut components=Vec::new();
     let mut brackets=Vec::new();
     let mut start=0;
