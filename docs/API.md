@@ -392,6 +392,14 @@ relative coverage, leading versus trailing edge (only on equal coverage), then
 title length. For otherwise eligible IMDb candidates, the ranking is:
 
 1. **Title relevance** (exact match, relative coverage, whole-word edge and length).
+   For a release **without a production year or explicit country qualifier**,
+   a full canonical IMDb `title.basics` title outranks an abbreviated AKA
+   that happens to have the same exact normalized text. For example,
+   `Bleach.S01` refers to the original `Bleach` title (2004), not the
+   newer `Bleach: Thousand-Year Blood War` (2022), whose AKA is `Bleach`.
+   This is a **title-identity relevance distinction**, not the former
+   `isOriginalTitle` or AKA-ordering tie-breaker. If a year is supplied,
+   the candidates remain equally exact so year proximity can disambiguate.
 2. **Distance from the release year**, when one was provided; otherwise all
    candidates have the same distance (zero), regardless of season/episode.
 3. **IMDb `numVotes`** (descending), unless the release explicitly qualifies
