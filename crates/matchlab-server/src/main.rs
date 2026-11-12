@@ -1076,11 +1076,13 @@ fn diagnose_with_policy(
     // /parse endpoint: only the matcher can distinguish ordinary TV from anime.
     let preferred_parent={
         let parsed=parsed_value.as_object().ok_or("parser returned no object")?;
-        // Hierarchical IMDb matching walks already-parsed levels from
-        // the leaf upward. Do not preempt its leaf with a parent-title
-        // lookup before candidates have been collected and ranked.
-        if parsed.get("path_layers").is_some(){None}
-        else{preferred_regular_series_parent_title(&db,req,parsed)?}
+        // Retain the established parser-facing parent-title normalization,
+        // especially when the leaf is an episode name instead of a show.
+        // This does NOT force the IMDb identity: the new bottom-up matcher
+        // independently gathers each component and picks the closest
+        // verified identity after all of that component's prefix/suffix
+        // candidates have been ranked.
+        preferred_regular_series_parent_title(&db,req,parsed)?
     };
     if let Some(parent)=preferred_parent {
         if let Some(parsed)=parsed_value.as_object_mut(){
