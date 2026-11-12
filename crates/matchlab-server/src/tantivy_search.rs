@@ -1040,6 +1040,47 @@ pub fn anime_aliases_for_title(
     Ok(results)
 }
 
+/// Check all title-identity collisions in one exact postings query. A large
+/// IMDb shortlist previously ran a Tantivy query per distinct normalized
+/// alias; this stays exhaustive and applies the same positive-year filter
+/// as has_duplicate_title_uncached. Small sets keep their single-flight
+/// per-key cache, avoiding a multi-term query for common exact matches.
+pub fn duplicate_titles(
+    db:&Connection,keys:&BTreeSet<String>,
+)->Result<std::collections::HashSet<String>,String>{
+    let mut duplicates=std::collections::HashSet::new();
+    if keys.len()<=4 {
+        for key in keys {
+            if has_duplicate_title(db,key)?{duplicates.insert(key.clone());}
+        }
+        return Ok(duplicates);
+    }
+    let (search,memory_dir)=open_search(db)?;
+    let reader=search.reader.searcher();
+    for batch in keys.iter().collect::<Vec<_>>().chunks(128){
+        let query=TermSetQuery::new(batch.iter()
+            .map(|key|Term::from_field_text(search.forward,key)));
+        let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
+        let mut first=HashMap::<String,String>::new();
+        for addr in hits {
+            let doc:tantivy::TantivyDocument=reader.doc(addr)
+                .map_err(|e|e.to_string())?;
+            if doc.get_first(search.year).and_then(|value|value.as_i64())
+                .unwrap_or(0)<=0 {continue;}
+            let (Some(title),Some(id))=(
+                doc.get_first(search.forward).and_then(|value|value.as_str()),
+                doc.get_first(search.id).and_then(|value|value.as_str()))
+                else{continue};
+            if let Some(previous)=first.get(title){
+                if previous!=id{duplicates.insert(title.to_owned());}
+            }else{first.insert(title.to_owned(),id.to_owned());}
+        }
+    }
+    drop(reader);drop(search);
+    if let Some(dir)=memory_dir{let _=std::fs::remove_dir_all(dir);}
+    Ok(duplicates)
+}
+
 pub fn has_duplicate_title(db:&Connection,key:&str)->Result<bool,String>{
     if let Some(id)=lookup_cache_key(db,"duplicate_title",key){
         DUPLICATE_LOOKUPS.get_or_init(||QueryCache::new(LOOKUP_CAP,LOOKUP_TTL))
