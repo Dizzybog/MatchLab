@@ -3,7 +3,7 @@
 //! release-title evidence. Season/year/region/votes remain deterministic;
 //! only indexed Tantivy alias queries discover candidate titles.
 use rusqlite::{params, Connection};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use serde::Serialize;
 
 pub use crate::title_normalization::clean_title;
