@@ -1059,6 +1059,41 @@ mod persistence_tests {
     use super::*;
 
     #[test]
+    fn warmed_index_handles_simultaneous_readers(){
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-concurrent-tantivy-{}-{:?}.sqlite3",
+            std::process::id(),std::thread::current().id()));
+        let _=std::fs::remove_file(&path);
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
+            region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE metadata_state(source TEXT PRIMARY KEY,
+                updated_at TEXT NOT NULL,row_count INTEGER NOT NULL);
+            INSERT INTO metadata_state VALUES('tantivy_generation','v3-parallel-readers',0);
+            INSERT INTO titles VALUES
+                ('tt0000400','Parallel Show','parallelshow',2026,'series','',1,0,'tvSeries');")
+            .unwrap();
+        warmup(&db).unwrap();
+        drop(db);
+        let mut workers=Vec::new();
+        for _ in 0..8 {
+            let path=path.clone();
+            workers.push(std::thread::spawn(move||{
+                let db=Connection::open(&path).unwrap();
+                for _ in 0..16 {
+                    let hits=title_aliases_exact(&db,"parallelshow").unwrap();
+                    assert_eq!(hits.len(),1);
+                    assert_eq!(hits[0].imdb_id,"tt0000400");
+                }
+            }));
+        }
+        for worker in workers {worker.join().unwrap();}
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
     fn multi_imdb_lookup_matches_union_of_individual_index_queries(){
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE titles(
