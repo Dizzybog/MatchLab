@@ -68,6 +68,7 @@ pub fn qualified(raw:&str)->Option<(&'static str,Vec<String>)>{
     }
     None
 }
+#[cfg(test)]
 pub fn candidates(raw:&str)->Vec<String>{
     qualified(raw).map(|(_,aliases)|aliases).unwrap_or_default()
 }
