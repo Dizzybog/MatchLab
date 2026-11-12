@@ -31,6 +31,8 @@ const L2:f32=1.0;
 pub struct OnlineModel{
     z:Vec<f32>,
     n:Vec<f32>,
+    // Owned scratch space: one allocation per model load, not per label.
+    scratch:Vec<usize>,
     positives:i64,
     negatives:i64,
     holdout:i64,
@@ -154,7 +156,8 @@ fn features(field:&str,signal:&str,title:&str)->Vec<usize>{
 }
 impl OnlineModel{
     pub fn new()->Self{
-        Self{z:vec![0.0;DIM],n:vec![0.0;DIM],positives:0,negatives:0,
+        Self{z:vec![0.0;DIM],n:vec![0.0;DIM],scratch:Vec::with_capacity(110),
+            positives:0,negatives:0,
             holdout:0,correct:0,recent_window:0,recent_count:0}
     }
     fn weight(&self,i:usize)->f32{
@@ -431,7 +434,8 @@ impl OnlineModel{
         }
         // Generate the counterfactual only after positive scoring/update.
         // Both feature sets are pure, and the FTRL update order is identical.
-        let mut features=context.features(field,signal);
+        let mut features=std::mem::take(&mut self.scratch);
+        context.features_into(field,signal,&mut features);
         let false_field=if field=="codec"{"resolution"}else{"codec"};
         // A deterministic title-group holdout prevents ordinary examples
         // for the same recognized work leaking between train and review.
@@ -452,12 +456,51 @@ impl OnlineModel{
             context.features_into(false_field,signal,&mut features);
             self.learn(&features,false);
         }
+        self.scratch=features;
         Ok(true)
     }
 }
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn reusable_model_scratch_matches_legacy_pairwise_ftrl_updates(){
+        // This independent scalar reference models the former two-Vec path,
+        // including positive-before-negative updates and holdout accounting.
+        let db=Connection::open_in_memory().unwrap();
+        let mut actual=OnlineModel::load(&db).unwrap();
+        let mut expected=OnlineModel::new();
+        for i in 0..120 {
+            let title=format!("FeatureSeries{i}.S02E07.2160p.WEB-DL.x265");
+            let context=TitleFeatureContext::new(&title);
+            let positive=context.features("codec","x265");
+            let negative=context.features("resolution","x265");
+            if context.holdout {
+                if expected.positives>=16&&expected.negatives>=16 {
+                    let passed=expected.raw_score(&positive)>expected.raw_score(&negative);
+                    expected.holdout+=1;
+                    if passed {expected.correct+=1;}
+                    expected.recent_window=(expected.recent_window<<1)|u32::from(passed);
+                    expected.recent_count=expected.recent_count.saturating_add(1).min(32);
+                }
+            }else{
+                expected.learn(&positive,true);
+                expected.learn(&negative,false);
+            }
+            assert!(actual.observe(&db,&title,"codec","x265").unwrap());
+        }
+        assert!(actual.holdout>0);
+        assert_eq!(actual.z,expected.z);
+        assert_eq!(actual.n,expected.n);
+        assert_eq!(actual.positives,expected.positives);
+        assert_eq!(actual.negatives,expected.negatives);
+        assert_eq!(actual.holdout,expected.holdout);
+        assert_eq!(actual.correct,expected.correct);
+        assert_eq!(actual.recent_count,expected.recent_count);
+        assert_eq!(actual.recent_window,expected.recent_window);
+        assert!(actual.scratch.capacity()>=110);
+    }
+
     #[test]
     fn cached_ngram_prefix_preserves_full_fnv_hash(){
         for (field,signal) in [("resolution","2160p"),
