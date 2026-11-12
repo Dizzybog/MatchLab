@@ -1817,3 +1817,85 @@ mod batch_eligibility_tests {
         assert_eq!(actual,expected);
     }
 }
+
+#[cfg(test)]
+mod shortlist_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn batched_ratings_and_anime_ids_match_scalar_enrichment_over_multiple_chunks(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE imdb_ratings(
+                imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT,
+                PRIMARY KEY(group_id,type,value));
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);").unwrap();
+        let mut ids=Vec::new();
+        for n in 0..415 {
+            let id=format!("tt{n:07}");
+            ids.push(id.clone());
+            if n%3==0 {
+                db.execute("INSERT INTO imdb_ratings VALUES(?1,?2)",
+                    params![&id,(n*137) as i64]).unwrap();
+            }
+            if n%4==0 {
+                db.execute("INSERT INTO anime_ids VALUES(?1,'mal',?2)",
+                    params![&id,format!("M{n}")]).unwrap();
+            }
+            if n%5==0 {
+                db.execute("INSERT INTO anime_ids VALUES(?1,'anidb',?2)",
+                    params![&id,format!("A{n:05}")]).unwrap();
+                if n%25==0 {
+                    db.execute("INSERT INTO anime_ids VALUES(?1,'anidb',?2)",
+                        params![&id,format!("B{n:05}")]).unwrap();
+                }
+            }
+            if n%7==0 {
+                db.execute("INSERT INTO anime_series_map VALUES(?1,?2)",
+                    params![&id,format!("fallback{n}")]).unwrap();
+                if n%49==0 {
+                    db.execute("INSERT INTO anime_series_map VALUES(?1,?2)",
+                        params![&id,format!("other{n}")]).unwrap();
+                }
+            }
+        }
+        let batch=shortlist_metadata(&db,&ids).unwrap();
+        assert_eq!(batch.len(),ids.len());
+        for id in ids {
+            let votes=db.query_row("SELECT num_votes FROM imdb_ratings WHERE imdb_id=?1",
+                [&id],|r|r.get::<_,i64>(0)).optional().unwrap().unwrap_or(0);
+            let mut expected=BTreeMap::new();
+            let mut stmt=db.prepare("SELECT type,value FROM anime_ids WHERE group_id=?1")
+                .unwrap();
+            for row in stmt.query_map([&id],|r|
+                Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).unwrap(){
+                let (kind,value)=row.unwrap();
+                expected.insert(kind,value);
+            }
+            if !expected.contains_key("anidb") {
+                let mut stmt=db.prepare(
+                    "SELECT DISTINCT anidb_id FROM anime_series_map WHERE imdb_id=?1")
+                    .unwrap();
+                let linked=stmt.query_map([&id],|r|r.get::<_,String>(0)).unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+                if linked.len()==1 {
+                    expected.insert("anidb".into(),linked[0].clone());
+                }
+            }
+            assert_eq!(batch.get(&id),Some(&(votes,expected)),"{id}");
+        }
+    }
+
+    #[test]
+    fn absent_ratings_table_preserves_zero_vote_fallback(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO anime_ids VALUES
+             ('tt0000001','anidb','11'),('tt0000002','anidb','12'),
+             ('tt0000003','anidb','13'),('tt0000004','anidb','14'),
+             ('tt0000005','anidb','15');").unwrap();
+        let ids=(1..=5).map(|n|format!("tt{n:07}")).collect::<Vec<_>>();
+        let batch=shortlist_metadata(&db,&ids).unwrap();
+        assert!(batch.values().all(|(votes,ids)|*votes==0 && ids.contains_key("anidb")));
+    }
+}
