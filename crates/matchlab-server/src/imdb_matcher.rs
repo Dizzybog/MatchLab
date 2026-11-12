@@ -666,6 +666,18 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
         for id in exact_ids {
             let Some(forms)=full_titles.get(&id)else{continue};
             if forms.iter().any(|full|full==&semantic_release){continue;}
+            // The parser can strip an AU/US country suffix and report only
+            // "Lego Masters" even though the original release explicitly
+            // reads "Lego Masters AU". Its canonical IMDb title may be the
+            // fully equivalent "Lego Masters Australia". Do not demote that
+            // verified country-qualified exact match as if it were a
+            // shortened sequel title. Only exempt canonical forms that are
+            // themselves *exact* expanded source-country aliases.
+            let qualified_canonical=country_qualified.as_ref().is_some_and(|(_,keys)|
+                groups.get(&id).is_some_and(|aliases|aliases.iter().any(|(a,_)|
+                    country_title_matches.contains(&(a.imdb_id.clone(),a.title.clone()))))
+                && forms.iter().any(|words|keys.contains(&clean_title(&words.join(" ")))));
+            if qualified_canonical {continue;}
             // Penalize a demonstrably shortened name, but NOT unrelated
             // translated aliases (e.g. exact English vs Japanese main title).
             let extension=forms.iter()
