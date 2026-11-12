@@ -1876,6 +1876,28 @@ fn enrich_selected_anime_episode(
     Ok(())
 }
 
+// Always-on, bounded, single-flight cache for final public matches keyed by
+// the COMPLETE original torrent path plus parsed/matcher/metadata generation.
+// Unlike the existing persistent ML cache this is available with ML disabled;
+// unlike candidate caches, it never shares a final SID across different files.
+static TORRENT_MATCH_CACHE:OnceLock<query_cache::QueryCache<Diagnostic>>=OnceLock::new();
+fn whole_torrent_cached_diagnose(
+    db_path:&PathBuf,req:&MatchRequest,
+)->Result<Diagnostic,String>{
+    let Some(metadata)=learning_cache::match_fingerprint(db_path)else{
+        return diagnose(db_path,req);
+    };
+    let regex_revision=parse_rules_revision();
+    let key=format!("{metadata}:{regex_revision:016x}:{:?}:{:?}:{}",
+        req.year,req.series,req.title);
+    TORRENT_MATCH_CACHE.get_or_init(||query_cache::QueryCache::new(
+        512,Duration::from_secs(30))).get_or_compute(
+        key,||diagnose(db_path,req),
+        |_|parse_rules_revision()==regex_revision
+            &&learning_cache::match_fingerprint(db_path)
+                .as_deref()==Some(metadata.as_str()))
+}
+
 fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result<Diagnostic,String>{
     let start=Instant::now();
     // Dashboard-only exploratory diagnostics deliberately bypass matching
@@ -1885,22 +1907,35 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result
     let mut generation=if cacheable{
         learning_cache::match_namespace(&state.db)
     }else{None};
+    let mut whole_path_generation=if cacheable{
+        learning_cache::match_fingerprint(&state.db)
+    }else{None};
     let mut result=if cacheable{
         if let Some(snapshot)=generation.as_deref().and_then(|ns|
             learning_cache::get_match(&req.title,req.year,req.series,ns)){
             match serde_json::from_value::<Diagnostic>(snapshot){
                 Ok(diagnostic)=>Ok(diagnostic),
-                Err(_)=>diagnose(&state.db,req),
+                Err(_)=>whole_torrent_cached_diagnose(&state.db,req),
             }
-        }else{diagnose(&state.db,req)}
+        }else{whole_torrent_cached_diagnose(&state.db,req)}
     }else{
         diagnose_with_policy(&state.db,req,policy)
     };
+    // The in-memory whole-path cache remains coherent even when the
+    // opt-in persistent ML cache is off. A database replacement while a
+    // request is running requires re-evaluation against the new generation.
+    if cacheable && whole_path_generation!=learning_cache::match_fingerprint(&state.db){
+        whole_path_generation=learning_cache::match_fingerprint(&state.db);
+        result=whole_torrent_cached_diagnose(&state.db,req);
+    }
+    if cacheable && whole_path_generation!=learning_cache::match_fingerprint(&state.db){
+        return Err("matching metadata changed during request; retry".into());
+    }
     // A metadata, index or learned regex generation can change mid-request.
     // Recheck the strict production outcome against the latest generation.
     if cacheable && generation!=learning_cache::match_namespace(&state.db){
         generation=learning_cache::match_namespace(&state.db);
-        result=diagnose(&state.db,req);
+        result=whole_torrent_cached_diagnose(&state.db,req);
     }
     if cacheable && generation!=learning_cache::match_namespace(&state.db){
         return Err("matching metadata or learned regex changed during request; retry".into());
