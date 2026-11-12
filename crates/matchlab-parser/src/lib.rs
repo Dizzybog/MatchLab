@@ -4226,6 +4226,28 @@ mod tests {
     }
 
     #[test]
+    fn independent_path_layers_keep_fields_and_bottom_up_source_order(){
+        let raw="monster/the.ed.gein.story/S01/E02.mkv";
+        let parsed=parse_title(raw,false).unwrap();
+        let layers=parsed.get("path_layers").and_then(Value::as_array).unwrap();
+        assert_eq!(layers.len(),4);
+        assert_eq!(layers[0]["raw"],"monster");
+        assert_eq!(layers[1]["raw"],"the.ed.gein.story");
+        assert_eq!(layers[2]["raw"],"S01");
+        assert_eq!(layers[3]["raw"],"E02.mkv");
+        assert_eq!(layers[0]["parsed"]["title"],"monster");
+        // Each parsed field must originate from its own component;
+        // only the whole-path result inherits closest valid coordinates.
+        assert!(layers[0]["parsed"]["seasons"].is_null()
+            ||layers[0]["parsed"]["seasons"].as_array().is_some_and(Vec::is_empty));
+        assert_eq!(parsed["seasons"],json!([1]));
+        assert_eq!(parsed["episodes"],json!([2]));
+        // All parsed layers are a snapshot of the ORIGINAL independent
+        // parses, not an accumulation of inherited ancestor fields.
+        assert_ne!(layers[1]["parsed"].get("episodes"),Some(&json!([2])));
+    }
+
+    #[test]
     fn path_title_candidates_preserve_subfolder_anime_part_names() {
         let parsed=parse_title(
             "Sword Art Online/Sword Art Online Alicization/             Sword.Art.Online.S03E01.1080p.mkv",false).unwrap();
