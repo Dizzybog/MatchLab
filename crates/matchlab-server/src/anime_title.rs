@@ -310,3 +310,55 @@ mod title_only_season_tests {
         assert_eq!(season_from_any_exact_title(&db,"swordartonlinealicization").unwrap(),None);
     }
 }
+
+#[cfg(test)]
+mod named_part_range_tests {
+    use super::*;
+
+    #[test]
+    fn named_part_batch_keeps_verified_season_and_rejects_out_of_range(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(
+            imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
+            region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            CREATE TABLE anime_series_map(
+                anidb_id TEXT,imdb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,max_episode INTEGER);
+            CREATE TABLE episode_map(
+                anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            INSERT INTO titles VALUES
+                ('tt0000001','Example Anime','exampleanime',2022,'series','',1,0,'tvSeries');
+            INSERT INTO anidb_titles VALUES
+                ('100','Part One','partone','main','en'),
+                ('200','Part Two','parttwo','main','en');
+            INSERT INTO anime_series_map VALUES
+                ('100','tt0000001','700',0),('200','tt0000001','700',0);
+            INSERT INTO season_episodes VALUES
+                ('tt0000001',1,3),('tt0000001',2,3);
+            INSERT INTO episode_map VALUES
+                ('100','700',1,1,1,3,0,''),
+                ('200','700',1,2,1,3,0,'');").unwrap();
+        let base=resolve_range(&db,"tt0000001","Part One",1,1,3).unwrap();
+        let sequel=resolve_range(&db,"tt0000001","Part Two",1,1,3).unwrap();
+        for (number,episode) in (1..=3).zip(base){
+            let item=episode.expect("verified first season");
+            assert_eq!((item.season,item.episode,item.anidb_id.as_str()),
+                (1,number,"100"));
+        }
+        for (number,episode) in (1..=3).zip(sequel){
+            let item=episode.expect("verified second season via named part");
+            assert_eq!((item.season,item.episode,item.anidb_id.as_str()),
+                (2,number,"200"));
+            assert_eq!(item.anidb_episode,number);
+        }
+        assert!(resolve_range(&db,"tt0000001","Part Two",1,4,5)
+            .unwrap().iter().all(Option::is_none));
+        let single=resolve(&db,"tt0000001","Part Two",1,2).unwrap().unwrap();
+        assert_eq!((single.season,single.episode,single.anidb_id.as_str()),
+            (2,2,"200"));
+    }
+}
