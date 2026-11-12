@@ -293,7 +293,7 @@ static HISTORY_DROPPED:AtomicUsize=AtomicUsize::new(0);
 /// worker threads.
 pub fn record_async(
     path:&Path,title:&str,status:&str,
-    selected:Option<&Value>,details:&Value,duration_ms:u64,
+    selected:Option<&Value>,details:Value,duration_ms:u64,
 ){
     let Some(tx)=HISTORY_QUEUE.get_or_init(||{
         let (tx,rx)=sync_channel::<HistoryEvent>(HISTORY_QUEUE_SIZE);
@@ -343,7 +343,7 @@ pub fn record_async(
         title:title.to_owned(),
         status:status.to_owned(),
         selected:selected.cloned(),
-        details:details.clone(),
+        details,
         duration_ms,
     };
     match tx.try_send(event){
