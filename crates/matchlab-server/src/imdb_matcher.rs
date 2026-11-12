@@ -148,13 +148,17 @@ fn semantic_extension(short:&[String],long:&[String])->Option<TitleFit>{
         edge:if prefix{0}else{1},longest_first:-(matched as i64)})
 }
 fn title_fit(key:&str,words:&[String],release_words:&[String],row:&Aka,
-    semantic_release:&[String])->Option<TitleFit>{
+    semantic_release:&[String],cached_alias:Option<&[String]>)->Option<TitleFit>{
     if row.clean==key{
         // An identical ASCII index key is not necessarily an identical
         // Unicode title. Prefer complete identity to partial prefix/suffix.
-        let full=semantic_words(&row.title);
-        if let Some(partial)=semantic_extension(semantic_release,&full)
-            .or_else(||semantic_extension(&full,semantic_release)){
+        let computed;
+        let full=match cached_alias{
+            Some(words)=>words,
+            None=>{computed=semantic_words(&row.title);&computed}
+        };
+        if let Some(partial)=semantic_extension(semantic_release,full)
+            .or_else(||semantic_extension(full,semantic_release)){
             return Some(partial);
         }
         return Some(TitleFit::exact());
@@ -491,7 +495,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     // original release, so keep the historical word-boundary and containment
     // checks. Only the raw-release validation below can admit longer names.
     discovered.retain(|row|release.contains(&row.clean)
-        && title_fit(&key,&words,&release_words,row,&semantic_release).is_some());
+        && title_fit(&key,&words,&release_words,row,&semantic_release,None).is_some());
     for row in discovered{
         ordinary_title_matches.insert((row.imdb_id.clone(),row.title.clone()));
         rows.push(row);
@@ -618,12 +622,17 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     // Repeat appearances via exact/forward/reverse retrieval do not change
     // the winner, and aliases of the same IMDb work are compared as one work.
     let mut groups:BTreeMap<String,Vec<(Aka,TitleFit)>>=BTreeMap::new();
+    let semantic_content_length=semantic_content.iter()
+        .map(|word|word.chars().count()).sum::<usize>();
     for row in rows{
+        // Reuse the Unicode tokenization for the candidate's title-fit
+        // evidence and exact-source comparison in this scoring pass.
+        let alias_semantic=semantic_words(&row.title);
         let alias_key=(row.imdb_id.clone(),row.title.clone());
         let mut evidence=Vec::new();
         if ordinary_title_matches.contains(&alias_key){
             if let Some(fit)=title_fit(&key,&words,&release_words,
-                &row,&semantic_release){evidence.push(fit);}
+                &row,&semantic_release,Some(&alias_semantic)){evidence.push(fit);}
         }
         if country_title_matches.contains(&alias_key){
             // AU and "Australia" are equivalent *complete* release title
@@ -636,9 +645,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             // Score the length of the original qualified title instead,
             // keeping ordinary lexical fit/season gates and the later
             // regional vote tie-breakers unchanged.
-            let matched=semantic_content.iter()
-                .map(|word|word.chars().count()).sum::<usize>();
-            evidence.push(TitleFit{tier:0,longest_first:-(matched as i64),
+            evidence.push(TitleFit{tier:0,longest_first:-(semantic_content_length as i64),
                 unmatched_bp:0,edge:0});
         }
         if extended_title_matches.contains(&alias_key){
@@ -658,10 +665,8 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             &semantic_content,&row){evidence.push(fit);}
         // Score the full source title consistently, including exact-match
         // rows that are also returned by a different discovery direction.
-        if semantic_words(&row.title)==semantic_content{
-            let matched=semantic_content.iter()
-                .map(|word|word.chars().count()).sum::<usize>();
-            evidence.push(TitleFit{tier:0,longest_first:-(matched as i64),
+        if alias_semantic==semantic_content{
+            evidence.push(TitleFit{tier:0,longest_first:-(semantic_content_length as i64),
                 unmatched_bp:0,edge:0});
         }
         let fit=evidence.into_iter().min().unwrap_or(TitleFit::fallback(
