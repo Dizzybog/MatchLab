@@ -1,6 +1,8 @@
 //! 300 release-name regression inputs: 100 movies, 100 TV, 100 anime.
-//! These are parser smoke tests, not IMDb/AniDB identity-parity assertions.
+//! Check actual year, season and episode coordinates, not only parse success.
+//! IMDb/AniDB identity-parity assertions remain in metadata-backed tests.
 use matchlab_parser::parse_title;
+use serde_json::json;
 
 fn variants(title: &str, year: u16, season: u8, episode: u16, series: bool) -> Vec<String> {
     let dot = title.replace(' ', ".");
@@ -64,6 +66,12 @@ fn parse_300_movie_tv_anime_variants() {
                 .unwrap_or_else(|e|panic!("movie parser failed on {raw:?}: {e}"));
             assert!(!result.get("title").and_then(|v|v.as_str()).unwrap_or("").is_empty(),
                 "movie title empty: {raw}");
+            assert_eq!(result.get("year"),Some(&json!(year)),
+                "movie release year not parsed correctly: {raw}: {result:?}");
+            assert_eq!(result.get("seasons"),Some(&json!([])),
+                "movie must not contain an invented TV season: {raw}: {result:?}");
+            assert_eq!(result.get("episodes"),Some(&json!([])),
+                "movie must not contain an invented TV episode: {raw}: {result:?}");
             count[0] += 1;
         }
     }
@@ -77,6 +85,10 @@ fn parse_300_movie_tv_anime_variants() {
                     .unwrap_or_else(|e|panic!("series parser failed on {raw:?}: {e}"));
                 assert!(!result.get("title").and_then(|v|v.as_str()).unwrap_or("").is_empty(),
                     "series title empty: {raw}");
+                assert_eq!(result.get("seasons"),Some(&json!([season])),
+                    "TV/anime season mismatch: {raw}: {result:?}");
+                assert_eq!(result.get("episodes"),Some(&json!([episode])),
+                    "TV/anime episode mismatch: {raw}: {result:?}");
                 count[group] += 1;
             }
         }
