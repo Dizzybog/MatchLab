@@ -2940,7 +2940,9 @@ fn merge_path_metadata(merged:&mut Map<String,Value>, layer:&Map<String,Value>){
     }
 }
 
-fn generic_path_title(title:&str)->bool{
+/// Shared structural-title guard for the metadata-only parser and IMDb
+/// hierarchy walker. A technical directory must not become a show identity.
+pub fn generic_path_title(title:&str)->bool{
     let lowercase=title.trim().to_lowercase();
     // A leaf like "S6E1-8 ..." can be reduced by the upstream parser to
     // just "S". It is a coordinate marker, not a stronger title than its
