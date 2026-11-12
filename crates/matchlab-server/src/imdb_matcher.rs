@@ -207,12 +207,15 @@ fn longer_release_title_prefixes(parsed_title:&str,release_title:&str)->Vec<Stri
 /// Requiring two source words avoids treating an isolated generic tag/word
 /// as sufficient suffix evidence. At most 14 trailing words are searched.
 fn longer_release_title_suffix_keys(release_title:&str)->Vec<String>{
-    let content=release_content_words(release_title);
+    // Preserve non-Latin word boundaries while generating compact ASCII
+    // Tantivy keys, so "Scene BLEACH 千年血戦篇" can discover "BLEACH"
+    // without treating the Japanese subtitle as an empty token.
+    let content=semantic_release_content_words(release_title);
     if content.len()<3{return Vec::new();}
     let mut keys=Vec::new();
     let start=content.len().saturating_sub(14).max(1);
     for idx in start..content.len()-1{
-        let key=format!("{}{}",content[idx],content[idx+1]);
+        let key=clean_title(&format!("{} {}",content[idx],content[idx+1]));
         if key.len()>=4 && !keys.contains(&key){keys.push(key);}
     }
     keys
@@ -421,7 +424,14 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     // content title, not only to the parser's already-truncated title.
     // Never search in technical metadata, require complete word edges, and
     // reject stray source-title words that are not covered by the candidate.
-    let suffix_keys=longer_release_title_suffix_keys(release_title);
+    let suffix_keys=if rows.iter().any(|row|
+        semantic_words(&row.title)==semantic_content) {
+        // An already discovered *complete* title occupying the whole
+        // source is longer than any suffix of it. No lookup is needed.
+        Vec::new()
+    }else{
+        longer_release_title_suffix_keys(release_title)
+    };
     let mut suffix_title_matches=HashSet::new();
     if !suffix_keys.is_empty(){
         let found=crate::tantivy_search::title_aliases_at_release_suffixes(
@@ -1165,6 +1175,30 @@ mod tests{
             "an isolated generic title cannot justify new suffix discovery");
         assert!(!has_longer_title_evidence_in_release(
             "Scene Monster","Scene.Monster.S01E01",&candidate.title));
+        assert!(longer_release_title_suffix_keys(
+            "Scene.BLEACH.千年血戦篇.S01E01").contains(&"bleach".to_string()),
+            "Unicode title words remain visible despite ASCII Tantivy keys");
+    }
+
+    #[test]
+    fn suffix_recovery_keeps_non_latin_title_words_in_relevance(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO titles VALUES
+                ('ttbleach','Bleach','bleach',2004,'series','US',1,0,'tvSeries'),
+                ('ttjapan','BLEACH 千年血戦篇','bleach',2022,'series','JP',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('ttbleach',16),('ttjapan',4);
+            INSERT INTO imdb_ratings VALUES('ttbleach',500000),('ttjapan',10);")
+            .unwrap();
+        let raw="Scene.BLEACH.千年血戦篇.S01E01";
+        let hits=search(&db,"Scene BLEACH",None,true,1,raw,true,3).unwrap();
+        assert_eq!(hits[0].imdb_id,"ttjapan",
+            "the Japanese title makes the whole suffix specific: {hits:?}");
     }
 
     #[test]
