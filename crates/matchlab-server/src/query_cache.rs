@@ -95,6 +95,27 @@ mod tests{
     use std::sync::atomic::{AtomicUsize,Ordering};
 
     #[test]
+    fn cache_payload_clones_never_hold_the_global_mutex(){
+        struct Probe{cache:std::sync::Weak<QueryCache<Probe>>}
+        impl Clone for Probe{
+            fn clone(&self)->Self{
+                if let Some(cache)=self.cache.upgrade(){
+                    assert!(cache.inner.try_lock().is_ok(),
+                        "copying a large cached response must not serialize other titles");
+                }
+                Self{cache:self.cache.clone()}
+            }
+        }
+        let cache=Arc::new(QueryCache::<Probe>::new(8,Duration::from_secs(60)));
+        let probe=Probe{cache:Arc::downgrade(&cache)};
+        // Insertion and retrieval both invoke Clone, neither under the lock.
+        cache.get_or_compute("probe".into(),||Ok(probe),|_|true).unwrap();
+        cache.get_or_compute("probe".into(),||{
+            panic!("valid cache entry must suppress duplicate computation")
+        },|_|true).unwrap();
+    }
+
+    #[test]
     fn same_key_hits_cache_but_different_key_is_independent(){
         let cache=QueryCache::<String>::new(2,Duration::from_secs(60));
         let n=AtomicUsize::new(0);
