@@ -215,7 +215,10 @@ fn longer_release_title_suffix_keys(release_title:&str)->Vec<String>{
     let mut keys=Vec::new();
     let start=content.len().saturating_sub(14).max(1);
     for idx in start..content.len()-1{
-        let key=clean_title(&format!("{} {}",content[idx],content[idx+1]));
+        // The validator requires EVERY remaining content word to belong to
+        // this candidate. Use that entire suffix as the indexed prefix term:
+        // far fewer false discoveries than a generic first-two-word query.
+        let key=clean_title(&content[idx..].join(" "));
         if key.len()>=4 && !keys.contains(&key){keys.push(key);}
     }
     keys
@@ -1151,7 +1154,8 @@ mod tests{
                 "suffix location is the edge tie-breaker; completeness is unmatched_bp");
             assert_eq!(fit.unmatched_bp==0,complete);
             let keys=longer_release_title_suffix_keys(raw);
-            assert!(keys.iter().any(|key|key=="monsterthe"),"{keys:?}");
+            assert!(keys.iter().any(|key|key.starts_with("monstertheedgein")),
+                "{keys:?}");
             assert!(has_longer_title_evidence_in_release(
                 "Scene Monster the",raw,&candidate.title));
         }
