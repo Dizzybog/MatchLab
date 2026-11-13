@@ -106,7 +106,9 @@ pub fn init(db:&Connection)->Result<(),String>{
         sample_hash TEXT PRIMARY KEY,source_build TEXT NOT NULL,
         signal TEXT NOT NULL,imdb_id TEXT NOT NULL,observed_at INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS ml_title_boundary_cohort
-        ON ml_title_boundary_evidence(source_build,signal,imdb_id);")
+        ON ml_title_boundary_evidence(source_build,signal,imdb_id);
+    CREATE INDEX IF NOT EXISTS ml_title_boundary_oldest
+        ON ml_title_boundary_evidence(observed_at,sample_hash);")
         .map_err(|e|e.to_string())
 }
 pub fn budget(db:&Connection)->Result<i64,String>{
@@ -116,14 +118,29 @@ pub fn budget(db:&Connection)->Result<i64,String>{
 pub fn observe(db:&Connection,raw:&str,parsed:&Value,selected:&Value,
     count:&mut i64)->Result<Option<&'static str>,String>{
     let Some(signal)=signal(raw,parsed,selected)else{return Ok(None);};
-    if *count>=MAX_OBSERVATIONS{return Ok(None);}
     let imdb=selected["imdb_id"].as_str().unwrap_or_default();
     // Raw torrent names and selected work names never enter export payloads.
-    let sample=digest(&format!("{}:{signal}:{imdb}:{}",build(),raw.to_ascii_lowercase()));
+    let source=build();
+    let sample=digest(&format!("{source}:{signal}:{imdb}:{}",raw.to_ascii_lowercase()));
+    if *count>=MAX_OBSERVATIONS{
+        // Repeated requests must not evict a different work. Reclaim a
+        // bounded oldest cohort only when the new observation is novel.
+        let known:i64=db.query_row("SELECT EXISTS(SELECT 1 FROM
+            ml_title_boundary_evidence WHERE sample_hash=?1)",
+            [&sample],|r|r.get(0)).map_err(|e|e.to_string())?;
+        if known!=0{return Ok(None);}
+        let removed=db.execute("DELETE FROM ml_title_boundary_evidence
+            WHERE sample_hash IN (SELECT sample_hash
+                FROM ml_title_boundary_evidence
+                ORDER BY observed_at,sample_hash LIMIT 256)",
+            []).map_err(|e|e.to_string())?;
+        *count=count.saturating_sub(removed as i64);
+        if *count>=MAX_OBSERVATIONS{return Ok(None);}
+    }
     let inserted=db.execute("INSERT OR IGNORE INTO ml_title_boundary_evidence
         (sample_hash,source_build,signal,imdb_id,observed_at)
         VALUES(?1,?2,?3,?4,strftime('%s','now'))",
-        params![sample,build(),signal,imdb]).map_err(|e|e.to_string())?;
+        params![sample,source,signal,imdb]).map_err(|e|e.to_string())?;
     if inserted==0{return Ok(None);}
     *count+=1;
     Ok(Some(signal))
