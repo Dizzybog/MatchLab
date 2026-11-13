@@ -23,7 +23,7 @@ services:
       MATCHLAB_DB: /data/metadata.sqlite3
       MATCHLAB_HOST: 0.0.0.0:8765
       MATCHLAB_MAX_CONCURRENT_MATCHES: "2"
-      MATCHLAB_STRICT_MODE: "false"
+      MATCHLAB_STRICT_MODE: "true"
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
@@ -85,13 +85,17 @@ Logging: `ERROR` remains at error level. MatchLab's formerly `WARN`-level nonfat
 
 The public `/match` and `/debug/match` endpoints have identical strict matching requirements. The dashboard's diagnostic endpoint is intentionally more permissive.
 
-**Optional exact-only mode:** set `MATCHLAB_STRICT_MODE: "true"` in the
-Compose environment to disable all prefix, suffix and partial-title
-candidate discovery, including anime aliases. Only complete normalized
-IMDb or AniDB title aliases can identify a work; the usual season/episode
-validation still applies. The default `false` preserves the current
-two-phase candidate search. This affects matching only, not `/parse`.
-See [strict mode behavior](docs/API.md#strict-exact-title-matching-optional). If metadata is missing or conflicting, MatchLab avoids inventing a match. See [API documentation](docs/API.md) for request options, full responses and other endpoints.
+**Strict exact-title matching is enabled by default.** Only complete
+normalized IMDb or AniDB title aliases can identify a work; prefix, suffix,
+internal partial-title and original-release recovery are disabled. Existing
+season/episode validation still applies.
+
+To **opt out** and restore the previous two-phase candidate search, set
+`MATCHLAB_STRICT_MODE: "false"` in Compose (or
+`MATCHLAB_STRICT_MODE=false` in the environment) and restart MatchLab.
+When the variable is absent, the default is `true`. Parsing (`/parse`)
+is unchanged.
+See [strict mode behavior](docs/API.md#strict-exact-title-matching-default). If metadata is missing or conflicting, MatchLab avoids inventing a match. See [API documentation](docs/API.md) for request options, full responses and other endpoints.
 
 ## Optional Machine Learning
 
