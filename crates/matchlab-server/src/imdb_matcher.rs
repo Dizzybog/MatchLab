@@ -150,6 +150,14 @@ pub(crate) fn semantic_words(raw:&str)->Vec<String>{
         .filter(|word|!word.is_empty() && *word!="and")
         .map(str::to_owned).collect()
 }
+/// Guard on actual normalized title length, not the ASCII-only index key.
+/// Keep ordinary ASCII titles on the zero-tokenization fast path.
+fn imdb_title_not_shorter(row:&Aka,parsed_len:usize)->bool{
+    let length=if row.title.is_ascii(){row.clean.len()}else{
+        semantic_words(&row.title).iter().map(|word|word.chars().count()).sum()
+    };
+    length>=parsed_len
+}
 /// Check whole-word containment in *both* directions; score the proportion
 /// of the longer title not covered by the shorter title.
 fn semantic_extension(short:&[String],long:&[String])->Option<TitleFit>{
@@ -722,10 +730,12 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     // Apply media-type and season eligibility once, after lexical discovery
     // has exhausted EVERY path. A more specific suffix can no longer be
     // starved by a shorter prefix/alias.
-    // Non-strict must never select an IMDb title alias shorter than the
-    // parser-selected title. Apply before eligibility and ranking, so the
-    // next eligible candidate can still win instead of rejecting afterwards.
-    if !strict {rows.retain(|row|row.clean.len()>=key.len());}
+    // Compare Unicode-preserving normalized title characters, NOT Tantivy's
+    // compact ASCII key (which can drop Japanese/Chinese characters).
+    // Reject shorter IMDb titles before costly eligibility and ranking.
+    let parsed_title_len=semantic_release.iter()
+        .map(|word|word.chars().count()).sum::<usize>();
+    if !strict {rows.retain(|row|imdb_title_not_shorter(row,parsed_title_len));}
     let eligible_rows=filter_eligible(db,rows,series,year,required_season)?;
     // An exact title can exist but be ineligible for the requested media
     // type/season. Avoid letting another alias with the same ASCII key
@@ -801,9 +811,9 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
             }
         }
     }
-    // Apply the same non-strict title-length guard to IDs recovered through
-    // AniDB fallback, including translated IMDb titles.
-    if !strict {rows.retain(|row|row.clean.len()>=key.len());}
+    // Apply the same guard after AniDB fallback, including translated
+    // IMDb title aliases; this does not change the strict AniDB policy.
+    if !strict {rows.retain(|row|imdb_title_not_shorter(row,parsed_title_len));}
     if rows.is_empty(){return Ok((vec![],false));}
     // Keep all plausible identities until ranked. Unrelated word fragments
     // are rejected before season eligibility and expensive ID lookups.
@@ -2107,7 +2117,9 @@ mod tests{
                 ('tt2222222','Beta Gamma','betagamma',2021,'movie','US',1,0,'movie');
             INSERT INTO imdb_ratings VALUES('tt1111111',1),('tt2222222',90000);")
             .unwrap();
-        let found=search(&db,"Alpha Beta Gamma",None,false,0,
+        // The parser title is a valid complete-word prefix of both IMDb
+        // aliases; neither candidate is shorter than this parsed title.
+        let found=search(&db,"Alpha Beta",None,false,0,
             "Alpha.Beta.Gamma.2021.WEB-DL",false,10).unwrap();
         assert_eq!(found.len(),2);
         assert_eq!(found[0].imdb_id,"tt1111111",
@@ -2144,10 +2156,15 @@ mod tests{
                 ('tt1111111','Beyond Dune','beyonddune',2021,'movie','US',1,0,'movie'),
                 ('tt2222222','Mystery','mystery',2021,'movie','US',1,0,'movie');")
             .unwrap();
-        let found=search(&db,"Mystery Beyond Dune",None,false,0,
+        // The suffix IMDb alias is longer than the parser title and can
+        // still be discovered from the original release.
+        let found=search(&db,"Mystery",None,false,0,
             "Mystery.Beyond.Dune.2021.1080p",false,10).unwrap();
-        assert_eq!(found.len(),1);
         assert_eq!(found[0].imdb_id,"tt1111111");
+        // A parser title containing the whole source is longer than both
+        // IMDb aliases and can no longer select either one.
+        assert!(search(&db,"Mystery Beyond Dune",None,false,0,
+            "Mystery.Beyond.Dune.2021.1080p",false,10).unwrap().is_empty());
     }
     #[test]
     fn word_fragments_and_short_generic_titles_are_not_identity(){
