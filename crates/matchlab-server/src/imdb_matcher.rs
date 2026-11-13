@@ -730,7 +730,7 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     }
     let mut rows=eligible_rows;
     let mut strict_anime_ids=HashSet::new();
-    if strict && rows.is_empty() && series && key.len()>=4 {
+    if strict && rows.is_empty() && series {
         // An exact imported AniDB title may map to a different English IMDb
         // primary title. Retain that genuinely exact alias relationship,
         // never a partial anime title or unverified related IMDb identity.
@@ -1013,7 +1013,9 @@ pub fn prefer_verified_episode_identity(
         return Ok(confirmed);
     }
     let key=clean_title(title);
-    if key.len()<4{return Ok(candidates);}
+    if key.is_empty() || (!crate::strict_match_mode() && key.len()<4){
+        return Ok(candidates);
+    }
     let aliases=if crate::strict_match_mode(){
         crate::tantivy_search::anime_aliases_exact(db,title)
     }else{crate::tantivy_search::anime_aliases_for_title(db,title,4)};
