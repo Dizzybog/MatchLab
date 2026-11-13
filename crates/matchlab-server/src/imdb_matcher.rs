@@ -152,9 +152,9 @@ pub(crate) fn semantic_words(raw:&str)->Vec<String>{
 }
 /// Guard on actual normalized title length, not the ASCII-only index key.
 /// Keep ordinary ASCII titles on the zero-tokenization fast path.
-fn imdb_title_not_shorter(row:&Aka,parsed_len:usize)->bool{
-    let length=if row.title.is_ascii(){row.clean.len()}else{
-        semantic_words(&row.title).iter().map(|word|word.chars().count()).sum()
+fn imdb_title_not_shorter(title:&str,clean:&str,parsed_len:usize)->bool{
+    let length=if title.is_ascii(){clean.len()}else{
+        semantic_words(title).iter().map(|word|word.chars().count()).sum()
     };
     length>=parsed_len
 }
@@ -735,7 +735,8 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     // Reject shorter IMDb titles before costly eligibility and ranking.
     let parsed_title_len=semantic_release.iter()
         .map(|word|word.chars().count()).sum::<usize>();
-    if !strict {rows.retain(|row|imdb_title_not_shorter(row,parsed_title_len));}
+    if !strict {rows.retain(|row|
+        imdb_title_not_shorter(&row.title,&row.clean,parsed_title_len));}
     let eligible_rows=filter_eligible(db,rows,series,year,required_season)?;
     // An exact title can exist but be ineligible for the requested media
     // type/season. Avoid letting another alias with the same ASCII key
@@ -813,7 +814,8 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     }
     // Apply the same guard after AniDB fallback, including translated
     // IMDb title aliases; this does not change the strict AniDB policy.
-    if !strict {rows.retain(|row|imdb_title_not_shorter(row,parsed_title_len));}
+    if !strict {rows.retain(|row|
+        imdb_title_not_shorter(&row.title,&row.clean,parsed_title_len));}
     if rows.is_empty(){return Ok((vec![],false));}
     // Keep all plausible identities until ranked. Unrelated word fragments
     // are rejected before season eligibility and expensive ID lookups.
@@ -1074,6 +1076,17 @@ pub fn prefer_verified_episode_identity(
             alias.ordering,
             alias.title.len()
         )) else{return Ok(candidates)};
+    // The late verified-episode promotion is another candidate-selection
+    // path. Enforce the same non-strict minimum IMDb title length here;
+    // strict may still resolve exact named AniDB seasons with shorter or
+    // translated canonical IMDb names.
+    if !crate::strict_match_mode(){
+        let parsed_len=semantic_words(title).iter()
+            .map(|word|word.chars().count()).sum();
+        if !imdb_title_not_shorter(&best.title,&best.clean,parsed_len){
+            return Ok(candidates);
+        }
+    }
     let mut anime_ids=BTreeMap::new();
     let mut stmt=db.prepare("SELECT type,value FROM anime_ids WHERE group_id=?1")?;
     for row in stmt.query_map([&id],|r|
