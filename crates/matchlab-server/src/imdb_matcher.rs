@@ -139,7 +139,7 @@ impl TitleFit{
 }
 /// Preserve non-Latin title words for ranking. Legacy index keys fold to ASCII:
 /// "BLEACH 千年血戦篇" and "Bleach" both have the same old key.
-fn semantic_words(raw:&str)->Vec<String>{
+pub(crate) fn semantic_words(raw:&str)->Vec<String>{
     use unicode_normalization::{UnicodeNormalization,char::is_combining_mark};
     let folded=raw.to_lowercase()
         .replace('æ',"ae").replace('ø',"o").replace('œ',"oe")
