@@ -826,6 +826,16 @@ reuses repeated exact parse/match requests only within the current
 source/rules/metadata namespace; obsolete results are always re-parsed and
 re-matched on demand. It is never a substitute for new verification.
 
+`title_boundaries` reports counts of locally deduplicated parser-versus-matcher
+title-boundary discrepancies (`observations`) and aggregate generic regex
+review candidates (`review_patterns`). Only strict public matching selections
+are eligible, and every training example must be independently aligned to
+an entire source-title word span. The fields `min_examples`, `min_imdb_works`,
+`maximum_local_evidence`, `live_activation` and `raw_titles_exported`
+describe the safety gates. **The proposals are review-only:** this learner
+never changes a parsed title or matcher identity by itself. The status
+endpoint contains no source names or IMDb IDs.
+
 `candidate_discovery` exposes only grouped counts of unknown release
 markers eligible for human review. The underlying marker strings, titles,
 hashes and model candidate predictions do not leave the local opt-in

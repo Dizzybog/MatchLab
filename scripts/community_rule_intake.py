@@ -114,6 +114,11 @@ FIELD_EPOCH=5
 TV_EPOCH=2
 CORRECTIVE_EPOCH=1
 DISCOVERY_EPOCH=2
+TITLE_BOUNDARY_REVIEW_PATTERNS={
+    "episode":r"(?i)(?:^|[ ._-])(?:s[0-9]{1,3}(?:[ ._-]*e[0-9]{1,5})?|[0-9]{1,3}x[0-9]{1,5}|e(?:p)?[0-9]{1,5})(?:$|[ ._-])",
+    "year":r"(?i)(?:^|[ ._-])(?:19|20)[0-9]{2}(?:$|[ ._-])",
+    "quality":r"(?i)(?:^|[ ._-])(?:1080p|2160p|720p|480p|4k|webdl|webrip|bluray|brrip|hdtv|remux|x264|x265|h264|h265|hevc|av1)(?:$|[ ._-])",
+}
 # Must match the restricted native Rust TV regex installed by tv_learning.rs.
 # GitHub receives the exact added patterns, not only the diagnostic grammar.
 TV_NATIVE_PATTERNS={
@@ -156,7 +161,31 @@ def valid_extended_rule(r,sha,ancestor=None):
          ("canonical_confirmations",0))):return None
     if r["canonical_confirmations"]>r["evidence_count"]:return None
     if not isinstance(r.get("fingerprint"),str):return None
-    if kind=="learned_field_regex_review":
+    if kind=="learned_title_boundary_regex_review":
+        # Title matches are NOT an independent authorization to rewrite
+        # parsing. Only aggregate, locally source-aligned discrepancies can
+        # propose one of the hard-coded review-only boundary grammars.
+        expected=common|{"field","signal","regex","review_only"}
+        if set(r)!=expected or not compatible_source(
+            r["source_build"],sha,1,ancestor):
+            return None
+        if (r["field"]!="title" or r["review_only"] is not True
+            or r["verification"]!=(
+                "matcher_alias_matches_complete_raw_title_review_only")
+            or r["canonical_confirmations"]!=0
+            or r["evidence_count"]<12 or r["distinct_titles"]<4):
+            return None
+        signal=r["signal"]
+        if not isinstance(signal,str) or not (
+            signal.startswith("underextracted_") or
+            signal.startswith("overextracted_")):
+            return None
+        suffix=signal.split("_",1)[1]
+        pattern=TITLE_BOUNDARY_REVIEW_PATTERNS.get(suffix)
+        if pattern is None or r["regex"]!=pattern:
+            return None
+        expected_fp=digest(f"title-boundary:{signal}:{pattern}")
+    elif kind=="learned_field_regex_review":
         # Unknown-field predictions are intentionally review-only.
         # A self-reported model score is not proof of a source regex fix.
         expected=common|{"field","signal","regex","review_only"}
@@ -193,7 +222,8 @@ def valid_extended_rule(r,sha,ancestor=None):
             "verified_regex_proposal","learned_field_regex",
             "learned_tv_regex","learned_source_regex_patch",
             "learned_corrective_regex","learned_general_regex_review",
-            "learned_field_regex_review"
+            "learned_field_regex_review",
+            "learned_title_boundary_regex_review"
         }:return None
         source=r["source_build"]
         if not isinstance(source,str) or ":" not in source:return None

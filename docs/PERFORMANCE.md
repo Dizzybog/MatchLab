@@ -315,3 +315,30 @@ CPU savings remain **unmeasured** until comparing cold/warm request mixes
 against the parent commit on the same IMDb/AniDB data. Useful measurements:
 exact-only hit rate, number of Tantivy queries, CPU seconds per 1,000
 matches, p50/p95 latency, memory, and final identity/coordinate parity.
+
+## Matcher-supervised title-boundary learning — November 13, 2026
+
+The opt-in background ML worker now records the difference between a fresh
+canonical Rust parser title and the exact IMDb title alias of the selected
+matcher identity. This is **not** self-certifying: only ASCII release names
+where that entire alias equals every significant original-source title word
+before an explicit season/episode, year or quality boundary become training
+observations. Translated title aliases, wrong or mismatched names, anime part
+remaps and path hierarchies do not supply labels.
+
+An accepted mismatch removes the suspicious canonical title from positive
+training and instead trains the advisory native FTRL model with a generic
+`title` under-/overextraction signal. Local SQLite evidence deduplicates
+repeat requests, never exports raw release names, and is bounded at 20,000
+rows. At least 12 examples from four distinct IMDb identities yield
+fixed-grammar title-boundary **review-only** regex proposals. These enter
+the existing community archive and strict GitHub intake workflow, where
+source changes still require separate independent test/replay verification.
+
+This feature performs no Tantivy or SQLite title search in the request
+thread, does not overwrite the parser title, does not add executable
+regexes to the live parser and does not change selected SID/ASID. Evaluation
+should compare confirmed title under-/overextraction on real requests and
+false positives from translated/anime aliases before approving a title
+handler change. Since this is an offline, bounded observation change, do not
+claim runtime accuracy improves until reviewed title corrections are merged.
