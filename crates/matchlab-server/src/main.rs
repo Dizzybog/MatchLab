@@ -1944,8 +1944,8 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result
     // Persistent and always-on match caches from the normal search policy
     // must never be reused by the stricter selection policy. Parsed fields
     // and index-generation-aware alias lookups remain safely cacheable.
-    let cacheable=matches!(policy,MatchPolicy::PublicApi)
-        &&!strict_match_mode();
+    let public_policy=matches!(policy,MatchPolicy::PublicApi);
+    let cacheable=public_policy &&!strict_match_mode();
     // Snapshot generation once: the persistent ML namespace is the same
     // fingerprint when ML is enabled, but the always-on cache also works
     // without ML. Avoid hashing metadata/WAL twice for the same snapshot.
@@ -1995,7 +1995,7 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result
             if local_learning::active(){
                 if let Some(record)=details.as_object_mut(){
                     record.insert("ml_source_policy".into(),json!(
-                        if cacheable{"public_api"}else{"dashboard_diagnostic"}));
+                        if public_policy{"public_api"}else{"dashboard_diagnostic"}));
                 }
             }
             let status=if d.selected.is_some(){"matched"}else{"unmatched"};
