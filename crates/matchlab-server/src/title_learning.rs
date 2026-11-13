@@ -119,8 +119,16 @@ pub fn budget(db:&Connection)->Result<i64,String>{
     db.query_row("SELECT COUNT(*) FROM ml_title_boundary_evidence",[],
         |r|r.get(0)).map_err(|e|e.to_string())
 }
+/// Repeat requests still describe a real parser error, but they must not
+/// increase evidence counts. Keep the classification separate from whether
+/// this particular observation is new in SQLite.
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub struct Observation{
+    pub signal:&'static str,
+    pub inserted:bool,
+}
 pub fn observe(db:&Connection,raw:&str,parsed:&Value,selected:&Value,
-    count:&mut i64)->Result<Option<&'static str>,String>{
+    count:&mut i64)->Result<Option<Observation>,String>{
     let Some(signal)=signal(raw,parsed,selected)else{return Ok(None);};
     let imdb=selected["imdb_id"].as_str().unwrap_or_default();
     // Raw torrent names and selected work names never enter export payloads.
@@ -132,22 +140,23 @@ pub fn observe(db:&Connection,raw:&str,parsed:&Value,selected:&Value,
         let known:i64=db.query_row("SELECT EXISTS(SELECT 1 FROM
             ml_title_boundary_evidence WHERE sample_hash=?1)",
             [&sample],|r|r.get(0)).map_err(|e|e.to_string())?;
-        if known!=0{return Ok(None);}
+        if known!=0{return Ok(Some(Observation{signal,inserted:false}));}
         let removed=db.execute("DELETE FROM ml_title_boundary_evidence
             WHERE sample_hash IN (SELECT sample_hash
                 FROM ml_title_boundary_evidence
                 ORDER BY observed_at,sample_hash LIMIT 256)",
             []).map_err(|e|e.to_string())?;
         *count=count.saturating_sub(removed as i64);
-        if *count>=MAX_OBSERVATIONS{return Ok(None);}
+        if *count>=MAX_OBSERVATIONS{
+            return Ok(Some(Observation{signal,inserted:false}));
+        }
     }
     let inserted=db.execute("INSERT OR IGNORE INTO ml_title_boundary_evidence
         (sample_hash,source_build,signal,imdb_id,observed_at)
         VALUES(?1,?2,?3,?4,strftime('%s','now'))",
         params![sample,source,signal,imdb]).map_err(|e|e.to_string())?;
-    if inserted==0{return Ok(None);}
-    *count+=1;
-    Ok(Some(signal))
+    if inserted!=0{*count+=1;}
+    Ok(Some(Observation{signal,inserted:inserted!=0}))
 }
 pub fn review_flag(signal:&str)->Value{
     json!({"code":if signal.starts_with("underextracted"){
@@ -272,9 +281,11 @@ mod tests{
                 "matched_title":"Alpha Beta Gamma"});
             let raw=format!("Alpha.Beta.Gamma.S01E{:02}.WEB-DL",i);
             assert_eq!(observe(&db,&raw,&json!({"title":"Alpha Beta"}),
-                &selected,&mut count).unwrap(),Some("underextracted_episode"));
+                &selected,&mut count).unwrap().map(|o|o.signal),
+                Some("underextracted_episode"));
             assert_eq!(observe(&db,&raw,&json!({"title":"Alpha Beta"}),
-                &selected,&mut count).unwrap(),None);
+                &selected,&mut count).unwrap(),
+                Some(Observation{signal:"underextracted_episode",inserted:false}));
         }
         let proposals=community_proposals(&db).unwrap();
         assert_eq!(count,12);
