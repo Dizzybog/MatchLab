@@ -112,8 +112,9 @@ lifecycle and remaining limitations.
 **Title discrepancy learning:** A title mismatch is not automatically a parser error:
 IMDb may store translated aliases, different anime-part names, or competing
 works. MatchLab trains on title-boundary discrepancies only when the
-selected alias exactly covers the independently extracted source-title span from a strict public match,
-records repeat observations without duplication, and requires at least 12
+selected alias exactly covers the independently extracted source-title span
+from a strict public match. Repeated observations do not increase evidence
+counts, and at least 12
 examples from four IMDb works before suggesting a bounded, generic
 title-boundary regex. Such proposals are **review-only** and never change the
 live parser until a trusted source diff and regression tests separately prove
