@@ -27,6 +27,8 @@ fn current(db:&Connection,meta:Option<&Connection>)->Vec<Value>{
         .unwrap_or_default());
     rules.extend(crate::general_learning::community_proposals(db)
         .unwrap_or_default());
+    rules.extend(crate::title_learning::community_proposals(db)
+        .unwrap_or_default());
     // Unknown local marker guesses may contain private filename fragments.
     // Keep them in the local review model, NEVER in the automatic export.
     if let Some(meta)=meta {
