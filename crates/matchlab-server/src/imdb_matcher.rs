@@ -532,7 +532,34 @@ fn shortlist_metadata(
 }
 
 pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_season:i64,
-    release_title:&str,_has_episode:bool,limit:usize)->rusqlite::Result<Vec<Match>>{
+    release_title:&str,has_episode:bool,limit:usize)->rusqlite::Result<Vec<Match>>{
+    search_inner(db,title,year,series,required_season,release_title,has_episode,limit,false)
+        .map(|(hits,_)|hits)
+}
+
+/// Preserve the public API's final eligibility gate when an exact-only
+/// shortlist is used. If all exact results fail a caller-specific gate (e.g.
+/// year evidence), retry the complete indexed discovery rather than
+/// suppressing a valid shorter, word-aligned candidate.
+pub fn search_validated(
+    db:&Connection,title:&str,year:Option<i32>,series:bool,required_season:i64,
+    release_title:&str,has_episode:bool,limit:usize,
+    validate:impl Fn(Vec<Match>)->Vec<Match>,
+)->rusqlite::Result<Vec<Match>>{
+    let (hits,exact_only)=search_inner(
+        db,title,year,series,required_season,release_title,has_episode,limit,false)?;
+    let filtered=validate(hits);
+    if exact_only && filtered.is_empty(){
+        let (fallback,_) = search_inner(
+            db,title,year,series,required_season,release_title,has_episode,limit,true)?;
+        return Ok(validate(fallback));
+    }
+    Ok(filtered)
+}
+
+fn search_inner(db:&Connection,title:&str,year:Option<i32>,series:bool,required_season:i64,
+    release_title:&str,_has_episode:bool,limit:usize,force_full:bool,
+)->rusqlite::Result<(Vec<Match>,bool)>{
     // The parser has already inherited season/episode/year across the
     // hierarchy. Only the lexical candidate discovery should operate on
     // the original component containing its chosen title, not on a joined
@@ -540,12 +567,12 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     let release_title=release_component_for_title(release_title,title);
     let key=clean_title(title);
     let release=clean_title(release_title);
-    if key.is_empty()||limit==0{return Ok(vec![]);}
-    // Discover ALL eligible lexical identities before assigning a winner:
-    // parsed exact aliases, forward/reversed title lookups, and both title
-    // edges in the original torrent are evidence for the SAME ranking pool.
-    // No prefix hit, exact hit, or country-qualified hit can suppress a
-    // potentially more relevant title discovered through another direction.
+    if key.is_empty()||limit==0{return Ok((vec![],false));}
+    // For a complete, verified source title of at least six normalized
+    // characters, exact aliases form a safe first phase. A truncated parser
+    // title or a country-qualified alias must still use all lexical paths.
+    // Otherwise the ordinary exhaustive discovery and global ranking stay
+    // authoritative, including valid partial and reversed-title matches.
     let words=crate::title_normalization::clean_words(title);
     let release_words=crate::title_normalization::clean_words(release_title);
     let mut rows=Vec::new();
@@ -573,7 +600,16 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
         }
     }
     let mut discovered=exact(db,&key)?;
-    if key.len()>=4{
+    // Presence in the index is NOT enough: the source's complete significant
+    // words must equal the parsed title, and at least one exact alias must
+    // have the same Unicode-preserving words (ASCII keys may collide).
+    // This protects longer names such as Monster / The Ed Gein Story and
+    // BLEACH with a Japanese subtitle from premature early exits.
+    let exact_only=!force_full && key.len()>=6 && country_qualified.is_none()
+        && !semantic_content.is_empty() && semantic_release==semantic_content
+        && discovered.iter().any(|row|
+            row.clean==key && semantic_words(&row.title)==semantic_content);
+    if !exact_only && key.len()>=4{
         discovered.extend(tantivy_aliases(db,&key,false)?);
         if key.len()>=8{
             discovered.extend(tantivy_aliases(db,&key,true)?);
@@ -594,7 +630,9 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     // Recover full IMDb titles and legitimate longer partial prefixes from
     // the ORIGINAL release, keeping only whole-word matches before technical
     // metadata, without SQL title scans or unbounded substring searches.
-    let extended_keys=longer_release_title_prefixes(title,release_title);
+    let extended_keys=if exact_only{Vec::new()}else{
+        longer_release_title_prefixes(title,release_title)
+    };
     let mut extended_title_matches=HashSet::new();
     if !extended_keys.is_empty(){
         let max_title_words=semantic_content.len();
@@ -618,7 +656,9 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     // reject stray source-title words that are not covered by the candidate.
     // Always collect suffix evidence, even if an exact/prefix candidate
     // already exists. Every candidate must be compared in one global rank.
-    let suffix_keys=longer_release_title_suffix_keys(release_title);
+    let suffix_keys=if exact_only{Vec::new()}else{
+        longer_release_title_suffix_keys(release_title)
+    };
     let mut suffix_title_matches=HashSet::new();
     if !suffix_keys.is_empty(){
         let found=crate::tantivy_search::title_aliases_at_release_suffixes(
@@ -639,7 +679,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     // one targeted lookup. Ordinary filter(release.contains(alias)) cannot
     // be used here: by definition the IMDb name is longer than the source.
     let mut imdb_title_suffix_matches=HashSet::new();
-    if semantic_content.len()>=2 {
+    if !exact_only && semantic_content.len()>=2 {
         let suffix_key=clean_title(&semantic_content.join(" "));
         if suffix_key.len()>=6{
             let found=tantivy_aliases(db,&suffix_key,true)?;
@@ -657,6 +697,14 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
     // has exhausted EVERY path. A more specific suffix can no longer be
     // starved by a shorter prefix/alias.
     let eligible_rows=filter_eligible(db,rows,series,year,required_season)?;
+    // An exact title can exist but be ineligible for the requested media
+    // type/season. Avoid letting another alias with the same ASCII key
+    // masquerade as a verified complete title; resume full discovery.
+    if exact_only && !eligible_rows.iter().any(|row|
+        row.clean==key && semantic_words(&row.title)==semantic_content){
+        return search_inner(db,title,year,series,required_season,
+            release_title,_has_episode,limit,true);
+    }
     let mut rows=eligible_rows;
     // The AniDB-only title lookup remains a separate *fallback* when none
     // of the IMDb title search paths found any eligible identity.
@@ -704,7 +752,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             }
         }
     }
-    if rows.is_empty(){return Ok(vec![]);}
+    if rows.is_empty(){return Ok((vec![],false));}
     // Keep all plausible identities until ranked. Unrelated word fragments
     // are rejected before season eligibility and expensive ID lookups.
     // Score every (IMDb title alias, source) independently and use its
@@ -877,7 +925,7 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
             category:best.category,matched_title:best.title,anime_ids:ids,media_type:best.media_type}));
     }
     output.sort_by(|a,b|a.0.cmp(&b.0));
-    Ok(output.into_iter().take(limit).map(|(_,m)|m).collect())
+    Ok((output.into_iter().take(limit).map(|(_,m)|m).collect(),exact_only))
 }
 /// A matching English IMDb alias can belong to an older OVA with too few
 /// episodes, while the modern TV series is linked only by AniDB's English
@@ -963,6 +1011,112 @@ pub fn prefer_verified_episode_identity(
 }
 #[cfg(test)]
 mod tests{
+
+    /// Exacts must be fast without changing duplicate-title ranking, including
+    /// two IMDb works that share the same complete title and have different years.
+    #[test]
+    fn exact_first_matches_exhaustive_ranking_for_complete_titles(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('ttmatrix','The Matrix','thematrix',1999,'movie','US',1,0,'movie'),
+                ('ttnew','The Matrix','thematrix',2010,'movie','US',1,0,'movie'),
+                ('ttsequel','The Matrix Reloaded','thematrixreloaded',2003,'movie','US',1,0,'movie');
+            INSERT INTO imdb_ratings VALUES('ttmatrix',10),('ttnew',100000),
+                ('ttsequel',999999);").unwrap();
+        let args=("The Matrix",Some(1999),false,0,"The.Matrix.1999.1080p.BluRay",false,20);
+        let (fast,exact_only)=search_inner(&db,args.0,args.1,args.2,args.3,
+            args.4,args.5,args.6,false).unwrap();
+        assert!(exact_only,"complete six-character-plus IMDb alias uses the fast path");
+        let (full,used_fast)=search_inner(&db,args.0,args.1,args.2,args.3,
+            args.4,args.5,args.6,true).unwrap();
+        assert!(!used_fast);
+        assert_eq!(fast.iter().map(|item|&item.imdb_id).collect::<Vec<_>>(),
+            full.iter().map(|item|&item.imdb_id).collect::<Vec<_>>());
+        assert_eq!(fast[0].imdb_id,"ttmatrix");
+    }
+
+    #[test]
+    fn five_character_title_keeps_all_lexical_search_paths(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES('ttshort','DuneX','dunex',2020,'movie','US',1,0,'movie');")
+            .unwrap();
+        let (hits,exact_only)=search_inner(&db,"DuneX",Some(2020),false,0,
+            "DuneX.2020.WEB-DL",false,20,false).unwrap();
+        assert!(!exact_only);
+        assert_eq!(hits[0].imdb_id,"ttshort");
+    }
+
+    #[test]
+    fn rejected_exact_only_candidate_retries_full_search_after_api_gate(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('ttold','Star Force','starforce',2010,'movie','US',1,0,'movie'),
+                ('ttnew','Force','force',2025,'movie','US',1,0,'movie');")
+            .unwrap();
+        let (quick,exact_only)=search_inner(&db,"Star Force",Some(2025),false,0,
+            "Star.Force.2025",false,20,false).unwrap();
+        assert!(exact_only);
+        assert_eq!(quick.len(),1);
+        assert_eq!(quick[0].imdb_id,"ttold");
+        // Mirrors the production /match year gate: rejected exact results
+        // must never prevent a shorter, word-boundary-safe newer candidate.
+        let valid=search_validated(&db,"Star Force",Some(2025),false,0,
+            "Star.Force.2025",false,20,|hits|{
+                hits.into_iter().filter(|hit|hit.year==2025).collect()
+            }).unwrap();
+        let full=search_inner(&db,"Star Force",Some(2025),false,0,
+            "Star.Force.2025",false,20,true).unwrap().0;
+        assert_eq!(valid.iter().map(|hit|&hit.imdb_id).collect::<Vec<_>>(),
+            full.iter().filter(|hit|hit.year==2025)
+                .map(|hit|&hit.imdb_id).collect::<Vec<_>>());
+        assert_eq!(valid[0].imdb_id,"ttnew");
+    }
+
+    #[test]
+    fn incomplete_or_unicode_qualified_exact_title_never_shortcuts(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('ttshort','The Ed','theed',2025,'series','US',1,0,'tvSeries'),
+                ('ttgein','Monster: The Ed Gein Story','monstertheedgeinstory',
+                    2025,'series','US',0,0,'tvSeries'),
+                ('ttbleach','Bleach','bleach',2004,'series','US',1,0,'tvSeries'),
+                ('ttjapan','BLEACH 千年血戦篇','bleach',2022,'series','JP',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('ttshort',1),('ttgein',2),
+                ('ttbleach',17),('ttjapan',4);").unwrap();
+        let (short,shortcut)=search_inner(&db,"The Ed",None,true,1,
+            "The.Ed.Gein.Story.S01E01",true,20,false).unwrap();
+        assert!(!shortcut);
+        assert_eq!(short[0].imdb_id,"ttgein",
+            "longer IMDb suffix must beat an exact but truncated parser title");
+        let (anime,shortcut)=search_inner(&db,"Bleach",None,true,1,
+            "Bleach.千年血戦篇.S01E01",true,20,false).unwrap();
+        assert!(!shortcut);
+        assert_eq!(anime[0].imdb_id,"ttjapan",
+            "Unicode suffix must remain part of the candidate ranking");
+    }
+
+
     use super::*;
     #[test] fn votes_replace_alias_count_as_tiebreaker(){
         let db=Connection::open_in_memory().unwrap();
