@@ -206,6 +206,16 @@ mod tests{
         }
         assert_eq!(signal("The.Office.US.S01E01",
             &json!({"title":"The Office US"}),&selected),None);
+        assert_eq!(signal("The.Office.US.S01E01.1080p",
+            &json!({"title":"The Office US S01E01"}),&selected),
+            Some("overextracted_episode"));
+        let flagged=review_flag("underextracted_episode");
+        let trusted=crate::field_audit::canonical_for_training(
+            &json!({"title":"The Office","seasons":[1],"episodes":[1]}),
+            &[flagged]);
+        assert!(trusted.get("title").is_none(),
+            "a suspect old title must not become a positive model label");
+        assert_eq!(trusted["episodes"],json!([1]));
     }
     #[test]
     fn translated_wrong_aliases_paths_and_ambiguous_parts_are_not_labels(){
@@ -225,6 +235,22 @@ mod tests{
             "matched_title":"The Office US"});
         assert!(signal("The.Office.US.S01E01",
             &json!({"title":"The Office"}),&anime).is_none());
+    }
+    #[test]
+    fn no_community_proposal_from_one_popular_work(){
+        let db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        let mut count=0;
+        let selected=json!({"match_source":"imdb","imdb_id":"tt1234567",
+            "matched_title":"Alpha Beta Gamma"});
+        for i in 1..=20{
+            let raw=format!("Alpha.Beta.Gamma.S01E{:02}",i);
+            assert!(observe(&db,&raw,&json!({"title":"Alpha Beta"}),
+                &selected,&mut count).unwrap().is_some());
+        }
+        assert_eq!(count,20);
+        assert!(community_proposals(&db).unwrap().is_empty(),
+            "one IMDb identity is not independent evidence");
     }
     #[test]
     fn requires_independent_works_and_deduplicates_repeated_requests(){
