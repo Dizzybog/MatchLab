@@ -855,9 +855,7 @@ fn title_aliases_inside_words_uncached(
 /// coverage guard, and include source word boundaries in the cache key:
 /// "Monster Story" and "Monsters Tory" may have the same compact key but
 /// different valid split points.
-fn inside_word_terms(raw_title:&str)->Vec<String>{
-    let words=crate::title_normalization::clean_words(raw_title);
-    let key=crate::title_normalization::clean_title(raw_title);
+fn inside_word_terms(key:&str,words:&[String])->Vec<String>{
     if key.len()<6||words.len()<2{return Vec::new();}
     let min_len=4usize.max((key.len()+1)/2).max(key.len().saturating_sub(16));
     if min_len>=key.len(){return Vec::new();}
@@ -877,9 +875,11 @@ fn inside_word_terms(raw_title:&str)->Vec<String>{
     terms.into_iter().collect()
 }
 pub fn title_aliases_inside_words(
-    db:&Connection,raw_title:&str,
+    db:&Connection,key:&str,words:&[String],
 )->Result<Vec<TitleAlias>,String>{
-    let terms=inside_word_terms(raw_title);
+    // Reuse the matcher-normalized title key and words. No extra Unicode
+    // folding or word-vector allocation on the full fallback path.
+    let terms=inside_word_terms(key,words);
     if terms.is_empty(){return Ok(Vec::new());}
     // The sorted term set identifies the exact query and also preserves
     // deduplication for alternate separators/spellings of the same title.
@@ -1182,7 +1182,8 @@ mod persistence_tests {
         for (raw,_) in cases{
             let key=crate::title_normalization::clean_title(raw);
             let min=4usize.max((key.len()+1)/2).max(key.len().saturating_sub(16));
-            for term in inside_word_terms(raw){
+            let words=crate::title_normalization::clean_words(raw);
+            for term in inside_word_terms(&key,&words){
                 assert!(term.len()>=min &&term.len()<key.len());
                 assert!(key.starts_with(&term)||key.ends_with(&term));
             }
@@ -1202,7 +1203,8 @@ mod persistence_tests {
         let raw="The Office Extra";
         let key=crate::title_normalization::clean_title(raw);
         let legacy=title_aliases_inside(&db,&key).unwrap();
-        let fast=title_aliases_inside_words(&db,raw).unwrap();
+        let fast=title_aliases_inside_words(&db,&key,
+            &crate::title_normalization::clean_words(raw)).unwrap();
         let legacy_word_aligned=legacy.into_iter().filter(|alias|{
             let alias_words=crate::title_normalization::clean_words(&alias.title);
             let words=crate::title_normalization::clean_words(raw);
