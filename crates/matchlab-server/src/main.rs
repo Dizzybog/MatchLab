@@ -41,7 +41,6 @@ use std::{env, path::PathBuf, sync::{Arc,Mutex,OnceLock}, time::{Instant,Duratio
 use tokio::sync::Semaphore;
 
 
-#[derive(Clone)]
 static STRICT_MATCH_MODE:OnceLock<bool>=OnceLock::new();
 fn strict_match_mode()->bool{
     STRICT_MATCH_MODE.get().copied().unwrap_or(false)
@@ -55,6 +54,7 @@ fn parse_strict_match_mode(raw:Option<&str>)->Result<bool,String>{
     }
 }
 
+#[derive(Clone)]
 struct AppState {
     db:Arc<PathBuf>,
     history:Arc<PathBuf>,
