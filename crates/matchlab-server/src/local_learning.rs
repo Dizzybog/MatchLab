@@ -224,8 +224,6 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
             continue;
         };
         let base=Value::Object(canonical_context.result.clone());
-        crate::general_learning::observe(&tx,&title,&canonical_context,
-            &mut general_evidence)?;
         // Flag missing, over- and underextraction *before* treating
         // canonical parser values as model training positives.
         let mut flags=crate::field_audit::audit(
@@ -237,6 +235,14 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
             new_title_observations+=1;
         }
         let clean=crate::field_audit::canonical_for_training(&base,&flags);
+        // Metamorphic source-handler learning treats the complete canonical
+        // parser result as its reference. A proven title-boundary anomaly
+        // invalidates that premise, so this example must not become a
+        // positive general-handler training label.
+        if title_signal.is_none(){
+            crate::general_learning::observe(&tx,&title,&canonical_context,
+                &mut general_evidence)?;
+        }
         // Unlike the advisory ranker, corrective evidence must compare
         // independent raw syntax with the untouched canonical parser.
         crate::corrective_learning::observe(&tx,&title,&base,
