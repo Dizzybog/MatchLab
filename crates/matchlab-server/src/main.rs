@@ -233,7 +233,9 @@ fn open_db(path: &PathBuf) -> rusqlite::Result<Connection> {
 
 fn anime_candidate(db: &Connection, title: &str, season: Option<i64>, episode: i64) -> rusqlite::Result<Option<Value>> {
     let key=imdb_matcher::clean_title(title);
-    if key.len()<4||episode<=0{return Ok(None);}
+    if key.is_empty()||(!strict_match_mode()&&key.len()<4)||episode<=0{
+        return Ok(None);
+    }
     let aliases=if strict_match_mode(){
         tantivy_search::anime_aliases_exact(db,title)
     }else{tantivy_search::anime_aliases_for_title(db,title,6)};
@@ -295,7 +297,7 @@ fn anime_candidate(db: &Connection, title: &str, season: Option<i64>, episode: i
 /// season or episode coordinates. Exact aliases precede longest prefixes.
 fn anime_identity(db:&Connection,title:&str)->rusqlite::Result<Option<String>>{
     let key=imdb_matcher::clean_title(title);
-    if key.len()<4{return Ok(None);}
+    if key.is_empty()||(!strict_match_mode()&&key.len()<4){return Ok(None);}
     let aliases=if strict_match_mode(){
         tantivy_search::anime_aliases_exact(db,title)
     }else{tantivy_search::anime_aliases_for_title(db,title,6)};
@@ -316,7 +318,7 @@ fn anime_identity(db:&Connection,title:&str)->rusqlite::Result<Option<String>>{
 /// unique AniDB alias. This is stricter than the prefix-based fallback used
 /// to rank title candidates and safe for season-pack inference.
 fn exact_anime_identity(db:&Connection,key:&str)->Result<Option<String>,String>{
-    if key.len()<4{return Ok(None);}
+    if key.is_empty()||(!strict_match_mode()&&key.len()<4){return Ok(None);}
     let aliases=if strict_match_mode(){
         tantivy_search::anime_aliases_exact(db,key)?
     }else{tantivy_search::anime_aliases(db,key,4)?};
@@ -649,7 +651,7 @@ fn verified_anime_subfolder_title(
     if imdb.is_empty(){return Ok(None);}
     for name in parents.iter().rev().filter_map(Value::as_str){
         let key=imdb_matcher::clean_title(name);
-        if key.len()<4 {continue;}
+        if key.is_empty()||(!strict_match_mode()&&key.len()<4){continue;}
         let aliases=if strict_match_mode(){
             tantivy_search::anime_aliases_exact(db,name)?
         }else{tantivy_search::anime_aliases(db,&key,4)?};
@@ -838,7 +840,8 @@ fn verified_unmarked_single_anime_imdb(
     year:Option<i32>,episode:i64,
 )->Result<Option<String>,String>{
     let key=imdb_matcher::clean_title(candidate_title);
-    if key.len()<4 || !(1..=99_999).contains(&episode){return Ok(None);}
+    if key.is_empty() ||(!strict_match_mode()&&key.len()<4)
+        ||!(1..=99_999).contains(&episode){return Ok(None);}
     let aliases=if strict_match_mode(){
         tantivy_search::anime_aliases_exact(db,candidate_title)?
     }else{tantivy_search::anime_aliases(db,&key,4)?};
