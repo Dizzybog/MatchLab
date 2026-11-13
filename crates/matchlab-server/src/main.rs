@@ -1949,10 +1949,17 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result
         Ok(d)=>{
             // One serialization for the optional ML cache and bounded
             // history queue; ownership is transferred to the writer.
-            let details=serde_json::to_value(d).unwrap_or(Value::Null);
+            let mut details=serde_json::to_value(d).unwrap_or(Value::Null);
             if cacheable && let Some(ref ns)=generation {
                 learning_cache::put_match(
                     &req.title,req.year,req.series,ns,&details);
+            }
+            // Keep policy metadata in durable history only, never in the
+            // cached/public Diagnostic. Exploratory dashboard selections are
+            // not valid supervisory labels for the title learner.
+            if let Some(record)=details.as_object_mut(){
+                record.insert("ml_source_policy".into(),json!(
+                    if cacheable{"public_api"}else{"dashboard_diagnostic"}));
             }
             let status=if d.selected.is_some(){"matched"}else{"unmatched"};
             dashboard_history::record_async(
