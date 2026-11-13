@@ -61,7 +61,9 @@ fn mappings(db:&Connection,anidb_id:&str)->Result<Vec<Mapping>,String>{
 
 fn exact_anidb_ids(db:&Connection,title:&str)->Result<BTreeSet<String>,String>{
     let key=title_normalization::clean_title(title);
-    if key.len()<4{return Ok(BTreeSet::new());}
+    if key.is_empty() || (!crate::strict_match_mode()&&key.len()<4){
+        return Ok(BTreeSet::new());
+    }
     let ids=tantivy_search::anidb_ids_exact(db,&key)?;
     Ok(ids.into_iter()
         .filter(|id|identifiers::canonical_asid(id,1).is_some()).collect())
