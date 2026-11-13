@@ -88,15 +88,14 @@ unchanged. A date in a daily-show filename (YYYY-MM-DD) remains an
 episode airdate, **not a production year**; the separate Cinemeta
 airdate resolver retains its own ±1-calendar-day timezone tolerance.
 
-### Strict exact-title matching (default)
+### Strict exact-title matching (optional)
 
-Exact-only IMDb and AniDB title matching is enabled automatically, including
-when `MATCHLAB_STRICT_MODE` is absent. The default is `true`.
-To opt out and restore the previous full two-phase candidate search, set
-`MATCHLAB_STRICT_MODE: "false"` in Docker Compose (or
-`MATCHLAB_STRICT_MODE=false` in the environment) and restart MatchLab.
+The default `MATCHLAB_STRICT_MODE=false` retains the optimized two-stage
+IMDb and AniDB candidate search. To **opt in** to exact-only title matching,
+set `MATCHLAB_STRICT_MODE: "true"` in Docker Compose (or
+`MATCHLAB_STRICT_MODE=true` in the environment) and restart MatchLab.
 
-With strict mode enabled, the **entire public /match and debug/dashboard title-identity
+When enabled, the **entire public /match and debug/dashboard title-identity
 search** uses only *complete normalized title aliases*: an exact IMDb
 Tantivy term match or an exact imported AniDB alias connected to an IMDb
 work. A strict result may still carry verified season/episode and AniDB
