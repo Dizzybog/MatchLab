@@ -1088,6 +1088,28 @@ mod tests{
     }
 
     #[test]
+    fn longer_original_title_disables_exact_hit_for_shorter_parser_title(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('ttshort','The Office','theoffice',2005,'series','US',1,0,'tvSeries'),
+                ('ttlong','The Office US','theofficeus',2005,'series','US',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('ttshort',9),('ttlong',9);
+            INSERT INTO imdb_ratings VALUES('ttshort',50000),('ttlong',1);")
+            .unwrap();
+        let (hits,exact_only)=search_inner(&db,"The Office",None,true,1,
+            "The.Office.US.S01E01",true,20,false).unwrap();
+        assert!(!exact_only,"the source contains an additional title word");
+        assert_eq!(hits[0].imdb_id,"ttlong",
+            "longer full-source identity must outrank a shorter exact parser hit");
+    }
+
+    #[test]
     fn incomplete_or_unicode_qualified_exact_title_never_shortcuts(){
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
@@ -1111,9 +1133,16 @@ mod tests{
             "longer IMDb suffix must beat an exact but truncated parser title");
         let (anime,shortcut)=search_inner(&db,"Bleach",None,true,1,
             "Bleach.千年血戦篇.S01E01",true,20,false).unwrap();
-        assert!(!shortcut);
-        assert_eq!(anime[0].imdb_id,"ttjapan",
-            "Unicode suffix must remain part of the candidate ranking");
+        assert!(!shortcut,"a truncated Unicode title cannot use exact-only");
+        let full=search_inner(&db,"Bleach",None,true,1,
+            "Bleach.千年血戦篇.S01E01",true,20,true).unwrap().0;
+        assert_eq!(anime.iter().map(|hit|&hit.imdb_id).collect::<Vec<_>>(),
+            full.iter().map(|hit|&hit.imdb_id).collect::<Vec<_>>());
+        let (complete,exact_only)=search_inner(&db,"Bleach 千年血戦篇",None,
+            true,1,"Bleach.千年血戦篇.S01E01",true,20,false).unwrap();
+        assert!(exact_only);
+        assert_eq!(complete[0].imdb_id,"ttjapan",
+            "full Unicode identity is preferred over a colliding ASCII alias");
     }
 
 
