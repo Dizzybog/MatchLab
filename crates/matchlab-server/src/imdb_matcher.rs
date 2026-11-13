@@ -1014,8 +1014,10 @@ pub fn prefer_verified_episode_identity(
     }
     let key=clean_title(title);
     if key.len()<4{return Ok(candidates);}
-    let exact_anime_ids=crate::tantivy_search::anime_aliases_for_title(db,title,4)
-        .map_err(index_error)?.into_iter()
+    let aliases=if crate::strict_match_mode(){
+        crate::tantivy_search::anime_aliases_exact(db,title)
+    }else{crate::tantivy_search::anime_aliases_for_title(db,title,4)};
+    let exact_anime_ids=aliases.map_err(index_error)?.into_iter()
         .filter(|alias|alias.clean_title==key)
         .map(|alias|alias.imdb_id)
         .collect::<std::collections::BTreeSet<_>>();
