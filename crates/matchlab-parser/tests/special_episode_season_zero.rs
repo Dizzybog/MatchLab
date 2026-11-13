@@ -82,3 +82,68 @@ fn special_tag_does_not_erase_known_episode_number_or_invent_one(){
     assert_eq!(unnumbered["seasons"],json!([0]),"{unnumbered:?}");
     assert_eq!(unnumbered["episodes"],json!([]),"{unnumbered:?}");
 }
+
+
+#[test]
+fn movie_title_special_before_release_year_is_not_a_tv_extra(){
+    for (raw,title,year) in [
+        ("www.Torrenting.org - The.Special.2020.HDRip.XviD.AC3-EVO",
+            "The Special",2020),
+        ("The.Special.2020.1080p.BluRay.x264-GROUP",
+            "The Special",2020),
+        ("A.Very.Special.Christmas.1987.DVDRip.XviD",
+            "A Very Special Christmas",1987),
+    ]{
+        let parsed=parse_title(raw,false).unwrap();
+        assert_eq!(parsed["title"],json!(title),"{raw}: {parsed:?}");
+        assert_eq!(parsed["year"],json!(year),"{raw}: {parsed:?}");
+        assert_eq!(parsed["seasons"],json!([]),"{raw}: {parsed:?}");
+        assert_eq!(parsed["episodes"],json!([]),"{raw}: {parsed:?}");
+        assert!(parsed.get("special_episode").is_none(),"{raw}: {parsed:?}");
+        assert!(parsed.get("special_type").is_none(),"{raw}: {parsed:?}");
+    }
+}
+
+#[test]
+fn creditless_anime_openings_and_endings_are_season_zero_extras(){
+    for (raw,kind) in [
+        ("Example.Anime.NCOP.1080p.BluRay.x264.mkv","ncop"),
+        ("Example.Anime.NCED.1080p.BluRay.x264.mkv","nced"),
+        ("[SubsPlease] Example Anime NCOP 1080p WEB-DL.mkv","ncop"),
+        ("Example Anime NCED.mkv","nced"),
+    ]{
+        let parsed=parse_title(raw,false).unwrap();
+        assert_eq!(parsed["title"],json!("Example Anime"),"{raw}: {parsed:?}");
+        assert_eq!(parsed["seasons"],json!([0]),"{raw}: {parsed:?}");
+        assert_eq!(parsed["episodes"],json!([]),"{raw}: {parsed:?}");
+        assert_eq!(parsed["special_episode"],json!(true),"{raw}: {parsed:?}");
+        assert_eq!(parsed["special_type"],json!(kind),"{raw}: {parsed:?}");
+    }
+}
+
+#[test]
+fn ncop_nced_folder_metadata_inherits_parent_title(){
+    for (raw,kind) in [
+        ("Example Anime/NCOP/E03.1080p.mkv","ncop"),
+        ("Example Anime/NCED/E02.1080p.mkv","nced"),
+    ]{
+        let parsed=parse_title(raw,false).unwrap();
+        assert_eq!(parsed["title"],json!("Example Anime"),"{raw}: {parsed:?}");
+        assert_eq!(parsed["seasons"],json!([0]),"{raw}: {parsed:?}");
+        assert_eq!(parsed["special_episode"],json!(true),"{raw}: {parsed:?}");
+        assert_eq!(parsed["special_type"],json!(kind),"{raw}: {parsed:?}");
+    }
+}
+
+#[test]
+fn creditless_markers_do_not_override_regular_explicit_seasons(){
+    for raw in [
+        "Example.Anime.S01E02.NCOP.1080p.WEB-DL.mkv",
+        "Example.Anime.S02E01.NCED.1080p.WEB-DL.mkv",
+    ]{
+        let parsed=parse_title(raw,false).unwrap();
+        assert_ne!(parsed["seasons"],json!([0]),"{raw}: {parsed:?}");
+        assert!(parsed.get("special_episode").is_none(),"{raw}: {parsed:?}");
+        assert!(parsed.get("special_type").is_none(),"{raw}: {parsed:?}");
+    }
+}

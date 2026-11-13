@@ -2651,13 +2651,15 @@ static TITLE_TAIL_SUBTITLE_TAG_RE:Lazy<regex::Regex>=Lazy::new(||{
         .expect("valid subtitle release marker")
 });
 
-// TheTVDB/Kodi catalogue individual extras as season 0. Recognize release
+// TheTVDB/Kodi catalogue individual extras as season 0. NCOP/NCED are
+// creditless anime opening/ending extras, not ordinary season episodes.
+// Recognize release
 // *markers*, not loose substrings in titles: "Special Ops" and "Special
 // Edition" are not evidence of a special episode. A bare ONA is a delivery
 // format and may denote an entire regular series, so require "ONA Special".
 static SPECIAL_RELEASE_MARKER_RE: Lazy<regex::Regex> = Lazy::new(|| {
     regex::Regex::new(
-        r"(?i)(?:^|[ ._\[(-])(?P<tag>ova|oav|oad|omake|specials?|bonus[ ._-]+(?:episode|ep)|extra[ ._-]+(?:episode|ep|special)|unaired(?:[ ._-]+(?:episode|ep|pilot))?|pilot[ ._-]+episode|webisode|picture[ ._-]+drama|recap[ ._-]+special|behind[ ._-]+the[ ._-]+scenes|one[ ._-]+shot|ona[ ._-]+special|sp[ ._-]*[0-9]{1,3})(?:$|[ ._\])(-])|\[(?P<bracket_sp>sp)\]"
+        r"(?i)(?:^|[ ._\[(-])(?P<tag>ova|oav|oad|omake|ncop|nced|specials?|bonus[ ._-]+(?:episode|ep)|extra[ ._-]+(?:episode|ep|special)|unaired(?:[ ._-]+(?:episode|ep|pilot))?|pilot[ ._-]+episode|webisode|picture[ ._-]+drama|recap[ ._-]+special|behind[ ._-]+the[ ._-]+scenes|one[ ._-]+shot|ona[ ._-]+special|sp[ ._-]*[0-9]{1,3})(?:$|[ ._\])(-])|\[(?P<bracket_sp>sp)\]"
     ).expect("valid special episode release markers")
 });
 static SPECIAL_BATCH_RE: Lazy<regex::Regex> = Lazy::new(|| {
@@ -2704,6 +2706,17 @@ fn standalone_special_marker(raw:&str, result:&Map<String,Value>) -> Option<(Str
             // suffixes are release labels; "Special Ops" is not.
             let next=after.split(|c:char|!c.is_ascii_alphanumeric())
                 .next().unwrap_or_default().to_ascii_lowercase();
+            // A movie literally named "The Special" normally has its
+            // production year immediately after the title. Do not interpret
+            // that year as a numbered TV special: Show.Special.E03 remains
+            // a special, while The.Special.2020.HDRip remains a film title.
+            if result.get("year").and_then(Value::as_i64)
+                .is_some_and(|year|next.parse::<i64>().ok()==Some(year))
+                && result.get("episodes").and_then(Value::as_array)
+                    .is_none_or(Vec::is_empty)
+            {
+                continue;
+            }
             let technical=next.is_empty() || next.bytes().next()
                 .is_some_and(|first|first.is_ascii_digit())
                 || next.starts_with('e') && next[1..].bytes().next()
@@ -3014,7 +3027,7 @@ pub fn generic_path_title(title:&str)->bool{
         "episode","ep","season","seasons","season 1","series",
         "shows","tv","tv shows","movies","films","media","videos",
         "downloads","download","archive","library","complete",
-        "extras","special","specials","ova","oav","oad","omake",
+        "extras","special","specials","ova","oav","oad","omake","ncop","nced",
         "webisode","webisodes","bonus","bonus episodes","picture drama",
         "recap special","ona special","one shot","sp","subtitles"
     ].contains(&lowercase.as_str())
