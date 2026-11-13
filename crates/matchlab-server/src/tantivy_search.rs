@@ -571,7 +571,9 @@ pub fn aliases_for_imdb_ids(
 /// (including works without an IMDb link) instead of rehydrating full title
 /// aliases. The cache key is tied to the immutable Tantivy generation.
 fn anidb_ids_exact_uncached(db:&Connection,key:&str)->Result<BTreeSet<String>,String>{
-    if key.len()<4{return Ok(BTreeSet::new());}
+    if key.is_empty() ||(!crate::strict_match_mode()&&key.len()<4){
+        return Ok(BTreeSet::new());
+    }
     let (search,memory_dir)=open_search(db)?;
     let reader=search.reader.searcher();
     let query=TermQuery::new(
