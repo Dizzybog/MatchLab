@@ -357,13 +357,15 @@ Compact prefix/suffix and source-title recovery queries are unchanged, as
 are the exact-first fast path and IMDb ranking rules. The legacy compact
 inside-title query remains available for parity/regression tests.
 
-AniDB/TVDB episode conversion now builds `SplitIndex.by_anidb` once
-per immutable SQLite mapping snapshot, grouping borrowed mapping records by
-AniDB ID while preserving each group's source order. The same structure
-holds existing split-cour partner evidence. Single episodes, multi-episode
-season and absolute ranges, and reverse AniDB conversions reuse the grouped
-rows instead of scanning every unrelated work's mapping per episode.
-No additional SQLite index or persistent in-memory cache is created.
+AniDB/TVDB episode conversion now builds a temporary AniDB-ID lookup
+once per immutable SQLite mapping snapshot, then compiles a
+`SplitIndex.links` table with relevant borrowed mapping records, original
+row ordering, absolute-offset data and split-cour partner evidence. The
+temporary lookup is dropped immediately. Single episodes, multi-episode
+season and absolute ranges, and reverse AniDB conversions reuse the
+pre-filtered links instead of scanning unrelated works or repeatedly
+calculating absolute offsets for every episode. No additional SQLite index
+or persistent in-memory cache is created.
 Ambiguous mappings, explicit episode pairs, precedence, and canonical
 SID/ASID behavior remain unchanged.
 
