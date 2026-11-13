@@ -523,6 +523,57 @@ mod tests{
     }
 
     #[test]
+    fn grouped_crosswalk_preserves_original_mapping_order_and_tvdb_filters(){
+        // The original O(links*maps) implementation selected mapping rows
+        // in database traversal order. An indexed batch must be identical
+        // for both direct and indirect TVDB-family links, even when an
+        // AniDB identity occurs with multiple TVDB families.
+        let links=vec![
+            Link{anidb:"101".into(),tvdb:"700".into(),trakt:2,direct:true},
+            Link{anidb:"101".into(),tvdb:"800".into(),trakt:2,direct:true},
+            Link{anidb:"202".into(),tvdb:"700".into(),trakt:0,direct:false},
+            Link{anidb:"303".into(),tvdb:String::new(),trakt:0,direct:true},
+            Link{anidb:"999".into(),tvdb:"900".into(),trakt:1,direct:true},
+        ];
+        let mk=|id:&str,tvdb:&str,season:i64| Mapping{
+            anidb:id.into(),tvdb:tvdb.into(),tv_season:season,
+            start:1,end:100,offset:0,explicit:Vec::new(),
+        };
+        let maps=vec![
+            mk("101","800",-1),mk("202","700",1),mk("101","700",-1),
+            mk("303","100",3),mk("101","700",2),mk("303","200",4),
+            mk("101","800",2),mk("202","700",5),mk("101","700",2),
+        ];
+        let index=split_index(&links,&maps);
+        for link in &links {
+            let expected=maps.iter()
+                .filter(|m|m.anidb==link.anidb
+                    &&(link.tvdb.is_empty()||m.tvdb==link.tvdb))
+                .map(|m|(m.anidb.as_str(),m.tvdb.as_str(),m.tv_season))
+                .collect::<Vec<_>>();
+            let actual=index.by_anidb.get(link.anidb.as_str())
+                .into_iter().flatten()
+                .filter(|m|link.tvdb.is_empty()||m.tvdb==link.tvdb)
+                .map(|m|(m.anidb.as_str(),m.tvdb.as_str(),m.tv_season))
+                .collect::<Vec<_>>();
+            assert_eq!(actual,expected);
+        }
+        assert!(!index.by_anidb.contains_key("999"),
+            "a link with no mappings must not borrow another anime's row");
+        for link in &links {
+            for mapping in &maps {
+                let previous=link.trakt>0&&links.iter().any(|other|
+                    other.anidb!=link.anidb &&other.trakt>0
+                    &&other.trakt!=link.trakt
+                    &&maps.iter().any(|m|m.anidb==other.anidb
+                        &&m.tvdb==mapping.tvdb
+                        &&m.tv_season==mapping.tv_season));
+                assert_eq!(split(link,mapping,&index),previous);
+            }
+        }
+    }
+
+    #[test]
     fn hundred_episode_batch_preserves_explicit_pairs_and_ambiguity(){
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE anime_series_map(
