@@ -1076,17 +1076,11 @@ pub fn prefer_verified_episode_identity(
             alias.ordering,
             alias.title.len()
         )) else{return Ok(candidates)};
-    // The late verified-episode promotion is another candidate-selection
-    // path. Enforce the same non-strict minimum IMDb title length here;
-    // strict may still resolve exact named AniDB seasons with shorter or
-    // translated canonical IMDb names.
-    if !crate::strict_match_mode(){
-        let parsed_len=semantic_words(title).iter()
-            .map(|word|word.chars().count()).sum();
-        if !imdb_title_not_shorter(&best.title,&best.clean,parsed_len){
-            return Ok(candidates);
-        }
-    }
+    // This late candidate has an EXACT AniDB title alias equal to the
+    // parser title AND an independently verified episode crosswalk.
+    // Its canonical IMDb title may be shorter or translated (JoJo 2012).
+    // The non-strict minimum-length guard applies to lexical IMDb aliases,
+    // not to a fully verified exact AniDB title identity.
     let mut anime_ids=BTreeMap::new();
     let mut stmt=db.prepare("SELECT type,value FROM anime_ids WHERE group_id=?1")?;
     for row in stmt.query_map([&id],|r|
