@@ -1120,6 +1120,38 @@ mod persistence_tests {
     use super::*;
 
     #[test]
+    fn strict_anime_postings_are_exact_and_allow_short_titles(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO titles VALUES
+                ('tt0000011','Bleach','bleach',2004,'series','US',1,0,'tvSeries'),
+                ('tt0000012','Short Anime','shortanime',2012,'series','US',1,0,'tvSeries');
+            INSERT INTO anidb_titles VALUES
+                ('2369','Bleach','bleach','main','en'),
+                ('9999','A','a','main','en');
+            INSERT INTO anime_series_map VALUES
+                ('tt0000011','2369','74796',0),
+                ('tt0000012','9999','44444',0);").unwrap();
+        let exact=anime_aliases_exact(&db,"Bleach").unwrap();
+        assert_eq!(exact.len(),1);
+        assert_eq!(exact[0].imdb_id,"tt0000011");
+        assert!(anime_aliases_exact(&db,"Bleach Thousand Year").unwrap()
+            .is_empty(),"exact-only mode must not enumerate anime prefixes");
+        assert!(anime_aliases_exact(&db,"Ble").unwrap().is_empty(),
+            "an abbreviated title must not find a longer alias");
+        let short=anime_aliases_exact(&db,"A").unwrap();
+        assert_eq!(short.len(),1);
+        assert_eq!(short[0].imdb_id,"tt0000012");
+    }
+
+
+    #[test]
     fn warmed_index_handles_simultaneous_readers(){
         let path=std::env::temp_dir().join(format!(
             "matchlab-concurrent-tantivy-{}-{:?}.sqlite3",
