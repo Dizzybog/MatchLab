@@ -83,7 +83,15 @@ The dashboard displays verified IMDb IDs as links to their IMDb title pages, and
 
 Logging: `ERROR` remains at error level. MatchLab's formerly `WARN`-level nonfatal diagnostics (metadata row skips, optional learning/cache/history failures and similar events) are emitted at `DEBUG`. Set `RUST_LOG=matchlab_server=debug` to inspect them; the default `info` level does not print them.
 
-The public `/match` and `/debug/match` endpoints have identical strict matching requirements. The dashboard's diagnostic endpoint is intentionally more permissive. If metadata is missing or conflicting, MatchLab avoids inventing a match. See [API documentation](docs/API.md) for request options, full responses and other endpoints.
+The public `/match` and `/debug/match` endpoints have identical strict matching requirements. The dashboard's diagnostic endpoint is intentionally more permissive.
+
+**Optional exact-only mode:** set `MATCHLAB_STRICT_MODE: "true"` in the
+Compose environment to disable all prefix, suffix and partial-title
+candidate discovery, including anime aliases. Only complete normalized
+IMDb or AniDB title aliases can identify a work; the usual season/episode
+validation still applies. The default `false` preserves the current
+two-phase candidate search. This affects matching only, not `/parse`.
+See [strict mode behavior](docs/API.md#strict-exact-title-matching-optional). If metadata is missing or conflicting, MatchLab avoids inventing a match. See [API documentation](docs/API.md) for request options, full responses and other endpoints.
 
 ## Optional Machine Learning
 
