@@ -995,7 +995,7 @@ pub fn title_aliases_inside(db:&Connection,key:&str)->Result<Vec<TitleAlias>,Str
 /// index fields in one lookup. The prefix-oriented anime cache is not touched.
 pub fn anime_aliases_exact(db:&Connection,raw_title:&str)->Result<Vec<AnimeAlias>,String>{
     let key=crate::title_normalization::clean_title(raw_title);
-    if key.len()<4{return Ok(Vec::new());}
+    if key.is_empty(){return Ok(Vec::new());}
     Ok(lookup_aliases(db,AliasLookupKind::ExactTitle,&key)?
         .into_iter()
         .filter(|alias|alias.source=="anidb" &&alias.normalized==key)
