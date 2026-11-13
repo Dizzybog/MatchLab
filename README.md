@@ -23,7 +23,7 @@ services:
       MATCHLAB_DB: /data/metadata.sqlite3
       MATCHLAB_HOST: 0.0.0.0:8765
       MATCHLAB_MAX_CONCURRENT_MATCHES: "2"
-      MATCHLAB_STRICT_MODE: "false"
+      MATCHLAB_STRICT_MODE: "true"
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
@@ -85,15 +85,14 @@ Logging: `ERROR` remains at error level. MatchLab's formerly `WARN`-level nonfat
 
 The public `/match` and `/debug/match` endpoints have identical strict matching requirements. The dashboard's diagnostic endpoint is intentionally more permissive.
 
-**Optional strict exact-title matching:** the default `MATCHLAB_STRICT_MODE=false`
-keeps the optimized two-stage candidate search (exact first, with broader
-prefix/suffix/word-boundary fallback when needed). To **opt in**, set
-`MATCHLAB_STRICT_MODE: "true"` in Compose (or
-`MATCHLAB_STRICT_MODE=true` in the environment) and restart MatchLab.
-Strict mode accepts only complete normalized IMDb/AniDB title aliases; it
-disables prefix, suffix, partial-title and original-release recovery while
-retaining the normal season/episode validation. Parsing (`/parse`) is unchanged.
-See [strict mode behavior](docs/API.md#strict-exact-title-matching-optional). If metadata is missing or conflicting, MatchLab avoids inventing a match. See [API documentation](docs/API.md) for request options, full responses and other endpoints.
+**Strict exact-title matching is enabled by default:** MatchLab accepts only
+complete normalized IMDb/AniDB title aliases, without prefix, suffix,
+partial-title or original-release fallback. Normal season/episode validation
+still applies. To **opt out** and restore the optimized two-stage search,
+set `MATCHLAB_STRICT_MODE: "false"` in Compose (or
+`MATCHLAB_STRICT_MODE=false` in the environment), then restart MatchLab.
+With no setting, strict remains enabled. Parsing (`/parse`) is unchanged.
+See [strict mode behavior](docs/API.md#strict-exact-title-matching-default). If metadata is missing or conflicting, MatchLab avoids inventing a match. See [API documentation](docs/API.md) for request options, full responses and other endpoints.
 
 ## Optional Machine Learning
 
