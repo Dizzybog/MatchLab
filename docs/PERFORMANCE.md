@@ -283,3 +283,35 @@ Reproduce on the same ARM64 CPU quota, metadata and torrent corpus with
 training-observation CPU, WAL writes, throughput and rule-proposal metrics.
 Changing crash recovery, revision invalidation or regex safety gates is out of
 scope without differential fault-injection tests.
+
+
+## Exact-first IMDb candidate retrieval — November 13, 2026
+
+The title matcher now uses two indexed candidate-discovery phases:
+
+1. **Cheap exact probe:** always try a Tantivy exact-term title-alias lookup.
+   For keys with **at least six normalized ASCII letters/digits**, the
+   exact-only shortcut is permitted only when the parser title exactly covers
+   the original release's significant Unicode word span, there is no
+   country-qualified variant, and an indexed exact alias also covers those
+   significant words. This check intentionally treats a returned exact alias
+   as *evidence*, not as a winner.
+2. **Full fallback:** keys shorter than six, missing/partial/Unicode-
+   mismatched exact evidence, excluded media types/seasons, or an exact-only
+   result rejected by the public identity gate use the established complete
+   forward/reverse prefix, internal alias, source prefix and source suffix
+   discovery, plus the existing AniDB fallback.
+
+The verified exact-only branch avoids broad Tantivy regex and term-union
+lookups for full source-title matches. Both phases share the existing
+Unicode-aware scoring, complete candidate grouping, year/region/votes
+ranking, episode evidence checks, and final SID/ASID crosswalk.
+
+Safety tests include a five-character boundary, duplicate IMDb movie names,
+a year-gated exact result with a valid nonexact fallback, Japanese BLEACH
+alias collisions, and parser truncation where a longer full-source title
+must win. The CI test suite and native ARM64/AMD64 builds verify correctness.
+CPU savings remain **unmeasured** until comparing cold/warm request mixes
+against the parent commit on the same IMDb/AniDB data. Useful measurements:
+exact-only hit rate, number of Tantivy queries, CPU seconds per 1,000
+matches, p50/p95 latency, memory, and final identity/coordinate parity.
