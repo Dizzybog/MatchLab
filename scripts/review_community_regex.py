@@ -11,7 +11,8 @@ from pathlib import Path
 from community_rule_intake import valid_extended_rule, valid_rule
 
 ALLOWED={"learned_field_regex","learned_tv_regex","learned_source_regex_patch","learned_corrective_regex","learned_general_regex_review",
-    "learned_field_regex_review","historical_regex_review",
+    "learned_field_regex_review","learned_title_boundary_regex_review",
+    "historical_regex_review",
     "verified_regex_proposal"}
 MAX_QUEUE=4096
 
