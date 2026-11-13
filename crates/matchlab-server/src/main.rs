@@ -730,14 +730,16 @@ fn bottom_up_imdb_path_match(
             ||(numeric&&depth>0
                 &&(lower.len()==1||lower.parse::<i64>().ok()==Some(season)));
         if coordinate_only{continue;}
-        let mut found=imdb_matcher::search(
-            db,trimmed,year,series,season,raw,has_episode,20)
-            .map_err(|e|e.to_string())?;
-        if numeric{
-            let exact=imdb_matcher::clean_title(trimmed);
-            found.retain(|hit|imdb_matcher::clean_title(&hit.matched_title)==exact);
-        }
-        let mut found=eligible(found);
+        // The exact-first phase must fall back to full lexical discovery
+        // if these request-specific gates reject all exact candidates.
+        let mut found=imdb_matcher::search_validated(
+            db,trimmed,year,series,season,raw,has_episode,20,|mut hits|{
+                if numeric{
+                    let exact=imdb_matcher::clean_title(trimmed);
+                    hits.retain(|hit|imdb_matcher::clean_title(&hit.matched_title)==exact);
+                }
+                eligible(hits)
+            }).map_err(|e|e.to_string())?;
         // The later episode-bound gate rejects unsupported candidates only
         // if more than two identities remain. Apply that same condition
         // before accepting a directory, otherwise all candidates can vanish
@@ -1113,10 +1115,11 @@ fn diagnose_with_policy(
     let (layer_title,imdb)=if let Some((name,matches))=chosen_layer{
         (Some(name),matches)
     }else{
-        (None,filter_request_imdb_candidates(
-            &db,imdb_matcher::search(
-                &db,title,year,series,seasons.iter().copied().max().unwrap_or(0),
-                &req.title,has_episode,20).map_err(|e|e.to_string())?,gate))
+        (None,imdb_matcher::search_validated(
+            &db,title,year,series,seasons.iter().copied().max().unwrap_or(0),
+            &req.title,has_episode,20,
+            |hits|filter_request_imdb_candidates(&db,hits,gate))
+            .map_err(|e|e.to_string())?)
     };
     // The matcher's verified level becomes the presentation title of its
     // diagnostic, while the standalone /parse result remains unchanged.
