@@ -150,6 +150,14 @@ pub(crate) fn semantic_words(raw:&str)->Vec<String>{
         .filter(|word|!word.is_empty() && *word!="and")
         .map(str::to_owned).collect()
 }
+/// Guard on actual normalized title length, not the ASCII-only index key.
+/// Keep ordinary ASCII titles on the zero-tokenization fast path.
+fn imdb_title_not_shorter(title:&str,clean:&str,parsed_len:usize)->bool{
+    let length=if title.is_ascii(){clean.len()}else{
+        semantic_words(title).iter().map(|word|word.chars().count()).sum()
+    };
+    length>=parsed_len
+}
 /// Check whole-word containment in *both* directions; score the proportion
 /// of the longer title not covered by the shorter title.
 fn semantic_extension(short:&[String],long:&[String])->Option<TitleFit>{
@@ -538,9 +546,9 @@ pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_se
 }
 
 /// Preserve the public API's final eligibility gate when an exact-only
-/// shortlist is used. If all exact results fail a caller-specific gate (e.g.
-/// year evidence), retry the complete indexed discovery rather than
-/// suppressing a valid shorter, word-aligned candidate.
+/// shortlist is used. If exact results fail a caller-specific gate (e.g.
+/// year evidence), retry full discovery; non-strict still rejects IMDb
+/// aliases shorter than the parser title before selecting a replacement.
 pub fn search_validated(
     db:&Connection,title:&str,year:Option<i32>,series:bool,required_season:i64,
     release_title:&str,has_episode:bool,limit:usize,
@@ -590,9 +598,9 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     let mut rows=Vec::new();
     let mut ordinary_title_matches=HashSet::new();
     let mut country_title_matches=HashSet::new();
-    let country_qualified=if strict {None} else{
-        crate::country_aliases::qualified(release_title)
-    };
+    // An explicit country qualifier is a complete-title equivalence, not a
+    // partial match. It is valid in strict mode as well.
+    let country_qualified=crate::country_aliases::qualified(release_title);
     let country=country_qualified.as_ref().map(|(code,_)|*code);
     let semantic_release=semantic_words(title);
     let semantic_full_release=semantic_words(release_title);
@@ -722,6 +730,13 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     // Apply media-type and season eligibility once, after lexical discovery
     // has exhausted EVERY path. A more specific suffix can no longer be
     // starved by a shorter prefix/alias.
+    // Compare Unicode-preserving normalized title characters, NOT Tantivy's
+    // compact ASCII key (which can drop Japanese/Chinese characters).
+    // Reject shorter IMDb titles before costly eligibility and ranking.
+    let parsed_title_len=semantic_release.iter()
+        .map(|word|word.chars().count()).sum::<usize>();
+    if !strict {rows.retain(|row|
+        imdb_title_not_shorter(&row.title,&row.clean,parsed_title_len));}
     let eligible_rows=filter_eligible(db,rows,series,year,required_season)?;
     // An exact title can exist but be ineligible for the requested media
     // type/season. Avoid letting another alias with the same ASCII key
@@ -733,19 +748,22 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     }
     let mut rows=eligible_rows;
     let mut strict_anime_ids=HashSet::new();
-    if strict && rows.is_empty() && series {
-        // An exact imported AniDB title may map to a different English IMDb
-        // primary title. Retain that genuinely exact alias relationship,
-        // never a partial anime title or unverified related IMDb identity.
+    if strict && series {
+        // Exact IMDb and AniDB titles compete in the SAME shortlist. AniDB
+        // part/season aliases can map to a different canonical IMDb title,
+        // even when an unrelated work has the exact IMDb name.
+        // Only exact, Unicode-verified AniDB aliases are admitted.
         let ids=crate::tantivy_search::anime_aliases_exact(db,title)
             .map_err(index_error)?.into_iter()
             .map(|row|row.imdb_id).collect::<std::collections::BTreeSet<_>>();
         if !ids.is_empty(){
             let aliases=crate::tantivy_search::titles_by_ids(
                 db,&ids.iter().cloned().collect::<Vec<_>>()).map_err(index_error)?;
-            rows=filter_eligible(db,aliases.into_iter().map(Aka::from).collect(),
+            let anime_rows=filter_eligible(db,
+                aliases.into_iter().map(Aka::from).collect(),
                 series,year,required_season)?;
-            strict_anime_ids=ids.into_iter().collect();
+            strict_anime_ids.extend(anime_rows.iter().map(|row|row.imdb_id.clone()));
+            rows.extend(anime_rows);
         }
     }
     // The AniDB-only title lookup remains a separate *fallback* when none
@@ -794,6 +812,10 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
             }
         }
     }
+    // Apply the same guard after AniDB fallback, including translated
+    // IMDb title aliases; this does not change the strict AniDB policy.
+    if !strict {rows.retain(|row|
+        imdb_title_not_shorter(&row.title,&row.clean,parsed_title_len));}
     if rows.is_empty(){return Ok((vec![],false));}
     // Keep all plausible identities until ranked. Unrelated word fragments
     // are rejected before season eligibility and expensive ID lookups.
@@ -808,11 +830,21 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
         if strict {
             let exact_imdb=row.clean==key
                 &&semantic_words(&row.title)==semantic_release;
-            if !exact_imdb && !strict_anime_ids.contains(&row.imdb_id){
-                continue;
-            }
-            groups.entry(row.imdb_id.clone()).or_default()
-                .push((row,TitleFit::exact()));
+            let alias_key=(row.imdb_id.clone(),row.title.clone());
+            let exact_country=country_title_matches.contains(&alias_key);
+            let exact_anime=strict_anime_ids.contains(&row.imdb_id);
+            if !exact_imdb && !exact_country && !exact_anime {continue;}
+            // Prefer a unique exact AniDB identity: a named cour/season may
+            // point to the correct parent IMDb series instead of a same-name
+            // OVA. If the AniDB alias resolves to several eligible IMDb IDs,
+            // do not grant any one of them an arbitrary priority.
+            // Country-equivalent exact aliases outrank an unqualified IMDb
+            // title but never replace a verified unique anime identity.
+            let preference=if exact_anime && strict_anime_ids.len()==1 {2}
+                else if exact_country {1}else{0};
+            let fit=TitleFit{tier:0,longest_first:-preference,
+                unmatched_bp:0,edge:0};
+            groups.entry(row.imdb_id.clone()).or_default().push((row,fit));
             continue;
         }
         // Reuse the Unicode tokenization for the candidate's title-fit
@@ -1044,6 +1076,10 @@ pub fn prefer_verified_episode_identity(
             alias.ordering,
             alias.title.len()
         )) else{return Ok(candidates)};
+    // An EXACT AniDB alias equal to the parsed title and an independently
+    // verified episode crosswalk already prove this identity. The canonical
+    // IMDb name may be shorter or translated (JoJo 2012); the non-strict
+    // minimum-length check applies to discovered IMDb lexical aliases.
     let mut anime_ids=BTreeMap::new();
     let mut stmt=db.prepare("SELECT type,value FROM anime_ids WHERE group_id=?1")?;
     for row in stmt.query_map([&id],|r|
@@ -1067,6 +1103,80 @@ pub fn prefer_verified_episode_identity(
 }
 #[cfg(test)]
 mod tests{
+
+    /// Strict mode ranks all exact IMDb and AniDB identities together.
+    /// A uniquely linked named anime part can beat a same-name unrelated
+    /// IMDb work; ambiguous AniDB links must not acquire that priority.
+    #[test]
+    fn strict_prioritizes_unique_exact_anidb_part_over_same_name_imdb(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO titles VALUES
+                ('tt0000100','Jojo Stone Ocean','jojostoneocean',2022,'series','US',1,0,'tvSeries'),
+                ('tt0000200','Jojos Bizarre Adventure','jojosbizarreadventure',
+                    2012,'series','JP',1,0,'tvSeries');
+            INSERT INTO anidb_titles VALUES
+                ('16187','Jojo Stone Ocean','jojostoneocean','main','en');
+            INSERT INTO anime_series_map VALUES('tt0000200','16187','262954',0);
+            INSERT INTO imdb_ratings VALUES('tt0000100',1000000),('tt0000200',1);").unwrap();
+        let search_part=||search_inner_mode(&db,"Jojo Stone Ocean",None,true,0,
+            "Jojo.Stone.Ocean.E01",true,5,false,true).unwrap().0;
+        assert_eq!(search_part()[0].imdb_id,"tt0000200",
+            "unique exact AniDB part should outrank the same-name IMDb work");
+        db.execute("INSERT INTO anime_series_map VALUES('tt0000100','16187','262954',0)",[])
+            .unwrap();
+        assert_eq!(search_part()[0].imdb_id,"tt0000100",
+            "ambiguous AniDB links cannot give arbitrary priority");
+    }
+
+    #[test]
+    fn strict_accepts_complete_country_alias_without_partial_title_search(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('ttus','Lego Masters','legomasters',2020,'series','US',1,0,'tvSeries'),
+                ('ttau','Lego Masters Australia','legomastersaustralia',
+                    2019,'series','AU',1,0,'tvSeries');
+            INSERT INTO imdb_ratings VALUES('ttus',1000000),('ttau',1);").unwrap();
+        let hits=search_inner_mode(&db,"Lego Masters",None,true,0,
+            "Lego.Masters.AU.S03E09",true,5,false,true).unwrap().0;
+        assert_eq!(hits[0].imdb_id,"ttau",
+            "complete AU/Australia equivalence must beat unqualified IMDb");
+        let incomplete=search_inner_mode(&db,"Lego Mas",None,true,0,
+            "Lego.Mas.S03E09",true,5,false,true).unwrap().0;
+        assert!(incomplete.is_empty(),"strict cannot accept a title prefix");
+    }
+
+    #[test]
+    fn non_strict_never_selects_imdb_alias_shorter_than_parser_title(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('ttforce','Force','force',2025,'series','US',1,0,'tvSeries');").unwrap();
+        let shorter=search_inner_mode(&db,"Star Force",None,true,0,
+            "Star.Force.S01E01",true,5,false,false).unwrap().0;
+        assert!(shorter.is_empty(),
+            "a word-aligned suffix is not enough when its IMDb title is shorter");
+        let exact=search_inner_mode(&db,"Force",None,true,0,
+            "Force.S01E01",true,5,false,false).unwrap().0;
+        assert_eq!(exact[0].imdb_id,"ttforce",
+            "equal-length exact IMDb aliases are still eligible");
+    }
 
     /// Strict mode has no minimum title length and never performs the
     /// normal prefix/suffix/inside or original-release recovery scans.
@@ -1200,7 +1310,7 @@ mod tests{
     }
 
     #[test]
-    fn rejected_exact_only_candidate_retries_full_search_after_api_gate(){
+    fn rejected_exact_only_candidate_never_selects_shorter_title_after_api_gate(){
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
             year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
@@ -1216,18 +1326,17 @@ mod tests{
         assert!(exact_only);
         assert_eq!(quick.len(),1);
         assert_eq!(quick[0].imdb_id,"ttold");
-        // Mirrors the production /match year gate: rejected exact results
-        // must never prevent a shorter, word-boundary-safe newer candidate.
+        // The production /match year gate can trigger a full fallback, but
+        // a shorter IMDb alias cannot replace the parsed title in non-strict.
         let valid=search_validated(&db,"Star Force",Some(2025),false,0,
             "Star.Force.2025",false,20,|hits|{
                 hits.into_iter().filter(|hit|hit.year==2025).collect()
             }).unwrap();
         let full=search_inner(&db,"Star Force",Some(2025),false,0,
             "Star.Force.2025",false,20,true).unwrap().0;
-        assert_eq!(valid.iter().map(|hit|&hit.imdb_id).collect::<Vec<_>>(),
-            full.iter().filter(|hit|hit.year==2025)
-                .map(|hit|&hit.imdb_id).collect::<Vec<_>>());
-        assert_eq!(valid[0].imdb_id,"ttnew");
+        assert!(full.iter().all(|hit|hit.imdb_id!="ttnew"),
+            "the shorter Force alias must be excluded even in full discovery");
+        assert!(valid.is_empty(),"the public year gate must not bypass title length");
     }
 
     #[test]
@@ -2014,7 +2123,9 @@ mod tests{
                 ('tt2222222','Beta Gamma','betagamma',2021,'movie','US',1,0,'movie');
             INSERT INTO imdb_ratings VALUES('tt1111111',1),('tt2222222',90000);")
             .unwrap();
-        let found=search(&db,"Alpha Beta Gamma",None,false,0,
+        // The parser title is a valid complete-word prefix of both IMDb
+        // aliases; neither candidate is shorter than this parsed title.
+        let found=search(&db,"Alpha Beta",None,false,0,
             "Alpha.Beta.Gamma.2021.WEB-DL",false,10).unwrap();
         assert_eq!(found.len(),2);
         assert_eq!(found[0].imdb_id,"tt1111111",
@@ -2051,10 +2162,15 @@ mod tests{
                 ('tt1111111','Beyond Dune','beyonddune',2021,'movie','US',1,0,'movie'),
                 ('tt2222222','Mystery','mystery',2021,'movie','US',1,0,'movie');")
             .unwrap();
-        let found=search(&db,"Mystery Beyond Dune",None,false,0,
+        // The suffix IMDb alias is longer than the parser title and can
+        // still be discovered from the original release.
+        let found=search(&db,"Mystery",None,false,0,
             "Mystery.Beyond.Dune.2021.1080p",false,10).unwrap();
-        assert_eq!(found.len(),1);
         assert_eq!(found[0].imdb_id,"tt1111111");
+        // A parser title containing the whole source is longer than both
+        // IMDb aliases and can no longer select either one.
+        assert!(search(&db,"Mystery Beyond Dune",None,false,0,
+            "Mystery.Beyond.Dune.2021.1080p",false,10).unwrap().is_empty());
     }
     #[test]
     fn word_fragments_and_short_generic_titles_are_not_identity(){

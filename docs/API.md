@@ -97,16 +97,20 @@ To **opt out** and restore the optimized two-stage candidate search, set
 `MATCHLAB_STRICT_MODE=false` in the environment) and restart MatchLab.
 
 When enabled, the **entire public /match and debug/dashboard title-identity
-search** uses only *complete normalized title aliases*: an exact IMDb
-Tantivy term match or an exact imported AniDB alias connected to an IMDb
-work. A strict result may still carry verified season/episode and AniDB
-crosswalk coordinates. If a selected title fails the ordinary year, type,
-season or episode eligibility checks, **no** shorter or longer title is
-substituted. The strict mode bypasses forward/reversed prefixes, internal
-partial aliases, source-prefix and source-suffix recovery, country-expanded
-title aliases and nonexact anime lookups. A directory path may still supply
-its own **independently parsed complete title**; no partial title match is
-ever accepted.
+search** collects *complete normalized title aliases* from both IMDb and
+AniDB before ranking the eligible IMDb identities. A unique exact AniDB alias
+takes priority over an exact IMDb alias for a different work: named anime
+seasons/parts can be catalogued under the parent IMDb series. If multiple
+eligible IMDb identities share the same exact AniDB alias, none receives an
+arbitrary AniDB priority; the ordinary ranking and verified episode gates
+still apply. Explicit country-qualified series titles expand only into
+equivalent complete aliases (`AU` / `Australia`, etc.), not partial titles.
+A strict result can carry verified season/episode and AniDB crosswalk
+coordinates. If a candidate fails ordinary year, type, season or episode
+eligibility, no shorter or longer title is substituted. Strict bypasses
+forward/reversed prefixes, internal partial aliases, source-prefix and
+source-suffix recovery and nonexact anime lookups. A directory path can
+supply its own **independently parsed complete title**.
 
 In particular, `The.Ed.Gein.Story.S01E01` will not be identified as a
 longer IMDb title when the parser extracted only `The Ed`. Exact normalized
