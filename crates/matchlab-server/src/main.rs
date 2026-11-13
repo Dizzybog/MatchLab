@@ -1102,7 +1102,6 @@ fn diagnose_with_policy(
     let airdate_only=dated.is_some() && numbers(parsed.get("seasons")).is_empty()
         && numbers(parsed.get("episodes")).is_empty();
     let title=title_owned.as_str();
-    let key = imdb_matcher::clean_title(title);
     let season_range=explicit_season_range(&req.title);
     let seasons = season_range.map(|(start,end)|vec![start,end])
         .unwrap_or_else(||numbers(parsed.get("seasons")));
