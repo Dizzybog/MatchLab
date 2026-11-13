@@ -48,6 +48,16 @@ def review_discovery(field="network",marker="futuretag"):
         "canonical_confirmations":0,
         "review_only":True,
         "fingerprint":sha(f"community-review:{field}:{marker}:{pattern}")}
+def title_boundary():
+    pattern=intake.TITLE_BOUNDARY_REVIEW_PATTERNS["episode"]
+    signal="underextracted_episode"
+    return {**common("learned_title_boundary_regex_review",1),
+        "evidence_count":16,"distinct_titles":4,
+        "canonical_confirmations":0,"field":"title",
+        "signal":signal,"regex":pattern,"review_only":True,
+        "verification":"matcher_alias_matches_complete_raw_title_review_only",
+        "fingerprint":sha(f"title-boundary:{signal}:{pattern}")}
+
 def batch(proposals):
     fps=sorted(r["fingerprint"] for r in proposals)
     batch_id=sha(SHA+"\n1\n"+"\n".join(fps))
@@ -109,6 +119,31 @@ class TestAllRegexSharing(unittest.TestCase):
         forged=review_discovery()
         forged["source_build"]=SHA+":1"
         self.assertIsNone(intake.valid_extended_rule(forged,SHA))
+    def test_verified_title_boundary_proposals_are_review_only_and_private(self):
+        candidate=title_boundary()
+        self.assertIsNotNone(intake.valid_extended_rule(candidate,SHA))
+        self.assertEqual(len(intake.parse_batch(
+            batch([candidate]),SHA,lambda *_:True)),1)
+        queued,changed=review.screen([candidate],[])
+        self.assertTrue(changed)
+        self.assertFalse(queued[0]["automatic_activation"])
+        for key,value in [
+            ("regex",r"(?s)(.*)+"),
+            ("source_build",SHA+":2"),
+            ("field","imdb_id"),
+            ("canonical_confirmations",4),
+            ("verification","automatically_activated"),
+            ("signal","underextracted_custom_marker"),
+            ("fingerprint","0"*64),
+            ("evidence_count",11),
+            ("distinct_titles",3),
+        ]:
+            forged={**candidate,key:value}
+            self.assertIsNone(intake.valid_extended_rule(forged,SHA),key)
+        self.assertNotIn("raw_title",candidate)
+        self.assertNotIn("imdb_id",candidate)
+        self.assertNotIn("matched_title",candidate)
+
     def test_two_rules_are_allowed_one_pr_review_at_a_time(self):
         rows=[technical(),tv()]
         accepted=intake.parse_batch(batch(rows),SHA,lambda *_:True)
