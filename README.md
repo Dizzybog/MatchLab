@@ -108,6 +108,20 @@ lifecycle and remaining limitations.
 
 **ML learns from every field that MatchLab parses**, including titles, years, seasons, episodes, languages, video and audio details, release groups, and other metadata. It looks for recurring naming patterns and can propose **new regex rules or improvements to existing ones** for any field. A rule is activated in the live parser **without restarting** only when sufficient independent evidence and field-specific safety checks support it; otherwise it remains inactive for further validation or review. Anime episode patterns still require verified metadata mappings. **ML changes regex only: MatchLab performs all field extraction and IMDb/AniDB matching. The existing `date` field participates in the native ML handler catalog, so new date syntaxes can be observed and proposed; unlike fixed technical labels, date changes require calendar and full-parser verification before they can become live rules.** With community sharing enabled, the exact regex additions and replacements can be proposed on GitHub. An ML score alone never activates a rule.
 
+
+**Title discrepancy learning:** A title mismatch is not automatically a parser error:
+IMDb may store translated aliases, different anime-part names, or competing
+works. MatchLab trains on title-boundary discrepancies only when the
+selected alias exactly covers the independently extracted source-title span from a strict public match,
+records repeat observations without duplication, and requires at least 12
+examples from four IMDb works before suggesting a bounded, generic
+title-boundary regex. Such proposals are **review-only** and never change the
+live parser until a trusted source diff and regression tests separately prove
+that the new rule improves results. No torrent filenames, matched movie
+names or IMDb IDs are exported in these proposals. Local status is available
+under `/api/ml/status` as `title_boundaries`.
+
+
 Enable learning with **one ML environment variable**:
 
 ```yaml
@@ -272,15 +286,3 @@ MatchLab is an independent Rust project informed by:
 - [FTRL-Proximal research](https://research.google/pubs/ad-click-prediction-a-view-from-the-trenches/) — approach used by the local Rust learner.
 
 MatchLab is not affiliated with these projects. Their authors retain their respective credits and licenses. MatchLab is licensed under **GPL-3.0-or-later**; metadata sources have their own terms.
-
-**Title discrepancy learning:** A title mismatch is not automatically a parser error:
-IMDb may store translated aliases, different anime-part names, or competing
-works. MatchLab trains on title-boundary discrepancies only when the
-selected alias exactly covers the independently extracted source-title span,
-records repeat observations without duplication, and requires at least 12
-examples from four IMDb works before suggesting a bounded, generic
-title-boundary regex. Such proposals are **review-only** and never change the
-live parser until a trusted source diff and regression tests separately prove
-that the new rule improves results. No torrent filenames, matched movie
-names or IMDb IDs are exported in these proposals. Local status is available
-under `/api/ml/status` as `title_boundaries`.
