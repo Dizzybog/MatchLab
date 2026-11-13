@@ -12,6 +12,10 @@ services:
       MATCHLAB_DB: /data/metadata.sqlite3
       MATCHLAB_HOST: 0.0.0.0:8765
       MATCHLAB_MAX_CONCURRENT_MATCHES: "40"
+      # true: only full normalized IMDb/AniDB title aliases; no prefix,
+      # suffix, internal alias, longer-source recovery or partial fallback.
+      # Exact-only is the default. Set MATCHLAB_STRICT_MODE=false to opt out.
+      MATCHLAB_STRICT_MODE: "${MATCHLAB_STRICT_MODE:-true}"
       # Total ML disk budget in GiB. 0=off, positive=on; one setting
       # automatically sizes training evidence, SQLite result cache and queue.
       MATCHLAB_ML_SIZE_GB: "${MATCHLAB_ML_SIZE_GB:-0}"

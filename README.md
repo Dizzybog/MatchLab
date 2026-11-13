@@ -23,6 +23,7 @@ services:
       MATCHLAB_DB: /data/metadata.sqlite3
       MATCHLAB_HOST: 0.0.0.0:8765
       MATCHLAB_MAX_CONCURRENT_MATCHES: "2"
+      MATCHLAB_STRICT_MODE: "true"
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
@@ -82,7 +83,16 @@ The dashboard displays verified IMDb IDs as links to their IMDb title pages, and
 
 Logging: `ERROR` remains at error level. MatchLab's formerly `WARN`-level nonfatal diagnostics (metadata row skips, optional learning/cache/history failures and similar events) are emitted at `DEBUG`. Set `RUST_LOG=matchlab_server=debug` to inspect them; the default `info` level does not print them.
 
-The public `/match` and `/debug/match` endpoints have identical strict matching requirements. The dashboard's diagnostic endpoint is intentionally more permissive. If metadata is missing or conflicting, MatchLab avoids inventing a match. See [API documentation](docs/API.md) for request options, full responses and other endpoints.
+The public `/match` and `/debug/match` endpoints have identical strict matching requirements. The dashboard's diagnostic endpoint is intentionally more permissive.
+
+**Strict exact-title matching is enabled by default:** MatchLab accepts only
+complete normalized IMDb/AniDB title aliases, without prefix, suffix,
+partial-title or original-release fallback. Normal season/episode validation
+still applies. To **opt out** and restore the optimized two-stage search,
+set `MATCHLAB_STRICT_MODE: "false"` in Compose (or
+`MATCHLAB_STRICT_MODE=false` in the environment), then restart MatchLab.
+With no setting, strict remains enabled. Parsing (`/parse`) is unchanged.
+See [strict mode behavior](docs/API.md#strict-exact-title-matching-default). If metadata is missing or conflicting, MatchLab avoids inventing a match. See [API documentation](docs/API.md) for request options, full responses and other endpoints.
 
 ## Optional Machine Learning
 

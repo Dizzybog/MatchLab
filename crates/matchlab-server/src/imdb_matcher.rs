@@ -139,7 +139,7 @@ impl TitleFit{
 }
 /// Preserve non-Latin title words for ranking. Legacy index keys fold to ASCII:
 /// "BLEACH 千年血戦篇" and "Bleach" both have the same old key.
-fn semantic_words(raw:&str)->Vec<String>{
+pub(crate) fn semantic_words(raw:&str)->Vec<String>{
     use unicode_normalization::{UnicodeNormalization,char::is_combining_mark};
     let folded=raw.to_lowercase()
         .replace('æ',"ae").replace('ø',"o").replace('œ',"oe")
@@ -533,8 +533,8 @@ fn shortlist_metadata(
 
 pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_season:i64,
     release_title:&str,has_episode:bool,limit:usize)->rusqlite::Result<Vec<Match>>{
-    search_inner(db,title,year,series,required_season,release_title,has_episode,limit,false)
-        .map(|(hits,_)|hits)
+    search_inner_mode(db,title,year,series,required_season,release_title,
+        has_episode,limit,false,crate::strict_match_mode()).map(|(hits,_)|hits)
 }
 
 /// Preserve the public API's final eligibility gate when an exact-only
@@ -546,19 +546,31 @@ pub fn search_validated(
     release_title:&str,has_episode:bool,limit:usize,
     validate:impl Fn(Vec<Match>)->Vec<Match>,
 )->rusqlite::Result<Vec<Match>>{
-    let (hits,exact_only)=search_inner(
-        db,title,year,series,required_season,release_title,has_episode,limit,false)?;
+    let strict=crate::strict_match_mode();
+    let (hits,exact_only)=search_inner_mode(
+        db,title,year,series,required_season,release_title,has_episode,limit,false,strict)?;
     let filtered=validate(hits);
-    if exact_only && filtered.is_empty(){
-        let (fallback,_) = search_inner(
-            db,title,year,series,required_season,release_title,has_episode,limit,true)?;
+    if !strict && exact_only && filtered.is_empty(){
+        let (fallback,_) = search_inner_mode(
+            db,title,year,series,required_season,release_title,has_episode,limit,true,false)?;
         return Ok(validate(fallback));
     }
     Ok(filtered)
 }
 
+#[cfg(test)]
 fn search_inner(db:&Connection,title:&str,year:Option<i32>,series:bool,required_season:i64,
-    release_title:&str,_has_episode:bool,limit:usize,force_full:bool,
+    release_title:&str,has_episode:bool,limit:usize,force_full:bool,
+)->rusqlite::Result<(Vec<Match>,bool)>{
+    search_inner_mode(db,title,year,series,required_season,release_title,
+        has_episode,limit,force_full,false)
+}
+
+/// Strict retrieval is a separate exact-only path within the same ranker.
+/// It does not enumerate a single prefix, suffix or inside-term candidate,
+/// and it never retries the broad discovery when a gate rejects the result.
+fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,required_season:i64,
+    release_title:&str,_has_episode:bool,limit:usize,force_full:bool,strict:bool,
 )->rusqlite::Result<(Vec<Match>,bool)>{
     // The parser has already inherited season/episode/year across the
     // hierarchy. Only the lexical candidate discovery should operate on
@@ -578,7 +590,9 @@ fn search_inner(db:&Connection,title:&str,year:Option<i32>,series:bool,required_
     let mut rows=Vec::new();
     let mut ordinary_title_matches=HashSet::new();
     let mut country_title_matches=HashSet::new();
-    let country_qualified=crate::country_aliases::qualified(release_title);
+    let country_qualified=if strict {None} else{
+        crate::country_aliases::qualified(release_title)
+    };
     let country=country_qualified.as_ref().map(|(code,_)|*code);
     let semantic_release=semantic_words(title);
     let semantic_full_release=semantic_words(release_title);
@@ -600,15 +614,22 @@ fn search_inner(db:&Connection,title:&str,year:Option<i32>,series:bool,required_
         }
     }
     let mut discovered=exact(db,&key)?;
+    if strict {
+        // Compact ASCII keys may collide for Unicode titles (Bleach vs
+        // BLEACH 千年血戦篇). Require the entire imported IMDb alias to match
+        // the entire parsed title in Unicode-aware normalized words.
+        discovered.retain(|row|row.clean==key
+            &&semantic_words(&row.title)==semantic_release);
+    }
     // Presence in the index is NOT enough: the source's complete significant
     // words must equal the parsed title, and at least one exact alias must
     // have the same Unicode-preserving words (ASCII keys may collide).
     // This protects longer names such as Monster / The Ed Gein Story and
     // BLEACH with a Japanese subtitle from premature early exits.
-    let exact_only=!force_full && key.len()>=6 && country_qualified.is_none()
+    let exact_only=strict || (!force_full && key.len()>=6 && country_qualified.is_none()
         && !semantic_content.is_empty() && semantic_release==semantic_content
         && discovered.iter().any(|row|
-            row.clean==key && semantic_words(&row.title)==semantic_content);
+            row.clean==key && semantic_words(&row.title)==semantic_content));
     if !exact_only && key.len()>=4{
         discovered.extend(tantivy_aliases(db,&key,false)?);
         if key.len()>=8{
@@ -623,8 +644,10 @@ fn search_inner(db:&Connection,title:&str,year:Option<i32>,series:bool,required_
     // Lexical discovery from a parser title is less trustworthy than the
     // original release, so keep the historical word-boundary and containment
     // checks. Only the raw-release validation below can admit longer names.
-    discovered.retain(|row|release.contains(&row.clean)
-        && title_fit(&key,&words,&release_words,row,&semantic_release,None).is_some());
+    if !strict {
+        discovered.retain(|row|release.contains(&row.clean)
+            &&title_fit(&key,&words,&release_words,row,&semantic_release,None).is_some());
+    }
     for row in discovered{
         ordinary_title_matches.insert((row.imdb_id.clone(),row.title.clone()));
         rows.push(row);
@@ -703,15 +726,31 @@ fn search_inner(db:&Connection,title:&str,year:Option<i32>,series:bool,required_
     // An exact title can exist but be ineligible for the requested media
     // type/season. Avoid letting another alias with the same ASCII key
     // masquerade as a verified complete title; resume full discovery.
-    if exact_only && !eligible_rows.iter().any(|row|
+    if !strict && exact_only && !eligible_rows.iter().any(|row|
         row.clean==key && semantic_words(&row.title)==semantic_content){
-        return search_inner(db,title,year,series,required_season,
-            release_title,_has_episode,limit,true);
+        return search_inner_mode(db,title,year,series,required_season,
+            release_title,_has_episode,limit,true,false);
     }
     let mut rows=eligible_rows;
+    let mut strict_anime_ids=HashSet::new();
+    if strict && rows.is_empty() && series {
+        // An exact imported AniDB title may map to a different English IMDb
+        // primary title. Retain that genuinely exact alias relationship,
+        // never a partial anime title or unverified related IMDb identity.
+        let ids=crate::tantivy_search::anime_aliases_exact(db,title)
+            .map_err(index_error)?.into_iter()
+            .map(|row|row.imdb_id).collect::<std::collections::BTreeSet<_>>();
+        if !ids.is_empty(){
+            let aliases=crate::tantivy_search::titles_by_ids(
+                db,&ids.iter().cloned().collect::<Vec<_>>()).map_err(index_error)?;
+            rows=filter_eligible(db,aliases.into_iter().map(Aka::from).collect(),
+                series,year,required_season)?;
+            strict_anime_ids=ids.into_iter().collect();
+        }
+    }
     // The AniDB-only title lookup remains a separate *fallback* when none
     // of the IMDb title search paths found any eligible identity.
-    if rows.is_empty()&&series&&key.len()>=4{
+    if !strict && rows.is_empty()&&series&&key.len()>=4{
         // IMDb's English primary title need not appear in the release at
         // all: e.g. Shinigami Bocchan to Kuro Maid is indexed under its
         // English title. The exact/longest AniDB alias provides identity;
@@ -766,6 +805,16 @@ fn search_inner(db:&Connection,title:&str,year:Option<i32>,series:bool,required_
     let semantic_content_length=semantic_content.iter()
         .map(|word|word.chars().count()).sum::<usize>();
     for row in rows{
+        if strict {
+            let exact_imdb=row.clean==key
+                &&semantic_words(&row.title)==semantic_release;
+            if !exact_imdb && !strict_anime_ids.contains(&row.imdb_id){
+                continue;
+            }
+            groups.entry(row.imdb_id.clone()).or_default()
+                .push((row,TitleFit::exact()));
+            continue;
+        }
         // Reuse the Unicode tokenization for the candidate's title-fit
         // evidence and exact-source comparison in this scoring pass.
         let alias_semantic=semantic_words(&row.title);
@@ -821,7 +870,7 @@ fn search_inner(db:&Connection,title:&str,year:Option<i32>,series:bool,required_
     let exact_ids=groups.iter().filter_map(|(id,aliases)|
         aliases.iter().any(|(_,fit)|fit.tier==0).then_some(id.clone()))
         .collect::<Vec<_>>();
-    if exact_ids.len()>1 {
+    if !strict && exact_ids.len()>1 {
         let mut full_titles=BTreeMap::<String,Vec<Vec<String>>>::new();
         for id in &exact_ids {
             let forms=groups.get(id).unwrap().iter()
@@ -967,9 +1016,13 @@ pub fn prefer_verified_episode_identity(
         return Ok(confirmed);
     }
     let key=clean_title(title);
-    if key.len()<4{return Ok(candidates);}
-    let exact_anime_ids=crate::tantivy_search::anime_aliases_for_title(db,title,4)
-        .map_err(index_error)?.into_iter()
+    if key.is_empty() || (!crate::strict_match_mode() && key.len()<4){
+        return Ok(candidates);
+    }
+    let aliases=if crate::strict_match_mode(){
+        crate::tantivy_search::anime_aliases_exact(db,title)
+    }else{crate::tantivy_search::anime_aliases_for_title(db,title,4)};
+    let exact_anime_ids=aliases.map_err(index_error)?.into_iter()
         .filter(|alias|alias.clean_title==key)
         .map(|alias|alias.imdb_id)
         .collect::<std::collections::BTreeSet<_>>();
@@ -1014,6 +1067,93 @@ pub fn prefer_verified_episode_identity(
 }
 #[cfg(test)]
 mod tests{
+
+    /// Strict mode has no minimum title length and never performs the
+    /// normal prefix/suffix/inside or original-release recovery scans.
+    #[test]
+    fn strict_mode_retains_only_complete_exact_imdb_aliases(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('tt0000001','The Ed','theed',2025,'series','US',1,0,'tvSeries'),
+                ('tt0000002','Monster: The Ed Gein Story','monstertheedgeinstory',
+                    2025,'series','US',1,0,'tvSeries'),
+                ('tt0000003','Dune','dune',2021,'movie','US',1,0,'movie'),
+                ('tt0000004','Duneland','duneland',2020,'movie','US',1,0,'movie'),
+                ('tt0000005','Bleach','bleach',2004,'series','US',1,0,'tvSeries'),
+                ('tt0000006','BLEACH 千年血戦篇','bleach',2022,'series','JP',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt0000001',1),('tt0000002',1),
+                ('tt0000005',17),('tt0000006',4);").unwrap();
+        let fetch=|title:&str,raw:&str,series:bool|{
+            search_inner_mode(&db,title,None,series,0,raw,false,20,false,true)
+                .unwrap().0.into_iter().map(|m|m.imdb_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(fetch("The Ed","The.Ed.Gein.Story.S01E01",true),
+            vec!["tt0000001"],"full-release suffix must not supersede exact title");
+        assert!(fetch("The Ed Gein Story","The.Ed.Gein.Story.S01E01",true)
+            .is_empty(),"partial source title must not recover longer IMDb title");
+        assert_eq!(fetch("Dune","Dune.2021",false),vec!["tt0000003"],
+            "strict exact matching works for keys shorter than six characters");
+        assert!(fetch("Dunel","Dunel.2020",false).is_empty());
+        assert_eq!(fetch("Bleach","Bleach.S01E01",true),vec!["tt0000005"],
+            "Unicode-colliding longer aliases are not strict matches");
+        assert_eq!(fetch("BLEACH 千年血戦篇","BLEACH.千年血戦篇.S01E01",true),
+            vec!["tt0000006"]);
+    }
+
+    #[test]
+    fn strict_mode_never_retries_partials_after_public_year_gate(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('tt0000010','Star Force','starforce',2010,'movie','US',1,0,'movie'),
+                ('tt0000011','Force','force',2025,'movie','US',1,0,'movie');")
+            .unwrap();
+        let (exact,_)=search_inner_mode(&db,"Star Force",Some(2025),false,
+            0,"Star.Force.2025",false,20,false,true).unwrap();
+        assert_eq!(exact.len(),1);
+        assert_eq!(exact[0].imdb_id,"tt0000010");
+        let strict_after_gate=exact.into_iter()
+            .filter(|match_|match_.year==2025).collect::<Vec<_>>();
+        assert!(strict_after_gate.is_empty(),
+            "failed exact candidate must not trigger a shorter Force match");
+    }
+
+    #[test]
+    fn strict_mode_allows_exact_anidb_alias_with_distinct_english_imdb_name(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO titles VALUES
+                ('tt0000020','The Duke of Death','thedukeofdeath',
+                    2021,'series','US',1,0,'tvSeries');
+            INSERT INTO anidb_titles VALUES
+                ('7777','Shinigami Bocchan','shinigamibocchan','main','ja');
+            INSERT INTO anime_series_map VALUES('tt0000020','7777','12345',0);")
+            .unwrap();
+        let (strict,_)=search_inner_mode(&db,"Shinigami Bocchan",None,
+            true,0,"Shinigami.Bocchan.S01E01",true,20,false,true).unwrap();
+        assert_eq!(strict.len(),1);
+        assert_eq!(strict[0].imdb_id,"tt0000020");
+        let (partial,_)=search_inner_mode(&db,"Shinigami",None,true,0,
+            "Shinigami.S01E01",true,20,false,true).unwrap();
+        assert!(partial.is_empty(),"no partial AniDB alias fallback");
+    }
 
     /// Exacts must be fast without changing duplicate-title ranking, including
     /// two IMDb works that share the same complete title and have different years.

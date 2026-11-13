@@ -571,7 +571,9 @@ pub fn aliases_for_imdb_ids(
 /// (including works without an IMDb link) instead of rehydrating full title
 /// aliases. The cache key is tied to the immutable Tantivy generation.
 fn anidb_ids_exact_uncached(db:&Connection,key:&str)->Result<BTreeSet<String>,String>{
-    if key.len()<4{return Ok(BTreeSet::new());}
+    if key.is_empty() ||(!crate::strict_match_mode()&&key.len()<4){
+        return Ok(BTreeSet::new());
+    }
     let (search,memory_dir)=open_search(db)?;
     let reader=search.reader.searcher();
     let query=TermQuery::new(
@@ -1060,6 +1062,29 @@ pub fn title_aliases_inside(db:&Connection,key:&str)->Result<Vec<TitleAlias>,Str
     }else{title_aliases_inside_uncached(db,key)}
 }
 
+/// Strict matching never enumerates anime prefixes/suffixes. Reuse the
+/// existing exact-title Tantivy TermSetQuery, which checks the IMDb and AniDB
+/// index fields in one lookup. The prefix-oriented anime cache is not touched.
+pub fn anime_aliases_exact(db:&Connection,raw_title:&str)->Result<Vec<AnimeAlias>,String>{
+    let key=crate::title_normalization::clean_title(raw_title);
+    if key.is_empty(){return Ok(Vec::new());}
+    Ok(lookup_aliases(db,AliasLookupKind::ExactTitle,&key)?
+        .into_iter()
+        .filter(|alias|alias.source=="anidb" &&alias.normalized==key)
+        // Tantivy's compact ASCII key may drop non-Latin title words.
+        // Strict mode must never treat BLEACH and BLEACH 千年血戦篇 as
+        // identical just because their indexed ASCII keys are equal.
+        .filter(|alias| (raw_title.is_ascii() && alias.name.is_ascii())
+            || crate::imdb_matcher::semantic_words(&alias.name)
+                ==crate::imdb_matcher::semantic_words(raw_title))
+        .filter_map(|alias|Some(AnimeAlias{
+            anidb_id:alias.anidb_id?,
+            imdb_id:alias.imdb_id?,
+            clean_title:alias.normalized
+        }))
+        .collect())
+}
+
 /// Cache the indexed candidates independent of the source title's word
 /// boundaries. Different raw titles can normalize to the same key but have
 /// different legal suffixes (e.g. "Beyond Dune" vs "BeyondDune").
@@ -1169,6 +1194,45 @@ pub fn anime_candidates(db:&Connection,key:&str)->Result<Vec<String>,String>{
 #[cfg(test)]
 mod persistence_tests {
     use super::*;
+
+    #[test]
+    fn strict_anime_postings_are_exact_and_allow_short_titles(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO titles VALUES
+                ('tt0000011','Bleach','bleach',2004,'series','US',1,0,'tvSeries'),
+                ('tt0000012','Short Anime','shortanime',2012,'series','US',1,0,'tvSeries'),
+                ('tt0000013','BLEACH TYBW','bleachtybw',2022,'series','JP',1,0,'tvSeries');
+            INSERT INTO anidb_titles VALUES
+                ('2369','Bleach','bleach','main','en'),
+                ('8888','BLEACH 千年血戦篇','bleach','main','ja'),
+                ('9999','A','a','main','en');
+            INSERT INTO anime_series_map VALUES
+                ('tt0000011','2369','74796',0),
+                ('tt0000012','9999','44444',0),
+                ('tt0000013','8888','74796',0);").unwrap();
+        let exact=anime_aliases_exact(&db,"Bleach").unwrap();
+        assert_eq!(exact.len(),1);
+        assert_eq!(exact[0].imdb_id,"tt0000011");
+        assert!(anime_aliases_exact(&db,"Bleach Thousand Year").unwrap()
+            .is_empty(),"exact-only mode must not enumerate anime prefixes");
+        let unicode=anime_aliases_exact(&db,"BLEACH 千年血戦篇").unwrap();
+        assert_eq!(unicode.len(),1);
+        assert_eq!(unicode[0].imdb_id,"tt0000013",
+            "exact anime aliases must retain non-Latin title words");
+        assert!(anime_aliases_exact(&db,"Ble").unwrap().is_empty(),
+            "an abbreviated title must not find a longer alias");
+        let short=anime_aliases_exact(&db,"A").unwrap();
+        assert_eq!(short.len(),1);
+        assert_eq!(short[0].imdb_id,"tt0000012");
+    }
+
 
     #[test]
     fn word_boundary_inside_terms_are_subset_of_old_compact_search(){

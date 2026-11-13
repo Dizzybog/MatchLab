@@ -41,6 +41,22 @@ use std::{env, path::PathBuf, sync::{Arc,Mutex,OnceLock}, time::{Instant,Duratio
 use tokio::sync::Semaphore;
 
 
+static STRICT_MATCH_MODE:OnceLock<bool>=OnceLock::new();
+fn strict_match_mode()->bool{
+    // Runtime sets this before accepting requests. Production fails closed
+    // with exact-only matching if accessed before initialization. Standalone
+    // unit fixtures retain legacy discovery until they explicitly test strict.
+    STRICT_MATCH_MODE.get().copied().unwrap_or(!cfg!(test))
+}
+fn parse_strict_match_mode(raw:Option<&str>)->Result<bool,String>{
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref(){
+        None|Some("true"|"1"|"on"|"yes")=>Ok(true),
+        Some("false"|"0"|"off"|"no")=>Ok(false),
+        Some(other)=>Err(format!(
+            "MATCHLAB_STRICT_MODE must be true or false (got {other:?})")),
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     db:Arc<PathBuf>,
@@ -220,8 +236,13 @@ fn open_db(path: &PathBuf) -> rusqlite::Result<Connection> {
 
 fn anime_candidate(db: &Connection, title: &str, season: Option<i64>, episode: i64) -> rusqlite::Result<Option<Value>> {
     let key=imdb_matcher::clean_title(title);
-    if key.len()<4||episode<=0{return Ok(None);}
-    let matches:Vec<_>=tantivy_search::anime_aliases_for_title(db,title,6)
+    if key.is_empty()||(!strict_match_mode()&&key.len()<4)||episode<=0{
+        return Ok(None);
+    }
+    let aliases=if strict_match_mode(){
+        tantivy_search::anime_aliases_exact(db,title)
+    }else{tantivy_search::anime_aliases_for_title(db,title,6)};
+    let matches:Vec<_>=aliases
         .map_err(|error|rusqlite::Error::ToSqlConversionFailure(
             Box::new(std::io::Error::other(error))))?
         .into_iter().map(|alias|(alias.anidb_id,alias.clean_title,alias.imdb_id))
@@ -279,8 +300,11 @@ fn anime_candidate(db: &Connection, title: &str, season: Option<i64>, episode: i
 /// season or episode coordinates. Exact aliases precede longest prefixes.
 fn anime_identity(db:&Connection,title:&str)->rusqlite::Result<Option<String>>{
     let key=imdb_matcher::clean_title(title);
-    if key.len()<4{return Ok(None);}
-    let rows:Vec<_>=tantivy_search::anime_aliases_for_title(db,title,6)
+    if key.is_empty()||(!strict_match_mode()&&key.len()<4){return Ok(None);}
+    let aliases=if strict_match_mode(){
+        tantivy_search::anime_aliases_exact(db,title)
+    }else{tantivy_search::anime_aliases_for_title(db,title,6)};
+    let rows:Vec<_>=aliases
         .map_err(|error|rusqlite::Error::ToSqlConversionFailure(
             Box::new(std::io::Error::other(error))))?
         .into_iter().map(|alias|(alias.clean_title,alias.imdb_id)).collect();
@@ -296,9 +320,13 @@ fn anime_identity(db:&Connection,title:&str)->rusqlite::Result<Option<String>>{
 /// Return an IMDb identity only when the release title itself is an exact,
 /// unique AniDB alias. This is stricter than the prefix-based fallback used
 /// to rank title candidates and safe for season-pack inference.
-fn exact_anime_identity(db:&Connection,key:&str)->Result<Option<String>,String>{
-    if key.len()<4{return Ok(None);}
-    let ids=tantivy_search::anime_aliases(db,key,4)?.into_iter()
+fn exact_anime_identity(db:&Connection,title:&str)->Result<Option<String>,String>{
+    let key=imdb_matcher::clean_title(title);
+    if key.is_empty()||(!strict_match_mode()&&key.len()<4){return Ok(None);}
+    let aliases=if strict_match_mode(){
+        tantivy_search::anime_aliases_exact(db,title)?
+    }else{tantivy_search::anime_aliases(db,&key,4)?};
+    let ids=aliases.into_iter()
         .filter(|alias|alias.clean_title==key)
         .map(|alias|alias.imdb_id)
         .collect::<std::collections::BTreeSet<_>>();
@@ -627,8 +655,10 @@ fn verified_anime_subfolder_title(
     if imdb.is_empty(){return Ok(None);}
     for name in parents.iter().rev().filter_map(Value::as_str){
         let key=imdb_matcher::clean_title(name);
-        if key.len()<4 {continue;}
-        let aliases=tantivy_search::anime_aliases(db,&key,4)?;
+        if key.is_empty()||(!strict_match_mode()&&key.len()<4){continue;}
+        let aliases=if strict_match_mode(){
+            tantivy_search::anime_aliases_exact(db,name)?
+        }else{tantivy_search::anime_aliases(db,&key,4)?};
         let exact_ids:std::collections::BTreeSet<String>=aliases.into_iter()
             .filter(|alias|alias.clean_title==key)
             .map(|alias|alias.imdb_id).collect();
@@ -770,10 +800,13 @@ fn bottom_up_imdb_path_match(
 /// partial-range diagnostics for an unambiguous single IMDb association; for
 /// collisions, require exactly one IMDb identity with an entirely mapped span.
 fn verified_unmarked_anime_range_imdb(
-    db:&Connection,key:&str,start:i64,end:i64,
+    db:&Connection,title:&str,start:i64,end:i64,
 )->Result<Option<String>,String>{
-    let ids=tantivy_search::anime_aliases(db,key,6)?
-        .into_iter().filter(|alias|alias.clean_title==key)
+    let key=imdb_matcher::clean_title(title);
+    let aliases=if strict_match_mode(){
+        tantivy_search::anime_aliases_exact(db,title)?
+    }else{tantivy_search::anime_aliases(db,&key,6)?};
+    let ids=aliases.into_iter().filter(|alias|alias.clean_title==key)
         .map(|alias|alias.imdb_id)
         .collect::<std::collections::BTreeSet<_>>();
     if ids.len()==1{return Ok(ids.into_iter().next());}
@@ -812,9 +845,12 @@ fn verified_unmarked_single_anime_imdb(
     year:Option<i32>,episode:i64,
 )->Result<Option<String>,String>{
     let key=imdb_matcher::clean_title(candidate_title);
-    if key.len()<4 || !(1..=99_999).contains(&episode){return Ok(None);}
-    let exact_ids=tantivy_search::anime_aliases(db,&key,4)?
-        .into_iter().filter(|alias|alias.clean_title==key)
+    if key.is_empty() ||(!strict_match_mode()&&key.len()<4)
+        ||!(1..=99_999).contains(&episode){return Ok(None);}
+    let aliases=if strict_match_mode(){
+        tantivy_search::anime_aliases_exact(db,candidate_title)?
+    }else{tantivy_search::anime_aliases(db,&key,4)?};
+    let exact_ids=aliases.into_iter().filter(|alias|alias.clean_title==key)
         .map(|alias|alias.imdb_id)
         .collect::<std::collections::BTreeSet<_>>();
     if exact_ids.is_empty(){return Ok(None);}
@@ -887,9 +923,8 @@ fn diagnose_with_policy(
             // Existing IMDb crosswalk validation wins when it can prove
             // this range. Only fall back to the independent AniDB lookup
             // if the legacy path cannot establish a candidate.
-            let key=imdb_matcher::clean_title(&candidate_title);
             verified_anime_range_imdb=verified_unmarked_anime_range_imdb(
-                &db,&key,start,end)?;
+                &db,&candidate_title,start,end)?;
             if verified_anime_range_imdb.is_none(){
                 verified_anidb_range=anidb_matcher::match_absolute_range(
                     &db,&candidate_title,start,end)?;
@@ -939,8 +974,7 @@ fn diagnose_with_policy(
         if req.series!=Some(false) && (1..=12).contains(&season)
             && (1..=99).contains(&episode) {
             for candidate_title in [format!("{hint_title} {season}"),hint_title.clone()] {
-                let key=imdb_matcher::clean_title(&candidate_title);
-                if let Some(imdb)=exact_anime_identity(&db,&key)? {
+                if let Some(imdb)=exact_anime_identity(&db,&candidate_title)? {
                     let valid=season_episode_end(&db,&imdb,season)?
                         .is_some_and(|end|episode<=end)
                         || episode_crosswalk::resolve_season(&db,&imdb,season,episode)
@@ -1029,9 +1063,8 @@ fn diagnose_with_policy(
         && (1..=99_999).contains(&absolute)
     {
         let proposed_title=candidate_title.to_owned();
-        let proposed_key=imdb_matcher::clean_title(&proposed_title);
         if let Some(verified_imdb)=verified_unmarked_anime_range_imdb(
-            &db,&proposed_key,absolute,absolute
+            &db,&proposed_title,absolute,absolute
         )?
             && let Some(parsed)=parsed_value.as_object_mut()
         {
@@ -1072,7 +1105,6 @@ fn diagnose_with_policy(
     let airdate_only=dated.is_some() && numbers(parsed.get("seasons")).is_empty()
         && numbers(parsed.get("episodes")).is_empty();
     let title=title_owned.as_str();
-    let key = imdb_matcher::clean_title(title);
     let season_range=explicit_season_range(&req.title);
     let seasons = season_range.map(|(start,end)|vec![start,end])
         .unwrap_or_else(||numbers(parsed.get("seasons")));
@@ -1091,9 +1123,9 @@ fn diagnose_with_policy(
         // A release with an explicit production year and no episode/season
         // coordinates is a movie candidate, even if an anime alias exists.
         None if year.is_some() => false,
-        None => anime_title::season_from_any_exact_title(&db,&key)
+        None => anime_title::season_from_any_exact_title(&db,title)
             .map_err(|e|e.to_string())?.is_some()
-            || exact_anime_identity(&db,&key)?.is_some(),
+            || exact_anime_identity(&db,title)?.is_some(),
     };
     let gate=ImdbIdentityGate{
         policy,year,has_season:series&&!seasons.is_empty(),
@@ -1558,7 +1590,7 @@ fn diagnose_with_policy(
                 let exact_anime=if linked_anime && !seasons.is_empty(){
                     false
                 }else{
-                    exact_anime_identity(&db,&key)?
+                    exact_anime_identity(&db,title)?
                         .is_some_and(|id|id==imdb_id)
                 };
                 let season=if let Some(season)=selected_season{
@@ -1882,6 +1914,12 @@ fn enrich_selected_anime_episode(
 // Unlike the existing persistent ML cache this is available with ML disabled;
 // unlike candidate caches, it never shares a final SID across different files.
 static TORRENT_MATCH_CACHE:OnceLock<query_cache::QueryCache<Diagnostic>>=OnceLock::new();
+/// Strict and broad candidate discovery must never share a persisted or
+/// short-lived final result. Keep the full metadata/regex fingerprint, but
+/// append the immutable boot-time search policy.
+fn scoped_match_generation(metadata:&str,strict:bool)->String{
+    format!("{metadata}:strict={strict}")
+}
 // Reuse the generation already checked by diagnose_logged, rather than
 // recomputing the filesystem/WAL SHA-256 to enter the same cache.
 fn whole_torrent_cached_diagnose(
@@ -1889,12 +1927,15 @@ fn whole_torrent_cached_diagnose(
 )->Result<Diagnostic,String>{
     let Some(metadata)=metadata else{return diagnose(db_path,req);};
     let regex_revision=parse_rules_revision();
-    let key=format!("{metadata}:{regex_revision:016x}:{:?}:{:?}:{}",
+    let strict=strict_match_mode();
+    let scoped=scoped_match_generation(metadata,strict);
+    let key=format!("{scoped}:{regex_revision:016x}:{:?}:{:?}:{}",
         req.year,req.series,req.title);
     TORRENT_MATCH_CACHE.get_or_init(||query_cache::QueryCache::new(
         512,Duration::from_secs(30))).get_or_compute(
         key,||diagnose(db_path,req),
         |_|parse_rules_revision()==regex_revision
+            &&strict_match_mode()==strict
             &&learning_cache::match_fingerprint(db_path)
                 .as_deref()==Some(metadata))
 }
@@ -1904,7 +1945,9 @@ fn whole_torrent_cached_diagnose(
 // memoize filesystem/regex generations across requests or SQLite refreshes.
 fn match_generations(db_path:&PathBuf)->(Option<String>,Option<String>){
     let fingerprint=learning_cache::match_fingerprint(db_path);
-    let namespace=if learning_cache::enabled(){fingerprint.clone()}else{None};
+    let namespace=if learning_cache::enabled(){
+        fingerprint.as_ref().map(|fp|scoped_match_generation(fp,strict_match_mode()))
+    }else{None};
     (namespace,fingerprint)
 }
 
@@ -1913,7 +1956,12 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result
     // Dashboard-only exploratory diagnostics deliberately bypass matching
     // caches. /match and strict /debug/match use the identical PublicApi
     // eligibility policy and may share verified cache entries.
-    let cacheable=matches!(policy,MatchPolicy::PublicApi);
+    // Cache only public-policy results. Strict and broad searches use
+    // distinct versioned namespaces and distinct final-result keys; one
+    // can never serve the other, even after an opt-out/restart. Exploratory
+    // dashboard diagnostics still bypass these caches entirely.
+    let public_policy=matches!(policy,MatchPolicy::PublicApi);
+    let cacheable=public_policy;
     // Snapshot generation once: the persistent ML namespace is the same
     // fingerprint when ML is enabled, but the always-on cache also works
     // without ML. Avoid hashing metadata/WAL twice for the same snapshot.
@@ -1963,7 +2011,7 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result
             if local_learning::active(){
                 if let Some(record)=details.as_object_mut(){
                     record.insert("ml_source_policy".into(),json!(
-                        if cacheable{"public_api"}else{"dashboard_diagnostic"}));
+                        if public_policy{"public_api"}else{"dashboard_diagnostic"}));
                 }
             }
             let status=if d.selected.is_some(){"matched"}else{"unmatched"};
@@ -2391,6 +2439,11 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         tracing::info!("downloaded metadata refresh completed: imdb={imdb} anime_links={links} episode_maps={mappings} aliases={aliases}");
         return Ok(());
     }
+    let strict_raw=env::var("MATCHLAB_STRICT_MODE").ok();
+    let strict=parse_strict_match_mode(strict_raw.as_deref())?;
+    let _=STRICT_MATCH_MODE.set(strict);
+    tracing::info!(strict_mode=strict,
+        "IMDb and AniDB title matching policy configured");
     let db = env::var("MATCHLAB_DB").unwrap_or_else(|_|"/data/metadata.sqlite3".into());
     let host = env::var("MATCHLAB_HOST").unwrap_or_else(|_|"127.0.0.1:8766".into());
     // Bind the HTTP listener before potentially expensive startup indexing.
@@ -2597,6 +2650,30 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn final_match_cache_namespaces_are_strictly_policy_separated(){
+        let key="v3-metadata-123";
+        assert_ne!(scoped_match_generation(key,true),
+            scoped_match_generation(key,false));
+        assert_eq!(scoped_match_generation(key,true),
+            scoped_match_generation(key,true));
+        assert_ne!(scoped_match_generation("v3-metadata-124",true),
+            scoped_match_generation(key,true));
+    }
+    #[test]
+    fn strict_mode_defaults_to_exact_only_and_rejects_invalid_configuration(){
+        assert_eq!(parse_strict_match_mode(None),Ok(true));
+        for value in ["true","TRUE","1","on","yes"," true "]{
+            assert_eq!(parse_strict_match_mode(Some(value)),Ok(true),"{value}");
+        }
+        for value in ["false","FALSE","0","off","no"," false "]{
+            assert_eq!(parse_strict_match_mode(Some(value)),Ok(false),"{value}");
+        }
+        for value in ["strict","enabled","2",""]{
+            assert!(parse_strict_match_mode(Some(value)).is_err(),"{value}");
+        }
+    }
+
     #[tokio::test]
     async fn dashboard_is_on_dash_and_root_redirects_without_moving_api_routes(){
         use axum::response::IntoResponse;
