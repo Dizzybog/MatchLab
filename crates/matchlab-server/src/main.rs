@@ -43,12 +43,15 @@ use tokio::sync::Semaphore;
 
 static STRICT_MATCH_MODE:OnceLock<bool>=OnceLock::new();
 fn strict_match_mode()->bool{
-    STRICT_MATCH_MODE.get().copied().unwrap_or(false)
+    // Runtime initializes this once from MATCHLAB_STRICT_MODE before the
+    // listener starts. Keep old direct matcher fixtures non-strict under
+    // cfg(test); production fails closed if accessed before initialization.
+    STRICT_MATCH_MODE.get().copied().unwrap_or(!cfg!(test))
 }
 fn parse_strict_match_mode(raw:Option<&str>)->Result<bool,String>{
     match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref(){
-        None|Some("false"|"0"|"off"|"no")=>Ok(false),
-        Some("true"|"1"|"on"|"yes")=>Ok(true),
+        None|Some("true"|"1"|"on"|"yes")=>Ok(true),
+        Some("false"|"0"|"off"|"no")=>Ok(false),
         Some(other)=>Err(format!(
             "MATCHLAB_STRICT_MODE must be true or false (got {other:?})")),
     }
@@ -2636,8 +2639,8 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     #[test]
-    fn strict_mode_setting_is_opt_in_and_rejects_invalid_configuration(){
-        assert_eq!(parse_strict_match_mode(None),Ok(false));
+    fn strict_mode_defaults_to_exact_only_and_rejects_invalid_configuration(){
+        assert_eq!(parse_strict_match_mode(None),Ok(true));
         for value in ["true","TRUE","1","on","yes"," true "]{
             assert_eq!(parse_strict_match_mode(Some(value)),Ok(true),"{value}");
         }
