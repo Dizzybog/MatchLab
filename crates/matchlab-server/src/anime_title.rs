@@ -286,20 +286,21 @@ pub fn season_from_title(db:&Connection,imdb:&str,title:&str)->rusqlite::Result<
 
 /// Recognize a title-only anime part only when an exact alias has a unique
 /// IMDb identity and a uniquely mapped positive season.
-pub fn season_from_any_exact_title(db:&Connection,key:&str)->rusqlite::Result<Option<i64>>{
+pub fn season_from_any_exact_title(db:&Connection,title:&str)->rusqlite::Result<Option<i64>>{
+    let key=imdb_matcher::clean_title(title);
     if key.is_empty()||(!crate::strict_match_mode()&&key.len()<4){
         return Ok(None);
     }
     let aliases=if crate::strict_match_mode(){
-        crate::tantivy_search::anime_aliases_exact(db,key)
-    }else{crate::tantivy_search::anime_aliases(db,key,4)};
+        crate::tantivy_search::anime_aliases_exact(db,title)
+    }else{crate::tantivy_search::anime_aliases(db,&key,4)};
     let ids=aliases.map_err(|error|rusqlite::Error::ToSqlConversionFailure(
             Box::new(std::io::Error::other(error))))?
         .into_iter().filter(|a|a.clean_title==key).map(|a|a.imdb_id)
         .collect::<BTreeSet<_>>();
     if ids.len()!=1{return Ok(None);}
     let imdb=ids.iter().next().unwrap();
-    season_from_title(db,imdb,key)
+    season_from_title(db,imdb,if crate::strict_match_mode(){title}else{&key})
 }
 
 #[cfg(test)]
