@@ -1103,20 +1103,20 @@ mod tests{
             CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
             CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
             INSERT INTO titles VALUES
-                ('ttova','Jojo Stone Ocean','jojostoneocean',2022,'series','US',1,0,'tvSeries'),
-                ('ttseries','Jojos Bizarre Adventure','jojosbizarreadventure',
+                ('tt0000100','Jojo Stone Ocean','jojostoneocean',2022,'series','US',1,0,'tvSeries'),
+                ('tt0000200','Jojos Bizarre Adventure','jojosbizarreadventure',
                     2012,'series','JP',1,0,'tvSeries');
             INSERT INTO anidb_titles VALUES
                 ('16187','Jojo Stone Ocean','jojostoneocean','main','en');
-            INSERT INTO anime_series_map VALUES('ttseries','16187','262954',0);
-            INSERT INTO imdb_ratings VALUES('ttova',1000000),('ttseries',1);").unwrap();
+            INSERT INTO anime_series_map VALUES('tt0000200','16187','262954',0);
+            INSERT INTO imdb_ratings VALUES('tt0000100',1000000),('tt0000200',1);").unwrap();
         let search_part=||search_inner_mode(&db,"Jojo Stone Ocean",None,true,0,
             "Jojo.Stone.Ocean.E01",true,5,false,true).unwrap().0;
-        assert_eq!(search_part()[0].imdb_id,"ttseries",
+        assert_eq!(search_part()[0].imdb_id,"tt0000200",
             "unique exact AniDB part should outrank the same-name IMDb work");
-        db.execute("INSERT INTO anime_series_map VALUES('ttova','16187','262954',0)",[])
+        db.execute("INSERT INTO anime_series_map VALUES('tt0000100','16187','262954',0)",[])
             .unwrap();
-        assert_eq!(search_part()[0].imdb_id,"ttova",
+        assert_eq!(search_part()[0].imdb_id,"tt0000100",
             "ambiguous AniDB links cannot give arbitrary priority");
     }
 
