@@ -1001,6 +1001,12 @@ pub fn anime_aliases_exact(db:&Connection,raw_title:&str)->Result<Vec<AnimeAlias
     Ok(lookup_aliases(db,AliasLookupKind::ExactTitle,&key)?
         .into_iter()
         .filter(|alias|alias.source=="anidb" &&alias.normalized==key)
+        // Tantivy's compact ASCII key may drop non-Latin title words.
+        // Strict mode must never treat BLEACH and BLEACH 千年血戦篇 as
+        // identical just because their indexed ASCII keys are equal.
+        .filter(|alias| (raw_title.is_ascii() && alias.name.is_ascii())
+            || crate::imdb_matcher::semantic_words(&alias.name)
+                ==crate::imdb_matcher::semantic_words(raw_title))
         .filter_map(|alias|Some(AnimeAlias{
             anidb_id:alias.anidb_id?,
             imdb_id:alias.imdb_id?,
@@ -1134,6 +1140,7 @@ mod persistence_tests {
                 ('tt0000012','Short Anime','shortanime',2012,'series','US',1,0,'tvSeries');
             INSERT INTO anidb_titles VALUES
                 ('2369','Bleach','bleach','main','en'),
+                ('8888','BLEACH 千年血戦篇','bleach','main','ja'),
                 ('9999','A','a','main','en');
             INSERT INTO anime_series_map VALUES
                 ('tt0000011','2369','74796',0),
@@ -1143,6 +1150,8 @@ mod persistence_tests {
         assert_eq!(exact[0].imdb_id,"tt0000011");
         assert!(anime_aliases_exact(&db,"Bleach Thousand Year").unwrap()
             .is_empty(),"exact-only mode must not enumerate anime prefixes");
+        assert_eq!(anime_aliases_exact(&db,"BLEACH 千年血戦篇").unwrap()
+            .len(),0,"an unrelated or unlinked Unicode work is not an IMDb candidate");
         assert!(anime_aliases_exact(&db,"Ble").unwrap().is_empty(),
             "an abbreviated title must not find a longer alias");
         let short=anime_aliases_exact(&db,"A").unwrap();
