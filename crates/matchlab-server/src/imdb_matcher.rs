@@ -1063,6 +1063,93 @@ pub fn prefer_verified_episode_identity(
 #[cfg(test)]
 mod tests{
 
+    /// Strict mode has no minimum title length and never performs the
+    /// normal prefix/suffix/inside or original-release recovery scans.
+    #[test]
+    fn strict_mode_retains_only_complete_exact_imdb_aliases(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('tt0000001','The Ed','theed',2025,'series','US',1,0,'tvSeries'),
+                ('tt0000002','Monster: The Ed Gein Story','monstertheedgeinstory',
+                    2025,'series','US',1,0,'tvSeries'),
+                ('tt0000003','Dune','dune',2021,'movie','US',1,0,'movie'),
+                ('tt0000004','Duneland','duneland',2020,'movie','US',1,0,'movie'),
+                ('tt0000005','Bleach','bleach',2004,'series','US',1,0,'tvSeries'),
+                ('tt0000006','BLEACH 千年血戦篇','bleach',2022,'series','JP',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt0000001',1),('tt0000002',1),
+                ('tt0000005',17),('tt0000006',4);").unwrap();
+        let fetch=|title:&str,raw:&str,series:bool|{
+            search_inner_mode(&db,title,None,series,0,raw,false,20,false,true)
+                .unwrap().0.into_iter().map(|m|m.imdb_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(fetch("The Ed","The.Ed.Gein.Story.S01E01",true),
+            vec!["tt0000001"],"full-release suffix must not supersede exact title");
+        assert!(fetch("The Ed Gein Story","The.Ed.Gein.Story.S01E01",true)
+            .is_empty(),"partial source title must not recover longer IMDb title");
+        assert_eq!(fetch("Dune","Dune.2021",false),vec!["tt0000003"],
+            "strict exact matching works for keys shorter than six characters");
+        assert!(fetch("Dunel","Dunel.2020",false).is_empty());
+        assert_eq!(fetch("Bleach","Bleach.S01E01",true),vec!["tt0000005"],
+            "Unicode-colliding longer aliases are not strict matches");
+        assert_eq!(fetch("BLEACH 千年血戦篇","BLEACH.千年血戦篇.S01E01",true),
+            vec!["tt0000006"]);
+    }
+
+    #[test]
+    fn strict_mode_never_retries_partials_after_public_year_gate(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('tt0000010','Star Force','starforce',2010,'movie','US',1,0,'movie'),
+                ('tt0000011','Force','force',2025,'movie','US',1,0,'movie');")
+            .unwrap();
+        let (exact,_)=search_inner_mode(&db,"Star Force",Some(2025),false,
+            0,"Star.Force.2025",false,20,false,true).unwrap();
+        assert_eq!(exact.len(),1);
+        assert_eq!(exact[0].imdb_id,"tt0000010");
+        let strict_after_gate=exact.into_iter()
+            .filter(|match_|match_.year==2025).collect::<Vec<_>>();
+        assert!(strict_after_gate.is_empty(),
+            "failed exact candidate must not trigger a shorter Force match");
+    }
+
+    #[test]
+    fn strict_mode_allows_exact_anidb_alias_with_distinct_english_imdb_name(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO titles VALUES
+                ('tt0000020','The Duke of Death','thedukeofdeath',
+                    2021,'series','US',1,0,'tvSeries');
+            INSERT INTO anidb_titles VALUES
+                ('7777','Shinigami Bocchan','shinigamibocchan','main','ja');
+            INSERT INTO anime_series_map VALUES('tt0000020','7777','12345',0);")
+            .unwrap();
+        let (strict,_)=search_inner_mode(&db,"Shinigami Bocchan",None,
+            true,0,"Shinigami.Bocchan.S01E01",true,20,false,true).unwrap();
+        assert_eq!(strict.len(),1);
+        assert_eq!(strict[0].imdb_id,"tt0000020");
+        let (partial,_)=search_inner_mode(&db,"Shinigami",None,true,0,
+            "Shinigami.S01E01",true,20,false,true).unwrap();
+        assert!(partial.is_empty(),"no partial AniDB alias fallback");
+    }
+
     /// Exacts must be fast without changing duplicate-title ranking, including
     /// two IMDb works that share the same complete title and have different years.
     #[test]
