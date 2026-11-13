@@ -230,6 +230,10 @@ fn persist_batch_with_learning(db:&mut Connection,items:&[HistoryEvent],
                 let training=json!({
                     "selected":item.details["selected"],
                     "parsed":item.details["parsed"],
+                    // Without this provenance the offline learner cannot
+                    // distinguish public /match from exploratory dashboard
+                    // selections; the title learner would never train.
+                    "ml_source_policy":item.details["ml_source_policy"],
                 });
                 enqueue.execute(params![id,identity,item.title,training.to_string()])?;
             }
@@ -496,6 +500,43 @@ mod tests {
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
+    fn training_queue_retains_strict_match_policy_and_rejects_exploration(){
+        let path=path();
+        initialize(&path).unwrap();
+        let mut db=connect(&path).unwrap();
+        let selected=json!({"imdb_id":"tt1234567","match_source":"imdb",
+            "matched_title":"The Office US"});
+        let make=|name:&str,policy:&str| HistoryEvent{
+            path:path.clone(),title:name.into(),status:"matched".into(),
+            selected:Some(selected.clone()),
+            details:json!({"selected":selected,"parsed":{"title":"The Office"},
+                "ml_source_policy":policy}),
+            duration_ms:3,
+        };
+        persist_batch_with_learning(&mut db,&[
+            make("The.Office.US.S01E01","public_api"),
+            make("The.Office.US.S01E02","dashboard_diagnostic"),
+        ],true).unwrap();
+        let mut stmt=db.prepare("SELECT title,details FROM ml_training_queue
+            ORDER BY title").unwrap();
+        let rows=stmt.query_map([],|row|Ok((
+            row.get::<_,String>(0)?,row.get::<_,String>(1)?
+        ))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(rows.len(),2);
+        for (name,serialized) in rows{
+            let payload:Value=serde_json::from_str(&serialized).unwrap();
+            assert_eq!(payload["selected"]["matched_title"],"The Office US");
+            assert_eq!(payload["parsed"]["title"],"The Office");
+            assert_eq!(payload["ml_source_policy"],if name.ends_with("S01E01"){
+                "public_api"
+            }else{"dashboard_diagnostic"});
+        }
+        drop(stmt);
+        drop(db);
+        cleanup(&path);
     }
 
     #[test]
