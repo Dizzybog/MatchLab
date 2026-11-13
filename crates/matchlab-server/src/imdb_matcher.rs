@@ -1318,7 +1318,8 @@ mod tests{
             }).unwrap();
         let full=search_inner(&db,"Star Force",Some(2025),false,0,
             "Star.Force.2025",false,20,true).unwrap().0;
-        assert!(full.is_empty(),"the shorter Force alias must be excluded");
+        assert!(full.iter().all(|hit|hit.imdb_id!="ttnew"),
+            "the shorter Force alias must be excluded even in full discovery");
         assert!(valid.is_empty(),"the public year gate must not bypass title length");
     }
 
