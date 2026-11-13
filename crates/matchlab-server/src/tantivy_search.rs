@@ -1137,21 +1137,25 @@ mod persistence_tests {
             CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
             INSERT INTO titles VALUES
                 ('tt0000011','Bleach','bleach',2004,'series','US',1,0,'tvSeries'),
-                ('tt0000012','Short Anime','shortanime',2012,'series','US',1,0,'tvSeries');
+                ('tt0000012','Short Anime','shortanime',2012,'series','US',1,0,'tvSeries'),
+                ('tt0000013','BLEACH TYBW','bleachtybw',2022,'series','JP',1,0,'tvSeries');
             INSERT INTO anidb_titles VALUES
                 ('2369','Bleach','bleach','main','en'),
                 ('8888','BLEACH 千年血戦篇','bleach','main','ja'),
                 ('9999','A','a','main','en');
             INSERT INTO anime_series_map VALUES
                 ('tt0000011','2369','74796',0),
-                ('tt0000012','9999','44444',0);").unwrap();
+                ('tt0000012','9999','44444',0),
+                ('tt0000013','8888','74796',0);").unwrap();
         let exact=anime_aliases_exact(&db,"Bleach").unwrap();
         assert_eq!(exact.len(),1);
         assert_eq!(exact[0].imdb_id,"tt0000011");
         assert!(anime_aliases_exact(&db,"Bleach Thousand Year").unwrap()
             .is_empty(),"exact-only mode must not enumerate anime prefixes");
-        assert_eq!(anime_aliases_exact(&db,"BLEACH 千年血戦篇").unwrap()
-            .len(),0,"an unrelated or unlinked Unicode work is not an IMDb candidate");
+        let unicode=anime_aliases_exact(&db,"BLEACH 千年血戦篇").unwrap();
+        assert_eq!(unicode.len(),1);
+        assert_eq!(unicode[0].imdb_id,"tt0000013",
+            "exact anime aliases must retain non-Latin title words");
         assert!(anime_aliases_exact(&db,"Ble").unwrap().is_empty(),
             "an abbreviated title must not find a longer alias");
         let short=anime_aliases_exact(&db,"A").unwrap();
