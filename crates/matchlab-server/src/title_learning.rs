@@ -17,10 +17,13 @@ static READY_PATTERNS:AtomicU64=AtomicU64::new(0);
 fn build()->String{format!("{}:{EPOCH}",option_env!("MATCHLAB_BUILD_SHA").unwrap_or("dev"))}
 fn digest(s:&str)->String{format!("{:x}",Sha256::digest(s.as_bytes()))}
 fn safe(raw:&str)->bool{
-    (8..=240).contains(&raw.len()) &&raw.is_ascii()
-        &&!raw.contains(['/','\\','@','\r','\n','\0'])
-        &&!["password=","token=","secret=","apikey=","magnet:","http:"]
-            .iter().any(|s|raw.to_ascii_lowercase().contains(s))
+    if !(8..=240).contains(&raw.len())||!raw.is_ascii()
+        ||raw.contains(['/','\\','@','\r','\n','\0']){return false;}
+    // Normalize once rather than allocating one lowercased buffer for
+    // every blocked secret/URL fragment on the ML worker.
+    let lower=raw.to_ascii_lowercase();
+    !["password=","token=","secret=","apikey=","magnet:","http:"]
+        .iter().any(|fragment|lower.contains(fragment))
 }
 fn words(s:&str)->Vec<String>{crate::title_normalization::clean_words(s)}
 fn episode_marker(s:&str)->bool{
@@ -83,7 +86,8 @@ fn signal(raw:&str,parsed:&Value,selected:&Value)->Option<&'static str>{
     // Only the whole release-title span proves a correction. IMDb aliases
     // may be translated or refer to another anime part.
     if expected!=content||previous.is_empty()||previous==expected{return None;}
-    let direction=if expected.starts_with(&previous)
+    let direction=if (expected.starts_with(&previous)
+            ||expected.ends_with(&previous))
         &&(1..=5).contains(&(expected.len()-previous.len())){
         "underextracted"
     }else if previous.starts_with(&expected)
@@ -206,6 +210,11 @@ mod tests{
         }
         assert_eq!(signal("The.Office.US.S01E01",
             &json!({"title":"The Office US"}),&selected),None);
+        // Losing a leading title word is just as meaningful as losing a
+        // trailing word; raw source evidence must still cover the alias.
+        assert_eq!(signal("The.Office.US.S01E01",
+            &json!({"title":"Office US"}),&selected),
+            Some("underextracted_episode"));
         assert_eq!(signal("The.Office.US.S01E01.1080p",
             &json!({"title":"The Office US S01E01"}),&selected),
             Some("overextracted_episode"));
