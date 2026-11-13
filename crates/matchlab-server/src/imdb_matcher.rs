@@ -533,8 +533,8 @@ fn shortlist_metadata(
 
 pub fn search(db:&Connection,title:&str,year:Option<i32>,series:bool,required_season:i64,
     release_title:&str,has_episode:bool,limit:usize)->rusqlite::Result<Vec<Match>>{
-    search_inner(db,title,year,series,required_season,release_title,has_episode,limit,false)
-        .map(|(hits,_)|hits)
+    search_inner_mode(db,title,year,series,required_season,release_title,
+        has_episode,limit,false,crate::strict_match_mode()).map(|(hits,_)|hits)
 }
 
 /// Preserve the public API's final eligibility gate when an exact-only
@@ -546,19 +546,31 @@ pub fn search_validated(
     release_title:&str,has_episode:bool,limit:usize,
     validate:impl Fn(Vec<Match>)->Vec<Match>,
 )->rusqlite::Result<Vec<Match>>{
-    let (hits,exact_only)=search_inner(
-        db,title,year,series,required_season,release_title,has_episode,limit,false)?;
+    let strict=crate::strict_match_mode();
+    let (hits,exact_only)=search_inner_mode(
+        db,title,year,series,required_season,release_title,has_episode,limit,false,strict)?;
     let filtered=validate(hits);
-    if exact_only && filtered.is_empty(){
-        let (fallback,_) = search_inner(
-            db,title,year,series,required_season,release_title,has_episode,limit,true)?;
+    if !strict && exact_only && filtered.is_empty(){
+        let (fallback,_) = search_inner_mode(
+            db,title,year,series,required_season,release_title,has_episode,limit,true,false)?;
         return Ok(validate(fallback));
     }
     Ok(filtered)
 }
 
+#[cfg(test)]
 fn search_inner(db:&Connection,title:&str,year:Option<i32>,series:bool,required_season:i64,
-    release_title:&str,_has_episode:bool,limit:usize,force_full:bool,
+    release_title:&str,has_episode:bool,limit:usize,force_full:bool,
+)->rusqlite::Result<(Vec<Match>,bool)>{
+    search_inner_mode(db,title,year,series,required_season,release_title,
+        has_episode,limit,force_full,false)
+}
+
+/// Strict retrieval is a separate exact-only path within the same ranker.
+/// It does not enumerate a single prefix, suffix or inside-term candidate,
+/// and it never retries the broad discovery when a gate rejects the result.
+fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,required_season:i64,
+    release_title:&str,_has_episode:bool,limit:usize,force_full:bool,strict:bool,
 )->rusqlite::Result<(Vec<Match>,bool)>{
     // The parser has already inherited season/episode/year across the
     // hierarchy. Only the lexical candidate discovery should operate on
@@ -578,7 +590,9 @@ fn search_inner(db:&Connection,title:&str,year:Option<i32>,series:bool,required_
     let mut rows=Vec::new();
     let mut ordinary_title_matches=HashSet::new();
     let mut country_title_matches=HashSet::new();
-    let country_qualified=crate::country_aliases::qualified(release_title);
+    let country_qualified=if strict {None} else{
+        crate::country_aliases::qualified(release_title)
+    };
     let country=country_qualified.as_ref().map(|(code,_)|*code);
     let semantic_release=semantic_words(title);
     let semantic_full_release=semantic_words(release_title);
@@ -600,15 +614,22 @@ fn search_inner(db:&Connection,title:&str,year:Option<i32>,series:bool,required_
         }
     }
     let mut discovered=exact(db,&key)?;
+    if strict {
+        // Compact ASCII keys may collide for Unicode titles (Bleach vs
+        // BLEACH 千年血戦篇). Require the entire imported IMDb alias to match
+        // the entire parsed title in Unicode-aware normalized words.
+        discovered.retain(|row|row.clean==key
+            &&semantic_words(&row.title)==semantic_release);
+    }
     // Presence in the index is NOT enough: the source's complete significant
     // words must equal the parsed title, and at least one exact alias must
     // have the same Unicode-preserving words (ASCII keys may collide).
     // This protects longer names such as Monster / The Ed Gein Story and
     // BLEACH with a Japanese subtitle from premature early exits.
-    let exact_only=!force_full && key.len()>=6 && country_qualified.is_none()
+    let exact_only=strict || (!force_full && key.len()>=6 && country_qualified.is_none()
         && !semantic_content.is_empty() && semantic_release==semantic_content
         && discovered.iter().any(|row|
-            row.clean==key && semantic_words(&row.title)==semantic_content);
+            row.clean==key && semantic_words(&row.title)==semantic_content));
     if !exact_only && key.len()>=4{
         discovered.extend(tantivy_aliases(db,&key,false)?);
         if key.len()>=8{
@@ -620,8 +641,10 @@ fn search_inner(db:&Connection,title:&str,year:Option<i32>,series:bool,required_
     // Lexical discovery from a parser title is less trustworthy than the
     // original release, so keep the historical word-boundary and containment
     // checks. Only the raw-release validation below can admit longer names.
-    discovered.retain(|row|release.contains(&row.clean)
-        && title_fit(&key,&words,&release_words,row,&semantic_release,None).is_some());
+    if !strict {
+        discovered.retain(|row|release.contains(&row.clean)
+            &&title_fit(&key,&words,&release_words,row,&semantic_release,None).is_some());
+    }
     for row in discovered{
         ordinary_title_matches.insert((row.imdb_id.clone(),row.title.clone()));
         rows.push(row);
@@ -700,15 +723,31 @@ fn search_inner(db:&Connection,title:&str,year:Option<i32>,series:bool,required_
     // An exact title can exist but be ineligible for the requested media
     // type/season. Avoid letting another alias with the same ASCII key
     // masquerade as a verified complete title; resume full discovery.
-    if exact_only && !eligible_rows.iter().any(|row|
+    if !strict && exact_only && !eligible_rows.iter().any(|row|
         row.clean==key && semantic_words(&row.title)==semantic_content){
-        return search_inner(db,title,year,series,required_season,
-            release_title,_has_episode,limit,true);
+        return search_inner_mode(db,title,year,series,required_season,
+            release_title,_has_episode,limit,true,false);
     }
     let mut rows=eligible_rows;
+    let mut strict_anime_ids=HashSet::new();
+    if strict && rows.is_empty() && series && key.len()>=4 {
+        // An exact imported AniDB title may map to a different English IMDb
+        // primary title. Retain that genuinely exact alias relationship,
+        // never a partial anime title or unverified related IMDb identity.
+        let ids=crate::tantivy_search::anime_aliases_exact(db,title)
+            .map_err(index_error)?.into_iter()
+            .map(|row|row.imdb_id).collect::<std::collections::BTreeSet<_>>();
+        if !ids.is_empty(){
+            let aliases=crate::tantivy_search::titles_by_ids(
+                db,&ids.iter().cloned().collect::<Vec<_>>()).map_err(index_error)?;
+            rows=filter_eligible(db,aliases.into_iter().map(Aka::from).collect(),
+                series,year,required_season)?;
+            strict_anime_ids=ids.into_iter().collect();
+        }
+    }
     // The AniDB-only title lookup remains a separate *fallback* when none
     // of the IMDb title search paths found any eligible identity.
-    if rows.is_empty()&&series&&key.len()>=4{
+    if !strict && rows.is_empty()&&series&&key.len()>=4{
         // IMDb's English primary title need not appear in the release at
         // all: e.g. Shinigami Bocchan to Kuro Maid is indexed under its
         // English title. The exact/longest AniDB alias provides identity;
@@ -763,6 +802,16 @@ fn search_inner(db:&Connection,title:&str,year:Option<i32>,series:bool,required_
     let semantic_content_length=semantic_content.iter()
         .map(|word|word.chars().count()).sum::<usize>();
     for row in rows{
+        if strict {
+            let exact_imdb=row.clean==key
+                &&semantic_words(&row.title)==semantic_release;
+            if !exact_imdb && !strict_anime_ids.contains(&row.imdb_id){
+                continue;
+            }
+            groups.entry(row.imdb_id.clone()).or_default()
+                .push((row,TitleFit::exact()));
+            continue;
+        }
         // Reuse the Unicode tokenization for the candidate's title-fit
         // evidence and exact-source comparison in this scoring pass.
         let alias_semantic=semantic_words(&row.title);
@@ -818,7 +867,7 @@ fn search_inner(db:&Connection,title:&str,year:Option<i32>,series:bool,required_
     let exact_ids=groups.iter().filter_map(|(id,aliases)|
         aliases.iter().any(|(_,fit)|fit.tier==0).then_some(id.clone()))
         .collect::<Vec<_>>();
-    if exact_ids.len()>1 {
+    if !strict && exact_ids.len()>1 {
         let mut full_titles=BTreeMap::<String,Vec<Vec<String>>>::new();
         for id in &exact_ids {
             let forms=groups.get(id).unwrap().iter()
