@@ -26,6 +26,7 @@ mod learning_rule_log;
 mod local_learning;
 mod online_model;
 mod candidate_discovery;
+mod title_learning;
 mod learning_cache;
 mod ml_config;
 mod learned_regex;
@@ -1971,6 +1972,7 @@ async fn ml_status()->Json<Value>{
         object.insert("training_queue".into(),local_learning::queue_status());
         object.insert("online_model".into(),online_model::OnlineModel::status());
         object.insert("unknown_markers".into(),candidate_discovery::status());
+        object.insert("title_boundaries".into(),title_learning::status());
         object.insert("regex_rules".into(),learning_rule_log::status());
         object.insert("corrective_regex".into(),corrective_learning::status());
         object.insert("general_regex".into(),general_learning::status());
