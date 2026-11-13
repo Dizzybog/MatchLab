@@ -81,6 +81,8 @@ A **SID** is an IMDb title ID, optionally followed by season and episode. An **A
 
 The dashboard displays verified IMDb IDs as links to their IMDb title pages, and AniDB IDs (including multiple anime segments) as individual links to AniDB. Links open in a new tab; API identifiers remain unchanged.
 
+The dashboard retains **the latest 500 detailed entries per status** (matched, unmatched and errors); **Requests** displays the 500 most recent entries overall. This keeps rare errors visible even during high match throughput. Each history filter supports paging through its 500-entry window; independent 14-day counters remain complete. ML training observations use a separate queue and are not deleted by dashboard retention.
+
 Logging: `ERROR` remains at error level. MatchLab's formerly `WARN`-level nonfatal diagnostics (metadata row skips, optional learning/cache/history failures and similar events) are emitted at `DEBUG`. Set `RUST_LOG=matchlab_server=debug` to inspect them; the default `info` level does not print them.
 
 The public `/match` and `/debug/match` endpoints have identical strict matching requirements. The dashboard's diagnostic endpoint is intentionally more permissive.

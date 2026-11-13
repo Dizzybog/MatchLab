@@ -10,11 +10,12 @@ use std::{
     time::Duration,
 };
 
-const MAX_HISTORY: i64 = 1_000;
+const MAX_HISTORY_PER_FILTER: i64 = 500;
+const REQUEST_STATUSES:[&str;3]=["matched","unmatched","error"];
 const PRUNE_BATCH: i64 = 1_000;
 const HISTORY_BATCH_SIZE:usize = 64;
-// Dedicated, bounded SQLite job spool (separate from the 1,000-row dashboard
-// retention window). Producers never synchronously touch this DB from API.
+// Dedicated SQLite ML job spool (independent of the 500-row-per-filter
+// dashboard retention). Producers never synchronously touch this DB from API.
 static ML_QUEUE_EVICTED:AtomicUsize=AtomicUsize::new(0);
 pub fn ml_queue_evicted()->usize{ML_QUEUE_EVICTED.load(Ordering::Relaxed)}
 pub fn history_telemetry_dropped()->usize{HISTORY_DROPPED.load(Ordering::Relaxed)}
@@ -115,7 +116,8 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         INSERT OR IGNORE INTO ml_queue_metrics(only_row,total,payload_bytes)
         SELECT 1,COUNT(*),COALESCE(SUM(
             length(CAST(title AS BLOB))+length(CAST(details AS BLOB))+256
-        ),0) FROM ml_training_queue;
+        ),0) FROM ml_training_queue
+        WHERE NOT EXISTS (SELECT 1 FROM ml_queue_metrics WHERE only_row=1);
         CREATE TRIGGER IF NOT EXISTS ml_queue_insert_count
         AFTER INSERT ON ml_training_queue BEGIN
             UPDATE ml_queue_metrics SET total=total+1,
@@ -175,21 +177,40 @@ pub fn initialize(path: &Path) -> Result<(), String> {
                 duration_sum_ms=duration_sum_ms+NEW.duration_ms;
         END;
 
-        -- Older versions executed a 1,000-row offset lookup and DELETE on
-        -- EVERY insert. The single background writer now trims once per
-        -- transaction of at most 64 requests, keeping writes bounded.
+        -- Prior versions trimmed overall history per write batch. The new
+        -- bounded writer trims only statuses present in that batch, retaining
+        -- 500 entries per status without losing rare errors or unmatched titles.
         DROP TRIGGER IF EXISTS request_history_cap;
 
-        -- The history view uses recent IDs; status filtering only scans 1,000.
+        -- Composite index supports bounded per-status history, retention,
+        -- and infrequent errors without a full scan of all request statuses.
         DROP INDEX IF EXISTS requests_status;
         DROP INDEX IF EXISTS requests_created_at;
+        CREATE INDEX IF NOT EXISTS requests_status_id_desc ON requests(status,id DESC);
         COMMIT;
     "#).map_err(|e| e.to_string())
 }
 
+/// Retain up to 500 of EACH status. Requests (unfiltered) displays the newest
+/// 500 across the three, while rare errors remain available even after many
+/// successful requests. Every lookup is served by (status,id) rather than a
+/// global last-N scan. Only statuses present in this writer batch are trimmed.
+fn trim_request_statuses(
+    tx:&rusqlite::Transaction<'_>,statuses:impl IntoIterator<Item=&'static str>
+)->rusqlite::Result<usize>{
+    let mut removed=0usize;
+    for status in statuses {
+        removed+=tx.execute("DELETE FROM requests WHERE status=?1 AND id < (
+            SELECT id FROM requests WHERE status=?1
+            ORDER BY id DESC LIMIT 1 OFFSET ?2
+        )",params![status,MAX_HISTORY_PER_FILTER-1])?;
+    }
+    Ok(removed)
+}
+
 /// Persist one bounded history batch in a single SQLite transaction. The
 /// minute-level statistics trigger runs for every row; raw-detail retention
-/// runs just once per batch instead of scanning the last 1,000 IDs per row.
+/// runs once per active status in the batch rather than once per request.
 fn persist_batch(db:&mut Connection,items:&[HistoryEvent])->rusqlite::Result<()>{
     persist_batch_with_learning(db,items,crate::local_learning::active())
 }
@@ -239,11 +260,12 @@ fn persist_batch_with_learning(db:&mut Connection,items:&[HistoryEvent],
             }
         }
     }
-    // Exact cap even when rows have gaps. The transaction commits both the
-    // request aggregates and retention trim, so readers see consistent data.
-    tx.execute("DELETE FROM requests WHERE id < (
-        SELECT id FROM requests ORDER BY id DESC LIMIT 1 OFFSET ?1
-    )",[MAX_HISTORY-1])?;
+    // Keep all three status logs independent; no global cap that causes
+    // rare errors/unmatched releases to disappear under high match volume.
+    // Retain exact caps even when IDs have gaps; never touch the ML job queue.
+    trim_request_statuses(&tx,REQUEST_STATUSES.into_iter().filter(|status|
+        items.iter().any(|item|item.status==*status)
+    ))?;
     // Counter tracks actual rows and estimated payload bytes across dedup.
     // Trim at most 4,096 oldest rows per batch; never scan a huge OFFSET.
     let evicted=if train{trim_ml_queue(&tx,ml_queue_max_items())?}else{0};
@@ -367,26 +389,25 @@ pub fn record_async(
     }
 }
 
-/// Trim raw details to 1,000 most recent requests and minute statistics to
-/// 14 days. Small delete transactions avoid holding a long write lock while
-/// removing a legacy history file with hundreds of thousands of rows.
+/// Trim raw details to 500 per status and minute statistics to 14 days.
+/// Bounded delete batches keep migrations from enormous legacy history files
+/// from holding SQLite write locks for too long.
 pub fn prune(path: &Path) -> Result<usize, String> {
     let db = connect(path).map_err(|e| e.to_string())?;
     let mut removed = 0usize;
-    loop {
-        let deleted = db.execute(
-            "DELETE FROM requests WHERE id IN (
-                SELECT id FROM requests
-                WHERE id < (
-                    SELECT id FROM requests ORDER BY id DESC LIMIT 1 OFFSET 999
-                )
-                ORDER BY id ASC LIMIT ?1
-             )",
-            params![PRUNE_BATCH],
-        ).map_err(|e| e.to_string())?;
-        removed += deleted;
-        if (deleted as i64) < PRUNE_BATCH {
-            break;
+    for status in REQUEST_STATUSES {
+        loop {
+            let deleted = db.execute(
+                "DELETE FROM requests WHERE id IN (
+                    SELECT id FROM requests WHERE status=?1 AND id < (
+                        SELECT id FROM requests WHERE status=?1
+                        ORDER BY id DESC LIMIT 1 OFFSET ?2
+                    ) ORDER BY id ASC LIMIT ?3
+                )",
+                params![status, MAX_HISTORY_PER_FILTER - 1, PRUNE_BATCH],
+            ).map_err(|e| e.to_string())?;
+            removed += deleted;
+            if (deleted as i64) < PRUNE_BATCH { break; }
         }
     }
     db.execute(
@@ -403,15 +424,21 @@ pub fn history(path: &Path, limit: usize, offset: usize, status: Option<&str>)
         return Err("invalid history status filter".into());
     }
     let db = connect(path).map_err(|e| e.to_string())?;
-    let mut stmt = db.prepare(
+    // Use two fixed, index-friendly statements. OR (?1 IS NULL ...) would
+    // force SQLite to consider a table scan even for rare error statuses.
+    let statement=if status.is_some(){
         "SELECT id,created_at,title,status,imdb_id,match_source,duration_ms,details
-         FROM requests
-         WHERE id IN (SELECT id FROM requests ORDER BY id DESC LIMIT 1000)
-           AND (?1 IS NULL OR status=?1)
+         FROM requests WHERE status=?1
          ORDER BY id DESC LIMIT ?2 OFFSET ?3"
-    ).map_err(|e| e.to_string())?;
-    let limit = limit.min(100);
-    let offset = offset.min(MAX_HISTORY as usize);
+    }else{
+        "SELECT id,created_at,title,status,imdb_id,match_source,duration_ms,details
+         FROM requests ORDER BY id DESC LIMIT ?2 OFFSET ?3"
+    };
+    let mut stmt=db.prepare(statement).map_err(|e|e.to_string())?;
+    let offset = offset.min(MAX_HISTORY_PER_FILTER as usize);
+    // The DB may still contain excess rows until background pruning runs.
+    // Never expose more than the per-filter cap even during that migration.
+    let limit = limit.min(100).min((MAX_HISTORY_PER_FILTER as usize).saturating_sub(offset));
     let rows = stmt.query_map(params![status,limit as i64,offset as i64], |r| {
         let details: String = r.get(7)?;
         Ok(json!({
@@ -425,7 +452,7 @@ pub fn history(path: &Path, limit: usize, offset: usize, status: Option<&str>)
     }).map_err(|e| e.to_string())?;
     let items = rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| e.to_string())?;
-    Ok(json!({"items":items,"limit":limit,"offset":offset,"max_records":MAX_HISTORY}))
+    Ok(json!({"items":items,"limit":limit,"offset":offset,"max_records":MAX_HISTORY_PER_FILTER}))
 }
 
 pub fn stats(path: &Path) -> Result<Value, String> {
@@ -557,7 +584,7 @@ mod tests {
             |r|r.get(0)).unwrap();
         let jobs:i64=db.query_row("SELECT COUNT(*) FROM ml_training_queue",[],
             |r|r.get(0)).unwrap();
-        assert_eq!(raw,1000,"dashboard must retain only most recent requests");
+        assert_eq!(raw,500,"dashboard must retain only most recent matched requests");
         assert_eq!(jobs,1200,"training backlog must survive dashboard cap");
         drop(db);
         initialize(&path).unwrap(); // restart/migration is idempotent
@@ -691,7 +718,7 @@ mod tests {
         }
         let raw:i64=db.query_row("SELECT COUNT(*) FROM requests",[],
             |r|r.get(0)).unwrap();
-        assert_eq!(raw,MAX_HISTORY);
+        assert_eq!(raw,MAX_HISTORY_PER_FILTER);
         let total=stats(&path).unwrap();
         assert_eq!(total["total"],1200);
         assert_eq!(total["matched"],1200);
@@ -737,11 +764,11 @@ mod tests {
         let db = connect(&path).unwrap();
         assert_eq!(db.query_row("SELECT COUNT(*) FROM requests",[],|r|r.get::<_,i64>(0)).unwrap(),1015);
         drop(db);
-        assert_eq!(prune(&path).unwrap(),15);
-        assert_eq!(history(&path,100,999,None).unwrap()["items"].as_array().unwrap().len(),1);
-        assert_eq!(history(&path,100,1000,None).unwrap()["items"].as_array().unwrap().len(),0);
+        assert_eq!(prune(&path).unwrap(),515);
+        assert_eq!(history(&path,100,499,None).unwrap()["items"].as_array().unwrap().len(),1);
+        assert_eq!(history(&path,100,500,None).unwrap()["items"].as_array().unwrap().len(),0);
         let db = connect(&path).unwrap();
-        assert_eq!(db.query_row("SELECT COUNT(*) FROM requests",[],|r|r.get::<_,i64>(0)).unwrap(),1000);
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM requests",[],|r|r.get::<_,i64>(0)).unwrap(),500);
         drop(db);
         let s = stats(&path).unwrap();
         assert_eq!(s["total"],1015);
@@ -777,6 +804,108 @@ mod tests {
         assert_eq!(s["total"],1);
         assert_eq!(s["matched"],1);
         assert_eq!(s["unmatched"],0);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn per_status_history_retains_500_each_even_when_errors_are_rare() {
+        let path=path();
+        initialize(&path).unwrap();
+        let mut db=connect(&path).unwrap();
+        let mut events=Vec::new();
+        for i in 0..(MAX_HISTORY_PER_FILTER as usize+70) {
+            for status in REQUEST_STATUSES {
+                events.push(HistoryEvent{
+                    path:path.clone(),title:format!("{status} {i}"),
+                    status:status.into(),selected:None,details:json!({}),
+                    duration_ms:10,
+                });
+            }
+        }
+        for batch in events.chunks(HISTORY_BATCH_SIZE) {
+            persist_batch_with_learning(&mut db,batch,false).unwrap();
+        }
+        for status in REQUEST_STATUSES {
+            let count:i64=db.query_row(
+                "SELECT COUNT(*) FROM requests WHERE status=?1",[status],
+                |row|row.get(0)).unwrap();
+            assert_eq!(count,MAX_HISTORY_PER_FILTER,"{status}");
+            let first=history(&path,25,0,Some(status)).unwrap();
+            assert_eq!(first["items"][0]["title"],json!(format!("{status} 569")));
+            assert_eq!(first["max_records"],MAX_HISTORY_PER_FILTER);
+            assert_eq!(history(&path,100,499,Some(status)).unwrap()["items"]
+                .as_array().unwrap().len(),1);
+            assert!(history(&path,100,500,Some(status)).unwrap()["items"]
+                .as_array().unwrap().is_empty());
+        }
+        let all=history(&path,100,0,None).unwrap();
+        assert_eq!(all["max_records"],MAX_HISTORY_PER_FILTER);
+        assert_eq!(history(&path,100,450,None).unwrap()["items"]
+            .as_array().unwrap().len(),50);
+        assert!(history(&path,100,500,None).unwrap()["items"]
+            .as_array().unwrap().is_empty());
+        let total:i64=db.query_row("SELECT COUNT(*) FROM requests",[],|row|row.get(0)).unwrap();
+        assert_eq!(total,1_500);
+        let stats=stats(&path).unwrap();
+        assert_eq!(stats["total"],(events.len() as i64));
+        assert_eq!(stats["errors"],(MAX_HISTORY_PER_FILTER+70));
+        drop(db);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn rare_error_remains_visible_after_many_successful_requests(){
+        let path=path();
+        initialize(&path).unwrap();
+        let mut db=connect(&path).unwrap();
+        persist_batch_with_learning(&mut db,&[HistoryEvent{
+            path:path.clone(),title:"important error".into(),status:"error".into(),
+            selected:None,details:json!({"error":"diagnostic"}),
+            duration_ms:2,
+        }],false).unwrap();
+        for i in 0..10 {
+            let items=(0..64).map(|j|HistoryEvent{
+                path:path.clone(),title:format!("matched {}",i*64+j),
+                status:"matched".into(),selected:None,details:json!({}),
+                duration_ms:1,
+            }).collect::<Vec<_>>();
+            persist_batch_with_learning(&mut db,&items,false).unwrap();
+        }
+        assert_eq!(history(&path,25,0,Some("error")).unwrap()["items"][0]["title"],
+            "important error");
+        assert_eq!(history(&path,25,0,None).unwrap()["items"][0]["status"],
+            "matched");
+        assert_eq!(stats(&path).unwrap()["errors"],1);
+        drop(db);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn background_prune_migrates_old_unbounded_status_logs(){
+        let path=path();
+        initialize(&path).unwrap();
+        let db=connect(&path).unwrap();
+        for status in REQUEST_STATUSES {
+            for i in 0..520 {
+                db.execute(
+                    "INSERT INTO requests(title,status,duration_ms,details)
+                     VALUES(?1,?2,1,'{}')",
+                    params![format!("legacy {status} {i}"),status],
+                ).unwrap();
+            }
+        }
+        drop(db);
+        assert_eq!(history(&path,100,499,Some("error")).unwrap()["items"]
+            .as_array().unwrap().len(),1);
+        assert_eq!(prune(&path).unwrap(),60);
+        let db=connect(&path).unwrap();
+        for status in REQUEST_STATUSES {
+            let count:i64=db.query_row("SELECT COUNT(*) FROM requests WHERE status=?1",
+                [status],|row|row.get(0)).unwrap();
+            assert_eq!(count,500);
+        }
+        assert_eq!(stats(&path).unwrap()["total"],1560);
+        drop(db);
         cleanup(&path);
     }
 
