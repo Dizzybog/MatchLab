@@ -43,7 +43,7 @@ fn history_filters_show_independent_five_hundred_row_windows(){
     assert!(DASHBOARD.contains("offset+current.length>=Math.min(500,Number(data.max_records)||500)"));
     assert!(DASHBOARD.contains("if(requestId!==historyRequestId)return;"));
     for status in ["all","matched","unmatched","error"]{
-        assert!(DASHBOARD.contains(&format!("data-filter=\\\"{status}\\\"")));
+        assert!(DASHBOARD.contains(&format!(r#"data-filter="{status}""#)));
     }
 }
 
