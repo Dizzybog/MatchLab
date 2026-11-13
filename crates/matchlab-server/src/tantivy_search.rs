@@ -990,6 +990,23 @@ pub fn title_aliases_inside(db:&Connection,key:&str)->Result<Vec<TitleAlias>,Str
     }else{title_aliases_inside_uncached(db,key)}
 }
 
+/// Strict matching never enumerates anime prefixes/suffixes. Reuse the
+/// existing exact-title Tantivy TermSetQuery, which checks the IMDb and AniDB
+/// index fields in one lookup. The prefix-oriented anime cache is not touched.
+pub fn anime_aliases_exact(db:&Connection,raw_title:&str)->Result<Vec<AnimeAlias>,String>{
+    let key=crate::title_normalization::clean_title(raw_title);
+    if key.len()<4{return Ok(Vec::new());}
+    Ok(lookup_aliases(db,AliasLookupKind::ExactTitle,&key)?
+        .into_iter()
+        .filter(|alias|alias.source=="anidb" &&alias.normalized==key)
+        .filter_map(|alias|Some(AnimeAlias{
+            anidb_id:alias.anidb_id?,
+            imdb_id:alias.imdb_id?,
+            clean_title:alias.normalized
+        }))
+        .collect())
+}
+
 /// Cache the indexed candidates independent of the source title's word
 /// boundaries. Different raw titles can normalize to the same key but have
 /// different legal suffixes (e.g. "Beyond Dune" vs "BeyondDune").
