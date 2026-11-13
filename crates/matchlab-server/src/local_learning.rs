@@ -206,6 +206,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
     let mut general_evidence=crate::general_learning::count(&tx)?;
     let mut discovery=crate::candidate_discovery::budget(&tx)?;
     let mut title_evidence=crate::title_learning::budget(&tx)?;
+    let mut new_title_observations=0usize;
     let mut samples=count(&tx,"samples")?;
     let mut patterns=count(&tx,"patterns")?;
     let now=chrono::Utc::now().timestamp();
@@ -233,6 +234,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
             &tx,&title,&base,&details["selected"],&mut title_evidence)?;
         if let Some(signal)=title_signal{
             flags.push(crate::title_learning::review_flag(signal));
+            new_title_observations+=1;
         }
         let clean=crate::field_audit::canonical_for_training(&base,&flags);
         // Unlike the advisory ranker, corrective evidence must compare
@@ -307,7 +309,9 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
         Ordering::Relaxed);
     model.publish_status();
     crate::candidate_discovery::publish(local)?;
-    crate::title_learning::publish(local)?;
+    if new_title_observations>0{
+        crate::title_learning::publish(local)?;
+    }
     if let Some(ref metadata)=meta{
         crate::learned_regex::reconcile(local,metadata)?;
     }
