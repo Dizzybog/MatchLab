@@ -590,9 +590,9 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     let mut rows=Vec::new();
     let mut ordinary_title_matches=HashSet::new();
     let mut country_title_matches=HashSet::new();
-    let country_qualified=if strict {None} else{
-        crate::country_aliases::qualified(release_title)
-    };
+    // An explicit country qualifier is a complete-title equivalence, not a
+    // partial match. It is valid in strict mode as well.
+    let country_qualified=crate::country_aliases::qualified(release_title);
     let country=country_qualified.as_ref().map(|(code,_)|*code);
     let semantic_release=semantic_words(title);
     let semantic_full_release=semantic_words(release_title);
@@ -722,6 +722,10 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     // Apply media-type and season eligibility once, after lexical discovery
     // has exhausted EVERY path. A more specific suffix can no longer be
     // starved by a shorter prefix/alias.
+    // Non-strict must never select an IMDb title alias shorter than the
+    // parser-selected title. Apply before eligibility and ranking, so the
+    // next eligible candidate can still win instead of rejecting afterwards.
+    if !strict {rows.retain(|row|row.clean.len()>=key.len());}
     let eligible_rows=filter_eligible(db,rows,series,year,required_season)?;
     // An exact title can exist but be ineligible for the requested media
     // type/season. Avoid letting another alias with the same ASCII key
@@ -733,19 +737,22 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     }
     let mut rows=eligible_rows;
     let mut strict_anime_ids=HashSet::new();
-    if strict && rows.is_empty() && series {
-        // An exact imported AniDB title may map to a different English IMDb
-        // primary title. Retain that genuinely exact alias relationship,
-        // never a partial anime title or unverified related IMDb identity.
+    if strict && series {
+        // Exact IMDb and AniDB titles compete in the SAME shortlist. AniDB
+        // part/season aliases can map to a different canonical IMDb title,
+        // even when an unrelated work has the exact IMDb name.
+        // Only exact, Unicode-verified AniDB aliases are admitted.
         let ids=crate::tantivy_search::anime_aliases_exact(db,title)
             .map_err(index_error)?.into_iter()
             .map(|row|row.imdb_id).collect::<std::collections::BTreeSet<_>>();
         if !ids.is_empty(){
             let aliases=crate::tantivy_search::titles_by_ids(
                 db,&ids.iter().cloned().collect::<Vec<_>>()).map_err(index_error)?;
-            rows=filter_eligible(db,aliases.into_iter().map(Aka::from).collect(),
+            let anime_rows=filter_eligible(db,
+                aliases.into_iter().map(Aka::from).collect(),
                 series,year,required_season)?;
-            strict_anime_ids=ids.into_iter().collect();
+            strict_anime_ids.extend(anime_rows.iter().map(|row|row.imdb_id.clone()));
+            rows.extend(anime_rows);
         }
     }
     // The AniDB-only title lookup remains a separate *fallback* when none
@@ -794,6 +801,9 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
             }
         }
     }
+    // Apply the same non-strict title-length guard to IDs recovered through
+    // AniDB fallback, including translated IMDb titles.
+    if !strict {rows.retain(|row|row.clean.len()>=key.len());}
     if rows.is_empty(){return Ok((vec![],false));}
     // Keep all plausible identities until ranked. Unrelated word fragments
     // are rejected before season eligibility and expensive ID lookups.
@@ -808,11 +818,21 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
         if strict {
             let exact_imdb=row.clean==key
                 &&semantic_words(&row.title)==semantic_release;
-            if !exact_imdb && !strict_anime_ids.contains(&row.imdb_id){
-                continue;
-            }
-            groups.entry(row.imdb_id.clone()).or_default()
-                .push((row,TitleFit::exact()));
+            let alias_key=(row.imdb_id.clone(),row.title.clone());
+            let exact_country=country_title_matches.contains(&alias_key);
+            let exact_anime=strict_anime_ids.contains(&row.imdb_id);
+            if !exact_imdb && !exact_country && !exact_anime {continue;}
+            // Prefer a unique exact AniDB identity: a named cour/season may
+            // point to the correct parent IMDb series instead of a same-name
+            // OVA. If the AniDB alias resolves to several eligible IMDb IDs,
+            // do not grant any one of them an arbitrary priority.
+            // Country-equivalent exact aliases outrank an unqualified IMDb
+            // title but never replace a verified unique anime identity.
+            let preference=if exact_anime && strict_anime_ids.len()==1 {2}
+                else if exact_country {1}else{0};
+            let fit=TitleFit{tier:0,longest_first:-preference,
+                unmatched_bp:0,edge:0};
+            groups.entry(row.imdb_id.clone()).or_default().push((row,fit));
             continue;
         }
         // Reuse the Unicode tokenization for the candidate's title-fit
