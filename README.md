@@ -85,12 +85,17 @@ Logging: `ERROR` remains at error level. MatchLab's formerly `WARN`-level nonfat
 
 The public `/match` and `/debug/match` endpoints have identical strict matching requirements. The dashboard's diagnostic endpoint is intentionally more permissive.
 
-**Strict exact-title matching is enabled by default:** MatchLab accepts only
-complete normalized IMDb/AniDB title aliases, without prefix, suffix,
-partial-title or original-release fallback. Normal season/episode validation
-still applies. To **opt out** and restore the optimized two-stage search,
-set `MATCHLAB_STRICT_MODE: "false"` in Compose (or
-`MATCHLAB_STRICT_MODE=false` in the environment), then restart MatchLab.
+**Strict exact-title matching is enabled by default:** MatchLab compares
+complete IMDb and exact AniDB aliases in the same ranked candidate set.
+An unambiguous exact AniDB title can identify a named anime season/part even
+when a different IMDb work has an exact title match. Explicit country-qualified
+titles (such as `Lego Masters AU` / `Lego Masters Australia`) are treated as
+verified complete aliases, never as partial matches. Strict still excludes
+prefix/suffix, inside-title and original-release recovery. Normal
+season/episode checks apply. With `MATCHLAB_STRICT_MODE=false`, the existing
+broader searches remain available, but no IMDb alias shorter than the title
+chosen by the parser can be selected. To opt out of strict mode, change
+`MATCHLAB_STRICT_MODE` to `false` and restart MatchLab.
 With no setting, strict remains enabled. Parsing (`/parse`) is unchanged.
 See [strict mode behavior](docs/API.md#strict-exact-title-matching-default). If metadata is missing or conflicting, MatchLab avoids inventing a match. See [API documentation](docs/API.md) for request options, full responses and other endpoints.
 
