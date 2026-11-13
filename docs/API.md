@@ -88,6 +88,40 @@ unchanged. A date in a daily-show filename (YYYY-MM-DD) remains an
 episode airdate, **not a production year**; the separate Cinemeta
 airdate resolver retains its own ±1-calendar-day timezone tolerance.
 
+### Strict exact-title matching (optional)
+
+Set `MATCHLAB_STRICT_MODE: "true"` in the Docker Compose environment and
+restart MatchLab. Default: `false` (existing full candidate search).
+
+When enabled, the **entire public /match and debug/dashboard title-identity
+search** uses only *complete normalized title aliases*: an exact IMDb
+Tantivy term match or an exact imported AniDB alias connected to an IMDb
+work. A strict result may still carry verified season/episode and AniDB
+crosswalk coordinates. If a selected title fails the ordinary year, type,
+season or episode eligibility checks, **no** shorter or longer title is
+substituted. The strict mode bypasses forward/reversed prefixes, internal
+partial aliases, source-prefix and source-suffix recovery, country-expanded
+title aliases and nonexact anime lookups. A directory path may still supply
+its own **independently parsed complete title**; no partial title match is
+ever accepted.
+
+In particular, `The.Ed.Gein.Story.S01E01` will not be identified as a
+longer IMDb title when the parser extracted only `The Ed`. Exact normalized
+means that differences in case, spaces and punctuation are ignored; it
+**does not mean** substring containment. A non-Latin IMDb alias must also
+match the full Unicode-aware title words to avoid ASCII-key collisions.
+Exact AniDB aliases may correctly link to an IMDb title with a different
+English name; they are still exact matches against the AniDB index.
+
+Strict matching disables the optional final-result caches to avoid serving
+non-strict results cached before the flag was enabled; immutable exact
+Tantivy query caching and parser caching remain available. `/parse`
+still performs normal parsing. The four-field public response format,
+episode validation, and ML rule activation remain unchanged.
+`/debug/match/strict` is an *eligibility-policy* endpoint and is distinct
+from this optional **exact-title** search configuration. See the
+`MATCHLAB_STRICT_MODE` setting in `compose.yaml`.
+
 ### Chinese bilingual release paths and absolute episodes
 
 A release such as `【高清剧集网发布 …】少年白马醉春风2[第41集]…/少年白马醉春风.The.Young.Brewmasters.Adventure.S02E41.2024….mp4` contains both a Chinese **series-absolute episode number** and an explicit file `S02E41`. The parser retains the normal file coordinates (`seasons:[2], episodes:[41]`), the Latin alternative title and year, and adds `absolute_episode_candidate:41` to the structured parse result. This field is a **hint**, not a verified episode.
