@@ -69,7 +69,9 @@ pub fn resolve_range(
     }
     let mut results=vec![None;(end-start+1) as usize];
     let key=imdb_matcher::clean_title(title);
-    if key.len()<4{return Ok(results);}
+    if key.is_empty()||(!crate::strict_match_mode()&&key.len()<4){
+        return Ok(results);
+    }
     let mut title_aliases=aliases(db,imdb,title)?;
     if title_aliases.is_empty(){return Ok(results);}
     title_aliases.sort_by_key(|(id,alias)|(if alias==&key{0}else{1},
@@ -202,7 +204,9 @@ pub fn resolve(db:&Connection,imdb:&str,title:&str,season:i64,episode:i64)
 
 pub fn has_specific_alias(db:&Connection,imdb:&str,title:&str)->rusqlite::Result<bool>{
     let key=imdb_matcher::clean_title(title);
-    if key.len()<4{return Ok(false);}
+    if key.is_empty()||(!crate::strict_match_mode()&&key.len()<4){
+        return Ok(false);
+    }
     let mut aliases=aliases(db,imdb,title)?;
     if aliases.is_empty(){return Ok(false);}
     aliases.sort_by_key(|(id,alias)|(if alias==&key{0}else{1},-(alias.len() as i64),id.clone()));
@@ -264,7 +268,9 @@ pub fn resolve_episode_from_exact_part_title(
 /// one positive TVDB season. Never manufacture an episode or an ASID.
 pub fn season_from_title(db:&Connection,imdb:&str,title:&str)->rusqlite::Result<Option<i64>>{
     let key=imdb_matcher::clean_title(title);
-    if key.len()<4{return Ok(None);}
+    if key.is_empty()||(!crate::strict_match_mode()&&key.len()<4){
+        return Ok(None);
+    }
     let ids=aliases(db,imdb,title)?.into_iter().filter(|(_,alias)|alias==&key)
         .collect::<Vec<_>>();
     let unique:BTreeSet<_>=ids.into_iter().map(|(id,_)|id).collect();
@@ -281,7 +287,9 @@ pub fn season_from_title(db:&Connection,imdb:&str,title:&str)->rusqlite::Result<
 /// Recognize a title-only anime part only when an exact alias has a unique
 /// IMDb identity and a uniquely mapped positive season.
 pub fn season_from_any_exact_title(db:&Connection,key:&str)->rusqlite::Result<Option<i64>>{
-    if key.len()<4{return Ok(None);}
+    if key.is_empty()||(!crate::strict_match_mode()&&key.len()<4){
+        return Ok(None);
+    }
     let aliases=if crate::strict_match_mode(){
         crate::tantivy_search::anime_aliases_exact(db,key)
     }else{crate::tantivy_search::anime_aliases(db,key,4)};
