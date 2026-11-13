@@ -150,14 +150,6 @@ pub(crate) fn semantic_words(raw:&str)->Vec<String>{
         .filter(|word|!word.is_empty() && *word!="and")
         .map(str::to_owned).collect()
 }
-/// Guard on actual normalized title length, not the ASCII-only index key.
-/// Keep ordinary ASCII titles on the zero-tokenization fast path.
-fn imdb_title_not_shorter(title:&str,clean:&str,parsed_len:usize)->bool{
-    let length=if title.is_ascii(){clean.len()}else{
-        semantic_words(title).iter().map(|word|word.chars().count()).sum()
-    };
-    length>=parsed_len
-}
 /// Check whole-word containment in *both* directions; score the proportion
 /// of the longer title not covered by the shorter title.
 fn semantic_extension(short:&[String],long:&[String])->Option<TitleFit>{
@@ -730,13 +722,6 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     // Apply media-type and season eligibility once, after lexical discovery
     // has exhausted EVERY path. A more specific suffix can no longer be
     // starved by a shorter prefix/alias.
-    // Compare Unicode-preserving normalized title characters, NOT Tantivy's
-    // compact ASCII key (which can drop Japanese/Chinese characters).
-    // Reject shorter IMDb titles before costly eligibility and ranking.
-    let parsed_title_len=semantic_release.iter()
-        .map(|word|word.chars().count()).sum::<usize>();
-    if !strict {rows.retain(|row|
-        imdb_title_not_shorter(&row.title,&row.clean,parsed_title_len));}
     let eligible_rows=filter_eligible(db,rows,series,year,required_season)?;
     // An exact title can exist but be ineligible for the requested media
     // type/season. Avoid letting another alias with the same ASCII key
@@ -812,10 +797,6 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
             }
         }
     }
-    // Apply the same guard after AniDB fallback, including translated
-    // IMDb title aliases; this does not change the strict AniDB policy.
-    if !strict {rows.retain(|row|
-        imdb_title_not_shorter(&row.title,&row.clean,parsed_title_len));}
     if rows.is_empty(){return Ok((vec![],false));}
     // Keep all plausible identities until ranked. Unrelated word fragments
     // are rejected before season eligibility and expensive ID lookups.
@@ -1159,27 +1140,35 @@ mod tests{
     }
 
     #[test]
-    fn non_strict_never_selects_imdb_alias_shorter_than_parser_title(){
+    fn non_strict_accepts_complete_imdb_suffix_despite_longer_parsed_title(){
+        // "Dahmer" is extra content at the front, not a reason to reject
+        // an otherwise verified complete IMDb title at the release suffix.
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
                 year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
             CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
             CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
             CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
             INSERT INTO titles VALUES
-                ('ttforce','Force','force',2025,'series','US',1,0,'tvSeries');").unwrap();
-        let shorter=search_inner_mode(&db,"Star Force",None,true,0,
-            "Star.Force.S01E01",true,5,false,false).unwrap().0;
-        assert!(shorter.is_empty(),
-            "a word-aligned suffix is not enough when its IMDb title is shorter");
-        let exact=search_inner_mode(&db,"Force",None,true,0,
-            "Force.S01E01",true,5,false,false).unwrap().0;
-        assert_eq!(exact[0].imdb_id,"ttforce",
-            "equal-length exact IMDb aliases are still eligible");
+                ('tt1111111','Monster: The Jeffrey Dahmer Story',
+                    'monsterthejeffreydahmerstory',2022,'series','US',1,0,'tvSeries'),
+                ('tt2222222','Monster','monster',2004,'series','JP',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt1111111',1),('tt2222222',1);
+            INSERT INTO imdb_ratings VALUES('tt1111111',1),('tt2222222',1000000);")
+            .unwrap();
+        let title="Dahmer Monster the Jeffrey Dahmer story";
+        let release="Dahmer.Monster.The.Jeffrey.Dahmer.Story.S01E01";
+        let broad=search_inner_mode(&db,title,None,true,1,release,true,10,
+            false,false).unwrap().0;
+        assert_eq!(broad.first().map(|candidate|candidate.imdb_id.as_str()),
+            Some("tt1111111"),"complete IMDb suffix should survive: {broad:?}");
+        let strict=search_inner_mode(&db,title,None,true,1,release,true,10,
+            false,true).unwrap().0;
+        assert!(strict.is_empty(),"strict must still require a complete exact alias");
     }
 
-    /// Strict mode has no minimum title length and never performs the
-    /// normal prefix/suffix/inside or original-release recovery scans.
+
     #[test]
     fn strict_mode_retains_only_complete_exact_imdb_aliases(){
         let db=Connection::open_in_memory().unwrap();
@@ -1310,7 +1299,7 @@ mod tests{
     }
 
     #[test]
-    fn rejected_exact_only_candidate_never_selects_shorter_title_after_api_gate(){
+    fn rejected_exact_only_candidate_retries_full_search_after_api_gate(){
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
             year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
@@ -1326,17 +1315,18 @@ mod tests{
         assert!(exact_only);
         assert_eq!(quick.len(),1);
         assert_eq!(quick[0].imdb_id,"ttold");
-        // The production /match year gate can trigger a full fallback, but
-        // a shorter IMDb alias cannot replace the parsed title in non-strict.
+        // Mirrors the production /match year gate: rejected exact results
+        // must never prevent a shorter, word-boundary-safe newer candidate.
         let valid=search_validated(&db,"Star Force",Some(2025),false,0,
             "Star.Force.2025",false,20,|hits|{
                 hits.into_iter().filter(|hit|hit.year==2025).collect()
             }).unwrap();
         let full=search_inner(&db,"Star Force",Some(2025),false,0,
             "Star.Force.2025",false,20,true).unwrap().0;
-        assert!(full.iter().all(|hit|hit.imdb_id!="ttnew"),
-            "the shorter Force alias must be excluded even in full discovery");
-        assert!(valid.is_empty(),"the public year gate must not bypass title length");
+        assert_eq!(valid.iter().map(|hit|&hit.imdb_id).collect::<Vec<_>>(),
+            full.iter().filter(|hit|hit.year==2025)
+                .map(|hit|&hit.imdb_id).collect::<Vec<_>>());
+        assert_eq!(valid[0].imdb_id,"ttnew");
     }
 
     #[test]
@@ -2123,9 +2113,7 @@ mod tests{
                 ('tt2222222','Beta Gamma','betagamma',2021,'movie','US',1,0,'movie');
             INSERT INTO imdb_ratings VALUES('tt1111111',1),('tt2222222',90000);")
             .unwrap();
-        // The parser title is a valid complete-word prefix of both IMDb
-        // aliases; neither candidate is shorter than this parsed title.
-        let found=search(&db,"Alpha Beta",None,false,0,
+        let found=search(&db,"Alpha Beta Gamma",None,false,0,
             "Alpha.Beta.Gamma.2021.WEB-DL",false,10).unwrap();
         assert_eq!(found.len(),2);
         assert_eq!(found[0].imdb_id,"tt1111111",
@@ -2162,15 +2150,10 @@ mod tests{
                 ('tt1111111','Beyond Dune','beyonddune',2021,'movie','US',1,0,'movie'),
                 ('tt2222222','Mystery','mystery',2021,'movie','US',1,0,'movie');")
             .unwrap();
-        // The suffix IMDb alias is longer than the parser title and can
-        // still be discovered from the original release.
-        let found=search(&db,"Mystery",None,false,0,
+        let found=search(&db,"Mystery Beyond Dune",None,false,0,
             "Mystery.Beyond.Dune.2021.1080p",false,10).unwrap();
+        assert_eq!(found.len(),1);
         assert_eq!(found[0].imdb_id,"tt1111111");
-        // A parser title containing the whole source is longer than both
-        // IMDb aliases and can no longer select either one.
-        assert!(search(&db,"Mystery Beyond Dune",None,false,0,
-            "Mystery.Beyond.Dune.2021.1080p",false,10).unwrap().is_empty());
     }
     #[test]
     fn word_fragments_and_short_generic_titles_are_not_identity(){

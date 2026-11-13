@@ -93,9 +93,10 @@ titles (such as `Lego Masters AU` / `Lego Masters Australia`) are treated as
 verified complete aliases, never as partial matches. Strict still excludes
 prefix/suffix, inside-title and original-release recovery. Normal
 season/episode checks apply. With `MATCHLAB_STRICT_MODE=false`, the existing
-broader searches remain available, but no IMDb alias shorter than the title
-chosen by the parser can be selected. To opt out of strict mode, change
-`MATCHLAB_STRICT_MODE` to `false` and restart MatchLab.
+broader search (including eligible shorter, whole-word IMDb title aliases and
+original-release suffix recovery) is available without a title-length ban.
+To opt out of strict mode, change `MATCHLAB_STRICT_MODE` to `false` and
+restart MatchLab.
 With no setting, strict remains enabled. Parsing (`/parse`) is unchanged.
 See [strict mode behavior](docs/API.md#strict-exact-title-matching-default). If metadata is missing or conflicting, MatchLab avoids inventing a match. See [API documentation](docs/API.md) for request options, full responses and other endpoints.
 

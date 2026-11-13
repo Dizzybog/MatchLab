@@ -14,8 +14,8 @@ services:
       MATCHLAB_MAX_CONCURRENT_MATCHES: "40"
       # true (default): exact IMDb + exact AniDB and complete country aliases.
       # A unique exact AniDB identity wins; no prefix/suffix/partial fallback.
-      # false: existing broader discovery; IMDb aliases shorter than the
-      # parser title are rejected. Set false to opt out of strict.
+      # false: existing broad exact/prefix/suffix discovery and ranking.
+      # Shorter valid IMDb aliases are eligible. Set false to opt out of strict.
       MATCHLAB_STRICT_MODE: "${MATCHLAB_STRICT_MODE:-true}"
       # Total ML disk budget in GiB. 0=off, positive=on; one setting
       # automatically sizes training evidence, SQLite result cache and queue.
