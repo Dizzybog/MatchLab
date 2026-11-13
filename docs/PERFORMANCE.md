@@ -342,3 +342,43 @@ should compare confirmed title under-/overextraction on real requests and
 false positives from translated/anime aliases before approving a title
 handler change. Since this is an offline, bounded observation change, do not
 claim runtime accuracy improves until reviewed title corrections are merged.
+
+## Word-boundary indexed candidate retrieval and AniDB crosswalk grouping
+
+The IMDb matcher's full lexical fallback now uses a **word-edge-only**
+Tantivy `TermSetQuery` for internal parsed-title aliases. For a title of
+`W` normalized words and `C` normalized characters, the legacy lookup
+generated up to `2*(C-min_len)` exact terms (plus document decoding for
+matches that later fail word-boundary validation); the new branch constructs
+at most `2*(W-1)` unique terms. It preserves the original minimum coverage
+rule: `min_len=max(4,ceil(C/2),C-16)`. The matcher passes its **existing**
+normalized key and normalized words to avoid redundant Unicode folding.
+Compact prefix/suffix and source-title recovery queries are unchanged, as
+are the exact-first fast path and IMDb ranking rules. The legacy compact
+inside-title query remains available for parity/regression tests.
+
+AniDB/TVDB episode conversion now builds `SplitIndex.by_anidb` once
+per immutable SQLite mapping snapshot, grouping borrowed mapping records by
+AniDB ID while preserving each group's source order. The same structure
+holds existing split-cour partner evidence. Single episodes, multi-episode
+season and absolute ranges, and reverse AniDB conversions reuse the grouped
+rows instead of scanning every unrelated work's mapping per episode.
+No additional SQLite index or persistent in-memory cache is created.
+Ambiguous mappings, explicit episode pairs, precedence, and canonical
+SID/ASID behavior remain unchanged.
+
+**Validation:** compare the new path against the legacy `title_aliases_inside`
+output after the matcher's full-word filter, and compare indexed crosswalk
+group traversal/split-cour membership with the previous nested reference.
+Existing multi-episode, Bleach, split-cour and ambiguity regression tests
+are retained. Production-wide latency/CPU savings are not claimed without
+profiling on a representative, warmed IMDb/AniDB dataset. Candidate metrics
+for future profiling: exact vs full search fraction, terms per internal
+lookup, Tantivy document decodes, per-request SQLite metadata reads,
+absolute range length, CPU seconds/1,000 requests and p50/p95 latency.
+
+A shared one-searcher-per-request context may further reduce generation
+lookup and reader acquisition on the less common full-search path. That
+larger refactor is intentionally excluded to avoid bypassing the existing
+single-flight cross-request caches or changing index-generation semantics
+without a separate parity/benchmark suite.
