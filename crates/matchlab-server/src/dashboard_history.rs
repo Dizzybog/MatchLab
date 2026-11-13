@@ -435,8 +435,10 @@ pub fn history(path: &Path, limit: usize, offset: usize, status: Option<&str>)
          FROM requests ORDER BY id DESC LIMIT ?2 OFFSET ?3"
     };
     let mut stmt=db.prepare(statement).map_err(|e|e.to_string())?;
-    let limit = limit.min(100);
     let offset = offset.min(MAX_HISTORY_PER_FILTER as usize);
+    // The DB may still contain excess rows until background pruning runs.
+    // Never expose more than the per-filter cap even during that migration.
+    let limit = limit.min(100).min((MAX_HISTORY_PER_FILTER as usize).saturating_sub(offset));
     let rows = stmt.query_map(params![status,limit as i64,offset as i64], |r| {
         let details: String = r.get(7)?;
         Ok(json!({
@@ -582,7 +584,7 @@ mod tests {
             |r|r.get(0)).unwrap();
         let jobs:i64=db.query_row("SELECT COUNT(*) FROM ml_training_queue",[],
             |r|r.get(0)).unwrap();
-        assert_eq!(raw,1000,"dashboard must retain only most recent requests");
+        assert_eq!(raw,500,"dashboard must retain only most recent matched requests");
         assert_eq!(jobs,1200,"training backlog must survive dashboard cap");
         drop(db);
         initialize(&path).unwrap(); // restart/migration is idempotent
@@ -716,7 +718,7 @@ mod tests {
         }
         let raw:i64=db.query_row("SELECT COUNT(*) FROM requests",[],
             |r|r.get(0)).unwrap();
-        assert_eq!(raw,MAX_HISTORY);
+        assert_eq!(raw,MAX_HISTORY_PER_FILTER);
         let total=stats(&path).unwrap();
         assert_eq!(total["total"],1200);
         assert_eq!(total["matched"],1200);
@@ -762,11 +764,11 @@ mod tests {
         let db = connect(&path).unwrap();
         assert_eq!(db.query_row("SELECT COUNT(*) FROM requests",[],|r|r.get::<_,i64>(0)).unwrap(),1015);
         drop(db);
-        assert_eq!(prune(&path).unwrap(),15);
-        assert_eq!(history(&path,100,999,None).unwrap()["items"].as_array().unwrap().len(),1);
-        assert_eq!(history(&path,100,1000,None).unwrap()["items"].as_array().unwrap().len(),0);
+        assert_eq!(prune(&path).unwrap(),515);
+        assert_eq!(history(&path,100,499,None).unwrap()["items"].as_array().unwrap().len(),1);
+        assert_eq!(history(&path,100,500,None).unwrap()["items"].as_array().unwrap().len(),0);
         let db = connect(&path).unwrap();
-        assert_eq!(db.query_row("SELECT COUNT(*) FROM requests",[],|r|r.get::<_,i64>(0)).unwrap(),1000);
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM requests",[],|r|r.get::<_,i64>(0)).unwrap(),500);
         drop(db);
         let s = stats(&path).unwrap();
         assert_eq!(s["total"],1015);
@@ -802,6 +804,108 @@ mod tests {
         assert_eq!(s["total"],1);
         assert_eq!(s["matched"],1);
         assert_eq!(s["unmatched"],0);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn per_status_history_retains_500_each_even_when_errors_are_rare() {
+        let path=path();
+        initialize(&path).unwrap();
+        let mut db=connect(&path).unwrap();
+        let mut events=Vec::new();
+        for i in 0..(MAX_HISTORY_PER_FILTER as usize+70) {
+            for status in REQUEST_STATUSES {
+                events.push(HistoryEvent{
+                    path:path.clone(),title:format!("{status} {i}"),
+                    status:status.into(),selected:None,details:json!({}),
+                    duration_ms:10,
+                });
+            }
+        }
+        for batch in events.chunks(HISTORY_BATCH_SIZE) {
+            persist_batch_with_learning(&mut db,batch,false).unwrap();
+        }
+        for status in REQUEST_STATUSES {
+            let count:i64=db.query_row(
+                "SELECT COUNT(*) FROM requests WHERE status=?1",[status],
+                |row|row.get(0)).unwrap();
+            assert_eq!(count,MAX_HISTORY_PER_FILTER,"{status}");
+            let first=history(&path,25,0,Some(status)).unwrap();
+            assert_eq!(first["items"][0]["title"],json!(format!("{status} 569")));
+            assert_eq!(first["max_records"],MAX_HISTORY_PER_FILTER);
+            assert_eq!(history(&path,100,499,Some(status)).unwrap()["items"]
+                .as_array().unwrap().len(),1);
+            assert!(history(&path,100,500,Some(status)).unwrap()["items"]
+                .as_array().unwrap().is_empty());
+        }
+        let all=history(&path,100,0,None).unwrap();
+        assert_eq!(all["max_records"],MAX_HISTORY_PER_FILTER);
+        assert_eq!(history(&path,100,450,None).unwrap()["items"]
+            .as_array().unwrap().len(),50);
+        assert!(history(&path,100,500,None).unwrap()["items"]
+            .as_array().unwrap().is_empty());
+        let total:i64=db.query_row("SELECT COUNT(*) FROM requests",[],|row|row.get(0)).unwrap();
+        assert_eq!(total,1_500);
+        let stats=stats(&path).unwrap();
+        assert_eq!(stats["total"],(events.len() as i64));
+        assert_eq!(stats["errors"],(MAX_HISTORY_PER_FILTER+70));
+        drop(db);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn rare_error_remains_visible_after_many_successful_requests(){
+        let path=path();
+        initialize(&path).unwrap();
+        let mut db=connect(&path).unwrap();
+        persist_batch_with_learning(&mut db,&[HistoryEvent{
+            path:path.clone(),title:"important error".into(),status:"error".into(),
+            selected:None,details:json!({"error":"diagnostic"}),
+            duration_ms:2,
+        }],false).unwrap();
+        for i in 0..10 {
+            let items=(0..64).map(|j|HistoryEvent{
+                path:path.clone(),title:format!("matched {}",i*64+j),
+                status:"matched".into(),selected:None,details:json!({}),
+                duration_ms:1,
+            }).collect::<Vec<_>>();
+            persist_batch_with_learning(&mut db,&items,false).unwrap();
+        }
+        assert_eq!(history(&path,25,0,Some("error")).unwrap()["items"][0]["title"],
+            "important error");
+        assert_eq!(history(&path,25,0,None).unwrap()["items"][0]["status"],
+            "matched");
+        assert_eq!(stats(&path).unwrap()["errors"],1);
+        drop(db);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn background_prune_migrates_old_unbounded_status_logs(){
+        let path=path();
+        initialize(&path).unwrap();
+        let db=connect(&path).unwrap();
+        for status in REQUEST_STATUSES {
+            for i in 0..520 {
+                db.execute(
+                    "INSERT INTO requests(title,status,duration_ms,details)
+                     VALUES(?1,?2,1,'{}')",
+                    params![format!("legacy {status} {i}"),status],
+                ).unwrap();
+            }
+        }
+        drop(db);
+        assert_eq!(history(&path,100,499,Some("error")).unwrap()["items"]
+            .as_array().unwrap().len(),1);
+        assert_eq!(prune(&path).unwrap(),60);
+        let db=connect(&path).unwrap();
+        for status in REQUEST_STATUSES {
+            let count:i64=db.query_row("SELECT COUNT(*) FROM requests WHERE status=?1",
+                [status],|row|row.get(0)).unwrap();
+            assert_eq!(count,500);
+        }
+        assert_eq!(stats(&path).unwrap()["total"],1560);
+        drop(db);
         cleanup(&path);
     }
 
