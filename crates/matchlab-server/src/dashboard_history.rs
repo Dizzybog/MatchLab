@@ -10,11 +10,12 @@ use std::{
     time::Duration,
 };
 
-const MAX_HISTORY: i64 = 1_000;
+const MAX_HISTORY_PER_FILTER: i64 = 500;
+const REQUEST_STATUSES:[&str;3]=["matched","unmatched","error"];
 const PRUNE_BATCH: i64 = 1_000;
 const HISTORY_BATCH_SIZE:usize = 64;
-// Dedicated, bounded SQLite job spool (separate from the 1,000-row dashboard
-// retention window). Producers never synchronously touch this DB from API.
+// Dedicated SQLite ML job spool (independent of the 500-row-per-filter
+// dashboard retention). Producers never synchronously touch this DB from API.
 static ML_QUEUE_EVICTED:AtomicUsize=AtomicUsize::new(0);
 pub fn ml_queue_evicted()->usize{ML_QUEUE_EVICTED.load(Ordering::Relaxed)}
 pub fn history_telemetry_dropped()->usize{HISTORY_DROPPED.load(Ordering::Relaxed)}
@@ -115,7 +116,8 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         INSERT OR IGNORE INTO ml_queue_metrics(only_row,total,payload_bytes)
         SELECT 1,COUNT(*),COALESCE(SUM(
             length(CAST(title AS BLOB))+length(CAST(details AS BLOB))+256
-        ),0) FROM ml_training_queue;
+        ),0) FROM ml_training_queue
+        WHERE NOT EXISTS (SELECT 1 FROM ml_queue_metrics WHERE only_row=1);
         CREATE TRIGGER IF NOT EXISTS ml_queue_insert_count
         AFTER INSERT ON ml_training_queue BEGIN
             UPDATE ml_queue_metrics SET total=total+1,
@@ -175,21 +177,40 @@ pub fn initialize(path: &Path) -> Result<(), String> {
                 duration_sum_ms=duration_sum_ms+NEW.duration_ms;
         END;
 
-        -- Older versions executed a 1,000-row offset lookup and DELETE on
-        -- EVERY insert. The single background writer now trims once per
-        -- transaction of at most 64 requests, keeping writes bounded.
+        -- Prior versions trimmed overall history per write batch. The new
+        -- bounded writer trims only statuses present in that batch, retaining
+        -- 500 entries per status without losing rare errors or unmatched titles.
         DROP TRIGGER IF EXISTS request_history_cap;
 
-        -- The history view uses recent IDs; status filtering only scans 1,000.
+        -- Composite index supports bounded per-status history, retention,
+        -- and infrequent errors without a full scan of all request statuses.
         DROP INDEX IF EXISTS requests_status;
         DROP INDEX IF EXISTS requests_created_at;
+        CREATE INDEX IF NOT EXISTS requests_status_id_desc ON requests(status,id DESC);
         COMMIT;
     "#).map_err(|e| e.to_string())
 }
 
+/// Retain up to 500 of EACH status. Requests (unfiltered) displays the newest
+/// 500 across the three, while rare errors remain available even after many
+/// successful requests. Every lookup is served by (status,id) rather than a
+/// global last-N scan. Only statuses present in this writer batch are trimmed.
+fn trim_request_statuses(
+    tx:&rusqlite::Transaction<'_>,statuses:impl IntoIterator<Item=&'static str>
+)->rusqlite::Result<usize>{
+    let mut removed=0usize;
+    for status in statuses {
+        removed+=tx.execute("DELETE FROM requests WHERE status=?1 AND id < (
+            SELECT id FROM requests WHERE status=?1
+            ORDER BY id DESC LIMIT 1 OFFSET ?2
+        )",params![status,MAX_HISTORY_PER_FILTER-1])?;
+    }
+    Ok(removed)
+}
+
 /// Persist one bounded history batch in a single SQLite transaction. The
 /// minute-level statistics trigger runs for every row; raw-detail retention
-/// runs just once per batch instead of scanning the last 1,000 IDs per row.
+/// runs once per active status in the batch rather than once per request.
 fn persist_batch(db:&mut Connection,items:&[HistoryEvent])->rusqlite::Result<()>{
     persist_batch_with_learning(db,items,crate::local_learning::active())
 }
@@ -239,11 +260,12 @@ fn persist_batch_with_learning(db:&mut Connection,items:&[HistoryEvent],
             }
         }
     }
-    // Exact cap even when rows have gaps. The transaction commits both the
-    // request aggregates and retention trim, so readers see consistent data.
-    tx.execute("DELETE FROM requests WHERE id < (
-        SELECT id FROM requests ORDER BY id DESC LIMIT 1 OFFSET ?1
-    )",[MAX_HISTORY-1])?;
+    // Keep all three status logs independent; no global cap that causes
+    // rare errors/unmatched releases to disappear under high match volume.
+    // Retain exact caps even when IDs have gaps; never touch the ML job queue.
+    trim_request_statuses(&tx,REQUEST_STATUSES.into_iter().filter(|status|
+        items.iter().any(|item|item.status==*status)
+    ))?;
     // Counter tracks actual rows and estimated payload bytes across dedup.
     // Trim at most 4,096 oldest rows per batch; never scan a huge OFFSET.
     let evicted=if train{trim_ml_queue(&tx,ml_queue_max_items())?}else{0};
@@ -367,26 +389,25 @@ pub fn record_async(
     }
 }
 
-/// Trim raw details to 1,000 most recent requests and minute statistics to
-/// 14 days. Small delete transactions avoid holding a long write lock while
-/// removing a legacy history file with hundreds of thousands of rows.
+/// Trim raw details to 500 per status and minute statistics to 14 days.
+/// Bounded delete batches keep migrations from enormous legacy history files
+/// from holding SQLite write locks for too long.
 pub fn prune(path: &Path) -> Result<usize, String> {
     let db = connect(path).map_err(|e| e.to_string())?;
     let mut removed = 0usize;
-    loop {
-        let deleted = db.execute(
-            "DELETE FROM requests WHERE id IN (
-                SELECT id FROM requests
-                WHERE id < (
-                    SELECT id FROM requests ORDER BY id DESC LIMIT 1 OFFSET 999
-                )
-                ORDER BY id ASC LIMIT ?1
-             )",
-            params![PRUNE_BATCH],
-        ).map_err(|e| e.to_string())?;
-        removed += deleted;
-        if (deleted as i64) < PRUNE_BATCH {
-            break;
+    for status in REQUEST_STATUSES {
+        loop {
+            let deleted = db.execute(
+                "DELETE FROM requests WHERE id IN (
+                    SELECT id FROM requests WHERE status=?1 AND id < (
+                        SELECT id FROM requests WHERE status=?1
+                        ORDER BY id DESC LIMIT 1 OFFSET ?2
+                    ) ORDER BY id ASC LIMIT ?3
+                )",
+                params![status, MAX_HISTORY_PER_FILTER - 1, PRUNE_BATCH],
+            ).map_err(|e| e.to_string())?;
+            removed += deleted;
+            if (deleted as i64) < PRUNE_BATCH { break; }
         }
     }
     db.execute(
@@ -403,15 +424,19 @@ pub fn history(path: &Path, limit: usize, offset: usize, status: Option<&str>)
         return Err("invalid history status filter".into());
     }
     let db = connect(path).map_err(|e| e.to_string())?;
-    let mut stmt = db.prepare(
+    // Use two fixed, index-friendly statements. OR (?1 IS NULL ...) would
+    // force SQLite to consider a table scan even for rare error statuses.
+    let statement=if status.is_some(){
         "SELECT id,created_at,title,status,imdb_id,match_source,duration_ms,details
-         FROM requests
-         WHERE id IN (SELECT id FROM requests ORDER BY id DESC LIMIT 1000)
-           AND (?1 IS NULL OR status=?1)
+         FROM requests WHERE status=?1
          ORDER BY id DESC LIMIT ?2 OFFSET ?3"
-    ).map_err(|e| e.to_string())?;
+    }else{
+        "SELECT id,created_at,title,status,imdb_id,match_source,duration_ms,details
+         FROM requests ORDER BY id DESC LIMIT ?2 OFFSET ?3"
+    };
+    let mut stmt=db.prepare(statement).map_err(|e|e.to_string())?;
     let limit = limit.min(100);
-    let offset = offset.min(MAX_HISTORY as usize);
+    let offset = offset.min(MAX_HISTORY_PER_FILTER as usize);
     let rows = stmt.query_map(params![status,limit as i64,offset as i64], |r| {
         let details: String = r.get(7)?;
         Ok(json!({
@@ -425,7 +450,7 @@ pub fn history(path: &Path, limit: usize, offset: usize, status: Option<&str>)
     }).map_err(|e| e.to_string())?;
     let items = rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| e.to_string())?;
-    Ok(json!({"items":items,"limit":limit,"offset":offset,"max_records":MAX_HISTORY}))
+    Ok(json!({"items":items,"limit":limit,"offset":offset,"max_records":MAX_HISTORY_PER_FILTER}))
 }
 
 pub fn stats(path: &Path) -> Result<Value, String> {
