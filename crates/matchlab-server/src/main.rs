@@ -1957,9 +1957,11 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result
             // Keep policy metadata in durable history only, never in the
             // cached/public Diagnostic. Exploratory dashboard selections are
             // not valid supervisory labels for the title learner.
-            if let Some(record)=details.as_object_mut(){
-                record.insert("ml_source_policy".into(),json!(
-                    if cacheable{"public_api"}else{"dashboard_diagnostic"}));
+            if local_learning::active(){
+                if let Some(record)=details.as_object_mut(){
+                    record.insert("ml_source_policy".into(),json!(
+                        if cacheable{"public_api"}else{"dashboard_diagnostic"}));
+                }
             }
             let status=if d.selected.is_some(){"matched"}else{"unmatched"};
             dashboard_history::record_async(
