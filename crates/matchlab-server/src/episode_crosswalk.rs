@@ -71,7 +71,6 @@ struct LinkedMappings<'a>{
     first_absolute_end:Option<i64>,
 }
 struct SplitIndex<'a>{
-    by_anidb:HashMap<&'a str,Vec<&'a Mapping>>,
     partners:HashMap<(&'a str,i64),Vec<(&'a str,i64)>>,
     links:Vec<LinkedMappings<'a>>,
 }
@@ -109,7 +108,9 @@ fn split_index<'a>(links:&'a[Link],maps:&'a[Mapping])->SplitIndex<'a>{
         LinkedMappings{link,mappings,absolute_offset,
             first_absolute_end:first_absolute.map(|m|m.end)}
     }).collect();
-    SplitIndex{by_anidb,partners,links:indexed_links}
+    // The temporary AniDB lookup map is intentionally dropped here.
+    // LinkedMappings has already captured only the relevant references.
+    SplitIndex{partners,links:indexed_links}
 }
 fn split(link:&Link,m:&Mapping,index:&SplitIndex<'_>)->bool{
     link.trakt>0&&index.partners.get(&(m.tvdb.as_str(),m.tv_season))
@@ -566,14 +567,15 @@ mod tests{
                     &&(link.tvdb.is_empty()||m.tvdb==link.tvdb))
                 .map(|m|(m.anidb.as_str(),m.tvdb.as_str(),m.tv_season))
                 .collect::<Vec<_>>();
-            let actual=index.by_anidb.get(link.anidb.as_str())
-                .into_iter().flatten()
-                .filter(|m|link.tvdb.is_empty()||m.tvdb==link.tvdb)
+            let indexed=index.links.iter().find(|indexed|
+                std::ptr::eq(indexed.link,link)).expect("link retained");
+            let actual=indexed.mappings.iter()
                 .map(|m|(m.anidb.as_str(),m.tvdb.as_str(),m.tv_season))
                 .collect::<Vec<_>>();
             assert_eq!(actual,expected);
         }
-        assert!(!index.by_anidb.contains_key("999"),
+        assert!(index.links.iter().find(|x|x.link.anidb=="999")
+            .is_some_and(|entry|entry.mappings.is_empty()),
             "a link with no mappings must not borrow another anime's row");
         for link in &links {
             for mapping in &maps {
