@@ -77,6 +77,8 @@ fn connect(path:&Path)->Result<Connection,String>{
     let model=crate::online_model::OnlineModel::load(&db)?;
     model.publish_status();
     crate::candidate_discovery::publish(&db)?;
+    crate::title_learning::init(&db)?;
+    crate::title_learning::publish(&db)?;
     Ok(db)
 }
 fn setting(db:&Connection,key:&str)->Result<Option<String>,String>{
@@ -203,6 +205,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
     let mut corrective_evidence=crate::corrective_learning::count(&tx)?;
     let mut general_evidence=crate::general_learning::count(&tx)?;
     let mut discovery=crate::candidate_discovery::budget(&tx)?;
+    let mut title_evidence=crate::title_learning::budget(&tx)?;
     let mut samples=count(&tx,"samples")?;
     let mut patterns=count(&tx,"patterns")?;
     let now=chrono::Utc::now().timestamp();
@@ -224,8 +227,13 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
             &mut general_evidence)?;
         // Flag missing, over- and underextraction *before* treating
         // canonical parser values as model training positives.
-        let flags=crate::field_audit::audit(
+        let mut flags=crate::field_audit::audit(
             &title,&base,&details["selected"]);
+        let title_signal=crate::title_learning::observe(
+            &tx,&title,&base,&details["selected"],&mut title_evidence)?;
+        if let Some(signal)=title_signal{
+            flags.push(crate::title_learning::review_flag(signal));
+        }
         let clean=crate::field_audit::canonical_for_training(&base,&flags);
         // Unlike the advisory ranker, corrective evidence must compare
         // independent raw syntax with the untouched canonical parser.
@@ -234,6 +242,9 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
         // One title normalization / holdout hash shared by all ML observers.
         let features=crate::online_model::TitleFeatureContext::new(&title);
         model.observe_canonical_fields_with_context(&tx,&title,&clean,&features)?;
+        if let Some(signal)=title_signal{
+            model.observe_with_context(&tx,&title,"title",signal,&features)?;
+        }
         for (field,signal) in crate::tv_learning::observe(
             &tx,&title,&clean,&mut tv_evidence)? {
             model.observe_with_context(&tx,&title,&field,&signal,&features)?;
@@ -296,6 +307,7 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
         Ordering::Relaxed);
     model.publish_status();
     crate::candidate_discovery::publish(local)?;
+    crate::title_learning::publish(local)?;
     if let Some(ref metadata)=meta{
         crate::learned_regex::reconcile(local,metadata)?;
     }
