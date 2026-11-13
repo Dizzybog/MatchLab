@@ -116,9 +116,10 @@ match the full Unicode-aware title words to avoid ASCII-key collisions.
 Exact AniDB aliases may correctly link to an IMDb title with a different
 English name; they are still exact matches against the AniDB index.
 
-Strict matching disables the optional final-result caches to avoid serving
-non-strict results cached before the flag was enabled; immutable exact
-Tantivy query caching and parser caching remain available. `/parse`
+Strict matching retains the optional ML and always-on final-result caches,
+but strict and broad searches use **separate generation-aware namespaces**.
+A strict result can never reuse a non-strict match from an earlier run.
+Immutable exact Tantivy query caching and parser caching remain available. `/parse`
 still performs normal parsing. The four-field public response format,
 episode validation, and ML rule activation remain unchanged.
 `/debug/match/strict` is an *eligibility-policy* endpoint and is distinct
