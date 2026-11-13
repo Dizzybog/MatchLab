@@ -1914,6 +1914,12 @@ fn enrich_selected_anime_episode(
 // Unlike the existing persistent ML cache this is available with ML disabled;
 // unlike candidate caches, it never shares a final SID across different files.
 static TORRENT_MATCH_CACHE:OnceLock<query_cache::QueryCache<Diagnostic>>=OnceLock::new();
+/// Strict and broad candidate discovery must never share a persisted or
+/// short-lived final result. Keep the full metadata/regex fingerprint, but
+/// append the immutable boot-time search policy.
+fn scoped_match_generation(metadata:&str,strict:bool)->String{
+    format!("{metadata}:strict={strict}")
+}
 // Reuse the generation already checked by diagnose_logged, rather than
 // recomputing the filesystem/WAL SHA-256 to enter the same cache.
 fn whole_torrent_cached_diagnose(
@@ -1921,12 +1927,15 @@ fn whole_torrent_cached_diagnose(
 )->Result<Diagnostic,String>{
     let Some(metadata)=metadata else{return diagnose(db_path,req);};
     let regex_revision=parse_rules_revision();
-    let key=format!("{metadata}:{regex_revision:016x}:{:?}:{:?}:{}",
+    let strict=strict_match_mode();
+    let scoped=scoped_match_generation(metadata,strict);
+    let key=format!("{scoped}:{regex_revision:016x}:{:?}:{:?}:{}",
         req.year,req.series,req.title);
     TORRENT_MATCH_CACHE.get_or_init(||query_cache::QueryCache::new(
         512,Duration::from_secs(30))).get_or_compute(
         key,||diagnose(db_path,req),
         |_|parse_rules_revision()==regex_revision
+            &&strict_match_mode()==strict
             &&learning_cache::match_fingerprint(db_path)
                 .as_deref()==Some(metadata))
 }
@@ -1936,7 +1945,9 @@ fn whole_torrent_cached_diagnose(
 // memoize filesystem/regex generations across requests or SQLite refreshes.
 fn match_generations(db_path:&PathBuf)->(Option<String>,Option<String>){
     let fingerprint=learning_cache::match_fingerprint(db_path);
-    let namespace=if learning_cache::enabled(){fingerprint.clone()}else{None};
+    let namespace=if learning_cache::enabled(){
+        fingerprint.as_ref().map(|fp|scoped_match_generation(fp,strict_match_mode()))
+    }else{None};
     (namespace,fingerprint)
 }
 
@@ -1945,11 +1956,12 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result
     // Dashboard-only exploratory diagnostics deliberately bypass matching
     // caches. /match and strict /debug/match use the identical PublicApi
     // eligibility policy and may share verified cache entries.
-    // Persistent and always-on match caches from the normal search policy
-    // must never be reused by the stricter selection policy. Parsed fields
-    // and index-generation-aware alias lookups remain safely cacheable.
+    // Cache only public-policy results. Strict and broad searches use
+    // distinct versioned namespaces and distinct final-result keys; one
+    // can never serve the other, even after an opt-out/restart. Exploratory
+    // dashboard diagnostics still bypass these caches entirely.
     let public_policy=matches!(policy,MatchPolicy::PublicApi);
-    let cacheable=public_policy &&!strict_match_mode();
+    let cacheable=public_policy;
     // Snapshot generation once: the persistent ML namespace is the same
     // fingerprint when ML is enabled, but the always-on cache also works
     // without ML. Avoid hashing metadata/WAL twice for the same snapshot.
@@ -2638,6 +2650,16 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn final_match_cache_namespaces_are_strictly_policy_separated(){
+        let key="v3-metadata-123";
+        assert_ne!(scoped_match_generation(key,true),
+            scoped_match_generation(key,false));
+        assert_eq!(scoped_match_generation(key,true),
+            scoped_match_generation(key,true));
+        assert_ne!(scoped_match_generation("v3-metadata-124",true),
+            scoped_match_generation(key,true));
+    }
     #[test]
     fn strict_mode_defaults_to_exact_only_and_rejects_invalid_configuration(){
         assert_eq!(parse_strict_match_mode(None),Ok(true));
