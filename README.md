@@ -91,7 +91,7 @@ The public `/match` and `/debug/match` endpoints have identical strict matching 
 The learning process is:
 
 1. Examine new release names for **four error types**: missing values, excessive extraction, incomplete extraction, and values assigned to the wrong fields (for example, swapped seasons and episodes). These are learning signals, not automatic corrections.
-2. Group recurring patterns and train a small **FTRL-Proximal** model.
+2. Group recurring patterns and train a small **FTRL-Proximal** model. When a trustworthy IMDb winner is available, compare its matched title alias to the **original canonical parser title** and the complete source-title words before an explicit episode, year or quality boundary. Confirmed over-/underextraction becomes another title-learning signal; aliases that cannot be verified in the raw release are not used as labels.
 3. Test proposed regex rules against known values, conflicting patterns and negative examples.
 4. Activate eligible rules in memory without restarting. More uncertain changes are kept for review.
 
@@ -272,3 +272,15 @@ MatchLab is an independent Rust project informed by:
 - [FTRL-Proximal research](https://research.google/pubs/ad-click-prediction-a-view-from-the-trenches/) — approach used by the local Rust learner.
 
 MatchLab is not affiliated with these projects. Their authors retain their respective credits and licenses. MatchLab is licensed under **GPL-3.0-or-later**; metadata sources have their own terms.
+
+**Title discrepancy learning:** A title mismatch is not automatically a parser error:
+IMDb may store translated aliases, different anime-part names, or competing
+works. MatchLab trains on title-boundary discrepancies only when the
+selected alias exactly covers the independently extracted source-title span,
+records repeat observations without duplication, and requires at least 12
+examples from four IMDb works before suggesting a bounded, generic
+title-boundary regex. Such proposals are **review-only** and never change the
+live parser until a trusted source diff and regression tests separately prove
+that the new rule improves results. No torrent filenames, matched movie
+names or IMDb IDs are exported in these proposals. Local status is available
+under `/api/ml/status` as `title_boundaries`.
