@@ -7,8 +7,10 @@ use std::collections::BTreeSet;
 struct Part {id:String}
 
 fn aliases(db:&Connection,imdb:&str,title:&str)->rusqlite::Result<Vec<(String,String)>>{
-    crate::tantivy_search::anime_aliases_for_title(db,title,4)
-        .map_err(|error|rusqlite::Error::ToSqlConversionFailure(
+    let aliases=if crate::strict_match_mode(){
+        crate::tantivy_search::anime_aliases_exact(db,title)
+    }else{crate::tantivy_search::anime_aliases_for_title(db,title,4)};
+    aliases.map_err(|error|rusqlite::Error::ToSqlConversionFailure(
             Box::new(std::io::Error::other(error))))
         .map(|found|found.into_iter().filter(|a|a.imdb_id==imdb)
             .map(|a|(a.anidb_id,a.clean_title)).collect())
@@ -280,8 +282,10 @@ pub fn season_from_title(db:&Connection,imdb:&str,title:&str)->rusqlite::Result<
 /// IMDb identity and a uniquely mapped positive season.
 pub fn season_from_any_exact_title(db:&Connection,key:&str)->rusqlite::Result<Option<i64>>{
     if key.len()<4{return Ok(None);}
-    let ids=crate::tantivy_search::anime_aliases(db,key,4)
-        .map_err(|error|rusqlite::Error::ToSqlConversionFailure(
+    let aliases=if crate::strict_match_mode(){
+        crate::tantivy_search::anime_aliases_exact(db,key)
+    }else{crate::tantivy_search::anime_aliases(db,key,4)};
+    let ids=aliases.map_err(|error|rusqlite::Error::ToSqlConversionFailure(
             Box::new(std::io::Error::other(error))))?
         .into_iter().filter(|a|a.clean_title==key).map(|a|a.imdb_id)
         .collect::<BTreeSet<_>>();
