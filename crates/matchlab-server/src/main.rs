@@ -42,6 +42,19 @@ use tokio::sync::Semaphore;
 
 
 #[derive(Clone)]
+static STRICT_MATCH_MODE:OnceLock<bool>=OnceLock::new();
+fn strict_match_mode()->bool{
+    STRICT_MATCH_MODE.get().copied().unwrap_or(false)
+}
+fn parse_strict_match_mode(raw:Option<&str>)->Result<bool,String>{
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref(){
+        None|Some("false"|"0"|"off"|"no")=>Ok(false),
+        Some("true"|"1"|"on"|"yes")=>Ok(true),
+        Some(other)=>Err(format!(
+            "MATCHLAB_STRICT_MODE must be true or false (got {other:?})")),
+    }
+}
+
 struct AppState {
     db:Arc<PathBuf>,
     history:Arc<PathBuf>,
@@ -221,7 +234,10 @@ fn open_db(path: &PathBuf) -> rusqlite::Result<Connection> {
 fn anime_candidate(db: &Connection, title: &str, season: Option<i64>, episode: i64) -> rusqlite::Result<Option<Value>> {
     let key=imdb_matcher::clean_title(title);
     if key.len()<4||episode<=0{return Ok(None);}
-    let matches:Vec<_>=tantivy_search::anime_aliases_for_title(db,title,6)
+    let aliases=if strict_match_mode(){
+        tantivy_search::anime_aliases_exact(db,title)
+    }else{tantivy_search::anime_aliases_for_title(db,title,6)};
+    let matches:Vec<_>=aliases
         .map_err(|error|rusqlite::Error::ToSqlConversionFailure(
             Box::new(std::io::Error::other(error))))?
         .into_iter().map(|alias|(alias.anidb_id,alias.clean_title,alias.imdb_id))
@@ -280,7 +296,10 @@ fn anime_candidate(db: &Connection, title: &str, season: Option<i64>, episode: i
 fn anime_identity(db:&Connection,title:&str)->rusqlite::Result<Option<String>>{
     let key=imdb_matcher::clean_title(title);
     if key.len()<4{return Ok(None);}
-    let rows:Vec<_>=tantivy_search::anime_aliases_for_title(db,title,6)
+    let aliases=if strict_match_mode(){
+        tantivy_search::anime_aliases_exact(db,title)
+    }else{tantivy_search::anime_aliases_for_title(db,title,6)};
+    let rows:Vec<_>=aliases
         .map_err(|error|rusqlite::Error::ToSqlConversionFailure(
             Box::new(std::io::Error::other(error))))?
         .into_iter().map(|alias|(alias.clean_title,alias.imdb_id)).collect();
@@ -298,7 +317,10 @@ fn anime_identity(db:&Connection,title:&str)->rusqlite::Result<Option<String>>{
 /// to rank title candidates and safe for season-pack inference.
 fn exact_anime_identity(db:&Connection,key:&str)->Result<Option<String>,String>{
     if key.len()<4{return Ok(None);}
-    let ids=tantivy_search::anime_aliases(db,key,4)?.into_iter()
+    let aliases=if strict_match_mode(){
+        tantivy_search::anime_aliases_exact(db,key)?
+    }else{tantivy_search::anime_aliases(db,key,4)?};
+    let ids=aliases.into_iter()
         .filter(|alias|alias.clean_title==key)
         .map(|alias|alias.imdb_id)
         .collect::<std::collections::BTreeSet<_>>();
@@ -628,7 +650,9 @@ fn verified_anime_subfolder_title(
     for name in parents.iter().rev().filter_map(Value::as_str){
         let key=imdb_matcher::clean_title(name);
         if key.len()<4 {continue;}
-        let aliases=tantivy_search::anime_aliases(db,&key,4)?;
+        let aliases=if strict_match_mode(){
+            tantivy_search::anime_aliases_exact(db,name)?
+        }else{tantivy_search::anime_aliases(db,&key,4)?};
         let exact_ids:std::collections::BTreeSet<String>=aliases.into_iter()
             .filter(|alias|alias.clean_title==key)
             .map(|alias|alias.imdb_id).collect();
@@ -772,8 +796,10 @@ fn bottom_up_imdb_path_match(
 fn verified_unmarked_anime_range_imdb(
     db:&Connection,key:&str,start:i64,end:i64,
 )->Result<Option<String>,String>{
-    let ids=tantivy_search::anime_aliases(db,key,6)?
-        .into_iter().filter(|alias|alias.clean_title==key)
+    let aliases=if strict_match_mode(){
+        tantivy_search::anime_aliases_exact(db,key)?
+    }else{tantivy_search::anime_aliases(db,key,6)?};
+    let ids=aliases.into_iter().filter(|alias|alias.clean_title==key)
         .map(|alias|alias.imdb_id)
         .collect::<std::collections::BTreeSet<_>>();
     if ids.len()==1{return Ok(ids.into_iter().next());}
@@ -813,8 +839,10 @@ fn verified_unmarked_single_anime_imdb(
 )->Result<Option<String>,String>{
     let key=imdb_matcher::clean_title(candidate_title);
     if key.len()<4 || !(1..=99_999).contains(&episode){return Ok(None);}
-    let exact_ids=tantivy_search::anime_aliases(db,&key,4)?
-        .into_iter().filter(|alias|alias.clean_title==key)
+    let aliases=if strict_match_mode(){
+        tantivy_search::anime_aliases_exact(db,candidate_title)?
+    }else{tantivy_search::anime_aliases(db,&key,4)?};
+    let exact_ids=aliases.into_iter().filter(|alias|alias.clean_title==key)
         .map(|alias|alias.imdb_id)
         .collect::<std::collections::BTreeSet<_>>();
     if exact_ids.is_empty(){return Ok(None);}
@@ -1913,7 +1941,11 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result
     // Dashboard-only exploratory diagnostics deliberately bypass matching
     // caches. /match and strict /debug/match use the identical PublicApi
     // eligibility policy and may share verified cache entries.
-    let cacheable=matches!(policy,MatchPolicy::PublicApi);
+    // Persistent and always-on match caches from the normal search policy
+    // must never be reused by the stricter selection policy. Parsed fields
+    // and index-generation-aware alias lookups remain safely cacheable.
+    let cacheable=matches!(policy,MatchPolicy::PublicApi)
+        &&!strict_match_mode();
     // Snapshot generation once: the persistent ML namespace is the same
     // fingerprint when ML is enabled, but the always-on cache also works
     // without ML. Avoid hashing metadata/WAL twice for the same snapshot.
@@ -2391,6 +2423,11 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         tracing::info!("downloaded metadata refresh completed: imdb={imdb} anime_links={links} episode_maps={mappings} aliases={aliases}");
         return Ok(());
     }
+    let strict_raw=env::var("MATCHLAB_STRICT_MODE").ok();
+    let strict=parse_strict_match_mode(strict_raw.as_deref())?;
+    let _=STRICT_MATCH_MODE.set(strict);
+    tracing::info!(strict_mode=strict,
+        "IMDb and AniDB title matching policy configured");
     let db = env::var("MATCHLAB_DB").unwrap_or_else(|_|"/data/metadata.sqlite3".into());
     let host = env::var("MATCHLAB_HOST").unwrap_or_else(|_|"127.0.0.1:8766".into());
     // Bind the HTTP listener before potentially expensive startup indexing.
