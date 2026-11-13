@@ -794,6 +794,7 @@ pub fn title_aliases_at_release_suffixes(
 /// Find complete IMDb alias prefixes AND suffixes inside the parsed title.
 /// One Tantivy term-union query discovers the candidates; a separate word-
 /// boundary-aware ranker rejects fragments of longer words.
+#[cfg(test)]
 fn title_aliases_inside_uncached(db:&Connection,key:&str)->Result<Vec<TitleAlias>,String>{
     if key.len()<6{return Ok(Vec::new());}
     let min_len=4usize.max((key.len()+1)/2).max(key.len().saturating_sub(16));
@@ -1050,6 +1051,7 @@ pub fn title_aliases(db:&Connection,key:&str,suffix:bool)->Result<Vec<TitleAlias
     }else{title_aliases_uncached(db,key,suffix)}
 }
 
+#[cfg(test)]
 pub fn title_aliases_inside(db:&Connection,key:&str)->Result<Vec<TitleAlias>,String>{
     if let Some(id)=lookup_cache_key(db,"inside_title",key){
         TITLE_LOOKUPS.get_or_init(||QueryCache::new(LOOKUP_CAP,LOOKUP_TTL))
