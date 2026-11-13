@@ -228,8 +228,13 @@ fn scan(history:&Path,metadata:&Path,local:&mut Connection,
         // canonical parser values as model training positives.
         let mut flags=crate::field_audit::audit(
             &title,&base,&details["selected"]);
-        let title_signal=crate::title_learning::observe(
-            &tx,&title,&base,&details["selected"],&mut title_evidence)?;
+        // Dashboard exploratory diagnostics intentionally use weaker
+        // matching gates. Only strict public /match (and strict /debug/match)
+        // selections can act as title-boundary supervisory evidence.
+        let title_signal=if details["ml_source_policy"]=="public_api"{
+            crate::title_learning::observe(
+                &tx,&title,&base,&details["selected"],&mut title_evidence)?
+        }else{None};
         if let Some(signal)=title_signal{
             flags.push(crate::title_learning::review_flag(signal));
             new_title_observations+=1;
