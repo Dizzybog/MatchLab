@@ -2634,6 +2634,20 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn strict_mode_setting_is_opt_in_and_rejects_invalid_configuration(){
+        assert_eq!(parse_strict_match_mode(None),Ok(false));
+        for value in ["true","TRUE","1","on","yes"," true "]{
+            assert_eq!(parse_strict_match_mode(Some(value)),Ok(true),"{value}");
+        }
+        for value in ["false","FALSE","0","off","no"," false "]{
+            assert_eq!(parse_strict_match_mode(Some(value)),Ok(false),"{value}");
+        }
+        for value in ["strict","enabled","2",""]{
+            assert!(parse_strict_match_mode(Some(value)).is_err(),"{value}");
+        }
+    }
+
     #[tokio::test]
     async fn dashboard_is_on_dash_and_root_redirects_without_moving_api_routes(){
         use axum::response::IntoResponse;
