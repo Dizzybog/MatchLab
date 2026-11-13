@@ -614,7 +614,10 @@ fn search_inner(db:&Connection,title:&str,year:Option<i32>,series:bool,required_
         if key.len()>=8{
             discovered.extend(tantivy_aliases(db,&key,true)?);
         }
-        discovered.extend(crate::tantivy_search::title_aliases_inside(db,&key)
+        // The downstream TitleFit validator accepts only complete source
+        // words. Query those edges directly rather than enumerating every
+        // character-length substring in Tantivy's posting union.
+        discovered.extend(crate::tantivy_search::title_aliases_inside_words(db,title)
             .map_err(index_error)?.into_iter().map(Aka::from));
     }
     // Lexical discovery from a parser title is less trustworthy than the
