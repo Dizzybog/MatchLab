@@ -23,6 +23,7 @@ services:
       MATCHLAB_DB: /data/metadata.sqlite3
       MATCHLAB_HOST: 0.0.0.0:8765
       MATCHLAB_MAX_CONCURRENT_MATCHES: "2"
+      MATCHLAB_STRICT_MODE: "false"
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
