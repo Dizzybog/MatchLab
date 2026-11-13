@@ -796,6 +796,7 @@ pub fn title_aliases_at_release_suffixes(
 /// Find complete IMDb alias prefixes AND suffixes inside the parsed title.
 /// One Tantivy term-union query discovers the candidates; a separate word-
 /// boundary-aware ranker rejects fragments of longer words.
+#[cfg(test)]
 fn title_aliases_inside_uncached(db:&Connection,key:&str)->Result<Vec<TitleAlias>,String>{
     if key.len()<6{return Ok(Vec::new());}
     let min_len=4usize.max((key.len()+1)/2).max(key.len().saturating_sub(16));
@@ -823,6 +824,74 @@ fn title_aliases_inside_uncached(db:&Connection,key:&str)->Result<Vec<TitleAlias
     drop(reader);drop(search);
     if let Some(dir)=memory_dir{let _=std::fs::remove_dir_all(dir);}
     Ok(aliases)
+}
+
+/// Query *only whole-word* prefixes/suffixes of the parsed title. The
+/// legacy compact-key inside lookup generates two terms per character length,
+/// but the matcher discards aliases ending inside a word. Restricting the
+/// postings union before retrieval avoids decoding irrelevant Tantivy docs.
+///
+/// This is an additional opt-in candidate path for the IMDb ranker, not a
+/// replacement for the public compact-key lookup used by other callers.
+/// Every term is an exact subset of the old inside-term union. Unicode-safe
+/// word normalization is identical to the matcher's TitleFit validation.
+fn title_aliases_inside_words_uncached(
+    db:&Connection,keys:&[String],
+)->Result<Vec<TitleAlias>,String>{
+    if keys.is_empty(){return Ok(Vec::new());}
+    let (search,memory_dir)=open_search(db)?;
+    let reader=search.reader.searcher();
+    let query=TermSetQuery::new(keys.iter()
+        .map(|key|Term::from_field_text(search.forward,key)));
+    let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
+    let mut aliases=Vec::with_capacity(hits.len());
+    for addr in hits{
+        let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
+        if let Some(alias)=read_title(&doc,&search){aliases.push(alias);}
+    }
+    drop(reader);drop(search);
+    if let Some(dir)=memory_dir{let _=std::fs::remove_dir_all(dir);}
+    Ok(aliases)
+}
+/// For a source with W words, produce at most 2*(W-1) indexed exact terms,
+/// instead of O(normalized key length). Keep the original half-title/16-char
+/// coverage guard, and include source word boundaries in the cache key:
+/// "Monster Story" and "Monsters Tory" may have the same compact key but
+/// different valid split points.
+fn inside_word_terms(key:&str,words:&[String])->Vec<String>{
+    if key.len()<6||words.len()<2{return Vec::new();}
+    let min_len=4usize.max((key.len()+1)/2).max(key.len().saturating_sub(16));
+    if min_len>=key.len(){return Vec::new();}
+    let mut terms=BTreeSet::new();
+    let mut prefix=String::new();
+    for word in words.iter().take(words.len()-1){
+        prefix.push_str(word);
+        if prefix.len()>=min_len &&prefix.len()<key.len()
+            &&key.starts_with(&prefix){terms.insert(prefix.clone());}
+    }
+    let mut suffix=String::new();
+    for word in words.iter().skip(1).rev(){
+        suffix.insert_str(0,word);
+        if suffix.len()>=min_len &&suffix.len()<key.len()
+            &&key.ends_with(&suffix){terms.insert(suffix.clone());}
+    }
+    terms.into_iter().collect()
+}
+pub fn title_aliases_inside_words(
+    db:&Connection,key:&str,words:&[String],
+)->Result<Vec<TitleAlias>,String>{
+    // Reuse the matcher-normalized title key and words. No extra Unicode
+    // folding or word-vector allocation on the full fallback path.
+    let terms=inside_word_terms(key,words);
+    if terms.is_empty(){return Ok(Vec::new());}
+    // The sorted term set identifies the exact query and also preserves
+    // deduplication for alternate separators/spellings of the same title.
+    let joined=terms.join("\u{1f}");
+    if let Some(id)=lookup_cache_key(db,"inside_title_word_edges",&joined){
+        TITLE_LOOKUPS.get_or_init(||QueryCache::new(LOOKUP_CAP,LOOKUP_TTL))
+            .get_or_compute(id,||title_aliases_inside_words_uncached(db,&terms),
+                |rows|rows.len()<=LOOKUP_MAX_ALIASES)
+    }else{title_aliases_inside_words_uncached(db,&terms)}
 }
 
 /// Complete prefix/suffix search. All candidates are retained until the IMDb
@@ -984,6 +1053,7 @@ pub fn title_aliases(db:&Connection,key:&str,suffix:bool)->Result<Vec<TitleAlias
     }else{title_aliases_uncached(db,key,suffix)}
 }
 
+#[cfg(test)]
 pub fn title_aliases_inside(db:&Connection,key:&str)->Result<Vec<TitleAlias>,String>{
     if let Some(id)=lookup_cache_key(db,"inside_title",key){
         TITLE_LOOKUPS.get_or_init(||QueryCache::new(LOOKUP_CAP,LOOKUP_TTL))
@@ -1164,6 +1234,56 @@ mod persistence_tests {
     }
 
 
+    #[test]
+    fn word_boundary_inside_terms_are_subset_of_old_compact_search(){
+        // The old compact lookup includes many irrelevant inside-word keys;
+        // the ranker only ever accepts whole normalized source words.
+        let cases=[
+            ("The Lord of the Rings",vec!["thelordof","thelordoftherings"]),
+            ("Monster The Jeffrey Dahmer Story",vec!["monster","thejeffrey"]),
+            ("JoJo's Bizarre Adventure",vec!["jojosbizarre","bizarreadventure"]),
+            ("Duneland",vec![]),
+            ("Pokémon and Ægir",vec!["pokemon","aegir"]),
+        ];
+        for (raw,_) in cases{
+            let key=crate::title_normalization::clean_title(raw);
+            let min=4usize.max((key.len()+1)/2).max(key.len().saturating_sub(16));
+            let words=crate::title_normalization::clean_words(raw);
+            for term in inside_word_terms(&key,&words){
+                assert!(term.len()>=min &&term.len()<key.len());
+                assert!(key.starts_with(&term)||key.ends_with(&term));
+            }
+        }
+    }
+    #[test]
+    fn compact_inside_lookup_matches_word_only_after_title_fit(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            INSERT INTO titles VALUES
+                ('tt0000001','The Office','theoffice',2005,'series','US',1,0,'tvSeries'),
+                ('tt0000002','Office Extra','officeextra',2025,'series','US',1,0,'tvSeries'),
+                ('tt0000003','Officeland','officeland',2020,'series','US',1,0,'tvSeries'),
+                ('tt0000004','Very Long Office Extra','verylongofficeextra',2025,'series','US',1,0,'tvSeries');")
+            .unwrap();
+        let raw="The Office Extra";
+        let key=crate::title_normalization::clean_title(raw);
+        let legacy=title_aliases_inside(&db,&key).unwrap();
+        let fast=title_aliases_inside_words(&db,&key,
+            &crate::title_normalization::clean_words(raw)).unwrap();
+        let legacy_word_aligned=legacy.into_iter().filter(|alias|{
+            let alias_words=crate::title_normalization::clean_words(&alias.title);
+            let words=crate::title_normalization::clean_words(raw);
+            (words.starts_with(&alias_words)||words.ends_with(&alias_words))
+                &&(key.starts_with(&alias.clean)||key.ends_with(&alias.clean))
+        }).map(|x|x.imdb_id).collect::<BTreeSet<_>>();
+        let fast_ids=fast.into_iter().map(|x|x.imdb_id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(fast_ids,legacy_word_aligned);
+        assert!(fast_ids.contains("tt0000001"));
+        assert!(fast_ids.contains("tt0000002"));
+        assert!(!fast_ids.contains("tt0000003"));
+    }
     #[test]
     fn warmed_index_handles_simultaneous_readers(){
         let path=std::env::temp_dir().join(format!(
