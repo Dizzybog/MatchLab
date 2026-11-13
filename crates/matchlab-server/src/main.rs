@@ -317,11 +317,12 @@ fn anime_identity(db:&Connection,title:&str)->rusqlite::Result<Option<String>>{
 /// Return an IMDb identity only when the release title itself is an exact,
 /// unique AniDB alias. This is stricter than the prefix-based fallback used
 /// to rank title candidates and safe for season-pack inference.
-fn exact_anime_identity(db:&Connection,key:&str)->Result<Option<String>,String>{
+fn exact_anime_identity(db:&Connection,title:&str)->Result<Option<String>,String>{
+    let key=imdb_matcher::clean_title(title);
     if key.is_empty()||(!strict_match_mode()&&key.len()<4){return Ok(None);}
     let aliases=if strict_match_mode(){
-        tantivy_search::anime_aliases_exact(db,key)?
-    }else{tantivy_search::anime_aliases(db,key,4)?};
+        tantivy_search::anime_aliases_exact(db,title)?
+    }else{tantivy_search::anime_aliases(db,&key,4)?};
     let ids=aliases.into_iter()
         .filter(|alias|alias.clean_title==key)
         .map(|alias|alias.imdb_id)
@@ -796,11 +797,12 @@ fn bottom_up_imdb_path_match(
 /// partial-range diagnostics for an unambiguous single IMDb association; for
 /// collisions, require exactly one IMDb identity with an entirely mapped span.
 fn verified_unmarked_anime_range_imdb(
-    db:&Connection,key:&str,start:i64,end:i64,
+    db:&Connection,title:&str,start:i64,end:i64,
 )->Result<Option<String>,String>{
+    let key=imdb_matcher::clean_title(title);
     let aliases=if strict_match_mode(){
-        tantivy_search::anime_aliases_exact(db,key)?
-    }else{tantivy_search::anime_aliases(db,key,6)?};
+        tantivy_search::anime_aliases_exact(db,title)?
+    }else{tantivy_search::anime_aliases(db,&key,6)?};
     let ids=aliases.into_iter().filter(|alias|alias.clean_title==key)
         .map(|alias|alias.imdb_id)
         .collect::<std::collections::BTreeSet<_>>();
@@ -918,9 +920,8 @@ fn diagnose_with_policy(
             // Existing IMDb crosswalk validation wins when it can prove
             // this range. Only fall back to the independent AniDB lookup
             // if the legacy path cannot establish a candidate.
-            let key=imdb_matcher::clean_title(&candidate_title);
             verified_anime_range_imdb=verified_unmarked_anime_range_imdb(
-                &db,&key,start,end)?;
+                &db,&candidate_title,start,end)?;
             if verified_anime_range_imdb.is_none(){
                 verified_anidb_range=anidb_matcher::match_absolute_range(
                     &db,&candidate_title,start,end)?;
@@ -970,8 +971,7 @@ fn diagnose_with_policy(
         if req.series!=Some(false) && (1..=12).contains(&season)
             && (1..=99).contains(&episode) {
             for candidate_title in [format!("{hint_title} {season}"),hint_title.clone()] {
-                let key=imdb_matcher::clean_title(&candidate_title);
-                if let Some(imdb)=exact_anime_identity(&db,&key)? {
+                if let Some(imdb)=exact_anime_identity(&db,&candidate_title)? {
                     let valid=season_episode_end(&db,&imdb,season)?
                         .is_some_and(|end|episode<=end)
                         || episode_crosswalk::resolve_season(&db,&imdb,season,episode)
@@ -1060,9 +1060,8 @@ fn diagnose_with_policy(
         && (1..=99_999).contains(&absolute)
     {
         let proposed_title=candidate_title.to_owned();
-        let proposed_key=imdb_matcher::clean_title(&proposed_title);
         if let Some(verified_imdb)=verified_unmarked_anime_range_imdb(
-            &db,&proposed_key,absolute,absolute
+            &db,&proposed_title,absolute,absolute
         )?
             && let Some(parsed)=parsed_value.as_object_mut()
         {
@@ -1122,9 +1121,9 @@ fn diagnose_with_policy(
         // A release with an explicit production year and no episode/season
         // coordinates is a movie candidate, even if an anime alias exists.
         None if year.is_some() => false,
-        None => anime_title::season_from_any_exact_title(&db,&key)
+        None => anime_title::season_from_any_exact_title(&db,title)
             .map_err(|e|e.to_string())?.is_some()
-            || exact_anime_identity(&db,&key)?.is_some(),
+            || exact_anime_identity(&db,title)?.is_some(),
     };
     let gate=ImdbIdentityGate{
         policy,year,has_season:series&&!seasons.is_empty(),
@@ -1589,7 +1588,7 @@ fn diagnose_with_policy(
                 let exact_anime=if linked_anime && !seasons.is_empty(){
                     false
                 }else{
-                    exact_anime_identity(&db,&key)?
+                    exact_anime_identity(&db,title)?
                         .is_some_and(|id|id==imdb_id)
                 };
                 let season=if let Some(season)=selected_season{
