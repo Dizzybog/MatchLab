@@ -30,10 +30,21 @@ fn history_scroll_keeps_unwrapped_titles_retrievable(){
 fn responsive_labels_preserve_information_and_health_status(){
     assert!(DASHBOARD.contains("Matching statistics · last 14 days (UTC)"));
     assert!(DASHBOARD.contains("Last 14 days · UTC"));
-    assert!(DASHBOARD.contains("Latest 1,000 requests"));
+    assert!(DASHBOARD.contains("Latest 500 requests per filter"));
     assert!(DASHBOARD.contains("Tap t_title to copy; tap other cells for details."));
     assert!(DASHBOARD.contains("node.querySelector('.health-short').textContent=short"));
     assert!(DASHBOARD.contains("node.setAttribute('aria-label',full)"));
+}
+
+#[test]
+fn history_filters_show_independent_five_hundred_row_windows(){
+    assert!(DASHBOARD.contains("Latest 500 requests per filter"));
+    assert!(DASHBOARD.contains("Each status retains its latest 500 diagnostics"));
+    assert!(DASHBOARD.contains("offset+current.length>=Math.min(500,Number(data.max_records)||500)"));
+    assert!(DASHBOARD.contains("if(requestId!==historyRequestId)return;"));
+    for status in ["all","matched","unmatched","error"]{
+        assert!(DASHBOARD.contains(&format!("data-filter=\\\"{status}\\\"")));
+    }
 }
 
 #[test]
