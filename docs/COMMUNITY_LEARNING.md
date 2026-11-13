@@ -211,6 +211,20 @@ optional observations, never a public match response. Training transaction
 size scales automatically (up to 128), and failed jobs retry without
 advancing the committed cursor. Normal work never waits for ML writer locks. The approach follows [StremThru's bounded persistent job queue](https://github.com/MunifTanjim/stremthru/tree/main/internal/job/job_queue): identity/dedup, bounded batches, delayed retry and independent workers.
 
+### Parser-versus-matcher title evidence
+
+The opt-in learner also audits the canonical parser title against the exact
+IMDb alias chosen by the strict public matcher. The alias must independently
+cover all original source-title words before a recognized technical boundary;
+translated aliases, exploratory dashboard matches and ambiguous spans are
+excluded. At least 12 unique examples spanning four IMDb identities can
+suggest a fixed-vocabulary title-boundary regex. It is **review-only**: it
+cannot be executed automatically and the GitHub intake reconstructs and
+validates the exact finite regex vocabulary. No raw torrent names, selected
+IMDb titles or IMDb IDs leave the local instance in these proposals. Reviewers
+must demonstrate an independently validated parser source diff and replay
+against positive/negative fixtures before any live change.
+
 ## Share regex improvements through GitHub
 
 Sharing is always optional. Provide a GitHub token that can comment on Issues in the upstream repository, and configure:
