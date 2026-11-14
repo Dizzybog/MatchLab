@@ -1188,6 +1188,59 @@ mod tests{
 
 
     #[test]
+    fn same_compact_title_key_prefers_matching_word_count_over_imdb_votes(){
+        // Both IMDb aliases share the key "supernatural" in Tantivy,
+        // but the release's original word boundaries distinguish them.
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('ttone','Supernatural','supernatural',2005,'series','US',1,0,'tvSeries'),
+                ('tttwo','Super-Natural','supernatural',2005,'series','US',1,0,'tvSeries');
+            INSERT INTO imdb_ratings VALUES('ttone',10000000),('tttwo',1);")
+            .unwrap();
+        for (title,release,expected) in [
+            ("Supernatural","Supernatural.S01E01.1080p","ttone"),
+            ("Super-Natural","Super-Natural.S01E01.1080p","tttwo"),
+            ("Super.Natural","Super.Natural.S01E01.1080p","tttwo"),
+        ] {
+            let (found,_) = search_inner_mode(
+                &db,title,None,true,0,release,true,5,false,false).unwrap();
+            assert_eq!(found[0].imdb_id,expected,"{title}: {found:?}");
+            let (strict,_) = search_inner_mode(
+                &db,title,None,true,0,release,true,5,false,true).unwrap();
+            assert_eq!(strict[0].imdb_id,expected,"strict: {title}: {strict:?}");
+            assert_eq!(strict.len(),1,"strict must reject different word boundaries");
+        }
+    }
+
+    #[test]
+    fn different_word_count_remains_a_non_strict_fallback_without_a_better_alias(){
+        // Preserve broad-mode backward compatibility when no word-aligned
+        // alternate IMDb title exists, but never loosen strict exact.
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('ttone','Supernatural','supernatural',2005,'series','US',1,0,'tvSeries');")
+            .unwrap();
+        let (broad,_) = search_inner_mode(
+            &db,"Super.Natural",None,true,0,"Super.Natural.S01E01",
+            true,5,false,false).unwrap();
+        assert_eq!(broad[0].imdb_id,"ttone");
+        let (strict,_) = search_inner_mode(
+            &db,"Super.Natural",None,true,0,"Super.Natural.S01E01",
+            true,5,false,true).unwrap();
+        assert!(strict.is_empty(),"strict must not merge two original words");
+    }
+
+    #[test]
     fn strict_mode_retains_only_complete_exact_imdb_aliases(){
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
