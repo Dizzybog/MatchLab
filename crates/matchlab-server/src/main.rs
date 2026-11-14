@@ -1082,6 +1082,62 @@ fn diagnose_with_policy(
             }
         }
     }
+    // A named anime part may interpret S2/P2 *locally*. The old episode
+    // crosswalk is authoritative: never promote an arithmetic season guess,
+    // and never touch Chinese absolute-episode or explicit range paths.
+    // S3 on a part beginning in IMDb S03 is interpreted as absolute S03.
+    let mut verified_local_anime_episode:Option<Value>=None;
+    if req.series!=Some(false)
+        && parsed_value.get("absolute_episode_candidate").is_none()
+        && parsed_value.get("anime_episode_range_candidate").is_none()
+        && parsed_value.get("episode_start").is_none()
+        && let Some(hint)=parsed_value.get("anime_local_part_candidate")
+        && let (Some(name),Some(marker),Some(local))=(
+            hint.get("title").and_then(Value::as_str),
+            hint.get("marker").and_then(Value::as_str),
+            hint.get("local").and_then(Value::as_i64))
+    {
+        let name=name.to_owned();
+        let marker=marker.to_owned();
+        let original_seasons=parsed_value.get("seasons").cloned();
+        let original_episodes=parsed_value.get("episodes").cloned();
+        let parsed_ep=original_episodes.as_ref().and_then(Value::as_array)
+            .and_then(|a|match a.as_slice(){[one]=>one.as_i64(),_=>None});
+        // Bare P2 is a part, not episode 2. Only an S2E02-style episode
+        // is trusted at this stage; P2 may still resolve a season-only pack.
+        let explicit_ep=if marker=="P"{None}else{parsed_ep};
+        let probe=explicit_ep.unwrap_or(1);
+        if let Some(imdb)=exact_anime_identity(&db,&name)?
+            && let Some(verified)=anime_title::resolve_local_part(
+                &db,&imdb,&name,&marker,local,probe)
+                    .map_err(|e|e.to_string())?
+        {
+            let mapped=verified.mapped;
+            if let Some(parsed)=parsed_value.as_object_mut(){
+                parsed.insert("title".into(),json!(name));
+                parsed.insert("seasons".into(),json!([mapped.season]));
+                parsed.insert("episodes".into(),if explicit_ep.is_some(){
+                    json!([mapped.episode])
+                }else{json!([])});
+                parsed.insert("anime_local_part_verified".into(),json!({
+                    "imdb_id":imdb,"base_season":verified.base_season,
+                    "local_marker":marker,"local_number":local,
+                    "original_seasons":original_seasons,
+                    "original_episodes":original_episodes,
+                    "resolved_season":mapped.season,
+                    "mapping_source":"verified_anidb_part_crosswalk"
+                }));
+                parsed.insert("anime_title_verified".into(),json!(true));
+            }
+            if explicit_ep.is_some(){
+                verified_local_anime_episode=Some(json!({
+                    "imdb_id":imdb,"season":mapped.season,
+                    "episode":mapped.episode,"anidb_id":mapped.anidb_id,
+                    "anidb_episode":mapped.anidb_episode
+                }));
+            }
+        }
+    }
     // A bare final number ("Stone Ocean 27") is not a trusted episode:
     // require an exact and unambiguous anime alias in Tantivy before
     // changing the parsed show title or promoting the episode coordinate.
@@ -1370,7 +1426,8 @@ fn diagnose_with_policy(
         .and_then(Value::as_str)
         .or(anime_subfolder_title.as_deref()).unwrap_or(title);
     let anime_resolve_key=imdb_matcher::clean_title(anime_resolve_title);
-    let anime = if let Some(verified)=verified_path_part {
+    let anime = if let Some(verified)=verified_local_anime_episode
+        .or(verified_path_part) {
         Some(verified)
     } else if verified_chinese_override.is_some()
         || verified_absolute_episode_imdb.is_some() {
@@ -1726,10 +1783,14 @@ fn diagnose_with_policy(
                         [&imdb_id],|row|row.get::<_,i64>(0))
                         .map_err(|e|e.to_string())? != 0;
                     if has_anime {
-                        let canonical_title=imdb.iter().any(|candidate|
-                            candidate.imdb_id==imdb_id
-                            && imdb_matcher::clean_title(&candidate.title)==anime_resolve_key)
-                            && anime_subfolder_title.is_none();
+                        // A local S/P marker was converted by an
+                        // independently verified crosswalk. This season is
+                        // already absolute; do not offset it a second time.
+                        let canonical_title=parsed.get("anime_local_part_verified").is_some()
+                            || (imdb.iter().any(|candidate|
+                                candidate.imdb_id==imdb_id
+                                && imdb_matcher::clean_title(&candidate.title)==anime_resolve_key)
+                                && anime_subfolder_title.is_none());
                         let mapped=mapped_season_episode_range(
                             &db,&imdb_id,anime_resolve_title,season,1,end,canonical_title)?;
                         // Keep the exact missing/ambiguous-map diagnostics
