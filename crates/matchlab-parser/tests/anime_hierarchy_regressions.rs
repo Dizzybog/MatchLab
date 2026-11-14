@@ -90,3 +90,23 @@ fn fansub_season_number_dash_episode_is_not_a_numeric_batch() {
         assert!(parsed.get("anime_season_episode_candidate").is_none(), "{raw}: {parsed:?}");
     }
 }
+
+#[test]
+fn nested_named_anime_part_numeric_leaf_is_unverified_until_metadata_check() {
+    let parsed = parse_title(
+        "[HorribleSubs] Sword Art Online/Alicization/02 [1080p].mkv", false,
+    ).unwrap();
+    let hint = &parsed["anime_episode_candidate"];
+    assert_eq!(hint["title"], "Sword Art Online - Alicization", "{parsed:?}");
+    assert_eq!(hint["episode"], 2, "{parsed:?}");
+    assert_eq!(hint["numbering"], "absolute", "{parsed:?}");
+    assert_eq!(hint["verified"], false, "{parsed:?}");
+    assert_eq!(hint["path_part"], true, "{parsed:?}");
+    assert_eq!(parsed["seasons"], json!([]), "{parsed:?}");
+    assert_eq!(parsed["path_layers"].as_array().unwrap().len(), 3);
+
+    let special = parse_title("Sword Art Online/Extras/02 [1080p].mkv", false).unwrap();
+    assert!(special.get("anime_episode_candidate").is_none(), "{special:?}");
+    let numbered_movie = parse_title("Movies/Film/2004.mkv", false).unwrap();
+    assert!(numbered_movie.get("anime_episode_candidate").is_none(), "{numbered_movie:?}");
+}

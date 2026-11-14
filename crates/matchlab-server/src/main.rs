@@ -1051,6 +1051,37 @@ fn diagnose_with_policy(
             }
         }
     }
+    // A video file named only "02.mkv" may inherit a named anime part
+    // from its two parents. Promote its unverified parser candidate only
+    // when the exact AniDB identity AND named-part season crosswalk agree.
+    // Never use whole-series absolute episode 2 as a fallback here: that
+    // can silently convert Alicization's local episode 2 to season-one E02.
+    let mut verified_path_part:Option<Value>=None;
+    if req.series!=Some(false)
+        && let Some(hint)=parsed_value.get("anime_episode_candidate")
+        && hint.get("path_part").and_then(Value::as_bool)==Some(true)
+        && let (Some(name),Some(episode))=(
+            hint.get("title").and_then(Value::as_str),
+            hint.get("episode").and_then(Value::as_i64))
+    {
+        let name=name.to_owned();
+        if let Some(imdb)=exact_anime_identity(&db,&name)?
+            && let Some(mapped)=anime_title::resolve_episode_from_exact_part_title(
+                &db,&imdb,&name,episode).map_err(|e|e.to_string())?
+        {
+            verified_path_part=Some(json!({
+                "imdb_id":mapped.imdb_id,"season":mapped.season,
+                "episode":mapped.episode,"anidb_id":mapped.anidb_id,
+                "anidb_episode":mapped.anidb_episode
+            }));
+            if let Some(parsed)=parsed_value.as_object_mut(){
+                parsed.insert("title".into(),json!(name));
+                parsed.insert("episodes".into(),json!([episode]));
+                parsed.insert("seasons".into(),json!([]));
+                parsed.insert("anime_title_verified".into(),json!(true));
+            }
+        }
+    }
     // A bare final number ("Stone Ocean 27") is not a trusted episode:
     // require an exact and unambiguous anime alias in Tantivy before
     // changing the parsed show title or promoting the episode coordinate.
@@ -1061,6 +1092,7 @@ fn diagnose_with_policy(
         && parsed_value.get("anime_season_episode_candidate").is_none()
         && parsed_value.get("anime_episode_range_candidate").is_none()
         && let Some(candidate) = parsed_value.get("anime_episode_candidate")
+        && candidate.get("path_part").and_then(Value::as_bool)!=Some(true)
         && let (Some(title),Some(episode)) = (
             candidate.get("title").and_then(Value::as_str),
             candidate.get("episode").and_then(Value::as_i64),
@@ -1338,7 +1370,9 @@ fn diagnose_with_policy(
         .and_then(Value::as_str)
         .or(anime_subfolder_title.as_deref()).unwrap_or(title);
     let anime_resolve_key=imdb_matcher::clean_title(anime_resolve_title);
-    let anime = if verified_chinese_override.is_some()
+    let anime = if let Some(verified)=verified_path_part {
+        Some(verified)
+    } else if verified_chinese_override.is_some()
         || verified_absolute_episode_imdb.is_some() {
         // A separately verified absolute episode owns its crosswalk.
         // Otherwise retain the established anime-priority path, including
@@ -4941,6 +4975,25 @@ mod tests {
         assert_eq!(part["episode"],1);
         assert_eq!(part["anime"]["asid"],"101:1");
         assert_eq!(public_match_response(Some(part))["sid_start"],"tt0300001:3:1");
+
+        // A numeric video filename gets its identity from two independently
+        // parsed parent folders, but only when the combined name resolves to
+        // an exact verified AniDB work and a real season crosswalk.
+        for raw in [
+            "[HorribleSubs] Sword Art Online/Alicization/02 [1080p].mkv",
+            "Sword Art Online/Alicization/02.mkv",
+        ] {
+            let nested=find(raw);
+            assert_eq!(nested.parsed["title"],"Sword Art Online - Alicization","{raw}");
+            assert_eq!(nested.parsed["anime_title_verified"],true,"{raw}");
+            let selected=nested.selected.expect("verified named-part video");
+            assert_eq!(selected["imdb_id"],"tt0300001","{raw}");
+            assert_eq!(selected["season"],3,"{raw}");
+            assert_eq!(selected["episode"],2,"{raw}");
+            assert_eq!(selected["anime"]["asid"],"101:2","{raw}");
+            assert_eq!(public_match_response(Some(selected))["sid_start"],
+                "tt0300001:3:2","{raw}");
+        }
 
         // The word "Alicization" is not blindly inherited for non-anime.
         let ordinary=find("Anime Library/Ordinary.Show.S01E01.mkv");

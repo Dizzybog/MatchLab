@@ -123,3 +123,39 @@ fn real_spanish_temporada_ten_cap_1004_is_s10e04() {
     assert_ne!(mismatched["seasons"], json!([10]),
         "conflicting explicit season must not be overwritten: {mismatched:?}");
 }
+
+#[test]
+fn fansub_named_anime_arc_remains_part_of_title() {
+    for (raw, title, episode) in [
+        (
+            "[HorribleSubs] Sword Art Online - Alicization - 02 [1080p].mkv",
+            "Sword Art Online - Alicization", 2,
+        ),
+        (
+            "[SubsPlease] Sword Art Online - Alicization - 09 [720p][A3CB185F].mkv",
+            "Sword Art Online - Alicization", 9,
+        ),
+        (
+            "[Erai-raws] Monogatari Series - Off and Monster Season - 02 [480p].mkv",
+            "Monogatari Series - Off and Monster Season", 2,
+        ),
+    ] {
+        let p = parsed(raw);
+        assert_eq!(p["title"], title, "{raw}: {p:?}");
+        assert_eq!(p["seasons"], json!([]), "{raw}: {p:?}");
+        assert_eq!(p["episodes"], json!([episode]), "{raw}: {p:?}");
+        assert_eq!(p["extension"], "mkv", "{raw}: {p:?}");
+        if let Some(candidate) = p.get("anime_episode_candidate") {
+            assert_eq!(candidate["title"], title, "{raw}: {p:?}");
+            assert_eq!(candidate["episode"], episode, "{raw}: {p:?}");
+            assert_eq!(candidate["verified"], false, "{raw}: {p:?}");
+        }
+    }
+
+    let explicit = parsed("[HorribleSubs] Sword Art Online - Alicization S03E02 [1080p].mkv");
+    assert_eq!(explicit["seasons"], json!([3]), "{explicit:?}");
+    assert_eq!(explicit["episodes"], json!([2]), "{explicit:?}");
+
+    let unmarked = parsed("[HorribleSubs] Sword Art Online - Alicization [1080p].mkv");
+    assert_eq!(unmarked["episodes"], json!([]), "{unmarked:?}");
+}
