@@ -8,7 +8,7 @@ ARG MATCHLAB_BUILD_SHA=""
 ENV MATCHLAB_BUILD_SHA=$MATCHLAB_BUILD_SHA
 ENV RUSTFLAGS=$RUSTFLAGS
 COPY . .
-RUN cargo build --release -p matchlab-server
+RUN cargo build --release --locked -p matchlab-server
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini curl \

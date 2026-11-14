@@ -72,12 +72,16 @@ def valid_rule(row,build_sha,ancestor=None):
         "verification","examples"
     }:return None
     marker=row["marker"]
-    if row["kind"]!="verified_regex_proposal" or canonical(marker)!=row["regex"]:
+    expression=canonical(marker)
+    if (row["kind"]!="verified_regex_proposal" or expression is None
+        or expression!=row["regex"]):
         return None
     if not compatible_source(row["source_build"],build_sha,1,ancestor):
         return None
     if (not isinstance(row["source_metadata"],str) or
         len(row["source_metadata"])>200):return None
+    try:row["source_metadata"].encode("utf-8")
+    except UnicodeError:return None
     fp=hashlib.sha256(("community-regex:"+marker).encode()).hexdigest()
     if row["fingerprint"]!=fp:return None
     for name,minimum in (("evidence_count",12),("distinct_imdb",4),
@@ -112,7 +116,7 @@ TV_GRAMMARS={
 }
 FIELD_EPOCH=5
 TV_EPOCH=2
-CORRECTIVE_EPOCH=1
+CORRECTIVE_EPOCH=2
 DISCOVERY_EPOCH=2
 TITLE_BOUNDARY_REVIEW_PATTERNS={
     "episode":r"(?i)(?:^|[ ._-])(?:s[0-9]{1,3}(?:[ ._-]*e[0-9]{1,5})?|[0-9]{1,3}x[0-9]{1,5}|e(?:p)?[0-9]{1,5})(?:$|[ ._-])",
@@ -140,7 +144,7 @@ def digest(s):return hashlib.sha256(s.encode()).hexdigest()
 def bounded_int(v,small=0,big=2_000_000):
     return type(v) is int and small<=v<=big
 def technical_pattern(field,signal):
-    if field not in TECH_FIELDS or not isinstance(signal,str):return None
+    if not isinstance(field,str) or field not in TECH_FIELDS or not isinstance(signal,str):return None
     if not 2<=len(signal)<=24 or not re.fullmatch("[a-z0-9_.]+",signal):
         return None
     parts=[re.escape(p) for p in re.split("[_.]",signal) if p]
@@ -149,6 +153,14 @@ def technical_pattern(field,signal):
     return pattern if len(pattern)<=140 else None
 def valid_extended_rule(r,sha,ancestor=None):
     if not isinstance(r,dict):return None
+    # JSON arrays/objects are valid input data but cannot be discriminators,
+    # dictionary keys or set members. Reject them before family validation so
+    # one malformed proposal cannot abort intake of all other Issue reports.
+    text_fields={"kind","fingerprint","source_build","verification",
+        "field","signal","original_kind","family","mode","regex",
+        "original_regex","proposed_regex","transform"}
+    if any(not isinstance(r[key],str) for key in text_fields if key in r):
+        return None
     kind=r.get("kind")
     common={"kind","fingerprint","evidence_count","distinct_titles",
         "canonical_confirmations","source_build","verification"}
@@ -228,7 +240,9 @@ def valid_extended_rule(r,sha,ancestor=None):
         source=r["source_build"]
         if not isinstance(source,str) or ":" not in source:return None
         old_sha,epoch=source.rsplit(":",1)
-        if not valid_sha(old_sha) or not epoch.isdecimal() or not 1<=int(epoch)<=20:
+        if (not valid_sha(old_sha) or not 1<=len(epoch)<=2
+            or not epoch.isascii() or not epoch.isdecimal()
+            or not 1<=int(epoch)<=20):
             return None
         if not (ancestor or git_ancestor)(old_sha,sha):return None
         if r["review_only"] is not True or r["verification"]!=(
@@ -354,7 +368,8 @@ def valid_extended_rule(r,sha,ancestor=None):
         if family=="sxe_range" and field!="episodes":return None
         if r["signal"]!=f"corrective_{family}":return None
         if not bounded_int(r["handler_index"],0,4096):return None
-        if not isinstance(r["failure_classes"],list) or not r["failure_classes"]:
+        if (not isinstance(r["failure_classes"],list) or not r["failure_classes"]
+            or any(not isinstance(value,str) for value in r["failure_classes"])):
             return None
         if (len(r["failure_classes"])>5 or
             len(r["failure_classes"])!=len(set(r["failure_classes"])) or
@@ -426,9 +441,11 @@ def parse_batch(comment,current_sha,ancestor=git_ancestor):
     body=comment.get("body")
     if not isinstance(body,str) or not body.startswith(MARKER+"\n"):
         return None
-    if len(body.encode("utf-8"))>MAX_BODY:return None
+    try:
+        if len(body.encode("utf-8"))>MAX_BODY:return None
+    except UnicodeError:return None
     try:batch=json.loads(body[len(MARKER)+1:])
-    except (ValueError,TypeError):return None
+    except (ValueError,TypeError,RecursionError):return None
     if not isinstance(batch,dict) or set(batch)!={
         "protocol","learning_epoch","build_sha","source","batch_id",
         "created_unix","verified","reports","rules"

@@ -431,11 +431,15 @@ fn write_in_generation(kind:&str,title:&str,year:Option<i32>,
 pub fn get_parser(title:&str)->Option<Value>{
     read("parse",title,None,None,None)
 }
-pub fn put_parser(title:&str,value:&Value){
-    if !enabled(){return;}
-    if let Some(ns)=namespace("parse",None){
-        write_in_generation("parse",title,None,None,ns,value);
-    }
+/// Capture before parsing, alongside the caller's live-rule generation.
+/// A completed parse must retain that provenance even if rules change
+/// between the caller's final validation and the asynchronous write.
+pub fn parser_generation()->Option<String>{
+    if !enabled(){return None;}
+    namespace("parse",None)
+}
+pub fn put_parser(title:&str,value:&Value,generation:&str){
+    write_in_generation("parse",title,None,None,generation.to_owned(),value);
 }
 /// The caller must verify the same generation again before returning a
 /// cached match. diagnose_logged always performs that metadata/rules check.
@@ -515,17 +519,28 @@ pub fn maintain(_db:&Connection,metadata:&Path)->Result<(),String>{
     let _=CACHE_WRITER.get_or_init(cache_worker);
     Ok(())
 }
-fn maintain_with_budget(db:&Connection,metadata:&Path,budget:u64)->Result<(),String>{
-    initialize(db).map_err(|e|e.to_string())?;
-    let current_parse=namespace("parse",None).ok_or("parser namespace unavailable")?;
-    let current_match=namespace("match",Some(metadata));
+fn mark_obsolete(db:&Connection,current_parse:&str,metadata_generation:Option<&str>,
+    strict:bool,time:i64)->Result<(),String>{
+    // Public matches include the matcher semantics and boot-time strict
+    // policy in their namespace. Comparing against the bare metadata
+    // fingerprint would incorrectly retire every current match on each pass.
+    let current_match=metadata_generation.map(|generation|
+        crate::scoped_match_generation(generation,strict));
     db.execute(
         "UPDATE learning_cache SET obsolete=1 WHERE obsolete=0
            AND (expires_at<=?1
             OR (kind='parse' AND namespace<>?2)
             OR (kind='match' AND namespace<>COALESCE(?3,'')))",
-        params![now(),current_parse,current_match]
+        params![time,current_parse,current_match]
     ).map_err(|e|e.to_string())?;
+    Ok(())
+}
+fn maintain_with_budget(db:&Connection,metadata:&Path,budget:u64)->Result<(),String>{
+    initialize(db).map_err(|e|e.to_string())?;
+    let current_parse=namespace("parse",None).ok_or("parser namespace unavailable")?;
+    let current_match=namespace("match",Some(metadata));
+    mark_obsolete(db,&current_parse,current_match.as_deref(),
+        crate::strict_match_mode(),now())?;
     // This SQLite database only contains cached responses. Rule evidence and
     // the offline sharing archive remain untouched in local-learning.sqlite3.
     let mut occupied=used_bytes(db)?;
@@ -588,6 +603,40 @@ fn read_current(db:&Connection,cache_key:&str,ns:&str,time:i64)->Option<Value>{
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn maintenance_preserves_current_matcher_policy_and_retires_stale_results(){
+        for strict in [false,true]{
+            let mut db=Connection::open_in_memory().unwrap();
+            initialize(&db).unwrap();
+            let current=crate::scoped_match_generation("metadata-v1",strict);
+            let other_policy=crate::scoped_match_generation("metadata-v1",!strict);
+            let old_metadata=crate::scoped_match_generation("metadata-v0",strict);
+            let events=[
+                ("current",current.as_str(),"match",100),
+                ("opposite-policy",other_policy.as_str(),"match",100),
+                ("old-metadata",old_metadata.as_str(),"match",100),
+                ("unscoped","metadata-v1","match",100),
+                ("old-matcher","metadata-v1:matcher=previous:strict=true","match",100),
+                ("expired",current.as_str(),"match",10),
+                ("parse","parser-v1","parse",100),
+                ("old-parse","parser-v0","parse",100),
+            ].map(|(cache_key,namespace,kind,expires_at)|CacheEvent{
+                cache_key:cache_key.into(),namespace:namespace.into(),
+                kind:kind.into(),payload:b"{}".to_vec(),created_at:1,expires_at,
+            });
+            put_batch(&mut db,&events).unwrap();
+            mark_obsolete(&db,"parser-v1",Some("metadata-v1"),strict,20).unwrap();
+            assert_eq!(read_current(&db,"current",&current,20),Some(json!({})));
+            assert_eq!(read_current(&db,"parse","parser-v1",20),Some(json!({})));
+            for key in ["opposite-policy","old-metadata","unscoped",
+                "old-matcher","expired","old-parse"]{
+                let obsolete:i64=db.query_row(
+                    "SELECT obsolete FROM learning_cache WHERE cache_key=?1",
+                    [key],|row|row.get(0)).unwrap();
+                assert_eq!(obsolete,1,"stale entry {key} must remain ineligible");
+            }
+        }
+    }
     #[test]
     fn bounded_cache_batch_preserves_current_namespace(){
         let mut db=Connection::open_in_memory().unwrap();

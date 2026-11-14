@@ -69,6 +69,17 @@ fn download(client:&reqwest::blocking::Client,url:&str,path:&Path)->Result<(),Bo
 }
 struct Workspace(PathBuf);
 impl Drop for Workspace{fn drop(&mut self){let _=fs::remove_dir_all(&self.0);}}
+fn metadata_client()->Result<reqwest::blocking::Client,reqwest::Error>{
+    reqwest::blocking::Client::builder()
+        // Enforce TLS before every network request, including redirects.
+        // Checking only the final response URL permits a plaintext request
+        // to be sent before the download's scheme check can reject it.
+        .https_only(true)
+        .timeout(std::time::Duration::from_secs(900))
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+}
 /// Seven HTTPS URLs in order: IMDb basics, akas, episodes, ratings, animeApi,
 /// Anime-Lists, AniDB titles. Sources are explicit to avoid silent feed changes.
 pub fn refresh_from_urls(target:&Path,urls:&[String])->Result<(u64,u64,u64,u64),Box<dyn Error>>{
@@ -85,11 +96,7 @@ pub fn refresh_from_urls(target:&Path,urls:&[String])->Result<(u64,u64,u64,u64),
     let dir=parent.join(format!(".matchlab-download-{}-{nonce}",std::process::id()));
     fs::create_dir(&dir)?;
     let _cleanup=Workspace(dir.clone());
-    let client=reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(900))
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .build()?;
+    let client=metadata_client()?;
     let names=["basics.tsv.gz","akas.tsv.gz","episodes.tsv.gz","ratings.tsv.gz","animeapi.tsv","animelists.xml","anidb.xml.gz"];
     let paths:Vec<PathBuf>=names.iter().map(|name|dir.join(name)).collect();
     for (url,path) in urls.iter().zip(paths.iter()){download(&client,url,path)?;}
@@ -114,6 +121,23 @@ mod tests{
         let urls=configured_urls(None).unwrap().join(",");
         assert_eq!(configured_urls(Some(&urls)).unwrap().len(),7);
         assert!(configured_urls(Some(&urls.replacen("https://","http://",1))).is_err());
+    }
+    #[test]
+    fn legacy_sources_insert_ratings_without_reordering_other_feeds(){
+        let mut legacy=configured_urls(None).unwrap();
+        legacy.remove(3);
+        assert_eq!(configured_urls(Some(&legacy.join(","))).unwrap(),
+            configured_urls(None).unwrap());
+    }
+    #[test]
+    fn transport_rejects_plaintext_before_attempting_a_connection(){
+        // This exercises the client policy underneath download()'s URL
+        // validation, so a redirect cannot bypass the HTTPS requirement.
+        let error=metadata_client().unwrap()
+            .get("http://127.0.0.1:1/plaintext")
+            .timeout(std::time::Duration::from_millis(100))
+            .send().unwrap_err();
+        assert!(error.is_builder(),"reject the scheme before transport: {error}");
     }
     #[test]
     fn reject_insecure_url_set_before_creating_workspace(){

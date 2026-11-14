@@ -101,5 +101,18 @@ class CommunityRuleTests(unittest.TestCase):
         item["distinct_imdb"]=1
         self.assertIsNone(rules.valid_rule(item,SHA))
 
+    def test_invalid_marker_with_null_regex_is_rejected(self):
+        for marker in (None, [], {}, 7, "episode"):
+            item = {**proposal(), "marker": marker, "regex": None}
+            with self.subTest(marker=marker):
+                self.assertIsNone(rules.valid_rule(item, SHA))
+        self.assertIsNone(rules.valid_rule(
+            {**proposal(), "source_metadata": "\ud800"}, SHA))
+
+    def test_excessively_nested_json_is_rejected(self):
+        body = rules.MARKER + "\n" + "[" * 2000 + "]" * 2000
+        self.assertIsNone(rules.parse_batch({"body": body}, SHA,
+                                            lambda *_: True))
+
 if __name__=="__main__":
     unittest.main()

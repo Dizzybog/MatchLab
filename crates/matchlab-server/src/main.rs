@@ -137,6 +137,24 @@ fn parse_rules_revision()->u64{
         ^ general_learning::revision().rotate_left(7)
         ^ matchlab_parser::handler_patch_revision().rotate_left(49)
 }
+
+fn stable_parse_snapshot(
+    revision:impl Fn()->u64,
+    mut load:impl FnMut()->Result<(Value,Option<String>),String>,
+)->Result<(Value,u64,Option<String>),String>{
+    // One retry handles publication during a parse without an unbounded loop
+    // when rules are being updated repeatedly. Always retain the generation
+    // captured BEFORE loading: an old parse must never acquire a newer label.
+    for _ in 0..2 {
+        let generation=revision();
+        let (value,persistent_generation)=load()?;
+        if revision()==generation {
+            return Ok((value,generation,persistent_generation));
+        }
+    }
+    Err("parser rules changed during request; retry".into())
+}
+
 fn parse_cached(title:&str)->Result<Value,String>{
     if title.trim().is_empty()||title.len()>4096 {
         return Err("title must be 1–4096 bytes".into());
@@ -151,27 +169,26 @@ fn parse_cached(title:&str)->Result<Value,String>{
                 .then(||Arc::clone(value)))
     });
     if let Some(value)=cached {
-        if parse_rules_revision()==generation {return Ok((*value).clone());}
+        let value=(*value).clone();
+        if parse_rules_revision()==generation {return Ok(value);}
         // A concurrent source-regex update requires a fresh parser run.
     }
     // Persisted hits are likewise strict current-namespace only. On a
     // parser/image/regex change, an old result can remain as historical
     // learning evidence but cannot become a live parse result.
-    let mut value=if let Some(cached)=learning_cache::get_parser(title){
-        cached
-    }else{
-        Value::Object(matchlab_parser::parse_title(title,false)
-            .map_err(|e|e.to_string())?)
-    };
-    if parse_rules_revision()!=generation {
-        // A new local rule was installed while loading. Do not cache or
-        // return a base parse computed in an older rule generation.
-        value=Value::Object(matchlab_parser::parse_title(title,false)
-            .map_err(|e|e.to_string())?);
-    }
+    let (value,generation,persistent_generation)=stable_parse_snapshot(
+        parse_rules_revision,||{
+            let persistent_generation=learning_cache::parser_generation();
+            let value=if let Some(cached)=learning_cache::get_parser(title){cached}
+                else{Value::Object(matchlab_parser::parse_title(title,false)
+                    .map_err(|e|e.to_string())?)};
+            Ok((value,persistent_generation))
+        })?;
     // The base parser output is stored, not an ML-decorated response. This
     // ensures retired learned patterns never survive as cached coordinates.
-    learning_cache::put_parser(title,&value);
+    if let Some(saved)=persistent_generation {
+        learning_cache::put_parser(title,&value,&saved);
+    }
     let cache_value=Arc::new(value.clone());
     if let Ok(mut guard)=cache.lock(){
         const CAPACITY:usize=1024;
@@ -185,7 +202,7 @@ fn parse_cached(title:&str)->Result<Value,String>{
                 }
             }
         }
-        guard.insert(title.to_string(),(Instant::now(),parse_rules_revision(),cache_value));
+        guard.insert(title.to_string(),(Instant::now(),generation,cache_value));
     }
     Ok(value)
 }
@@ -2809,11 +2826,14 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         return Ok(());
     }
     if args.get(1).is_some_and(|arg|arg=="refresh-metadata-urls") {
-        if args.len()!=9 {
-            return Err("usage: matchlab-server refresh-metadata-urls <database.sqlite3> <basics_url> <akas_url> <episodes_url> <animeapi_url> <animelists_url> <anidb_titles_url>".into());
+        if !matches!(args.len(),9|10) {
+            return Err("usage: matchlab-server refresh-metadata-urls <database.sqlite3> <basics_url> <akas_url> <episodes_url> [<ratings_url>] <animeapi_url> <animelists_url> <anidb_titles_url>".into());
         }
+        // Share startup validation and the legacy six-source compatibility
+        // path, which inserts the official ratings feed in the right slot.
+        let urls=metadata_download::configured_urls(Some(&args[3..].join(",")))?;
         let (imdb,links,mappings,aliases)=metadata_download::refresh_from_urls(
-            std::path::Path::new(&args[2]),&args[3..])?;
+            std::path::Path::new(&args[2]),&urls)?;
         tracing::info!("downloaded metadata refresh completed: imdb={imdb} anime_links={links} episode_maps={mappings} aliases={aliases}");
         return Ok(());
     }
@@ -6209,6 +6229,35 @@ mod tests {
         assert!(cache_generation_current(4,at,4));
         assert!(!cache_generation_current(4,at,5),
             "a cached parse from an obsolete regex generation must be recomputed");
+    }
+    #[test]
+    fn parser_snapshot_retries_changes_and_preserves_captured_provenance(){
+        use std::cell::Cell;
+        let generation=Cell::new(4);
+        let attempts=Cell::new(0);
+        let (value,saved,persistent)=stable_parse_snapshot(||generation.get(),||{
+            let at=generation.get();
+            attempts.set(attempts.get()+1);
+            if attempts.get()==1{generation.set(5);}
+            Ok((json!({"generation":at}),Some(format!("namespace-{at}"))))
+        }).unwrap();
+        assert_eq!(attempts.get(),2);
+        assert_eq!(value["generation"],5);
+        assert_eq!(saved,5);
+        assert_eq!(persistent.as_deref(),Some("namespace-5"));
+        generation.set(6);
+        assert_eq!(saved,5,"later updates cannot relabel this cached value");
+    }
+    #[test]
+    fn repeatedly_changing_parser_rules_fail_without_publishing_a_snapshot(){
+        use std::cell::Cell;
+        let generation=Cell::new(0);
+        let result=stable_parse_snapshot(||generation.get(),||{
+            generation.set(generation.get()+1);
+            Ok((json!({"title":"unstable"}),None))
+        });
+        assert!(result.unwrap_err().contains("parser rules changed"));
+        assert_eq!(generation.get(),2,"retries must be bounded");
     }
     #[test]
     fn parse_cache_returns_full_parser_fields() {

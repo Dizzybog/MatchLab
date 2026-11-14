@@ -1,6 +1,7 @@
 """New community sharing formats: exact-rule and source-rule PR proposals."""
 import hashlib
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -97,6 +98,56 @@ class TestAllRegexSharing(unittest.TestCase):
         p=tv()
         p["source_build"]=SHA+":1"
         self.assertIsNone(intake.valid_extended_rule(p,SHA))
+
+    def test_wrong_json_types_do_not_suppress_valid_sibling_rules(self):
+        for factory in (technical, tv, patch, review_discovery, title_boundary):
+            candidate = factory()
+            good = tv() if factory is technical else technical()
+            for key, value in candidate.items():
+                # The batch checksum deliberately requires every fingerprint
+                # to be valid. Other malformed fields reject only their rule.
+                if key == "fingerprint" or not isinstance(value, str):
+                    continue
+                for malformed in (None, [], {}, 7, True):
+                    with self.subTest(kind=candidate["kind"], key=key,
+                                      malformed=malformed):
+                        bad = {**candidate, key: malformed}
+                        self.assertIsNone(intake.valid_extended_rule(bad, SHA))
+                        self.assertEqual(intake.parse_batch(
+                            batch([bad, good]), SHA, lambda *_: True), [good])
+
+    def test_corrective_failure_classes_require_strings(self):
+        handlers = json.loads(intake.CATALOG.read_text())["handlers"]
+        index = next(i for i, handler in enumerate(handlers)
+                     if handler.get("name") == "episodes"
+                     and handler.get("transform") == "array(integer)"
+                     and handler.get("options", {}).get("remove") is False
+                     and handler.get("options", {}).get("skipIfAlreadyFound") is True)
+        pattern = intake.TV_NATIVE_PATTERNS["sxe"]["episodes"]
+        candidate = {
+            **common("learned_corrective_regex", intake.CORRECTIVE_EPOCH),
+            "handler_index": index, "field": "episodes", "family": "sxe",
+            "signal": "corrective_sxe", "regex": pattern,
+            "failure_classes": ["missing"], "review_only": True,
+            "verification": "review_only_requires_safe_replay",
+            "fingerprint": sha(f"corrective:sxe:{index}:false:{pattern}"),
+        }
+        self.assertIsNotNone(intake.valid_extended_rule(candidate, SHA))
+        self.assertIsNone(intake.valid_extended_rule(
+            {**candidate, "source_build": SHA + ":1"}, SHA))
+        for failures in ([[]], [{}], [None], ["missing", 1]):
+            with self.subTest(failures=failures):
+                bad = {**candidate, "failure_classes": failures}
+                self.assertIsNone(intake.valid_extended_rule(bad, SHA))
+                self.assertEqual(intake.parse_batch(
+                    batch([bad, technical()]), SHA, lambda *_: True), [technical()])
+
+    def test_corrective_epoch_matches_native_producer(self):
+        source = (Path(__file__).resolve().parents[2] /
+                  "crates/matchlab-server/src/corrective_learning.rs").read_text()
+        epoch = re.search(r"const\s+EPOCH\s*:\s*u32\s*=\s*(\d+)\s*;", source)
+        self.assertIsNotNone(epoch, "native corrective protocol epoch must be declared")
+        self.assertEqual(intake.CORRECTIVE_EPOCH, int(epoch[1]))
     def test_any_parser_field_can_submit_discovery_for_review_only(self):
         for field in ("title","year","group","network","languages",
                       "seasons","episodes","quality","audio"):
@@ -177,6 +228,9 @@ class TestAllRegexSharing(unittest.TestCase):
         with patch.object(intake,"git_ancestor",return_value=True):
             self.assertIsNone(intake.valid_extended_rule(
                 {**old,"verification":"untrusted"},SHA))
+            for epoch in ("9" * 5000, "\u0665"):
+                self.assertIsNone(intake.valid_extended_rule(
+                    {**old, "source_build": "b" * 40 + ":" + epoch}, SHA))
     def test_no_untrusted_extra_fields_or_title_samples(self):
         row=technical()
         row["samples"]=["Private.Movie.2024"]

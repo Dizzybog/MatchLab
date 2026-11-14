@@ -1555,9 +1555,15 @@ fn contains_ascii_fold(input: &str, needle: &str) -> bool {
 }
 
 fn has_collapsible_whitespace(input: &str) -> bool {
+    // The guarded shortcut must cover the same Unicode whitespace as
+    // SPACING_REGEX. Keep the ordinary ASCII byte scan for release names.
+    if !input.is_ascii()
+        && input.chars().any(|c|!c.is_ascii()&&c.is_whitespace()) {
+        return true;
+    }
     let mut previous_was_whitespace = false;
     for byte in input.bytes() {
-        let whitespace = matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0c);
+        let whitespace = byte.is_ascii_whitespace() || byte == 0x0b;
         if whitespace && (previous_was_whitespace || byte != b' ') {
             return true;
         }
@@ -3182,7 +3188,7 @@ pub fn generic_path_title(title:&str)->bool{
     // A leaf like "S6E1-8 ..." can be reduced by the upstream parser to
     // just "S". It is a coordinate marker, not a stronger title than its
     // descriptive parent directory.
-    if lowercase.len()==1 && lowercase.bytes().all(|b|b.is_ascii_alphabetic()){
+    if matches!(lowercase.as_str(),"s"|"e"){
         return true;
     }
     // A lone episode marker is not a show title. This also allows
@@ -3226,7 +3232,7 @@ fn normalize_slash_date_format<'a>(
         let before=input[..m.start()].rsplit(['/', '\\']).next().unwrap_or_default();
         let separated=before.as_bytes().last()
             .is_some_and(|c|matches!(*c,b'.'|b'_'|b'-'|b' '));
-        let named=before.bytes().any(|c|c.is_ascii_alphabetic());
+        let named=before.chars().any(char::is_alphabetic);
         let trailing=input[m.end()..].chars().next()
             .is_none_or(|c|!c.is_ascii_alphanumeric());
         let normalized=m.as_str().replace('/'," ");
@@ -3256,31 +3262,48 @@ fn split_release_path(raw:&str)->Vec<&str>{
             Vec::new()
         }else{vec![raw]};
     }
-    let mut components=Vec::new();
+    // Only complete annotations can hide path separators. A malformed
+    // publisher prefix such as "[site/Show/S01E02.mkv" must not swallow
+    // every subsequent directory. Retry only malformed inputs, ignoring
+    // their unmatched opening positions. Complete nested blocks still
+    // protect URLs, and well-formed paths retain a single tokenizer pass.
     let mut brackets=Vec::new();
-    let mut start=0;
-    for (index,ch) in raw.char_indices(){
-        match ch {
-            '['=>brackets.push(']'),
-            '【'=>brackets.push('】'),
-            '('=>brackets.push(')'),
-            '{'=>brackets.push('}'),
-            ']'|'】'|')'|'}'=>{
-                if brackets.last().copied()==Some(ch){brackets.pop();}
-            },
-            '/'|'\\' if brackets.is_empty()=>{
-                let part=&raw[start..index];
-                if !part.is_empty()&&part!="."&&part!=".."{
-                    components.push(part);
-                }
-                start=index+ch.len_utf8();
-            },
-            _=>{},
+    let mut unmatched=Vec::new();
+    let mut components=Vec::new();
+    for _ in 0..2 {
+        brackets.clear();
+        components.clear();
+        let mut ignored=unmatched.iter().peekable();
+        let mut start=0;
+        for (index,ch) in raw.char_indices(){
+            if ignored.peek().copied()==Some(&index){
+                ignored.next();
+                continue;
+            }
+            match ch {
+                '['=>brackets.push((index,']')),
+                '【'=>brackets.push((index,'】')),
+                '('=>brackets.push((index,')')),
+                '{'=>brackets.push((index,'}')),
+                ']'|'】'|')'|'}'=>{
+                    if brackets.last().is_some_and(|(_,close)|*close==ch){brackets.pop();}
+                },
+                '/'|'\\' if brackets.is_empty()=>{
+                    let part=&raw[start..index];
+                    if !part.is_empty()&&part!="."&&part!=".."{
+                        components.push(part);
+                    }
+                    start=index+ch.len_utf8();
+                },
+                _=>{},
+            }
         }
-    }
-    let part=&raw[start..];
-    if !part.is_empty()&&part!="."&&part!=".."{
-        components.push(part);
+        let part=&raw[start..];
+        if !part.is_empty()&&part!="."&&part!=".."{
+            components.push(part);
+        }
+        if brackets.is_empty(){break;}
+        unmatched.extend(brackets.iter().map(|(index,_)|*index));
     }
     components
 }
@@ -4477,6 +4500,71 @@ mod tests {
             let parsed=parse_title(release,false).unwrap();
             assert!(parsed.get("date").is_none(),
                 "invalid date should not be exposed: {release} => {parsed:?}");
+        }
+    }
+
+    #[test]
+    fn unicode_slash_airdates_remain_one_release_component() {
+        for (release,title) in [
+            ("新闻.2026/11/10.1080p.WEB-DL", "新闻"),
+            ("Новости.10/11/2026.1080p.WEB-DL", "Новости"),
+            ("Dagsrevyen/新闻.2026/11/10.1080p.WEB-DL", "新闻"),
+        ] {
+            let parsed=parse_title(release,false).unwrap();
+            assert_eq!(parsed["date"],"2026-11-10","{release}: {parsed:?}");
+            assert_eq!(parsed["title"],title,"{release}: {parsed:?}");
+            assert_eq!(parsed["seasons"],json!([]),"{release}: {parsed:?}");
+            assert_eq!(parsed["episodes"],json!([]),"{release}: {parsed:?}");
+        }
+        for release in ["新闻/2026/11/10.mkv","Новости.2026/02/30.mkv"] {
+            assert!(parse_title(release,false).unwrap().get("date").is_none(),
+                "numeric directories and invalid dates are not broadcast dates: {release}");
+        }
+    }
+
+    #[test]
+    fn malformed_annotations_do_not_swallow_path_separators() {
+        for opening in ["[", "【", "(", "{"] {
+            let parent=format!("{opening}broken publisher");
+            let raw=format!("{parent}/Example.Show.S01/S01E02.mkv");
+            assert_eq!(split_release_path(&raw),
+                vec![parent.as_str(),"Example.Show.S01","S01E02.mkv"]);
+            let parsed=parse_title(&raw,false).unwrap();
+            assert_eq!(parsed["title"],"Example Show","{raw}: {parsed:?}");
+            assert_eq!(parsed["seasons"],json!([1]),"{raw}: {parsed:?}");
+            assert_eq!(parsed["episodes"],json!([2]),"{raw}: {parsed:?}");
+        }
+        assert_eq!(split_release_path(
+            "【broken/[site https://example.org/download]Show.S01/S01E02.mkv"),
+            vec!["【broken","[site https://example.org/download]Show.S01","S01E02.mkv"]);
+        assert_eq!(split_release_path(
+            "[site https://example.org/a(b)/download]Show.S01/S01E02.mkv"),
+            vec!["[site https://example.org/a(b)/download]Show.S01","S01E02.mkv"]);
+    }
+
+    #[test]
+    fn one_letter_work_titles_can_be_inherited_from_parent_folders() {
+        for title in ["V", "X", "M"] {
+            assert!(!generic_path_title(title));
+            let raw=format!("{title}.1984/S01E02.mkv");
+            let parsed=parse_title(&raw,false).unwrap();
+            assert_eq!(parsed["title"],title,"{raw}: {parsed:?}");
+            assert_eq!(parsed["year"],1984,"{raw}: {parsed:?}");
+            assert_eq!(parsed["seasons"],json!([1]),"{raw}: {parsed:?}");
+            assert_eq!(parsed["episodes"],json!([2]),"{raw}: {parsed:?}");
+        }
+        assert!(generic_path_title("S"));
+        assert!(generic_path_title("E"));
+    }
+
+    #[test]
+    fn guarded_cleaner_normalizes_unicode_and_ascii_whitespace() {
+        for whitespace in ["\u{00a0}","\u{2003}","\u{202f}","\u{000b}"] {
+            let raw=format!("Example{whitespace}{whitespace}Show");
+            assert_eq!(clean_title_impl::<true>(&raw),"Example Show");
+            assert_eq!(clean_title_impl::<true>(&raw),clean_title_impl::<false>(&raw));
+            let parsed=parse_title(&format!("{raw}.S01E02.1080p"),false).unwrap();
+            assert_eq!(parsed["title"],"Example Show","{parsed:?}");
         }
     }
 

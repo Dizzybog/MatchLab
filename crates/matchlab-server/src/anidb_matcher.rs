@@ -121,7 +121,7 @@ fn season_episode(rows:&[Mapping],season:i64,episode:i64)->Option<i64>{
             found.extend(m.pairs.iter().filter_map(|(ani,tv)|
                 (*tv==episode).then_some(*ani)));
         }else if m.start>0 && m.end>=m.start {
-            let ani=episode-m.offset;
+            let Some(ani)=episode.checked_sub(m.offset) else{continue};
             if (m.start..=m.end).contains(&ani){found.insert(ani);}
         }
     }
@@ -246,6 +246,12 @@ mod tests{
         assert_eq!(
             tantivy_search::anidb_ids_exact_title(&db,"Super-Natural").unwrap(),
             BTreeSet::from(["5002".into()]));
+    }
+
+    #[test]
+    fn malformed_season_offsets_do_not_overflow(){
+        let rows=[Mapping{season:1,start:1,end:12,offset:i64::MIN,pairs:vec![]}];
+        assert_eq!(season_episode(&rows,1,3),None);
     }
 
     #[test]
