@@ -60,12 +60,29 @@ fn within_known_season_bounds(
 pub fn resolve_range(
     db:&Connection,imdb:&str,title:&str,season:i64,start:i64,end:i64,
 )->rusqlite::Result<Vec<Option<episode_crosswalk::Episode>>>{
+    resolve_range_inner(db,imdb,title,season,start,end,false)
+}
+
+/// Only local S/P markers use this path. A family-first AniDB work may
+/// refer to its second cour while all cours still occupy one IMDb season.
+/// The ordinary resolver deliberately retains its global-season shortcut.
+pub fn resolve_local_part_range(
+    db:&Connection,imdb:&str,title:&str,season:i64,start:i64,end:i64,
+)->rusqlite::Result<Vec<Option<episode_crosswalk::Episode>>>{
+    resolve_range_inner(db,imdb,title,season,start,end,true)
+}
+
+fn resolve_range_inner(
+    db:&Connection,imdb:&str,title:&str,season:i64,start:i64,end:i64,
+    force_local:bool,
+)->rusqlite::Result<Vec<Option<episode_crosswalk::Episode>>>{
     if season<=0||start<=0||end<start{return Ok(Vec::new());}
     // Preserve very large interval behavior without allocating an unbounded
     // batch context. Ordinary packs use the optimized shared-snapshot path.
     if end-start>=1_000 {
         return (start..=end).map(|episode|
-            resolve(db,imdb,title,season,episode)).collect();
+            resolve_range_inner(db,imdb,title,season,episode,episode,force_local)
+                .map(|episodes|episodes.into_iter().next().flatten())).collect();
     }
     let mut results=vec![None;(end-start+1) as usize];
     let key=imdb_matcher::clean_title(title);
@@ -139,7 +156,7 @@ pub fn resolve_range(
          CASE WHEN anidb_id GLOB '[0-9]*' THEN CAST(anidb_id AS INTEGER)
          ELSE 2147483647 END LIMIT 1",
         [&family],|r|r.get(0)).optional()?;
-    if base.as_deref()==Some(selected){
+    if !force_local && base.as_deref()==Some(selected){
         let fallback=episode_crosswalk::resolve_season_range(db,imdb,season,start,end)?;
         for (slot,mapped) in results.iter_mut().zip(fallback){
             if slot.is_none(){*slot=mapped;}
@@ -261,6 +278,93 @@ pub fn resolve_episode_from_exact_part_title(
     // and IMDb episode counts may lag behind verified crosswalk metadata.
     let mapped=resolve(db,imdb,title,1,episode)?;
     Ok(mapped.filter(|m|m.season==inferred_season))
+}
+
+/// Independently verified local S/P coordinates for a named AniDB work.
+/// They are never derived from arithmetic alone: the established part
+/// crosswalk supplies the real IMDb and AniDB episode IDs.
+pub struct LocalPartCoordinate {
+    pub base_season:i64,
+    pub mapped:episode_crosswalk::Episode,
+}
+
+/// Resolve S2/P2 *within* an exact named anime work. A global S2 release
+/// stays global, and a Part 3 S01E03 keeps its established part/episode
+/// offset. The requested equality exception applies to S3 when the named
+/// work starts at IMDb S03, not to P3 (which means a third part).
+/// A named part must have a *unique exact* AniDB alias, start beyond
+/// IMDb S01, and share a TVDB family with another linked AniDB work.
+/// A single generic anime title indexed only against S03 is NOT enough
+/// to prove that its explicit S2 is relative.
+pub fn named_part_base(
+    db:&Connection,imdb:&str,title:&str,
+)->rusqlite::Result<Option<i64>>{
+    let key=imdb_matcher::clean_title(title);
+    if key.len()<7{return Ok(None);}
+    // Title evidence is served only by the immutable Tantivy index.
+    // Never scan the large IMDb titles table from a matching request.
+    let canonical=crate::tantivy_search::title_aliases_exact(db,&key)
+        .map_err(|error|rusqlite::Error::ToSqlConversionFailure(
+            Box::new(std::io::Error::other(error))))?
+        .into_iter().any(|alias|alias.imdb_id==imdb && alias.original
+            && alias.clean==key
+            && matches!(alias.media_type.as_str(),"tvSeries"|"tvMiniSeries"));
+    if canonical{return Ok(None);}
+    let ids=aliases(db,imdb,title)?.into_iter()
+        .filter_map(|(id,alias)|(alias==key).then_some(id))
+        .collect::<BTreeSet<_>>();
+    if ids.len()!=1{return Ok(None);}
+    let selected=ids.iter().next().expect("unique AniDB alias");
+    let mut stmt=db.prepare(
+        "SELECT DISTINCT tvdb_season FROM episode_map
+         WHERE anidb_id=?1 AND anidb_season>0 AND tvdb_season>0")?;
+    let seasons=stmt.query_map([selected],|row|row.get::<_,i64>(0))?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+    if seasons.len()!=1{return Ok(None);}
+    let base=*seasons.iter().next().unwrap();
+    if base<=1{return Ok(None);}
+    let related:i64=db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM episode_map mine
+            JOIN episode_map sibling
+                ON sibling.tvdb_id=mine.tvdb_id
+            JOIN anime_series_map linked
+                ON linked.anidb_id=sibling.anidb_id
+            WHERE mine.anidb_id=?1 AND mine.tvdb_id<>''
+                AND mine.tvdb_season>0
+                AND sibling.anidb_id<>mine.anidb_id
+                AND sibling.tvdb_season>0 AND linked.imdb_id=?2
+            LIMIT 1)",
+        params![selected,imdb],|row|row.get(0))?;
+    Ok((related!=0).then_some(base))
+}
+
+/// Verify local S2/P2 via the original AniDB part resolver. S3 when the
+/// work starts at S03 is *absolute* S03; P3 still denotes the third part.
+/// No episode or season is emitted merely from an arithmetic prediction.
+pub fn resolve_local_part(
+    db:&Connection,imdb:&str,title:&str,marker:&str,local:i64,episode:i64,
+)->rusqlite::Result<Option<LocalPartCoordinate>>{
+    if local<2 || local>99 || episode<=0 || episode>99_999
+        || !matches!(marker,"S"|"P"){return Ok(None);}
+    let Some(base)=named_part_base(db,imdb,title)? else{return Ok(None)};
+    let effective=if marker=="S" && local==base {1}else{local};
+    let Some(mapped)=resolve_local_part_range(
+        db,imdb,title,effective,episode,episode)?
+            .into_iter().next().flatten() else{
+        return Ok(None);
+    };
+    if !within_known_season_bounds(db,imdb,mapped.season,mapped.episode)?{
+        return Ok(None);
+    }
+    let valid=if marker=="S" && local==base {
+        mapped.season==base
+    }else if marker=="S" {
+        base.checked_add(local-1)==Some(mapped.season)
+    }else{
+        // Parts can occupy the same IMDb season or different seasons.
+        mapped.season>=base
+    };
+    Ok(valid.then_some(LocalPartCoordinate{base_season:base,mapped}))
 }
 
 /// Infer an IMDb/TVDB season from a title-specific AniDB alias without an episode.

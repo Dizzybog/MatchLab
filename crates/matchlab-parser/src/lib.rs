@@ -2573,6 +2573,44 @@ static PACK_SEASON_SUFFIX_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)(?:^|[ ._-])s0?([1-9][0-9]?)[ ._-]*$")
         .expect("valid anime pack season suffix")
 });
+// A local S2/P2 marker is not itself an IMDb season. The matcher may
+// reinterpret it only after a unique AniDB *part* alias and its crosswalk
+// prove a corresponding global season / episode. Keep original coordinates.
+static LOCAL_ANIME_PART_MARKER_RE:Lazy<regex::Regex>=Lazy::new(||{
+    regex::Regex::new(
+        r"(?i)(?:^|[ ._-])(?P<kind>[sp])0*(?P<n>[1-9][0-9]?)(?:e(?P<ep>[0-9]{1,4})|$|[ ._\[(])"
+    ).expect("valid bounded anime S/P marker")
+});
+fn local_anime_part_candidate(raw:&str)->Option<Value>{
+    // Cheap linear prefilter: most release names contain an S or P but
+    // almost none contain an immediately numbered S/P marker.
+    if !raw.as_bytes().windows(2).any(|pair|
+        matches!(pair[0],b's'|b'S'|b'p'|b'P') && pair[1].is_ascii_digit()) {
+        return None;
+    }
+    for caps in LOCAL_ANIME_PART_MARKER_RE.captures_iter(raw){
+        let prefix=raw.get(..caps.get(0)?.start())?
+            .trim_end_matches(|c:char|c.is_whitespace()||matches!(c,'.'|'_'|'-'));
+        let title=if prefix.starts_with('['){
+            prefix.split_once(']')?.1.trim()
+        }else{prefix};
+        // Reject bare/technical folder titles before the matcher pays for an
+        // exact alias lookup; never concatenate unrelated path components.
+        if title.chars().filter(|c|c.is_alphabetic()).count()<7
+            || title.contains(['/', '\\']) {
+            continue;
+        }
+        let title=clean_title(title);
+        if title.is_empty(){continue;}
+        let local=caps.name("n")?.as_str().parse::<i64>().ok()?;
+        let marker=caps.name("kind")?.as_str().to_ascii_uppercase();
+        let episode=caps.name("ep").and_then(|m|m.as_str().parse::<i64>().ok());
+        return Some(json!({"title":title,"local":local,
+            "marker":marker,"episode":episode,"verified":false}));
+    }
+    None
+}
+
 fn unmarked_single_anime_episode_candidate(
     raw: &str, result: &Map<String, Value>, translate_languages: bool,
 ) -> Result<Option<Value>, ParseError> {
@@ -3006,6 +3044,9 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
         )? {
             result.insert("anime_episode_candidate".into(),candidate);
         }
+    }
+    if let Some(candidate)=local_anime_part_candidate(raw){
+        result.insert("anime_local_part_candidate".into(),candidate);
     }
     preserve_fansub_part_title(raw, &mut result)?;
     if result.get("title").and_then(Value::as_str)
