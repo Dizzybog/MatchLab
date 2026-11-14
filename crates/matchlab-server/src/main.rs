@@ -2351,6 +2351,22 @@ fn match_generations(db_path:&PathBuf)->(Option<String>,Option<String>){
     (namespace,fingerprint)
 }
 
+fn history_details_with_request(mut details:Value,req:&MatchRequest,policy:MatchPolicy)->Value{
+    if let Some(record)=details.as_object_mut(){
+        // Both keys must be present: explicit null means the new event had
+        // no override; an absent object on legacy history means unknown.
+        record.insert("request_context".into(),json!({
+            "year":req.year,"series":req.series
+        }));
+        // Policy is replay provenance even when learning is disabled.
+        // Retain the existing key used by the independent ML evidence queue.
+        record.insert("ml_source_policy".into(),json!(
+            if matches!(policy,MatchPolicy::PublicApi){"public_api"}
+            else{"dashboard_diagnostic"}));
+    }
+    details
+}
+
 fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result<Diagnostic,String>{
     let start=Instant::now();
     // Dashboard-only exploratory diagnostics deliberately bypass matching
@@ -2400,26 +2416,21 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result
         Ok(d)=>{
             // One serialization for the optional ML cache and bounded
             // history queue; ownership is transferred to the writer.
-            let mut details=serde_json::to_value(d).unwrap_or(Value::Null);
+            let details=serde_json::to_value(d).unwrap_or(Value::Null);
             if cacheable && let Some(ref ns)=generation {
                 learning_cache::put_match(
                     &req.title,req.year,req.series,ns,&details);
             }
-            // Keep policy metadata in durable history only, never in the
-            // cached/public Diagnostic. Exploratory dashboard selections are
-            // not valid supervisory labels for the title learner.
-            if local_learning::active(){
-                if let Some(record)=details.as_object_mut(){
-                    record.insert("ml_source_policy".into(),json!(
-                        if public_policy{"public_api"}else{"dashboard_diagnostic"}));
-                }
-            }
+            // Request provenance belongs to history, after the cache has
+            // copied the pristine Diagnostic. It never changes API output.
+            let details=history_details_with_request(details,req,policy);
             let status=if d.selected.is_some(){"matched"}else{"unmatched"};
             dashboard_history::record_async(
                 &state.history,&req.title,status,d.selected.as_ref(),details,elapsed);
         },
         Err(error)=>dashboard_history::record_async(
-            &state.history,&req.title,"error",None,json!({"error":error}),elapsed),
+            &state.history,&req.title,"error",None,
+            history_details_with_request(json!({"error":error}),req,policy),elapsed),
     }
     result
 }
@@ -6423,6 +6434,51 @@ mod tests {
             serde_json::to_value(&sample).unwrap()).unwrap();
         assert_eq!(restored.selected,sample.selected);
         assert_eq!(restored.imdb_candidates[0].source,"imdb");
+    }
+    #[test]
+    fn history_retains_request_context_without_polluting_cached_diagnostics(){
+        let sample=Diagnostic{
+            parsed:json!({"title":"Example","seasons":[1],"episodes":[7]}),
+            normalized_title:"example".into(),imdb_candidates:vec![],
+            anime_candidate:None,anidb_candidate:None,selected:None,
+            reason:"Unmatched fixture".into(),
+        };
+        let cache=query_cache::QueryCache::new(1,Duration::from_secs(30));
+        let diagnostic=cache.get_or_compute("fixture".into(),||Ok(sample),|_|true).unwrap();
+        let pristine=serde_json::to_value(&diagnostic).unwrap();
+        let folder=std::env::temp_dir().join(format!("matchlab-history-context-{}-{}",
+            std::process::id(),std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let path=folder.join("history.sqlite3");
+        dashboard_history::initialize(&path).unwrap();
+        // Provenance is independent of ML enablement: both request policies
+        // are always recorded by the same history decoration path.
+        for (policy,source) in [(MatchPolicy::PublicApi,"public_api"),
+            (MatchPolicy::DashboardDiagnostic,"dashboard_diagnostic")]{
+            for (year,series) in [(Some(2005),Some(false)),(None,None),(None,Some(true))]{
+                let req=MatchRequest{title:"Example.S01E07".into(),year,series};
+                let details=history_details_with_request(pristine.clone(),&req,policy);
+                assert_eq!(details["request_context"],json!({"year":year,"series":series}));
+                assert_eq!(details["ml_source_policy"],source);
+                assert!(!details["request_context"].as_object().unwrap().contains_key("title"));
+                dashboard_history::record(&path,&req.title,"unmatched",None,&details,1);
+                let stored=dashboard_history::history(&path,1,0,None).unwrap();
+                assert_eq!(stored["items"][0]["details"]["request_context"],
+                    details["request_context"],"persist explicit nulls and false overrides");
+                assert_eq!(stored["items"][0]["details"]["ml_source_policy"],source);
+                let error=history_details_with_request(json!({"error":"fixture"}),&req,policy);
+                assert_eq!(error["request_context"],details["request_context"]);
+                assert_eq!(error["ml_source_policy"],source);
+                assert_eq!(error["error"],"fixture");
+            }
+        }
+        let cached=cache.get_or_compute("fixture".into(),
+            ||panic!("history decoration must not invalidate the diagnostic"),|_|true).unwrap();
+        assert_eq!(serde_json::to_value(&cached).unwrap(),pristine);
+        assert!(pristine.get("request_context").is_none());
+        assert!(pristine.get("ml_source_policy").is_none());
+        assert_eq!(public_match_response(cached.selected),public_match_response(diagnostic.selected));
+        std::fs::remove_dir_all(folder).unwrap();
     }
     #[test]
     fn changed_regex_generation_invalidates_30_second_parser_memory_cache(){

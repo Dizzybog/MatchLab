@@ -1,0 +1,289 @@
+{
+  "schema": "matchlab.authenticated-debug-review.v1",
+  "date": "2026-11-14",
+  "deployed_build": "dfe78a5b67c08dddff935c589e29e300b8728565",
+  "local_parent_commit": "e3f2c13c94a3ba2b453cc3f3631c96d5cc0bd7d0",
+  "sample": {
+    "snapshot_capture_utc": "2026-11-14T19:32:05Z",
+    "rows": 658,
+    "unique_ids": 658,
+    "unique_requests": 647,
+    "exact_repeated_rows": 11,
+    "status_counts": {
+      "unmatched": 461,
+      "matched": 197
+    },
+    "policy_counts": {
+      "public_api": 658
+    },
+    "known_request_context_rows": 0,
+    "flagged_rows": 157,
+    "alert_counts": {
+      "unmatched_explicit_episode": 66,
+      "field_underextracted_title": 83,
+      "field_mismatch_quality": 8,
+      "field_missing_title": 3,
+      "field_missing_year": 4,
+      "invalid_selected_coordinate": 5,
+      "unusual_season_number": 1
+    },
+    "confirmed_heuristic_false_positive_occurrences": {
+      "valid_season_zero_specials": 5,
+      "date_or_collection_year": 4,
+      "compound_quality": 4,
+      "site_only_title": 1,
+      "title_boundary_starts_at_represented_year": 54
+    },
+    "confirmed_noise_unique_row_count": 65,
+    "unmatched_explicit_rows_with_matching_sxe_parser_arrays": 66,
+    "unmatched_explicit_rows": 66,
+    "limitations": [
+      "Seven rolling history pages are not an atomic snapshot and can omit retained/pruned rows.",
+      "No trusted expected identity labels or original year/series overrides are present; counts are not parser or matcher precision/recall.",
+      "Raw release names, parsed titles and identities are excluded from this summary."
+    ]
+  },
+  "confirmed_parser_bugs": [
+    {
+      "kind": "transport_stream_extension_as_telesync",
+      "rows": 16
+    },
+    {
+      "kind": "domain_shaped_title_words_removed",
+      "rows": 6
+    },
+    {
+      "kind": "written_season_restores_publisher_banner",
+      "rows": 3
+    },
+    {
+      "kind": "bare_domain_banner_as_title",
+      "rows": 3
+    },
+    {
+      "kind": "production_year_from_named_release_group",
+      "rows": 2
+    }
+  ],
+  "confirmed_parser_bug_rows": 30,
+  "independent_parser_assertions": 101,
+  "before_parser_replay": {
+    "complete_cases_passed": 0,
+    "complete_cases": 30,
+    "assertions_passed": 51,
+    "assertions": 101
+  },
+  "postfix_verification": {
+    "scope": "Controlled isolated SQLite title-only request replay using canonical real aliases and controlled episode bounds; not a full catalog or production accuracy measurement. Original protected-history request year/series overrides are unknown, so these outputs do not reproduce every original decision.",
+    "same_fixture_and_index": true,
+    "strict": true,
+    "ml_enabled": false,
+    "phases": [
+      {
+        "label": "before",
+        "binary_sha256": "22b89319e97b3fe302c07fbd98c2e9cea1b520c141cdfef5197f9631c041c91c",
+        "matcher": {
+          "cases": 6,
+          "matched_expectation": 3
+        },
+        "parser": {
+          "cases": 30,
+          "matched_expectation": 0,
+          "assertions": 101,
+          "assertions_passed": 51,
+          "groups": {
+            "bare_domain_banner_as_title": {
+              "cases": 3,
+              "passed": 0
+            },
+            "domain_words_removed_from_title": {
+              "cases": 6,
+              "passed": 0
+            },
+            "embedded_group_year": {
+              "cases": 2,
+              "passed": 0
+            },
+            "season_overlay_restores_banner": {
+              "cases": 3,
+              "passed": 0
+            },
+            "ts_extension_as_telesync": {
+              "cases": 16,
+              "passed": 0
+            }
+          }
+        },
+        "child_terminated": true
+      },
+      {
+        "label": "after",
+        "binary_sha256": "b2807fcb42119e9689d383b00aa2af8eda95619f88cd2c155040e71b674e1b25",
+        "matcher": {
+          "cases": 6,
+          "matched_expectation": 6
+        },
+        "parser": {
+          "cases": 30,
+          "matched_expectation": 30,
+          "assertions": 101,
+          "assertions_passed": 101,
+          "groups": {
+            "bare_domain_banner_as_title": {
+              "cases": 3,
+              "passed": 3
+            },
+            "domain_words_removed_from_title": {
+              "cases": 6,
+              "passed": 6
+            },
+            "embedded_group_year": {
+              "cases": 2,
+              "passed": 2
+            },
+            "season_overlay_restores_banner": {
+              "cases": 3,
+              "passed": 3
+            },
+            "ts_extension_as_telesync": {
+              "cases": 16,
+              "passed": 16
+            }
+          }
+        },
+        "child_terminated": true
+      }
+    ],
+    "detector_only_replay": {
+      "binary_sha256": "b2807fcb42119e9689d383b00aa2af8eda95619f88cd2c155040e71b674e1b25",
+      "historical_rows": 658,
+      "replayed_unique_ids": 658,
+      "historical_rows_with_changed_alert_codes": 80,
+      "original_alert_counts": {
+        "unmatched_explicit_episode": 66,
+        "field_underextracted_title": 83,
+        "field_mismatch_quality": 8,
+        "field_missing_title": 3,
+        "field_missing_year": 4,
+        "invalid_selected_coordinate": 5,
+        "unusual_season_number": 1
+      },
+      "new_alert_counts_using_original_stored_fields": {
+        "unmatched_explicit_episode": 66,
+        "field_underextracted_title": 29,
+        "field_missing_title": 2,
+        "field_mismatch_quality": 4,
+        "field_overextracted_title": 2,
+        "unusual_season_number": 1
+      },
+      "removed_alert_counts": {
+        "field_underextracted_title": 61,
+        "field_mismatch_quality": 4,
+        "field_missing_year": 4,
+        "field_missing_title": 1,
+        "invalid_selected_coordinate": 5
+      },
+      "added_alert_counts": {
+        "field_underextracted_title": 7,
+        "field_overextracted_title": 2
+      },
+      "old_flagged_rows": 157,
+      "new_flagged_rows": 99,
+      "legacy_context_unknown_correct": 658,
+      "top_level_source_policy_counts": {
+        "public_api": 658
+      },
+      "retention_limit": 1500,
+      "retention_per_status": 500,
+      "sanitized_controls": [
+        {
+          "control": "special-season-only",
+          "passed": true,
+          "codes": []
+        },
+        {
+          "control": "special-episode-one",
+          "passed": true,
+          "codes": []
+        },
+        {
+          "control": "explicit-zero-episode",
+          "passed": true,
+          "codes": []
+        },
+        {
+          "control": "negative-season",
+          "passed": true,
+          "codes": [
+            "invalid_selected_coordinate"
+          ]
+        },
+        {
+          "control": "high-season",
+          "passed": true,
+          "codes": [
+            "invalid_selected_coordinate",
+            "unusual_season_number"
+          ]
+        },
+        {
+          "control": "negative-episode",
+          "passed": true,
+          "codes": [
+            "invalid_selected_coordinate"
+          ]
+        },
+        {
+          "control": "high-episode",
+          "passed": true,
+          "codes": [
+            "invalid_selected_coordinate"
+          ]
+        },
+        {
+          "control": "high-range-season",
+          "passed": true,
+          "codes": [
+            "invalid_selected_coordinate"
+          ]
+        },
+        {
+          "control": "high-range-episode",
+          "passed": true,
+          "codes": [
+            "invalid_selected_coordinate"
+          ]
+        },
+        {
+          "control": "reversed-range",
+          "passed": true,
+          "codes": [
+            "reversed_selected_range"
+          ]
+        }
+      ],
+      "limitations": [
+        "Only diagnostics were re-evaluated against original stored parser/matcher fields.",
+        "This replay does not run the new parser, matching engine or metadata selection.",
+        "The 658 captured production rows lack original year/series overrides and verified identity labels.",
+        "No remote service or user credential was used; the loopback daemon used a fresh random local token.",
+        "Output excludes raw private release titles and identities."
+      ]
+    }
+  },
+  "privacy": "Only aggregate observations and minimal synthetic/public examples are committed. Token and raw retained history are excluded.",
+  "remaining_limits": [
+    "Rolling sample is not atomic or exhaustive.",
+    "Original year and series overrides are unknown for all sampled history rows.",
+    "Matched/unmatched and flag counts do not establish population precision or recall.",
+    "Empty non-Latin keys require a planned metadata/index migration."
+  ],
+  "validation": {
+    "workspace_rust_tests_passed": 516,
+    "regex_auditor_tests_passed": 5,
+    "python_tests_passed": 99,
+    "all_targets_check": "passed with RUSTFLAGS=-D warnings",
+    "release_build": "passed with RUSTFLAGS=-D warnings",
+    "production_deployed_or_reconfigured": false
+  }
+}

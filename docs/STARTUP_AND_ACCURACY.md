@@ -2,6 +2,10 @@
 
 Measured on 2026-11-14 against **https://MatchLab.notprod.fyi** and an isolated local release build. The deployed service was not restarted or reconfigured.
 
+The subsequent [authenticated production-debug review](PRODUCTION_DEBUG_REVIEW.md)
+uses retained real requests, adds parser/matcher corrections, and distinguishes
+verified defects from heuristic alerts and unknown original request overrides.
+
 ## Findings
 
 - Existing-index startup is fast in the controlled local fixture: approximately **14 ms** to readiness. Lazy parser initialization dominates the first parse, approximately **45–55 ms**, versus **0.5–0.6 ms** for repeated identical parses.

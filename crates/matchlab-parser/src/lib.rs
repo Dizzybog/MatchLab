@@ -563,6 +563,19 @@ impl ParserEngine {
         // PCRE2 UTF mode returns offsets on UTF-8 boundaries. Borrow captures;
         // only episode/group context needs to retain an owned match.
         let raw_match = &title[m0.start()..m0.end()];
+        // A terminal .ts is a transport-stream extension, not a low-quality
+        // TeleSync marker. The early trash/quality handlers run before the
+        // extension handler, so both must leave this suffix untouched.
+        // The same regex can consume HD.ts as one apparent HDTS marker;
+        // leave HD available for the later HDTV handler in that case.
+        if matches!(handler.name.as_str(),"quality"|"trash")
+            && ((raw_match.eq_ignore_ascii_case("ts")&&title[..m0.start()].ends_with('.'))
+                ||raw_match.as_bytes().get(raw_match.len().saturating_sub(3)..)
+                    .is_some_and(|suffix|suffix.eq_ignore_ascii_case(b".ts")))
+            && title[m0.end()..].trim().is_empty()
+        {
+            return Ok(None);
+        }
         // Mixed-case Opus is valid audio release metadata only after the
         // already recognized title/technical boundary. A film or series
         // literally named "Opus" must not turn into an audio-only release.
@@ -576,8 +589,31 @@ impl ParserEngine {
             .map(|m| &title[m.start()..m.end()])
             .unwrap_or(raw_match);
 
-        if handler.name == "year" && is_numeric_title(title.get(..end_of_title).unwrap_or(title)) {
-            return Ok(None);
+        if handler.name == "year" {
+            if is_numeric_title(title.get(..end_of_title).unwrap_or(title)) {
+                return Ok(None);
+            }
+            // Keep legacy attached title/year forms, but digits inside a
+            // separately marked -[TEAM1980] / -[TEAM_1980] release group
+            // are not production-year evidence. Numeric-only year brackets
+            // and unrelated brackets without the group prefix stay eligible.
+            let (year_start,year_end)=captures.get(1)
+                .map(|m|(m.start(),m.end())).unwrap_or((m0.start(),m0.end()));
+            let prefix=&title[..year_start];
+            let named_group=prefix.rfind('[').is_some_and(|open|{
+                if !title[..open].trim_end().ends_with('-')
+                    ||prefix[open..].contains(']') {
+                    return false;
+                }
+                let Some(close)=title[open+1..].find(']')
+                    .map(|offset|open+1+offset)else{return false;};
+                let body=&title[open+1..close];
+                year_end<=close&&!body.contains('[')
+                    &&body.bytes().any(|byte|byte.is_ascii_alphabetic())
+            });
+            if named_group {
+                return Ok(None);
+            }
         }
 
         match handler.guard {
@@ -613,9 +649,16 @@ impl ParserEngine {
                     .get(..3)
                     .is_some_and(|prefix| prefix.eq_ignore_ascii_case("www"));
                 let standalone_domain = !matched.contains_key("year") && raw_match == title.trim();
+                let prefix=&title[..m0.start()];
+                let bracketed=[('[',']'),('【','】')].iter().any(|(open,close)|
+                    prefix.rfind(*open).is_some_and(|start|!prefix[start..].contains(*close))
+                        &&title[m0.end()..].starts_with(*close));
+                let separated=prefix.trim_end().ends_with(" -")
+                    ||prefix.ends_with(".-.")||prefix.ends_with("_-_");
                 if !explicit_www
                     && !standalone_domain
-                    && (m0.start() == 0 || raw_match.contains(char::is_whitespace))
+                    && (m0.start() == 0 || raw_match.contains(char::is_whitespace)
+                        ||(m0.start()<end_of_title&&!bracketed&&!separated))
                 {
                     return Ok(None);
                 }
@@ -2113,6 +2156,10 @@ fn set_title_from_release_prefix(
 ) -> Result<(), ParseError> {
     let prefix = raw[..marker_start]
         .trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '.' | '_' | '-'));
+    // Coordinate overlays reparse the original prefix after the initial
+    // banner cleanup. Do not let that second parse restore publisher words
+    // as the title (notably before a written CJK season marker).
+    let prefix=release_without_leading_site_banners(prefix).unwrap_or(prefix);
     if prefix.is_empty() {
         return Ok(());
     }
@@ -2901,6 +2948,9 @@ fn cached_path_component(raw:&str,translate_languages:bool)
 // or be the entire media filename. Only complete leading bracket blocks
 // containing a URL are stripped; fansub groups and legitimate Chinese
 // titles are not advertisements. Retain the original input for metadata.
+static BANNER_DOMAIN_RE:Lazy<regex::Regex>=Lazy::new(||regex::Regex::new(
+    r"(?i)(?:^|[^a-z0-9_-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|org|net|ms|tv|mx|co|party|vip|nu|pics)(?:$|[^a-z0-9_-])"
+).expect("bounded publisher domain grammar"));
 fn release_without_leading_site_banners(raw:&str)->Option<&str>{
     let mut remaining=raw.trim_start();
     let mut removed=false;
@@ -2914,6 +2964,7 @@ fn release_without_leading_site_banners(raw:&str)->Option<&str>{
         if !contains_ascii_fold(content,"www.")
             && !contains_ascii_fold(content,"https://")
             && !contains_ascii_fold(content,"http://")
+            && !(content.contains('.')&&BANNER_DOMAIN_RE.is_match(content))
         {break;}
         remaining=rest[end+close.len_utf8()..].trim_start();
         removed=true;

@@ -1157,6 +1157,38 @@ pub fn prefer_verified_episode_identity(
 mod tests{
 
     #[test]
+    fn strict_complete_aliases_equate_and_with_ampersand_without_omitting_words(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('tt3007572','Locke & Key','lockekey',2020,'series','US',1,0,'tvSeries'),
+                ('tt3457530','Fat Tony & Co','fattonyco',2014,'series','US',1,0,'tvMiniSeries'),
+                ('tt0000001','Locke Key','lockekey',2020,'series','US',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt3007572',3),('tt3457530',1),('tt0000001',3);
+            INSERT INTO imdb_ratings VALUES('tt3007572',1),('tt0000001',1000000);")
+            .unwrap();
+        for (title,season,expected) in [
+            ("Locke and Key",3,"tt3007572"),
+            ("Locke & Key",3,"tt3007572"),
+            ("Fat Tony and Co",1,"tt3457530"),
+            ("Fat Tony & Co",1,"tt3457530"),
+            ("Locke Key",3,"tt0000001"),
+        ]{
+            let raw=format!("{title}.S{season:02}E01.1080p.WEB-DL-GROUP");
+            let found=search_inner_mode(&db,title,None,true,season,&raw,
+                true,20,false,true).unwrap().0;
+            assert_eq!(found.len(),1,"{title}: {found:?}");
+            assert_eq!(found[0].imdb_id,expected,
+                "the connective is equivalent, but cannot be silently omitted");
+        }
+    }
+
+    #[test]
     fn strict_matches_equivalent_unicode_apostrophes_and_decomposed_accents(){
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,

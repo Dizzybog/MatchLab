@@ -770,7 +770,8 @@ The season table uses IMDb season numbering; anime crosswalk mappings may use di
 ### Read-only parsing diagnostics feed
 
 The separate, opt-in debug feed allows an external reviewer or scheduled monitor
-to poll the same **last 1,000** retained matching requests that the dashboard uses.
+to poll the dashboard's retained matching requests: **up to 500 per status**
+(`matched`, `unmatched`, `error`), or **1,500 total**.
 It **never triggers a new match** and does not alter history, metadata or the
 Tantivy index. It has no extra SQLite table or schema migration.
 
@@ -810,22 +811,37 @@ curl -fsS -H "Authorization: Bearer $MATCHLAB_DEBUG_API_TOKEN" \
   to avoid re-reading unflagged requests indefinitely.
 - `include_details=true`: Add the full stored diagnostic (including
   ranked candidate details). The default includes the original release title,
-  timestamp, status, selected and parsed values, and anomaly flags.
+  timestamp, status, selected and parsed values, and anomaly flags. Each item
+  also exposes `source_policy` (`public_api`, `dashboard_diagnostic`, or `null`
+  when historical policy metadata is absent). Exploratory dashboard selections
+  are not verified production matching labels. New records also retain optional
+  request overrides: `request_context_available=true` accompanies a complete
+  `replay_request` containing `title`, `year` and `series`. Explicit `null`
+  overrides mean they were absent on that request. Older records without this
+  context return `request_context_available=false` and `replay_request=null`;
+  their original overrides are unknown and must not be inferred from parsed
+  or selected metadata.
 
 The response returns `oldest_id`, `latest_id`, `retained`,
-`next_after_id`, `has_more`, and `cursor_expired`.
+`retention_limit` (1,500), `retention_per_status` (500), `next_after_id`,
+`has_more`, and `cursor_expired`.
 When `has_more=true`, request the next page immediately. When it is false,
-poll again later from `next_after_id`. If `cursor_expired=true`, the 1,000-row
-retention cap caused a data gap; reset to the earliest available history and
-record the gap. The feed is not a permanent historical archive.
+poll again later from `next_after_id`. `cursor_expired=true` means the oldest
+retained ID has moved past the saved cursor; record that data gap. Each page
+reads coherent bounds and rows, but multiple pages are a rolling view: new
+requests and independent per-status pruning can remove rows while you catch
+up. Internal ID gaps can therefore exist even without `cursor_expired=true`.
+The feed is not a complete snapshot or a permanent historical archive.
 
 The anomaly flags are **conservative review hints**, not automatic corrections.
 Current checks cover explicit `SxxEyy` and Spanish `Cap.103` / `Cap.1004`
 marker disagreement with selected or parsed coordinates, unresolved absolute
 anime episode hints (such as `Stone Ocean 27`), unmatched explicitly episodic
-releases, impossible nonpositive coordinates, unusually large seasons,
+releases, coordinates outside the public SID bounds, unusually large seasons,
 reversed episode ranges, and matching errors. A verified AniDB mapping that deliberately changes an explicit episode
-is not reported as an explicit-marker mismatch.
+is not reported as an explicit-marker mismatch. Season zero is valid for
+specials; absent coordinates and explicit zero episodes follow the existing
+public SID contract and are not classified as impossible coordinates.
 
 **Security:** Only the HTTPS `Authorization: Bearer` header is accepted,
 never URL tokens, cookies, or HTTP Basic Auth. Results carry

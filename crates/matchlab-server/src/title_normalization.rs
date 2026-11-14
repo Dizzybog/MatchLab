@@ -20,6 +20,7 @@ pub fn clean_title(input:&str)->String{
 /// removes word boundaries. Dots, dashes, underscores and spaces separate
 /// words; apostrophes/backticks within names do not (JoJo's == Jojos: one word).
 /// Unlike clean_words, common connective words such as "and" still count.
+/// An ampersand counts as that same connective word ("Locke & Key").
 /// No allocations and no Tantivy index schema change are required.
 pub fn title_word_count(input:&str)->usize{
     let mut count=0;
@@ -28,6 +29,9 @@ pub fn title_word_count(input:&str)->usize{
         if ch.is_alphanumeric(){
             if !in_word{count+=1;}
             in_word=true;
+        }else if ch=='&'{
+            count+=1;
+            in_word=false;
         }else if ch!='\'' && ch!='’' && ch!='`'
             && !unicode_normalization::char::is_combining_mark(ch){
             in_word=false;
@@ -80,6 +84,9 @@ mod tests{
         }
         assert_eq!(title_word_count("The Lord of the Rings"),5);
         assert_eq!(title_word_count("Rock and Roll"),3);
+        assert_eq!(title_word_count("Rock & Roll"),3);
+        assert_eq!(title_word_count("Rock&Roll"),3);
+        assert_eq!(title_word_count("Rock Roll"),2);
         assert_eq!(title_word_count("BLEACH 千年血戦篇"),2);
         assert_eq!(title_word_count("Amélie"),1);
         assert_eq!(title_word_count("Ame\u{301}lie"),1);
