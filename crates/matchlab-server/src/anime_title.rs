@@ -60,12 +60,29 @@ fn within_known_season_bounds(
 pub fn resolve_range(
     db:&Connection,imdb:&str,title:&str,season:i64,start:i64,end:i64,
 )->rusqlite::Result<Vec<Option<episode_crosswalk::Episode>>>{
+    resolve_range_inner(db,imdb,title,season,start,end,false)
+}
+
+/// Only local S/P markers use this path. A family-first AniDB work may
+/// refer to its second cour while all cours still occupy one IMDb season.
+/// The ordinary resolver deliberately retains its global-season shortcut.
+pub fn resolve_local_part_range(
+    db:&Connection,imdb:&str,title:&str,season:i64,start:i64,end:i64,
+)->rusqlite::Result<Vec<Option<episode_crosswalk::Episode>>>{
+    resolve_range_inner(db,imdb,title,season,start,end,true)
+}
+
+fn resolve_range_inner(
+    db:&Connection,imdb:&str,title:&str,season:i64,start:i64,end:i64,
+    force_local:bool,
+)->rusqlite::Result<Vec<Option<episode_crosswalk::Episode>>>{
     if season<=0||start<=0||end<start{return Ok(Vec::new());}
     // Preserve very large interval behavior without allocating an unbounded
     // batch context. Ordinary packs use the optimized shared-snapshot path.
     if end-start>=1_000 {
         return (start..=end).map(|episode|
-            resolve(db,imdb,title,season,episode)).collect();
+            resolve_range_inner(db,imdb,title,season,episode,episode,force_local)
+                .map(|episodes|episodes.into_iter().next().flatten())).collect();
     }
     let mut results=vec![None;(end-start+1) as usize];
     let key=imdb_matcher::clean_title(title);
@@ -139,7 +156,7 @@ pub fn resolve_range(
          CASE WHEN anidb_id GLOB '[0-9]*' THEN CAST(anidb_id AS INTEGER)
          ELSE 2147483647 END LIMIT 1",
         [&family],|r|r.get(0)).optional()?;
-    if base.as_deref()==Some(selected){
+    if !force_local && base.as_deref()==Some(selected){
         let fallback=episode_crosswalk::resolve_season_range(db,imdb,season,start,end)?;
         for (slot,mapped) in results.iter_mut().zip(fallback){
             if slot.is_none(){*slot=mapped;}
@@ -328,7 +345,9 @@ pub fn resolve_local_part(
         || !matches!(marker,"S"|"P"){return Ok(None);}
     let Some(base)=named_part_base(db,imdb,title)? else{return Ok(None)};
     let effective=if marker=="S" && local==base {1}else{local};
-    let Some(mapped)=resolve(db,imdb,title,effective,episode)? else{
+    let Some(mapped)=resolve_local_part_range(
+        db,imdb,title,effective,episode,episode)?
+            .into_iter().next().flatten() else{
         return Ok(None);
     };
     if !within_known_season_bounds(db,imdb,mapped.season,mapped.episode)?{
