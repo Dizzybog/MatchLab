@@ -990,8 +990,68 @@ fn diagnose_with_policy(
                     && mapped["start_season"].as_i64()==Some(season)
                     && mapped["end_season"].as_i64()==Some(season)
             }else{false};
-            if let Some(season)=season_hint
-                && !absolute_agrees_with_season {
+            // When absolute 01..24 does not agree with the explicitly
+            // advertised S2, first test whether S2/P2 is LOCAL to a
+            // uniquely identified AniDB work. Only a completely mapped
+            // part-local interval can become canonical IMDb endpoints.
+            let mut local_promoted=false;
+            if !absolute_agrees_with_season {
+                let local_hint=parsed_value.get("anime_local_part_candidate")
+                    .and_then(|h|Some((
+                        h.get("title")?.as_str()?.to_owned(),
+                        h.get("marker")?.as_str()?.to_owned(),
+                        h.get("local")?.as_i64()?
+                    )));
+                if let Some((name,marker,local))=local_hint
+                    && (season_hint==Some(local)
+                        || (marker=="P" && season_hint.is_none()))
+                    && let Some(imdb)=exact_anime_identity(&db,&name)?
+                    && let Some(first)=anime_title::resolve_local_part(
+                        &db,&imdb,&name,&marker,local,start)
+                            .map_err(|e|e.to_string())?
+                {
+                    let effective=if marker=="S" && local==first.base_season {
+                        1
+                    }else{local};
+                    let checked=mapped_season_episode_range(
+                        &db,&imdb,&name,effective,start,end,false)?;
+                    if checked["complete"]==true
+                        && checked["start_season"].as_i64()
+                            ==Some(first.mapped.season)
+                        && checked["end_season"].as_i64()
+                            ==Some(first.mapped.season)
+                        && let (Some(actual_start),Some(actual_end))=(
+                            checked["start_episode"].as_i64(),
+                            checked["end_episode"].as_i64())
+                    {
+                        if let Some(parsed)=parsed_value.as_object_mut(){
+                            parsed.insert("title".into(),json!(name));
+                            parsed.insert("seasons".into(),
+                                json!([first.mapped.season]));
+                            parsed.insert("episodes".into(),json!([actual_start]));
+                            parsed.insert("episode_start".into(),json!(actual_start));
+                            parsed.insert("episode_end".into(),json!(actual_end));
+                            parsed.insert("episode_count".into(),json!(end-start+1));
+                            parsed.insert("episode_range_numbering".into(),
+                                json!("season"));
+                            parsed.insert("anime_local_part_verified".into(),json!({
+                                "imdb_id":imdb,"base_season":first.base_season,
+                                "local_marker":marker,"local_number":local,
+                                "resolved_season":first.mapped.season,
+                                "mapping_source":"verified_anidb_part_crosswalk"
+                            }));
+                            parsed.insert("anime_title_verified".into(),
+                                json!(true));
+                        }
+                        verified_anime_range_imdb=None;
+                        local_promoted=true;
+                    }
+                }
+            }
+            if !local_promoted {
+                if let Some(season)=season_hint
+                    && !absolute_agrees_with_season {
+
                 // A verified absolute anime episode 01..24 could belong
                 // to S03, but "S2 (01-24)" must never publish S03. Treat
                 // these as a season-relative batch, then let the existing
@@ -1008,8 +1068,8 @@ fn diagnose_with_policy(
                     parsed.insert("episode_count".into(),json!(end-start+1));
                     parsed.insert("episode_range_numbering".into(),json!("season"));
                 }
-            }else{
-                if season_hint.is_none() && verified_anime_range_imdb.is_none(){
+                }else{
+                    if season_hint.is_none() && verified_anime_range_imdb.is_none(){
                     verified_anidb_range=anidb_matcher::match_absolute_range(
                         &db,&candidate_title,start,end)?;
                 }
@@ -1026,6 +1086,7 @@ fn diagnose_with_policy(
                         parsed.insert("anime_title_verified".into(),json!(true));
                     }
                 }
+            }
             }
         }
     }
@@ -1863,7 +1924,8 @@ fn diagnose_with_policy(
                             .map_err(|e|e.to_string())?;
                     let range=if linked {
                         let mapped=mapped_season_episode_range(
-                            &db,&imdb_id,anime_resolve_title,season,start,end,false)?;
+                            &db,&imdb_id,anime_resolve_title,season,start,end,
+                            parsed.get("anime_local_part_verified").is_some())?;
                         // A partial AniDB mapping is not evidence that the
                         // explicitly labelled IMDb SxxEyy interval is wrong.
                         // Retain IMDb endpoints when the canonical IMDb
