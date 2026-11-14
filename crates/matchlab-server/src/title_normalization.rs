@@ -28,7 +28,7 @@ pub fn title_word_count(input:&str)->usize{
         if ch.is_alphanumeric(){
             if !in_word{count+=1;}
             in_word=true;
-        }else if ch!='\\'' && ch!='’'{
+        }else if ch!='\'' && ch!='’'{
             in_word=false;
         }
     }
