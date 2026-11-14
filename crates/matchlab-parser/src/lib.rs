@@ -3177,12 +3177,31 @@ pub fn parse_title(
         // evidence that every child film was released in 2001 or 2012.
         // The generated year handlers can extract either endpoint. Prevent
         // inheritance of that endpoint, but let any explicit child year win.
-        if is_parent
-            && let Some((start,end))=collection_year_span(component)
-            && layer.get("year").and_then(Value::as_i64)
-                .is_some_and(|year|year==i64::from(start)||year==i64::from(end))
-        {
-            layer.remove("year");
+        if is_parent && let Some((start,end))=collection_year_span(component){
+            if layer.get("year").and_then(Value::as_i64)
+                .is_some_and(|year|year==i64::from(start)||year==i64::from(end)){
+                layer.remove("year");
+            }
+            // A Unicode en/em dash in a movie box-set range can otherwise
+            // be interpreted by the upstream parser as a huge absolute TV
+            // episode. Remove ONLY coordinates equal to the year endpoints
+            // in a parent component with no explicit TV season coordinates.
+            // Real child SxxExx and separate parent coordinates remain intact.
+            let fake_year_episode=layer.get("seasons").and_then(Value::as_array)
+                .is_none_or(Vec::is_empty)
+                &&layer.get("episodes").and_then(Value::as_array)
+                    .is_some_and(|episodes|!episodes.is_empty()
+                        &&episodes.iter().all(|value|
+                            value.as_i64().is_some_and(|ep|
+                                ep==i64::from(start)||ep==i64::from(end))));
+            if fake_year_episode{
+                for field in ["episodes","episode_start","episode_end",
+                    "episode_count","episode_range_numbering",
+                    "absolute_episode_candidate","anime_episode_candidate",
+                    "anime_episode_range_candidate"]{
+                    layer.remove(field);
+                }
+            }
         }
         if let Some(title)=layer.get("title").and_then(Value::as_str){
             let title=title.trim();
