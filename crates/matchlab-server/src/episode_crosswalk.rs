@@ -264,72 +264,86 @@ pub fn resolve_absolute_range(
         imdb,episode,&links,&maps,&splits)).collect())
 }
 
+// A full BTreeMap of candidates is unnecessary when the only possible
+// answer is a unique strongest coordinate. Deduplicate identical tuples
+// as they stream in, preserve the strongest evidence priority, and retain
+// ambiguity across different tuples at that same evidence strength.
+#[derive(Clone,Copy,PartialEq,Eq)]
+struct AbsoluteWinner<'a>{
+    anidb:&'a str,anime_episode:i64,season:i64,episode:i64,strength:u8,
+}
+fn consider_absolute<'a>(
+    best:&mut Option<AbsoluteWinner<'a>>,ambiguous:&mut bool,
+    anidb:&'a str,anime_episode:i64,season:i64,episode:i64,strength:u8,
+){
+    if canonical_asid(anidb,anime_episode).is_none()
+        ||!(1..=9_999).contains(&season)||!(1..=99_999).contains(&episode){
+        return;
+    }
+    let candidate=AbsoluteWinner{anidb,anime_episode,season,episode,strength};
+    match *best{
+        None=>{
+            *best=Some(candidate);
+            *ambiguous=false;
+        },
+        Some(previous) if strength>previous.strength=>{
+            *best=Some(candidate);
+            *ambiguous=false;
+        },
+        Some(previous) if strength==previous.strength=>{
+            if (previous.anidb,previous.anime_episode,
+                previous.season,previous.episode)!=(anidb,anime_episode,season,episode){
+                *ambiguous=true;
+            }
+        },
+        _=>{},
+    }
+}
 fn resolve_absolute_preloaded(
     imdb:&str,episode:i64,_links:&[Link],_maps:&[Mapping],
     splits:&SplitIndex<'_>,
 )->Option<Episode>{
     if !(1..=99_999).contains(&episode){return None;}
-    // A TVDB family includes sequels, movies and cours with different AniDB
-    // identities. An open-ended season default is weaker evidence than a
-    // concrete bounded episode mapping (or an explicit episode pair).
-    // Keep ties at the strongest evidence level ambiguous.
-    let mut candidates=std::collections::BTreeMap::<(String,i64,i64,i64),u8>::new();
-    let mut register=|candidate:(String,i64,i64,i64),strength:u8|{
-        candidates.entry(candidate)
-            .and_modify(|previous|*previous=(*previous).max(strength))
-            .or_insert(strength);
-    };
-    for indexed in &splits.links {
+    let mut best:Option<AbsoluteWinner<'_>>=None;
+    let mut ambiguous=false;
+    for indexed in &splits.links{
         let link=indexed.link;
-        // Both absolute-row count and the first absolute row's end bound
-        // were computed in link order once, not twice for every episode.
+        // Computed once per crosswalk snapshot: preserve first absolute
+        // mapping row, duplicate links and source-row traversal order.
         let local=episode-indexed.absolute_offset;
         if local<=0||indexed.first_absolute_end
             .is_some_and(|end|end>0&&local>end){continue;}
-        for (&m,&is_split) in indexed.mappings.iter().zip(&indexed.split) {
+        for (&m,&is_split) in indexed.mappings.iter().zip(&indexed.split){
             if m.tv_season<=0{continue;}
-            // Explicit episode pairs are authoritative even if the mapping
-            // range describes another numbering domain.
             if !m.explicit.is_empty(){
-                for &(ani,tv) in &m.explicit {
+                for &(ani,tv) in &m.explicit{
                     if ani==local&&tv>0{
                         let season=if is_split{link.trakt}else{m.tv_season};
                         if season>0{
-                            register((link.anidb.clone(),local,season,tv),3);
+                            consider_absolute(&mut best,&mut ambiguous,
+                                &link.anidb,local,season,tv,3);
                         }
                     }
                 }
                 continue;
             }
             if local<m.start.max(1)||(m.end>0&&local>m.end){continue;}
-            // Related AniDB works from the same TVDB family are not proof
-            // that this IMDb title owns every episode of an open-ended
-            // sequel. Indirect links require a finite range or exact pair.
-            if !link.direct && (m.start<=0 || m.end<=0){continue;}
+            // Indirect links never make unbounded default rows proof of
+            // ownership. The old evidence tiers (3/2/1) stay unchanged.
+            if !link.direct && (m.start<=0||m.end<=0){continue;}
             let season=if is_split{link.trakt}else{m.tv_season};
-            let tv=if is_split{
-                local-m.start.max(1)+1
-            }else{
-                local+m.offset
-            };
+            let tv=if is_split{local-m.start.max(1)+1}else{local+m.offset};
             if season>0&&tv>0{
-                // An explicit start/end range proves this number belongs to
-                // this AniDB work. Default open-ended seasons do not.
                 let strength=if m.start>0&&m.end>0{2}else{1};
-                register((link.anidb.clone(),local,season,tv),strength);
+                consider_absolute(&mut best,&mut ambiguous,
+                    &link.anidb,local,season,tv,strength);
             }
         }
     }
-    // Invalid coordinates must never compete with verified candidates.
-    candidates.retain(|(id,ani,season,tv),_|
-        canonical_asid(id,*ani).is_some()
-        && (1..=9_999).contains(season)
-        && (1..=99_999).contains(tv));
-    let strongest=candidates.values().copied().max()?;
-    let mut winners=candidates.into_iter().filter(|(_,strength)|*strength==strongest);
-    let ((anidb_id,anidb_episode,season,episode),_)=winners.next()?;
-    if winners.next().is_some(){return None;}
-    Some(Episode{imdb_id:imdb.into(),season,episode,anidb_id,anidb_episode})
+    if ambiguous{return None;}
+    let best=best?;
+    Some(Episode{imdb_id:imdb.into(),season:best.season,episode:best.episode,
+        anidb_id:best.anidb.to_owned(),anidb_episode:best.anime_episode})
 }
 
 /// Reverse lookup: AniDB work + AniDB-local (often absolute) episode number
