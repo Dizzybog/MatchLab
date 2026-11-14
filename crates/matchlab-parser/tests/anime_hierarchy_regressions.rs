@@ -110,3 +110,26 @@ fn nested_named_anime_part_numeric_leaf_is_unverified_until_metadata_check() {
     let numbered_movie = parse_title("Movies/Film/2004.mkv", false).unwrap();
     assert!(numbered_movie.get("anime_episode_candidate").is_none(), "{numbered_movie:?}");
 }
+
+#[test]
+fn named_part_local_markers_are_candidates_not_parser_guesses(){
+    for (raw,part,episode) in [
+        ("Sword Art Online - Alicization S2E02 [1080p].mkv",2,Some(2)),
+        ("Sword Art Online - Alicization S3E02 [1080p].mkv",3,Some(2)),
+        ("Sword Art Online - Alicization P2 [720p].mkv",2,None),
+        ("Sword Art Online - Alicization P2E03.mkv",2,Some(3)),
+        ("[SubsPlease] Sword Art Online - Alicization S2 (01-12) [Batch]",2,None),
+    ]{
+        let p=parse_title(raw,false).unwrap();
+        let hint=&p["anime_local_part_candidate"];
+        assert_eq!(hint["title"],"Sword Art Online - Alicization","{raw}: {p:?}");
+        assert_eq!(hint["local"],part,"{raw}: {p:?}");
+        assert_eq!(hint["episode"].as_i64(),episode,"{raw}: {p:?}");
+        assert_eq!(hint["verified"],false,"{raw}: {p:?}");
+        assert!(p.get("anime_local_part_verified").is_none(),"{raw}");
+    }
+    // Ordinary TV seasons are still parsed as global coordinates.
+    let p=parse_title("Enen no Shouboutai S2",false).unwrap();
+    assert_eq!(p["seasons"],json!([2]));
+    assert!(p.get("anime_local_part_verified").is_none());
+}
