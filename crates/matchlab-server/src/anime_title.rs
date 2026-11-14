@@ -275,26 +275,59 @@ pub struct LocalPartCoordinate {
 /// stays global, and a Part 3 S01E03 keeps its established part/episode
 /// offset. The requested equality exception applies to S3 when the named
 /// work starts at IMDb S03, not to P3 (which means a third part).
-pub fn resolve_local_part(
-    db:&Connection,imdb:&str,title:&str,marker:&str,local:i64,episode:i64,
-)->rusqlite::Result<Option<LocalPartCoordinate>>{
-    if local<2 || local>99 || episode<=0 || episode>99_999
-        || !matches!(marker,"S"|"P") {return Ok(None);}
+/// A named part must have a *unique exact* AniDB alias, start beyond
+/// IMDb S01, and share a TVDB family with another linked AniDB work.
+/// A single generic anime title indexed only against S03 is NOT enough
+/// to prove that its explicit S2 is relative.
+pub fn named_part_base(
+    db:&Connection,imdb:&str,title:&str,
+)->rusqlite::Result<Option<i64>>{
     let key=imdb_matcher::clean_title(title);
-    if key.len()<7 {return Ok(None);}
-    // A canonical series is NEVER a named part, even if only its
-    // second season happens to be indexed in the AniDB crosswalk.
+    if key.len()<7{return Ok(None);}
     let canonical:i64=db.query_row(
         "SELECT EXISTS(SELECT 1 FROM titles
             WHERE imdb_id=?1 AND clean_title=?2 AND original=1
             AND type IN ('tvSeries','tvMiniSeries') LIMIT 1)",
         params![imdb,key],|r|r.get(0))?;
     if canonical!=0{return Ok(None);}
-    let Some(base)=season_from_title(db,imdb,title)? else{return Ok(None)};
+    let ids=aliases(db,imdb,title)?.into_iter()
+        .filter_map(|(id,alias)|(alias==key).then_some(id))
+        .collect::<BTreeSet<_>>();
+    if ids.len()!=1{return Ok(None);}
+    let selected=ids.iter().next().expect("unique AniDB alias");
+    let mut stmt=db.prepare(
+        "SELECT DISTINCT tvdb_season FROM episode_map
+         WHERE anidb_id=?1 AND anidb_season>0 AND tvdb_season>0")?;
+    let seasons=stmt.query_map([selected],|row|row.get::<_,i64>(0))?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+    if seasons.len()!=1{return Ok(None);}
+    let base=*seasons.iter().next().unwrap();
     if base<=1{return Ok(None);}
+    let related:i64=db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM episode_map mine
+            JOIN episode_map sibling
+                ON sibling.tvdb_id=mine.tvdb_id
+            JOIN anime_series_map linked
+                ON linked.anidb_id=sibling.anidb_id
+            WHERE mine.anidb_id=?1 AND mine.tvdb_id<>''
+                AND mine.tvdb_season>0
+                AND sibling.anidb_id<>mine.anidb_id
+                AND sibling.tvdb_season>0 AND linked.imdb_id=?2
+            LIMIT 1)",
+        params![selected,imdb],|row|row.get(0))?;
+    Ok((related!=0).then_some(base))
+}
+
+/// Verify local S2/P2 via the original AniDB part resolver. S3 when the
+/// work starts at S03 is *absolute* S03; P3 still denotes the third part.
+/// No episode or season is emitted merely from an arithmetic prediction.
+pub fn resolve_local_part(
+    db:&Connection,imdb:&str,title:&str,marker:&str,local:i64,episode:i64,
+)->rusqlite::Result<Option<LocalPartCoordinate>>{
+    if local<2 || local>99 || episode<=0 || episode>99_999
+        || !matches!(marker,"S"|"P"){return Ok(None);}
+    let Some(base)=named_part_base(db,imdb,title)? else{return Ok(None)};
     let effective=if marker=="S" && local==base {1}else{local};
-    // The original named-part resolver validates the exact AniDB alias,
-    // family ordering, per-episode offsets, bounds and ambiguity.
     let Some(mapped)=resolve(db,imdb,title,effective,episode)? else{
         return Ok(None);
     };
@@ -306,9 +339,7 @@ pub fn resolve_local_part(
     }else if marker=="S" {
         base.checked_add(local-1)==Some(mapped.season)
     }else{
-        // Parts can occupy the same IMDb season (JoJo Stone Ocean) or
-        // successive seasons (SAO Alicization). The actual crosswalk,
-        // not arithmetic, is authoritative for P2/P3.
+        // Parts can occupy the same IMDb season or different seasons.
         mapped.season>=base
     };
     Ok(valid.then_some(LocalPartCoordinate{base_season:base,mapped}))
