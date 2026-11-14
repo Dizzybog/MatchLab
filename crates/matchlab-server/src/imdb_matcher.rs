@@ -1292,7 +1292,7 @@ mod tests{
     }
 
     #[test]
-    fn strict_mode_never_retries_partials_after_public_year_gate(){
+    fn strict_mode_rejects_mismatched_year_without_retrying_partials(){
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
             year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
@@ -1305,12 +1305,78 @@ mod tests{
             .unwrap();
         let (exact,_)=search_inner_mode(&db,"Star Force",Some(2025),false,
             0,"Star.Force.2025",false,20,false,true).unwrap();
-        assert_eq!(exact.len(),1);
-        assert_eq!(exact[0].imdb_id,"tt0000010");
-        let strict_after_gate=exact.into_iter()
-            .filter(|match_|match_.year==2025).collect::<Vec<_>>();
-        assert!(strict_after_gate.is_empty(),
-            "failed exact candidate must not trigger a shorter Force match");
+        assert!(exact.is_empty(),
+            "strict must discard the 2010 exact title for a 2025 torrent,
+             and must not fall back to the shorter 2025 Force title");
+    }
+
+    #[test]
+    fn strict_year_is_required_for_movie_and_series_duplicate_identities(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('ttmovie2005','The Island','theisland',2005,'movie','US',1,0,'movie'),
+                ('ttmovie2023','The Island','theisland',2023,'movie','US',1,0,'movie'),
+                ('ttseries2005','Example Show','exampleshow',2005,'series','US',1,0,'tvSeries'),
+                ('ttseries2023','Example Show','exampleshow',2023,'series','US',1,0,'tvSeries'),
+                ('ttunknown','Example Show','exampleshow',0,'series','US',1,0,'tvSeries');
+            INSERT INTO imdb_ratings VALUES('ttmovie2005',1000000),
+                ('ttmovie2023',1),('ttseries2005',1000000),('ttseries2023',1);")
+            .unwrap();
+
+        for (title,year,series,release,expected) in [
+            ("The Island",2023,false,"The.Island.2023.1080p", "ttmovie2023"),
+            ("Example Show",2023,true,"Example.Show.2023.S01E01", "ttseries2023"),
+        ]{
+            let (strict,_) = search_inner_mode(&db,title,Some(year),series,0,
+                release,series,20,false,true).unwrap();
+            assert_eq!(strict.len(),1,"{release}: {strict:?}");
+            assert_eq!(strict[0].imdb_id,expected,"{release}");
+            let (unspecified,_) = search_inner_mode(&db,title,None,series,0,
+                release,series,20,false,true).unwrap();
+            assert!(unspecified.len()>=2,"no production year must preserve all exact names");
+            let (missing,_) = search_inner_mode(&db,title,Some(2017),series,0,
+                release,series,20,false,true).unwrap();
+            assert!(missing.is_empty(),"wrong release year must not return any identity");
+        }
+        let (broad,_) = search_inner_mode(&db,"The Island",Some(2023),false,0,
+            "The.Island.2023",false,20,false,false).unwrap();
+        assert_eq!(broad.len(),2,"non-strict keeps wrong-year candidates as lower-ranked fallbacks");
+        assert_eq!(broad[0].imdb_id,"ttmovie2023");
+    }
+
+    #[test]
+    fn strict_year_excludes_anidb_linked_work_with_different_imdb_year(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO titles VALUES
+                ('ttanime2005','The Duke of Death','thedukeofdeath',
+                    2005,'series','US',1,0,'tvSeries'),
+                ('ttanime2021','The Duke of Death','thedukeofdeath',
+                    2021,'series','US',1,0,'tvSeries');
+            INSERT INTO anidb_titles VALUES
+                ('7777','Shinigami Bocchan','shinigamibocchan','main','ja');
+            INSERT INTO anime_series_map VALUES
+                ('ttanime2005','7777','12345',0),
+                ('ttanime2021','7777','12345',0);")
+            .unwrap();
+        let search=|year|search_inner_mode(&db,"Shinigami Bocchan",year,true,0,
+            "Shinigami.Bocchan.S01E01",true,20,false,true).unwrap().0;
+        let found=search(Some(2021));
+        assert_eq!(found.len(),1);
+        assert_eq!(found[0].imdb_id,"ttanime2021");
+        assert!(search(Some(2019)).is_empty(),"no year-compatible identity exists");
+        assert_eq!(search(None).len(),2,"without year, both AniDB identities remain");
     }
 
     #[test]
