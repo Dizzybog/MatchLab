@@ -1942,8 +1942,12 @@ static TORRENT_MATCH_CACHE:OnceLock<query_cache::QueryCache<Diagnostic>>=OnceLoc
 /// Strict and broad candidate discovery must never share a persisted or
 /// short-lived final result. Keep the full metadata/regex fingerprint, but
 /// append the immutable boot-time search policy.
+// A semantic matcher change must invalidate old persistent ML match results,
+// even when metadata.sqlite3, learned regex rules and the strict-mode flag
+// are unchanged. Bump this revision when altering title/year eligibility.
+const MATCHER_SEMANTIC_REVISION:&str="title-word-boundaries-strict-year-collection-v1";
 fn scoped_match_generation(metadata:&str,strict:bool)->String{
-    format!("{metadata}:strict={strict}")
+    format!("{metadata}:matcher={MATCHER_SEMANTIC_REVISION}:strict={strict}")
 }
 // Reuse the generation already checked by diagnose_logged, rather than
 // recomputing the filesystem/WAL SHA-256 to enter the same cache.
