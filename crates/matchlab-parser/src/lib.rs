@@ -2948,12 +2948,27 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
         set_title_from_release_prefix(raw,marker_start,translate_languages,&mut result)?;
     }
     if let Some((start,end,offset,_))=protected_years {
-        // A year interval without TV coordinates denotes a collection,
-        // not a single film's production year or an episode range.
-        if result.get("seasons").and_then(Value::as_array).is_none_or(Vec::is_empty)
-            && result.get("episodes").and_then(Value::as_array).is_none_or(Vec::is_empty)
-            && !result.contains_key("episode_start")
-        {
+        // Only genuine, separately labelled coordinates can override a
+        // release collection year span. Loose numeric/audio handlers can
+        // still invent episodes from other release tokens (e.g. DTS-ES6.1).
+        let has_explicit_episode=EXPLICIT_EPISODE_SHAPE_RE.is_match(release)
+            .map_err(|e|ParseError::Regex(e.to_string()))?
+            || X_COORDS_RE.is_match(release)
+                .map_err(|e|ParseError::Regex(e.to_string()))?
+            || SPANISH_CAP_COORDS_RE.is_match(release)
+                .map_err(|e|ParseError::Regex(e.to_string()))?
+            || LABELED_EPISODE_RANGE_RE.is_match(release)
+                .map_err(|e|ParseError::Regex(e.to_string()))?;
+        if !has_explicit_episode {
+            for field in ["episode_start","episode_end","episode_count",
+                "episode_range_numbering","absolute_episode_candidate",
+                "anime_episode_candidate","anime_episode_range_candidate"] {
+                result.remove(field);
+            }
+            result.insert("episodes".into(),json!([]));
+            result.insert("seasons".into(),json!([]));
+            // A collection's date span is not a single film's release year.
+            result.remove("year");
             result.insert("collection_year_range".into(),json!([start,end]));
             set_title_from_release_prefix(release,offset,translate_languages,&mut result)?;
         }
