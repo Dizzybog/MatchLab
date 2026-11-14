@@ -435,7 +435,10 @@ fn mapped_season_episode_range(
         anime_title::has_specific_alias(db,imdb,title)
             .map_err(|e|e.to_string())?
     };
-    let resolved=if specific {
+    let resolved=if force_named_part {
+        anime_title::resolve_local_part_range(db,imdb,title,season,start,end)
+            .map_err(|e|e.to_string())?
+    }else if specific {
         anime_title::resolve_range(db,imdb,title,season,start,end)
             .map_err(|e|e.to_string())?
     }else{
