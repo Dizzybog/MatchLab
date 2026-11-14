@@ -29,11 +29,24 @@ fn links(db:&Connection,imdb:&str)->rusqlite::Result<Vec<Link>>{
         out.push(Link{anidb:ids[0].clone(),tvdb:String::new(),trakt:0,direct:true});
     }
     let tvdbs:BTreeSet<String>=out.iter().filter(|l|!l.tvdb.is_empty()).map(|l|l.tvdb.clone()).collect();
+    // Small families are cheaper to scan inline. Large AniDB families
+    // previously checked every discovered sibling against the entire
+    // growing link list: O(family²). Build a membership set only after
+    // the family becomes large enough, preserving direct duplicates and
+    // the original source-row order exactly.
+    let mut seen:Option<std::collections::HashSet<(String,String)>>=None;
     for tvdb in tvdbs {
         let mut stmt=db.prepare("SELECT DISTINCT anidb_id FROM episode_map WHERE tvdb_id=?1")?;
         for id in stmt.query_map([&tvdb],|r|r.get::<_,String>(0))? {
             let id=id?;
-            if !out.iter().any(|l|l.anidb==id&&l.tvdb==tvdb){
+            let exists=if out.len()<8{
+                out.iter().any(|l|l.anidb==id&&l.tvdb==tvdb)
+            }else{
+                let set=seen.get_or_insert_with(||out.iter()
+                    .map(|l|(l.anidb.clone(),l.tvdb.clone())).collect());
+                !set.insert((id.clone(),tvdb.clone()))
+            };
+            if !exists{
                 out.push(Link{anidb:id,tvdb:tvdb.clone(),trakt:0,direct:false});
             }
         }
