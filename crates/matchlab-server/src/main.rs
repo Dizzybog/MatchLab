@@ -5003,18 +5003,24 @@ mod tests {
                 'series','',1,0,'tvSeries');
             INSERT INTO titles VALUES('tt0300002','Ordinary Show','ordinaryshow',2010,
                 'series','',1,0,'tvSeries');
-            INSERT INTO seasons VALUES('tt0300001',3);
+            INSERT INTO seasons VALUES('tt0300001',4);
             INSERT INTO seasons VALUES('tt0300002',3);
             INSERT INTO season_episodes VALUES('tt0300001',1,12,12);
+            INSERT INTO season_episodes VALUES('tt0300001',3,12,12);
+            INSERT INTO season_episodes VALUES('tt0300001',4,12,12);
             INSERT INTO season_episodes VALUES('tt0300002',1,12,12);
             INSERT INTO anime_series_map VALUES('tt0300001','100','456',0);
             INSERT INTO anime_series_map VALUES('tt0300001','101','456',0);
+            INSERT INTO anime_series_map VALUES('tt0300001','102','456',0);
             INSERT INTO anime_ids VALUES('tt0300001','anidb','100');
             INSERT INTO anidb_titles VALUES('100','Sword Art Online','swordartonline','main','en');
             INSERT INTO anidb_titles VALUES('101','Sword Art Online Alicization',
                 'swordartonlinealicization','main','en');
+            INSERT INTO anidb_titles VALUES('102','Sword Art Online Alicization Part 2',
+                'swordartonlinealicizationpart2','main','en');
             INSERT INTO episode_map VALUES('100','456',1,1,1,12,0,'');
-            INSERT INTO episode_map VALUES('101','456',1,3,1,12,0,'');").unwrap();
+            INSERT INTO episode_map VALUES('101','456',1,3,1,12,0,'');
+            INSERT INTO episode_map VALUES('102','456',1,4,1,12,0,'');").unwrap();
         tantivy_search::warmup(&db).unwrap();
         drop(db);
         let find=|raw:&str|{
@@ -5054,6 +5060,38 @@ mod tests {
             assert_eq!(selected["anime"]["asid"],"101:2","{raw}");
             assert_eq!(public_match_response(Some(selected))["sid_start"],
                 "tt0300001:3:2","{raw}");
+        }
+
+        // Distinct local-vs-global S numbering is handled by the exact
+        // AniDB part crosswalk, never by arithmetic alone.
+        for (raw,season,asid) in [
+            ("Sword Art Online - Alicization S2E02 [1080p].mkv",4,"102:2"),
+            ("Sword Art Online - Alicization S3E02 [1080p].mkv",3,"101:2"),
+        ]{
+            let d=find(raw);
+            assert_eq!(d.parsed["anime_local_part_verified"]["base_season"],3,
+                "{raw}: {:?}",d.parsed);
+            assert_eq!(d.parsed["seasons"],json!([season]),"{raw}");
+            let winner=d.selected.expect("verified named-part local coordinate");
+            assert_eq!(winner["imdb_id"],"tt0300001","{raw}: {winner}");
+            assert_eq!(winner["season"],season,"{raw}: {winner}");
+            assert_eq!(winner["episode"],2,"{raw}: {winner}");
+            assert_eq!(winner["anime"]["asid"],asid,"{raw}: {winner}");
+        }
+        for (raw,season) in [
+            ("Sword Art Online - Alicization P2 [1080p].mkv",4),
+            ("Sword Art Online - Alicization S2 [1080p].mkv",4),
+            ("Sword Art Online - Alicization S3 [1080p].mkv",3),
+        ]{
+            let d=find(raw);
+            assert_eq!(d.parsed["seasons"],json!([season]),"{raw}");
+            assert_eq!(d.parsed["episodes"],json!([]),"{raw}");
+            let winner=d.selected.expect("verified named-part season pack");
+            assert_eq!(winner["season"],season,"{raw}: {winner}");
+            assert_eq!(winner["season_end"],season,"{raw}: {winner}");
+            let public=public_match_response(Some(winner));
+            assert_eq!(public["sid_start"],format!("tt0300001:{season}:1"),"{raw}");
+            assert_eq!(public["sid_end"],format!("tt0300001:{season}:12"),"{raw}");
         }
 
         // The word "Alicization" is not blindly inherited for non-anime.
