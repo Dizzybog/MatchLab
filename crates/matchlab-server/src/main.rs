@@ -1051,6 +1051,34 @@ fn diagnose_with_policy(
             }
         }
     }
+    // When the video leaf is only "02.mkv", the immediate two parent
+    // directories can describe a series and its named anime part.
+    // The parser exposes this only as a candidate. Promote it solely if an
+    // exact unique AniDB alias AND an independently mapped episode agree;
+    // a numeric movie file or ordinary TV folder never creates a SID.
+    if req.series!=Some(false)
+        && let Some(hint)=parsed_value.get("anime_episode_candidate")
+        && hint.get("path_part").and_then(Value::as_bool)==Some(true)
+        && let (Some(name),Some(episode))=(
+            hint.get("title").and_then(Value::as_str),
+            hint.get("episode").and_then(Value::as_i64))
+    {
+        let name=name.to_owned();
+        let mapped=anime_candidate(&db,&name,None,episode)
+            .map_err(|error|error.to_string())?;
+        let exact=exact_anime_identity(&db,&name)?;
+        if let Some(mapped)=mapped
+            && mapped.get("imdb_id").and_then(Value::as_str)==exact.as_deref()
+            && mapped.get("season").and_then(Value::as_i64).is_some()
+            && mapped.get("episode").and_then(Value::as_i64).is_some()
+            && let Some(parsed)=parsed_value.as_object_mut()
+        {
+            parsed.insert("title".into(),json!(name));
+            parsed.insert("episodes".into(),json!([episode]));
+            parsed.insert("seasons".into(),json!([]));
+            parsed.insert("anime_title_verified".into(),json!(true));
+        }
+    }
     // A bare final number ("Stone Ocean 27") is not a trusted episode:
     // require an exact and unambiguous anime alias in Tantivy before
     // changing the parsed show title or promoting the episode coordinate.
@@ -1061,6 +1089,7 @@ fn diagnose_with_policy(
         && parsed_value.get("anime_season_episode_candidate").is_none()
         && parsed_value.get("anime_episode_range_candidate").is_none()
         && let Some(candidate) = parsed_value.get("anime_episode_candidate")
+        && candidate.get("path_part").and_then(Value::as_bool)!=Some(true)
         && let (Some(title),Some(episode)) = (
             candidate.get("title").and_then(Value::as_str),
             candidate.get("episode").and_then(Value::as_i64),
