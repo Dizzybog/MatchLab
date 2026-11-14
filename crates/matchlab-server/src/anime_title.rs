@@ -104,9 +104,10 @@ fn resolve_range_inner(
     // A named AniDB part may begin an IMDb season other than S01 (JoJo).
     // Preload its whole crosswalk once, but keep every episode's independent
     // eligibility and ambiguous-mapping check.
-    if season==1 && best.1==key
+    if best.1==key
         && let Some(mapped_season)=season_from_title(db,imdb,title)?
-        && mapped_season>1 {
+        && mapped_season>1
+        && (season==1 || (!force_local && season==mapped_season)) {
         let mapped=episode_crosswalk::resolve_season_range(
             db,imdb,mapped_season,start,end)?;
         let mut bounds=std::collections::HashMap::<i64,Option<i64>>::new();
@@ -143,7 +144,12 @@ fn resolve_range_inner(
             };
             if valid{*slot=Some(candidate);}
         }
-        if results.iter().all(Option::is_some){return Ok(results);}
+        // Explicit S03 on a part that starts in global S03 stays S03 for
+        // the complete interval, just as it does for a single episode.
+        // A hole or an out-of-bounds endpoint must not fall through to the
+        // third local part. P3 still uses force_local and retains its meaning.
+        if (!force_local && season==mapped_season)
+            || results.iter().all(Option::is_some){return Ok(results);}
     }
 
     let family:Option<String>=db.query_row(
@@ -534,5 +540,123 @@ mod named_part_range_tests {
             assert!(resolve_range(&db,"tt0000001","Part One",season,start,end)
                 .unwrap().is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod explicit_global_named_part_range_tests {
+    use super::*;
+
+    // Real AnimeAPI links and Anime-Lists coordinates: Alicization starts
+    // at S03, while War of Underworld's two AniDB parts share S04. English
+    // aliases and IMDb bounds are controlled here to isolate range semantics.
+    fn fixture()->Connection{
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(
+                imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
+                region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,max_episode INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            INSERT INTO titles VALUES
+                ('tt2250192','Sword Art Online','swordartonline',2012,
+                 'series','',1,0,'tvSeries');
+            INSERT INTO anidb_titles VALUES
+                ('8692','Sword Art Online','swordartonline','main','en'),
+                ('10376','Sword Art Online II','swordartonlineii','main','en'),
+                ('13493','Sword Art Online: Alicization',
+                 'swordartonlinealicization','main','en'),
+                ('14796','Sword Art Online: Alicization - War of Underworld',
+                 'swordartonlinealicizationwarofunderworld','main','en'),
+                ('15146','Sword Art Online: Alicization - War of Underworld 2nd Season',
+                 'swordartonlinealicizationwarofunderworld2ndseason','main','en');
+            INSERT INTO anime_series_map VALUES
+                ('tt2250192','8692','259640',1),
+                ('tt2250192','10376','259640',2),
+                ('tt2250192','13493','259640',3),
+                ('tt2250192','14796','259640',4),
+                ('tt2250192','15146','259640',0);
+            INSERT INTO season_episodes VALUES
+                ('tt2250192',1,25),('tt2250192',2,24),
+                ('tt2250192',3,24),('tt2250192',4,23);
+            INSERT INTO episode_map VALUES
+                ('8692','259640',1,1,0,0,0,''),
+                ('10376','259640',1,2,0,0,0,''),
+                ('13493','259640',1,3,0,0,0,''),
+                ('14796','259640',1,4,1,12,0,''),
+                ('15146','259640',1,4,1,0,12,'');")
+            .unwrap();
+        db
+    }
+
+    #[test]
+    fn explicit_base_season_range_matches_individual_global_coordinates(){
+        let db=fixture();
+        let title="Sword Art Online Alicization";
+        let batch=resolve_range(&db,"tt2250192",title,3,3,5).unwrap();
+        assert_eq!(batch.len(),3);
+        for (number,item) in (3..=5).zip(batch){
+            let item=item.expect("verified global Alicization episode");
+            assert_eq!((item.season,item.episode,item.anidb_id.as_str(),item.anidb_episode),
+                (3,number,"13493",number));
+            let local=resolve_local_part(&db,"tt2250192",title,"S",3,number)
+                .unwrap().expect("single S3 equality control").mapped;
+            assert_eq!(item,local);
+        }
+    }
+
+    #[test]
+    fn explicit_base_season_range_does_not_fill_crosswalk_holes_from_local_parts(){
+        let db=fixture();
+        db.execute("UPDATE episode_map SET map='3-3;5-5' WHERE anidb_id='13493'",[])
+            .unwrap();
+        let batch=resolve_range(&db,"tt2250192","Sword Art Online Alicization",3,3,5)
+            .unwrap();
+        assert_eq!(batch[0].as_ref().unwrap().anidb_id,"13493");
+        assert!(batch[1].is_none(),"missing S3E04 cannot become a third-part S4 episode");
+        assert_eq!(batch[2].as_ref().unwrap().anidb_id,"13493");
+        db.execute("DELETE FROM episode_map WHERE anidb_id='13493'",[]).unwrap();
+        assert!(resolve_range(&db,"tt2250192","Sword Art Online Alicization",3,3,5)
+            .unwrap().iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn explicit_base_season_range_enforces_known_bounds(){
+        let db=fixture();
+        let batch=resolve_range(&db,"tt2250192","Sword Art Online Alicization",3,23,26)
+            .unwrap();
+        assert_eq!(batch[0].as_ref().unwrap().episode,23);
+        assert_eq!(batch[1].as_ref().unwrap().episode,24);
+        assert!(batch[2..].iter().all(Option::is_none),
+            "episodes after global S3's known maximum cannot become local-part coordinates");
+    }
+
+    #[test]
+    fn relative_s2_and_explicit_p3_keep_their_verified_local_coordinates(){
+        let db=fixture();
+        let title="Sword Art Online Alicization";
+        let second=resolve_range(&db,"tt2250192",title,2,3,5).unwrap();
+        for (number,item) in (3..=5).zip(second){
+            let item=item.expect("second named part");
+            assert_eq!((item.season,item.episode,item.anidb_id.as_str(),item.anidb_episode),
+                (4,number,"14796",number));
+        }
+        let second=resolve_local_part(&db,"tt2250192",title,"P",2,3)
+            .unwrap().unwrap().mapped;
+        assert_eq!((second.season,second.episode,second.anidb_id.as_str()),(4,3,"14796"));
+        let third=resolve_local_part(&db,"tt2250192",title,"P",3,3)
+            .unwrap().unwrap().mapped;
+        assert_eq!((third.season,third.episode,third.anidb_id.as_str()),(4,15,"15146"));
+        let explicit=resolve(&db,"tt2250192",
+            "Sword Art Online Alicization War of Underworld 2nd Season",1,3)
+            .unwrap().unwrap();
+        assert_eq!((explicit.season,explicit.episode,explicit.anidb_id.as_str()),
+            (4,15,"15146"));
     }
 }
