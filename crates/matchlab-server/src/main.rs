@@ -960,6 +960,39 @@ fn diagnose_with_policy(
     let mut parsed_value=parse_cached(&req.title)?;
     let db=open_db(db_path).map_err(|e|e.to_string())?;
 
+    // An unadorned named anime part may end with a spaced hyphen:
+    // "Sword Art Online - Alicization". The general release parser can
+    // mistake the final word for a torrent release group and truncate the
+    // title to "Sword Art Online". Recover it ONLY when the raw input is
+    // exactly the two parsed components, a unique AniDB alias confirms
+    // the joined name, and its crosswalk proves an IMDb season. Ordinary
+    // release groups (e.g. -GROUP) keep their original parser semantics.
+    if req.series!=Some(false)
+        && parsed_value.get("seasons").and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+        && parsed_value.get("episodes").and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+        && parsed_value.get("episode_start").is_none()
+        && parsed_value.get("year").is_none()
+        && let (Some(base),Some(group))=(
+            parsed_value.get("title").and_then(Value::as_str),
+            parsed_value.get("group").and_then(Value::as_str))
+    {
+        let joined=format!("{base} - {group}");
+        if req.title.trim().eq_ignore_ascii_case(&joined)
+            && let Some(imdb)=exact_anime_identity(&db,&joined)?
+            && anime_title::season_from_title(&db,&imdb,&joined)
+                .map_err(|e|e.to_string())?.is_some()
+            && let Some(parsed)=parsed_value.as_object_mut()
+        {
+            parsed.insert("title".into(),json!(joined));
+            parsed.remove("group");
+            parsed.insert("anime_title_verified".into(),json!(true));
+            parsed.insert("anime_part_title_recovered".into(),
+                json!("verified_misclassified_release_group"));
+        }
+    }
+
     // An unmarked range (Title 01-07, (01-25), 01~12) is not authoritative.
     // The parser exposes a tentative title and endpoints, without changing
     // regular release parsing. Use it only when Tantivy finds an exact,
