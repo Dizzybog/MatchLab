@@ -618,6 +618,35 @@ fn season_episode_end(db:&Connection,imdb:&str,season:i64)->Result<Option<i64>,S
     }
 }
 
+/// CAP.4123 may be S04E123 or S41E23. A numeric guess is insufficient:
+/// accept exactly one title identity/coordinate with positive IMDb bounds.
+/// Only execute this small indexed-metadata shortlist query for ambiguous CAP.
+fn verified_spanish_compact_coordinate(
+    db:&Connection,hint:&Value,candidates:&[imdb_matcher::Match],
+)->Result<Option<(String,i64,i64)>,String>{
+    let pairs=[
+        (hint["season"].as_i64(),hint["episode"].as_i64()),
+        (hint["alternate_season"].as_i64(),hint["alternate_episode"].as_i64())
+    ];
+    let mut verified=std::collections::BTreeSet::new();
+    for candidate in candidates {
+        if !matches!(candidate.media_type.as_str(),"tvSeries"|"tvMiniSeries"){
+            continue;
+        }
+        for (season,episode) in pairs {
+            let (Some(season),Some(episode))=(season,episode) else{continue};
+            if !(1..=9999).contains(&season)||!(1..=1700).contains(&episode){
+                continue;
+            }
+            if season_episode_end(db,&candidate.imdb_id,season)?
+                .is_some_and(|max|episode<=max){
+                verified.insert((candidate.imdb_id.clone(),season,episode));
+            }
+        }
+    }
+    if verified.len()==1{Ok(verified.into_iter().next())}else{Ok(None)}
+}
+
 // Some Chinese releases label the *absolute* episode in a parent directory
 // ("第41集"), but encode that number as S02E41 in the file name.
 // Never guess a season offset. Only reinterpret the file coordinate when
@@ -690,6 +719,7 @@ struct ImdbIdentityGate<'a>{
     has_season:bool,
     has_quality:bool,
     collection_year_range:Option<(i32,i32)>,
+    collection_movie:bool,
     verified_bluray_stream:bool,
     season_range_end:Option<i64>,
     verified_anime_range:Option<&'a str>,
@@ -736,6 +766,8 @@ fn filter_request_imdb_candidates(
         // promotion, including verified anime episode recovery. This also
         // covers dashboard diagnostics, not only the public API gate.
         imdb_matcher::year_eligible(gate.strict,gate.year,candidate.year)
+            && (!gate.collection_movie ||
+                !matches!(candidate.media_type.as_str(),"tvSeries"|"tvMiniSeries"))
             && (!matches!(gate.policy,MatchPolicy::PublicApi)
             ||year_signal_eligible(
                 gate.year,candidate.year,gate.has_season,
@@ -1156,9 +1188,12 @@ fn diagnose_with_policy(
         && numbers(parsed.get("episodes")).is_empty();
     let title=title_owned.as_str();
     let season_range=explicit_season_range(&req.title);
-    let seasons = season_range.map(|(start,end)|vec![start,end])
+    let mut seasons = season_range.map(|(start,end)|vec![start,end])
         .unwrap_or_else(||numbers(parsed.get("seasons")));
     let mut episodes = numbers(parsed.get("episodes"));
+    // A CAP.4123 token is not proof of season 41: leave both possible
+    // interpretations for metadata verification after lexical discovery.
+    let spanish_compact_hint=parsed.get("spanish_compact_episode_candidate").cloned();
     if episodes.is_empty() {
         if let Some(ep)=explicit_absolute_episode(&req.title){episodes.push(ep);}
     }
@@ -1181,8 +1216,14 @@ fn diagnose_with_policy(
         policy,strict:strict_match_mode(),year,has_season:series&&!seasons.is_empty(),
         has_quality:parsed_quality,
         collection_year_range:if year.is_none()&&!series{
-            movie_collection_year_range(parsed)
+            parsed.get("collection_year_range").and_then(Value::as_array)
+                .and_then(|a|match a.as_slice(){
+                    [start,end]=>Some((start.as_i64()? as i32,end.as_i64()? as i32)),
+                    _=>None,
+                })
+                .or_else(||movie_collection_year_range(parsed))
         }else{None},
+        collection_movie:!series && parsed.get("collection_year_range").is_some(),
         verified_bluray_stream:!series
             &&matchlab_parser::bluray_movie_stream_path(&req.title),
         season_range_end:season_range.map(|(_,end)|end),
@@ -1195,19 +1236,42 @@ fn diagnose_with_policy(
     let chosen_layer=if parsed.get("anime_title_verified")
         .and_then(Value::as_bool)==Some(true){None}else{
         bottom_up_imdb_path_match(
-            &db,parsed,year,series,seasons.iter().copied().max().unwrap_or(0),
+            &db,parsed,year,series,if spanish_compact_hint.is_some(){0}else{
+                seasons.iter().copied().max().unwrap_or(0)},
             has_episode,seasons.len()==1&&episodes.len()==1,
             |hits|filter_request_imdb_candidates(&db,hits,gate))?
     };
-    let (layer_title,imdb)=if let Some((name,matches))=chosen_layer{
+    let (layer_title,mut imdb)=if let Some((name,matches))=chosen_layer{
         (Some(name),matches)
     }else{
         (None,imdb_matcher::search_validated(
-            &db,title,year,series,seasons.iter().copied().max().unwrap_or(0),
+            &db,title,year,series,if spanish_compact_hint.is_some(){0}else{
+                seasons.iter().copied().max().unwrap_or(0)},
             &req.title,has_episode,20,
             |hits|filter_request_imdb_candidates(&db,hits,gate))
             .map_err(|e|e.to_string())?)
     };
+    if let Some(ref hint)=spanish_compact_hint {
+        let verified=verified_spanish_compact_coordinate(&db,hint,&imdb)?;
+        if let Some((id,season,episode))=verified {
+            imdb.sort_by_key(|candidate|candidate.imdb_id!=id);
+            seasons=vec![season];
+            episodes=vec![episode];
+            if let Some(parsed)=parsed_value.as_object_mut(){
+                parsed.insert("seasons".into(),json!([season]));
+                parsed.insert("episodes".into(),json!([episode]));
+                parsed.insert("spanish_compact_verified".into(),json!(true));
+            }
+        }else{
+            // Keep title identity without fabricating a season/episode.
+            seasons.clear();
+            episodes.clear();
+            if let Some(parsed)=parsed_value.as_object_mut(){
+                parsed.insert("seasons".into(),json!([]));
+                parsed.insert("episodes".into(),json!([]));
+            }
+        }
+    }
     // The matcher's verified level becomes the presentation title of its
     // diagnostic, while the standalone /parse result remains unchanged.
     // All later anime/crosswalk checks now use that same selected level.
@@ -1913,6 +1977,29 @@ fn diagnose_with_policy(
     }
     if let Some(winner)=selected.as_mut(){
         reconcile_series_coordinates(&db,winner,parsed)?;
+        // Parser-only coordinate guesses are not authoritative for a
+        // non-anime identity. The 1700 cap does not affect AniDB-linked
+        // works or their independently verified crosswalks.
+        let anime=winner["anime_ids"].as_object()
+            .is_some_and(|ids|!ids.is_empty())
+            ||winner.pointer("/anime/asid").and_then(Value::as_str).is_some()
+            ||parsed.get("anime_title_verified").and_then(Value::as_bool)==Some(true);
+        if winner["category"]=="series" && !anime {
+            if winner["episode"].as_i64().is_some_and(|ep|ep>1700){
+                winner["episode"]=Value::Null;
+                if let Some(id)=winner["imdb_id"].as_str(){
+                    winner["sid"]=json!(id);
+                }
+                winner["coordinate_fallback_blocked"]=json!("episode_over_1700_non_anime");
+            }
+            if winner["episode_end"].as_i64().is_some_and(|ep|ep>1700){
+                winner["episode_end"]=Value::Null;
+                if let Some(range)=winner.get_mut("episode_range"){
+                    range["complete"]=json!(false);
+                    range["end_episode"]=Value::Null;
+                }
+            }
+        }
     }
     let reason = if anidb_candidate.is_some() && selected.as_ref()
         .is_some_and(|winner|winner["imdb_id"].is_null()) {
@@ -1980,7 +2067,7 @@ static TORRENT_MATCH_CACHE:OnceLock<query_cache::QueryCache<Diagnostic>>=OnceLoc
 // A semantic matcher change must invalidate old persistent ML match results,
 // even when metadata.sqlite3, learned regex rules and the strict-mode flag
 // are unchanged. Bump this revision when altering title/year eligibility.
-const MATCHER_SEMANTIC_REVISION:&str="title-word-boundaries-strict-year-collection-v1";
+const MATCHER_SEMANTIC_REVISION:&str="title-word-boundaries-strict-year-collection-episode-context-v2";
 fn scoped_match_generation(metadata:&str,strict:bool)->String{
     format!("{metadata}:matcher={MATCHER_SEMANTIC_REVISION}:strict={strict}")
 }
