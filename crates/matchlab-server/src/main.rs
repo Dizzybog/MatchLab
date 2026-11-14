@@ -4442,6 +4442,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn history_migration_does_not_block_http_or_statistics_readiness(){
+        let unique=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let history=std::env::temp_dir().join(format!(
+            "matchlab-async-history-{}-{unique}.sqlite3",std::process::id()));
+        let state=AppState{
+            db:Arc::new(PathBuf::from("/nonexistent/async-history-metadata.sqlite3")),
+            history:Arc::new(history.clone()),
+            match_slots:Arc::new(Semaphore::new(2)),
+            index_phase:Arc::new(Mutex::new(IndexPhase::Indexing)),
+            history_ready:Arc::new(AtomicBool::new(false)),
+        };
+        let (status,Json(live))=liveness().await;
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(live["status"],"alive");
+        let (_,html)=dashboard().await;
+        assert!(html.contains("html"));
+        let (status,Json(stats))=dashboard_stats_request(State(state.clone())).await;
+        assert_eq!(status,StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(stats["status"],"initializing");
+        let (status,Json(history_result))=dashboard_history_request(
+            State(state.clone()),Query(HistoryQuery{
+                limit:None,offset:None,status:None
+            })).await;
+        assert_eq!(status,StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(history_result["status"],"initializing");
+        // The migration is performed on Tokio's blocking pool; HTTP never
+        // waits for it, and ordinary requests remain independent of ML.
+        let to_initialize=history.clone();
+        tokio::task::spawn_blocking(move||
+            dashboard_history::initialize(&to_initialize)).await.unwrap().unwrap();
+        state.history_ready.store(true,Ordering::Release);
+        let (status,Json(stats))=dashboard_stats_request(State(state.clone())).await;
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(stats["total"],0);
+        let (status,Json(history_result))=dashboard_history_request(
+            State(state),Query(HistoryQuery{
+                limit:None,offset:None,status:None
+            })).await;
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(history_result["items"],json!([]));
+        let _=std::fs::remove_file(&history);
+        let _=std::fs::remove_file(format!("{}-wal",history.display()));
+        let _=std::fs::remove_file(format!("{}-shm",history.display()));
+    }
+
+    #[tokio::test]
     async fn server_health_and_json_errors_work_while_metadata_is_indexing(){
         let state=AppState{
             db:Arc::new(PathBuf::from("/nonexistent/matchlab-metadata-test.sqlite3")),
