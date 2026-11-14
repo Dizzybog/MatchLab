@@ -1034,7 +1034,7 @@ fn diagnose_with_policy(
     // candidate, suppress that inference rather than publishing guessed
     // coordinates for unrelated movies or ordinary TV titles.
     if verified_anidb_range.is_none() && verified_anime_range_imdb.is_none()
-        && !parsed_value.contains_key("episode_start")
+        && parsed_value.get("episode_start").is_none()
         && parsed_value.get("anime_episode_range_candidate").is_some()
         && let Some(parsed)=parsed_value.as_object_mut(){
         parsed.insert("episodes".into(),json!([]));
