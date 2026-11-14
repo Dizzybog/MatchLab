@@ -420,6 +420,80 @@ pub fn resolve_anidb(
 mod tests{
     use super::*;
     #[test]
+    fn streaming_winners_match_original_sort_and_dedup_for_1000_fixtures(){
+        let ids=["100","101","102","bad","0","123"];
+        let mut state=0x18f3a11c_u64;
+        let mut pick=|n:u64|{
+            state=state.wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state%n
+        };
+        for _case in 0..1000 {
+            let mut old_season:Vec<(i64,i64,String,i64)>=Vec::new();
+            let mut best_season=None;
+            let mut ambiguous_season=false;
+            let mut old_absolute=std::collections::BTreeMap::<(String,i64,i64,i64),u8>::new();
+            let mut best_absolute=None;
+            let mut ambiguous_absolute=false;
+            for _ in 0..38 {
+                let id=ids[pick(ids.len() as u64) as usize];
+                let offset=pick(8) as i64-3;
+                let start=pick(7) as i64;
+                let ani=pick(105_000) as i64;
+                let season=pick(10_100) as i64;
+                let episode=pick(105_000) as i64;
+                let strength=(pick(3)+1) as u8;
+                old_season.push((offset,start,id.into(),ani));
+                consider_season(&mut best_season,&mut ambiguous_season,
+                    offset,start,id,ani);
+                old_absolute.entry((id.into(),ani,season,episode))
+                    .and_modify(|seen|*seen=(*seen).max(strength))
+                    .or_insert(strength);
+                consider_absolute(&mut best_absolute,&mut ambiguous_absolute,
+                    id,ani,season,episode,strength);
+            }
+            // The old season resolver filtered invalid ASIDs, sorted by
+            // descending (offset,start), and rejected a different runner-up
+            // tied at the strongest rank.
+            old_season.retain(|(_,_,id,ani)|canonical_asid(id,*ani).is_some());
+            old_season.sort_by(|a,b|b.0.cmp(&a.0)
+                .then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+            let expected_season=old_season.first().and_then(|first|{
+                if old_season.get(1).is_some_and(|runner|
+                    runner.0==first.0&&runner.1==first.1
+                    &&(runner.2!=first.2||runner.3!=first.3)){
+                    None
+                }else{Some((first.2.clone(),first.3))}
+            });
+            let actual_season=if ambiguous_season {None}else{
+                best_season.map(|best:SeasonWinner<'_>|
+                    (best.anidb.to_owned(),best.anime_episode))
+            };
+            assert_eq!(actual_season,expected_season);
+
+            // The old absolute resolver merged identical keys using their
+            // maximum evidence strength and required one strongest key.
+            old_absolute.retain(|(id,ani,season,episode),_|
+                canonical_asid(id,*ani).is_some()
+                &&(1..=9_999).contains(season)
+                &&(1..=99_999).contains(episode));
+            let max=old_absolute.values().copied().max();
+            let mut top=old_absolute.into_iter().filter(|(_,strength)|
+                Some(*strength)==max);
+            let expected_absolute=match (top.next(),top.next()){
+                (Some((key,_)),None)=>Some(key),
+                _=>None,
+            };
+            let actual_absolute=if ambiguous_absolute {None}else{
+                best_absolute.map(|best:AbsoluteWinner<'_>|(
+                    best.anidb.to_owned(),best.anime_episode,
+                    best.season,best.episode))
+            };
+            assert_eq!(actual_absolute,expected_absolute);
+        }
+    }
+
+    #[test]
     fn bleach_absolute_320_prefers_bounded_episode_over_shared_tvdb_open_sequels(){
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE anime_series_map(
@@ -578,6 +652,13 @@ mod tests{
                 tv_season:3,start:1,end:12,offset:0,explicit:vec![]},
         ];
         let index=split_index(&links,&maps);
+        for indexed in &index.links{
+            assert_eq!(indexed.mappings.len(),indexed.split.len());
+            for (&map,&cached) in indexed.mappings.iter().zip(&indexed.split){
+                assert_eq!(cached,split(indexed.link,map,&index),
+                    "the cached split flag must equal the historical rule");
+            }
+        }
         for link in &links{
             for map in &maps{
                 let previous=link.trakt>0&&links.iter().any(|other|
