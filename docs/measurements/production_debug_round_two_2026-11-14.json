@@ -1,0 +1,300 @@
+{
+  "schema": "matchlab-production-debug-round-two-v1",
+  "capture_utc": "2026-11-14T20:25:38Z",
+  "request_time_interval_utc": {
+    "first": "2026-11-14T20:24:55.436Z",
+    "last": "2026-11-14T20:25:30.542Z"
+  },
+  "sample": {
+    "rows": 801,
+    "unique_ids": 801,
+    "unique_request_strings": 795,
+    "repeated_request_rows": 6,
+    "unique_basename_strings_not_independent_identities": 788,
+    "repeated_same_parent_leaf_paths": 2,
+    "request_strings_shared_with_previous_658_row_capture": 0,
+    "status_counts": {
+      "unmatched": 499,
+      "matched": 302
+    },
+    "policy_counts": {
+      "public_api": 801
+    },
+    "complete_original_request_context_rows": 0,
+    "original_request_overrides_unknown_rows": 801
+  },
+  "rolling_window": {
+    "pages": 9,
+    "initial_status": {
+      "retained": 1000,
+      "retention_limit": 1000
+    },
+    "numeric_id_span": 2262,
+    "internal_id_gaps": 1461,
+    "initial_retained_minus_collected": 199,
+    "interpretation": "Rows are a rolling bounded-history sample, not an atomic snapshot. Pruning, independent status retention and concurrent arrivals can create gaps. Count differences do not prove exactly which initial rows were lost."
+  },
+  "versions": {
+    "deployed_build_reported_at_capture": "dfe78a5b67c08dddff935c589e29e300b8728565",
+    "local_parser_source_commit": "fd02292468865b1c5bb5c491b39b3e61d74e8b8a",
+    "deployed_commit_is_local_ancestor": true,
+    "commits_between_reported_deployment_and_local_source": 7,
+    "local_parser_binary_sha256": "b2807fcb42119e9689d383b00aa2af8eda95619f88cd2c155040e71b674e1b25",
+    "warning": "A capture-time deployment SHA is not a per-row parser/rule/metadata provenance stamp. The deployed service predates already merged fixes; do not propose duplicate fixes from old fields."
+  },
+  "stored_diagnostic_vs_current_title_only_parse": {
+    "replay_rows": 801,
+    "unique_replay_ids": 801,
+    "joined_ids": 801,
+    "http_status_counts": {
+      "200": 801
+    },
+    "identical_objects": 764,
+    "only_server_added_anime_title_verified": 20,
+    "additional_verified_server_anime_title_or_range_overlay_differences": 3,
+    "remaining_native_output_difference_candidates": 14,
+    "native_old_only_fields": {
+      "quality": 4,
+      "trash": 7,
+      "year": 1
+    },
+    "native_new_only_fields": {
+      "title": 3
+    },
+    "native_changed_shared_fields": {
+      "seasons": 1,
+      "episodes": 1,
+      "quality": 2,
+      "title": 1
+    },
+    "overlay_difference_fields": {
+      "episode_end": 2,
+      "anime_title_verified": 3,
+      "episode_start": 2,
+      "episode_count": 2,
+      "episode_range_numbering": 2,
+      "title": 1
+    },
+    "old_missing_field_alerts_whose_field_is_present_in_current_parse": {
+      "field_missing_title": 3,
+      "field_missing_seasons": 1
+    },
+    "interpretation": "Stored match diagnostics include server metadata verification and episode overlays. The 20 flag-only and three further verified overlays are not native parser regressions. The 14 remaining output changes require source/rule-context review and are not automatically new defects or verified accuracy gains."
+  },
+  "original_heuristic_diagnostics": {
+    "flagged_rows": 188,
+    "alert_occurrences": 211,
+    "alert_code_counts": {
+      "field_underextracted_title": 127,
+      "field_mismatch_quality": 8,
+      "unmatched_explicit_episode": 43,
+      "field_missing_year": 17,
+      "field_missing_seasons": 3,
+      "field_mismatch_codec": 2,
+      "field_missing_title": 3,
+      "field_missing_quality": 2,
+      "field_missing_bit_depth": 1,
+      "field_missing_audio": 1,
+      "field_missing_channels": 1,
+      "invalid_selected_coordinate": 2,
+      "incomplete_anime_episode_range": 1
+    }
+  },
+  "limitations": [
+    "The complete sample has no independently labeled expected-identity set for all original requests. Four catalog-backed title-only matcher cases are scored separately; matched/unmatched counts do not establish precision, recall or accuracy.",
+    "All 801 original year/series request override contexts are unknown; a title-only replay is not an exact replay of the original matching request.",
+    "The current /parse artifact evaluates title parsing only; it does not re-run production metadata, learned rule state, candidate ranking or episode crosswalk verification.",
+    "A 200 parse response proves successful execution, not semantic correctness.",
+    "Different request strings or basenames are not necessarily independent films, shows or parser conventions.",
+    "No user token, raw release title, parsed work name or selected identity is included in this aggregate artifact."
+  ],
+  "inputs_sha256": {
+    "snapshot.json": "75807606edf30c13dc3b7788feca0f7cbcd5d6e6e07340ae20999d92038a30c8",
+    "parser-current.json": "1e8b58085268a5e6202f51bd8f6a263a5a87b736401c0762029778fde7f005df",
+    "capture-summary.json": "cb08a66358b2499d1bb1d53bda0b87f1b13d3ae4fc9bd6d135fcb8fbe4391239",
+    "parser-confirmed-cases.json": "02147abece510a8ca313efaea34dc846c09c773c2686187f89bdecfc64856fce",
+    "parser-private-replay.json": "0aebac2f47149907381c531319890a7edad8e637a2fbfca26fbd02c45ca05649",
+    "local-bilingual-replay-private.json": "bb3348ad3843e0942a567d765c829c95a1d93731723ef3ccca8eaa44418734b2"
+  },
+  "verification": {
+    "comparison_baseline": "Merged PR145, not the older deployed service",
+    "parser_known_failure_cohort": {
+      "scope": "Manually specified raw-syntax assertions for known failures; not a random cohort or production accuracy estimate. Baseline already includes merged PR145.",
+      "phases": [
+        {
+          "label": "before",
+          "binary_sha256": "b2807fcb42119e9689d383b00aa2af8eda95619f88cd2c155040e71b674e1b25",
+          "cases": 11,
+          "passed": 0,
+          "assertions": 45,
+          "assertions_passed": 30,
+          "groups": {
+            "collection_year_season_erasure": {
+              "cases": 3,
+              "passed": 0,
+              "assertions": 12,
+              "assertions_passed": 9
+            },
+            "title_word_it_as_network": {
+              "cases": 3,
+              "passed": 0,
+              "assertions": 8,
+              "assertions_passed": 2
+            },
+            "date_delimiter_hides_quality": {
+              "cases": 2,
+              "passed": 0,
+              "assertions": 12,
+              "assertions_passed": 10
+            },
+            "plural_bit_depth": {
+              "cases": 1,
+              "passed": 0,
+              "assertions": 4,
+              "assertions_passed": 3
+            },
+            "joined_truehd_channels": {
+              "cases": 1,
+              "passed": 0,
+              "assertions": 5,
+              "assertions_passed": 3
+            },
+            "dts_group_prefix_collision": {
+              "cases": 1,
+              "passed": 0,
+              "assertions": 4,
+              "assertions_passed": 3
+            }
+          }
+        },
+        {
+          "label": "after",
+          "binary_sha256": "21015be7aa202201c321173a83752de6af1f01cd938db24586c393b45807c0d9",
+          "cases": 11,
+          "passed": 11,
+          "assertions": 45,
+          "assertions_passed": 45,
+          "groups": {
+            "collection_year_season_erasure": {
+              "cases": 3,
+              "passed": 3,
+              "assertions": 12,
+              "assertions_passed": 12
+            },
+            "title_word_it_as_network": {
+              "cases": 3,
+              "passed": 3,
+              "assertions": 8,
+              "assertions_passed": 8
+            },
+            "date_delimiter_hides_quality": {
+              "cases": 2,
+              "passed": 2,
+              "assertions": 12,
+              "assertions_passed": 12
+            },
+            "plural_bit_depth": {
+              "cases": 1,
+              "passed": 1,
+              "assertions": 4,
+              "assertions_passed": 4
+            },
+            "joined_truehd_channels": {
+              "cases": 1,
+              "passed": 1,
+              "assertions": 5,
+              "assertions_passed": 5
+            },
+            "dts_group_prefix_collision": {
+              "cases": 1,
+              "passed": 1,
+              "assertions": 4,
+              "assertions_passed": 4
+            }
+          }
+        }
+      ]
+    },
+    "all_captured_title_parses": {
+      "rows": 801,
+      "all_before_after_http_200": true,
+      "changed_rows": 14,
+      "changed_field_counts": {
+        "seasons": 3,
+        "network": 3,
+        "title": 3,
+        "quality": 3,
+        "bit_depth": 1,
+        "audio": 2,
+        "channels": 1,
+        "group": 2
+      },
+      "interpretation": "All 14 changes manually inspected: 11 predefined affected cases plus one removed false TeleSync field and two recovered explicit release groups. Unchanged outputs are not correctness labels."
+    },
+    "matcher_controlled_replay": {
+      "scope": "Controlled local HTTP title-only replay with real public alias/year evidence plus explicit synthetic guard metadata. Actual filenames and history references stay private. Original request overrides and full production catalog are unknown; no production accuracy claim.",
+      "same_fixture_and_index": true,
+      "strict_mode": true,
+      "ml_enabled": false,
+      "phases": [
+        {
+          "label": "before",
+          "binary_sha256": "b2807fcb42119e9689d383b00aa2af8eda95619f88cd2c155040e71b674e1b25",
+          "summary": {
+            "private_actual_cohort": {
+              "cases": 11,
+              "labeled": 4,
+              "matched_expectation": 0,
+              "unscored": 7
+            },
+            "sanitized_control": {
+              "cases": 14,
+              "labeled": 14,
+              "matched_expectation": 12,
+              "unscored": 0
+            }
+          },
+          "child_exit_status": -15
+        },
+        {
+          "label": "after",
+          "binary_sha256": "21015be7aa202201c321173a83752de6af1f01cd938db24586c393b45807c0d9",
+          "summary": {
+            "private_actual_cohort": {
+              "cases": 11,
+              "labeled": 4,
+              "matched_expectation": 4,
+              "unscored": 7
+            },
+            "sanitized_control": {
+              "cases": 14,
+              "labeled": 14,
+              "matched_expectation": 14,
+              "unscored": 0
+            }
+          },
+          "child_exit_status": -15
+        }
+      ],
+      "unscored_cases_abstain_in_both_binaries": true
+    },
+    "rust": {
+      "workspace_passed": 526,
+      "regex_auditor_passed": 5
+    },
+    "python": {
+      "passed": 99
+    },
+    "all_targets_check": "passed",
+    "optimized_release_build": "passed",
+    "compiler_warnings_denied": true,
+    "cargo_locked": true,
+    "source_sha256": {
+      "crates/matchlab-parser/src/lib.rs": "dd5b832816ddaec846b29141ffc77cbf05063b4bca2236461548975d788f42cd",
+      "crates/matchlab-parser/tests/debug_round_two_regressions.rs": "24e4b7a5fb5b5e084935ac8de26b677ed41f937757778c1ca2f24f53d2ebcd4c",
+      "crates/matchlab-server/src/imdb_matcher.rs": "54ff25b1773097c038b62b427a168269a74ee4eafed8c71008c38a517ee31176",
+      "crates/matchlab-server/src/main.rs": "fd38ac3b39753b8f46ea3426fb25dbae12092d7947aeb1a41168f428d5946f7f"
+    },
+    "remaining_ci": "Docker and native ARM64 validation on the PR"
+  }
+}
