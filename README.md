@@ -89,6 +89,8 @@ The public `/match` and `/debug/match` endpoints have identical strict matching 
 
 Title matching preserves word boundaries in addition to Tantivy's compact normalized key: `Supernatural` (1 word) differs from `Super-Natural` / `Super.Natural` (2 words). **Strict** requires the original word count for exact IMDb and AniDB aliases. **Non-strict** uses the count only as a tie-break preference for normalized-key collisions, not as an exclusion: erroneous parser titles with additional words retain validated prefix/suffix recovery. Word counts are computed from existing names at query time; no metadata reindex is needed.
 
+**Strict production-year rule:** If a torrent filename supplies a year (or the `/match` request explicitly supplies one), the selected IMDb identity **must have that exact year**. Candidates with another year or no valid year are excluded, including AniDB-linked IMDb identities and episode-driven promotions. A release without a production year retains the existing title/episode matching rules. Non-strict mode continues to rank approximate years instead of excluding them. Date-based episodes use their separate airdate logic rather than interpreting an episode airdate as a show's production year.
+
 **Strict exact-title matching is enabled by default:** MatchLab compares
 complete IMDb and exact AniDB aliases in the same ranked candidate set.
 An unambiguous exact AniDB title can identify a named anime season/part even
