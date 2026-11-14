@@ -973,25 +973,58 @@ fn diagnose_with_policy(
              v.get("start").and_then(Value::as_i64),
              v.get("end").and_then(Value::as_i64))) {
             let candidate_title=candidate_title.to_owned();
-            // Existing IMDb crosswalk validation wins when it can prove
-            // this range. Only fall back to the independent AniDB lookup
-            // if the legacy path cannot establish a candidate.
+            let season_hint=hint.and_then(|v|v.get("season_hint"))
+                .and_then(Value::as_i64).filter(|s|(1..=120).contains(s));
+            // The ordinary unmarked anime batch has no season: the
+            // AniDB absolute crosswalk remains authoritative. A literal
+            // S2 next to the batch is different evidence. An absolute
+            // conversion is valid only if its ENTIRE mapped interval
+            // belongs to that explicitly advertised season.
             verified_anime_range_imdb=verified_unmarked_anime_range_imdb(
                 &db,&candidate_title,start,end)?;
-            if verified_anime_range_imdb.is_none(){
-                verified_anidb_range=anidb_matcher::match_absolute_range(
-                    &db,&candidate_title,start,end)?;
-            }
-            if verified_anidb_range.is_some() || verified_anime_range_imdb.is_some(){
+            let absolute_agrees_with_season=if let (Some(season),Some(imdb))=(
+                season_hint,verified_anime_range_imdb.as_deref())
+            {
+                let mapped=mapped_absolute_range(&db,imdb,start,end)?;
+                mapped["complete"]==true
+                    && mapped["start_season"].as_i64()==Some(season)
+                    && mapped["end_season"].as_i64()==Some(season)
+            }else{false};
+            if let Some(season)=season_hint
+                && !absolute_agrees_with_season {
+                // A verified absolute anime episode 01..24 could belong
+                // to S03, but "S2 (01-24)" must never publish S03. Treat
+                // these as a season-relative batch, then let the existing
+                // season crosswalk and IMDb episode bounds prove endpoints.
+                // Preserve the candidate in /parse for diagnostics; never
+                // manufacture ASIDs or a different season as a fallback.
+                verified_anime_range_imdb=None;
                 if let Some(parsed)=parsed_value.as_object_mut(){
                     parsed.insert("title".into(),json!(candidate_title));
-                    parsed.insert("episodes".into(),json!([]));
-                    parsed.insert("seasons".into(),json!([]));
+                    parsed.insert("seasons".into(),json!([season]));
+                    parsed.insert("episodes".into(),json!([start]));
                     parsed.insert("episode_start".into(),json!(start));
                     parsed.insert("episode_end".into(),json!(end));
                     parsed.insert("episode_count".into(),json!(end-start+1));
-                    parsed.insert("episode_range_numbering".into(),json!("absolute"));
-                    parsed.insert("anime_title_verified".into(),json!(true));
+                    parsed.insert("episode_range_numbering".into(),json!("season"));
+                }
+            }else{
+                if season_hint.is_none() && verified_anime_range_imdb.is_none(){
+                    verified_anidb_range=anidb_matcher::match_absolute_range(
+                        &db,&candidate_title,start,end)?;
+                }
+                if verified_anidb_range.is_some()
+                    || verified_anime_range_imdb.is_some() {
+                    if let Some(parsed)=parsed_value.as_object_mut(){
+                        parsed.insert("title".into(),json!(candidate_title));
+                        parsed.insert("episodes".into(),json!([]));
+                        parsed.insert("seasons".into(),json!([]));
+                        parsed.insert("episode_start".into(),json!(start));
+                        parsed.insert("episode_end".into(),json!(end));
+                        parsed.insert("episode_count".into(),json!(end-start+1));
+                        parsed.insert("episode_range_numbering".into(),json!("absolute"));
+                        parsed.insert("anime_title_verified".into(),json!(true));
+                    }
                 }
             }
         }
@@ -1001,6 +1034,7 @@ fn diagnose_with_policy(
     // candidate, suppress that inference rather than publishing guessed
     // coordinates for unrelated movies or ordinary TV titles.
     if verified_anidb_range.is_none() && verified_anime_range_imdb.is_none()
+        && parsed_value.get("episode_start").is_none()
         && parsed_value.get("anime_episode_range_candidate").is_some()
         && let Some(parsed)=parsed_value.as_object_mut(){
         parsed.insert("episodes".into(),json!([]));
@@ -4299,6 +4333,91 @@ mod tests {
         db.execute("DELETE FROM season_episodes",[]).unwrap();
         assert!(fallback("Born with Luck",1,24).is_none(),
             "unknown IMDb episode bounds cannot authorize fallback");
+    }
+
+    #[test]
+    fn season_tagged_anime_batch_keeps_explicit_season_against_absolute_crosswalk(){
+        // A stale/incorrect AniDB absolute episode mapping may associate
+        // episodes 01-24 with S03. The release explicitly advertises S2.
+        // Season-relative IMDb bounds remain valid even when AniDB's
+        // season-2 crosswalk has not been imported yet.
+        for absolute_season in [2,3] {
+            let stamp=std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+            let path=std::env::temp_dir().join(format!(
+                "matchlab-fire-force-s2-{absolute_season}-{}-{stamp}.sqlite3",
+                std::process::id()));
+            let db=Connection::open(&path).unwrap();
+            db.execute_batch(&format!("
+                CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                    year INTEGER,category TEXT,region TEXT,original INTEGER,
+                    ordering INTEGER,type TEXT);
+                CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+                CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                    episode_count INTEGER,max_episode INTEGER);
+                CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                    tvdb_id TEXT,trakt_season INTEGER);
+                CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                    anidb_season INTEGER,tvdb_season INTEGER,
+                    start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+                CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+                CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                    title_type TEXT,language TEXT);
+                INSERT INTO titles VALUES('tt2026001','Enen no Shouboutai',
+                    'enennoshouboutai',2019,'series','',1,0,'tvSeries');
+                INSERT INTO seasons VALUES('tt2026001',3);
+                INSERT INTO season_episodes VALUES
+                    ('tt2026001',2,24,24),('tt2026001',3,24,24);
+                INSERT INTO anime_series_map VALUES('tt2026001','500',
+                    'fireforce',0);
+                INSERT INTO anime_ids VALUES('tt2026001','anidb','500');
+                INSERT INTO anidb_titles VALUES('500','Enen no Shouboutai',
+                    'enennoshouboutai','main','en');
+                INSERT INTO episode_map VALUES('500','fireforce',1,-1,1,24,0,'');
+                INSERT INTO episode_map VALUES('500','fireforce',1,
+                    {absolute_season},1,24,0,'');
+            ")).unwrap();
+            tantivy_search::warmup(&db).unwrap();
+            drop(db);
+
+            let release="[SubsPlease] Enen no Shouboutai S2 (01-24) (720p) [Batch]";
+            let parsed=matchlab_parser::parse_title(release,false).unwrap();
+            assert_eq!(parsed["anime_episode_range_candidate"]["season_hint"],2,
+                "{parsed:?}");
+            assert_eq!(parsed["anime_episode_range_candidate"]["start"],1);
+            assert_eq!(parsed["anime_episode_range_candidate"]["end"],24);
+            let result=diagnose(&path,&MatchRequest{
+                title:release.into(),year:None,series:None}).unwrap();
+            let selected=result.selected.expect("canonical anime series found");
+            assert_eq!(selected["imdb_id"],"tt2026001");
+            assert_eq!(selected["season"],2,"{absolute_season}: {selected:?}");
+            assert_eq!(selected["season_end"],2,"{absolute_season}: {selected:?}");
+            assert_eq!(selected["episode"],1,"{absolute_season}: {selected:?}");
+            assert_eq!(selected["episode_end"],24,"{absolute_season}: {selected:?}");
+            let public=public_match_response(Some(selected));
+            assert_eq!(public["sid_start"],"tt2026001:2:1",
+                "{absolute_season}: {public}");
+            assert_eq!(public["sid_end"],"tt2026001:2:24",
+                "{absolute_season}: {public}");
+            if absolute_season==2 {
+                assert_eq!(public["asid_start"],"500:1","{public}");
+                assert_eq!(public["asid_end"],"500:24","{public}");
+            }else{
+                assert!(public["asid_start"].is_null(),"{public}");
+                assert!(public["asid_end"].is_null(),"{public}");
+            }
+
+            // Without S2, the exact same numerical batch is correctly
+            // eligible for absolute AniDB mapping, including S03.
+            let unscoped=diagnose(&path,&MatchRequest{
+                title:"[SubsPlease] Enen no Shouboutai (01-24) (720p) [Batch]".into(),
+                year:None,series:None}).unwrap();
+            let unscoped=unscoped.selected.expect("unscoped anime batch");
+            assert_eq!(unscoped["season"],absolute_season,
+                "{absolute_season}: {unscoped:?}");
+            std::fs::remove_file(&path).unwrap();
+            std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+        }
     }
 
     #[test]
