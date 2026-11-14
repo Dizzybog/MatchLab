@@ -1134,6 +1134,71 @@ fn diagnose_with_policy(
             }
         }
     }
+    // S2/P2 after a uniquely verified named AniDB part is *local* to
+    // that work, unless the advertised number already equals its absolute
+    // IMDb starting season. E.g. Alicization begins at S03:
+    // local S1 -> S03, S2/P2 -> S04, explicit S3 -> S03 (not S05).
+    // A plain series title such as "Enen no Shouboutai S2" has no
+    // later-season named-part anchor and must remain global S02.
+    let mut verified_local_anime_episode:Option<Value>=None;
+    if req.series!=Some(false)
+        && let Some(candidate)=parsed_value.get("anime_local_season_candidate")
+        && let (Some(name),Some(local))=(
+            candidate.get("title").and_then(Value::as_str),
+            candidate.get("local_season").and_then(Value::as_i64))
+        && (1..=99).contains(&local)
+    {
+        let name=name.to_owned();
+        if let Some(imdb)=exact_anime_identity(&db,&name)?
+            && let Some(base)=anime_title::season_from_title(&db,&imdb,&name)
+                .map_err(|e|e.to_string())?
+            && base>1
+        {
+            let absolute=if local==base {Some(base)}
+                else{base.checked_add(local-1)};
+            if let Some(absolute)=absolute.filter(|n|(1..=9_999).contains(n)){
+                let max=db.query_row(
+                    "SELECT max_season FROM seasons WHERE imdb_id=?1",
+                    [&imdb],|row|row.get::<_,i64>(0))
+                    .optional().map_err(|e|e.to_string())?;
+                // Only a season proven to exist in this IMDb work can
+                // replace a parsed S/P marker. Never fabricate an ASID.
+                if max.is_some_and(|m|absolute<=m) {
+                    let parsed_episode=parsed_value.get("episodes")
+                        .and_then(Value::as_array)
+                        .and_then(|values|match values.as_slice(){
+                            [only]=>only.as_i64(),_=>None
+                        });
+                    if let Some(parsed)=parsed_value.as_object_mut(){
+                        parsed.insert("title".into(),json!(name));
+                        parsed.insert("seasons".into(),json!([absolute]));
+                        parsed.insert("anime_local_season_resolved".into(),
+                            json!({"base_season":base,"local_season":local,
+                                "season":absolute,"imdb_id":imdb}));
+                        // P2 is a part marker, not an episode. Clear only a
+                        // bogus P-number episode when nothing independently
+                        // marks an episode in the same release.
+                        if candidate.get("marker").and_then(Value::as_str)==Some("P")
+                            && parsed_episode==Some(local)
+                        {
+                            parsed.insert("episodes".into(),json!([]));
+                        }
+                    }
+                    if let Some(ep)=parsed_episode.filter(|ep|*ep>0)
+                        && let Some(mapped)=episode_crosswalk::resolve_season(
+                            &db,&imdb,absolute,ep).map_err(|e|e.to_string())?
+                        && mapped.season==absolute && mapped.episode==ep
+                    {
+                        verified_local_anime_episode=Some(json!({
+                            "imdb_id":mapped.imdb_id,"season":mapped.season,
+                            "episode":mapped.episode,"anidb_id":mapped.anidb_id,
+                            "anidb_episode":mapped.anidb_episode
+                        }));
+                    }
+                }
+            }
+        }
+    }
     // The ML subsystem supplies a compiled regex candidate, never a parsed
     // field value. Only MatchLab's matcher may reinterpret an episode after
     // independently verifying the current AniDB/TVDB crosswalk.
@@ -1370,7 +1435,8 @@ fn diagnose_with_policy(
         .and_then(Value::as_str)
         .or(anime_subfolder_title.as_deref()).unwrap_or(title);
     let anime_resolve_key=imdb_matcher::clean_title(anime_resolve_title);
-    let anime = if let Some(verified)=verified_path_part {
+    let anime = if let Some(verified)=verified_local_anime_episode
+        .or(verified_path_part) {
         Some(verified)
     } else if verified_chinese_override.is_some()
         || verified_absolute_episode_imdb.is_some() {
