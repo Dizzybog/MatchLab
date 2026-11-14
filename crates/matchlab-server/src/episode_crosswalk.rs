@@ -66,6 +66,9 @@ struct LinkedMappings<'a>{
     link:&'a Link,
     // Preserve the order of mapping rows and every duplicate/overlap.
     mappings:Vec<&'a Mapping>,
+    // Split status depends only on the immutable family/season metadata,
+    // NOT on the episode number. Evaluate once per map row, then reuse.
+    split:Vec<bool>,
     // This is identical to the old per-episode first-absolute-row check.
     absolute_offset:i64,
     first_absolute_end:Option<i64>,
@@ -94,6 +97,11 @@ fn split_index<'a>(links:&'a[Link],maps:&'a[Mapping])->SplitIndex<'a>{
         let mappings=by_anidb.get(link.anidb.as_str()).into_iter()
             .flatten().copied().filter(|m|
                 link.tvdb.is_empty()||link.tvdb==m.tvdb).collect::<Vec<_>>();
+        let split=mappings.iter().map(|m|link.trakt>0
+            && partners.get(&(m.tvdb.as_str(),m.tv_season)).is_some_and(|others|
+                others.iter().any(|(id,trakt)|
+                    *id!=link.anidb.as_str() && *trakt!=link.trakt)))
+            .collect::<Vec<_>>();
         let mut absolute_count=0usize;
         let mut first_absolute=None;
         for &m in &mappings{
@@ -105,13 +113,14 @@ fn split_index<'a>(links:&'a[Link],maps:&'a[Mapping])->SplitIndex<'a>{
         let absolute_offset=if absolute_count==1{
             first_absolute.map_or(0,|m:&Mapping|m.offset)
         }else{0};
-        LinkedMappings{link,mappings,absolute_offset,
+        LinkedMappings{link,mappings,split,absolute_offset,
             first_absolute_end:first_absolute.map(|m|m.end)}
     }).collect();
     // The temporary AniDB lookup map is intentionally dropped here.
     // LinkedMappings has already captured only the relevant references.
     SplitIndex{partners,links:indexed_links}
 }
+#[cfg(test)]
 fn split(link:&Link,m:&Mapping,index:&SplitIndex<'_>)->bool{
     link.trakt>0&&index.partners.get(&(m.tvdb.as_str(),m.tv_season))
         .is_some_and(|other|other.iter().any(|(id,trakt)|
@@ -157,8 +166,7 @@ fn resolve_season_preloaded(
     let mut candidates=vec![];
     for indexed in &splits.links {
         let link=indexed.link;
-        for &m in &indexed.mappings {
-        let is_split=split(link,m,splits);
+        for (&m,&is_split) in indexed.mappings.iter().zip(&indexed.split) {
         if is_split&&link.trakt!=season{continue;}
         if !is_split&&m.tv_season!=season{continue;}
         if !is_split{
@@ -245,14 +253,14 @@ fn resolve_absolute_preloaded(
         let local=episode-indexed.absolute_offset;
         if local<=0||indexed.first_absolute_end
             .is_some_and(|end|end>0&&local>end){continue;}
-        for &m in &indexed.mappings {
+        for (&m,&is_split) in indexed.mappings.iter().zip(&indexed.split) {
             if m.tv_season<=0{continue;}
             // Explicit episode pairs are authoritative even if the mapping
             // range describes another numbering domain.
             if !m.explicit.is_empty(){
                 for &(ani,tv) in &m.explicit {
                     if ani==local&&tv>0{
-                        let season=if split(link,m,splits){link.trakt}else{m.tv_season};
+                        let season=if is_split{link.trakt}else{m.tv_season};
                         if season>0{
                             register((link.anidb.clone(),local,season,tv),3);
                         }
@@ -265,7 +273,6 @@ fn resolve_absolute_preloaded(
             // that this IMDb title owns every episode of an open-ended
             // sequel. Indirect links require a finite range or exact pair.
             if !link.direct && (m.start<=0 || m.end<=0){continue;}
-            let is_split=split(link,m,splits);
             let season=if is_split{link.trakt}else{m.tv_season};
             let tv=if is_split{
                 local-m.start.max(1)+1
@@ -322,8 +329,8 @@ pub fn resolve_anidb(
         for indexed in splits.links.iter()
             .filter(|indexed|indexed.link.anidb==anidb_id){
             let link=indexed.link;
-            for &m in indexed.mappings.iter().filter(|m|m.tv_season>0){
-                let split_part=split(link,m,&splits);
+            for (&m,&split_part) in indexed.mappings.iter().zip(&indexed.split){
+                if m.tv_season<=0{continue;}
                 let season=if split_part{link.trakt}else{m.tv_season};
                 if season<=0||season>9_999{continue;}
                 let ep_candidates:Vec<i64>=if split_part{
