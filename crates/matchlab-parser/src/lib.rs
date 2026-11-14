@@ -2624,6 +2624,81 @@ fn unmarked_single_anime_episode_candidate(
         "numbering":"absolute","verified":false})))
 }
 
+// Bracketed fansub names can contain named anime arcs/parts separated by
+// " - ". A generic release-group or episode handler may truncate that suffix
+// while extracting the final " - 02". Recover the complete release title
+// from the bounded original prefix, without changing coordinate semantics:
+// bare anime ordinals still require metadata verification by the matcher.
+fn preserve_fansub_part_title(
+    raw: &str,
+    result: &mut Map<String, Value>,
+) -> Result<(), ParseError> {
+    if !raw.starts_with('[')
+        || !raw.contains(" - ")
+        || result.contains_key("episode_start")
+        || result.get("seasons").and_then(Value::as_array)
+            .is_some_and(|seasons| !seasons.is_empty())
+    {
+        return Ok(());
+    }
+    let Some(caps) = DASH_ANIME_EPISODE_RE.captures(raw)
+        .map_err(|e| ParseError::Regex(e.to_string()))?
+    else {
+        return Ok(());
+    };
+    let (Some(prefix), Some(episode)) = (caps.get(1), caps.get(2)) else {
+        return Ok(());
+    };
+    let Some((group, release_name)) = prefix.as_str()
+        .strip_prefix('[')
+        .and_then(|text| text.split_once(']'))
+    else {
+        return Ok(());
+    };
+    if group.trim().len() < 2 {
+        return Ok(());
+    }
+    let release_name = release_name.trim_matches(|c: char|
+        c.is_whitespace() || matches!(c, '.' | '_'));
+    let Some((base, part)) = release_name.rsplit_once(" - ") else {
+        return Ok(());
+    };
+    // The part must be text, not another number, an episode range, or an
+    // SxxExx/season marker. This keeps ordinary packs and TV coordinates on
+    // their existing parsing path.
+    if base.chars().filter(|c| c.is_alphabetic()).count() < 4
+        || part.chars().filter(|c| c.is_alphabetic()).count() < 3
+        || part.contains(['[', ']', '/', '\\'])
+        || EXPLICIT_EPISODE_SHAPE_RE.is_match(release_name)
+            .map_err(|e| ParseError::Regex(e.to_string()))?
+    {
+        return Ok(());
+    }
+    let Some(number) = episode.as_str().parse::<i64>().ok() else {
+        return Ok(());
+    };
+    if result.get("episodes").and_then(Value::as_array)
+        .is_some_and(|episodes| !episodes.is_empty()
+            && (episodes.len() != 1 || episodes[0].as_i64() != Some(number)))
+    {
+        return Ok(());
+    }
+    let title = clean_title(release_name);
+    if title.is_empty() {
+        return Ok(());
+    }
+    result.insert("title".into(), json!(title));
+    // The unverified absolute-episode candidate must name the same complete
+    // anime part as the public title, or strict AniDB identity checks would
+    // still search for the wrong series.
+    if let Some(Value::Object(hint)) = result.get_mut("anime_episode_candidate")
+        && hint.get("episode").and_then(Value::as_i64) == Some(number)
+    {
+        hint.insert("title".into(), json!(title));
+    }
+    Ok(())
+}
+
 // The upstream parser mutates its working title as handlers run. Some
 // episode/season markers can consume the trailing file suffix before the
 // native extension handler executes. Recover only known suffixes from the
@@ -2932,6 +3007,7 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
             result.insert("anime_episode_candidate".into(),candidate);
         }
     }
+    preserve_fansub_part_title(raw, &mut result)?;
     if result.get("title").and_then(Value::as_str)
         .is_some_and(|title|TITLE_TAIL_SUBTITLE_TAG_RE.is_match(title))
         && let Some(caps)=S_E_COORDS_RE.captures(raw)
