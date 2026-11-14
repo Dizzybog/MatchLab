@@ -127,14 +127,15 @@ fn exact(db:&Connection,key:&str)->rusqlite::Result<Vec<Aka>>{
 #[derive(Clone,Copy,Debug,PartialEq,Eq,PartialOrd,Ord)]
 struct TitleFit{
     tier:u8,               // full-name fit, ordinary partial, fallback
+    word_gap:u16,          // normalized-key collision: source vs IMDb title words
     longest_first:i64,    // among full-release fits, longest matched words win
     unmatched_bp:u32,     // relative unmatched share (basis points)
     edge:u8,              // prefix before suffix only when coverage is equal
 }
 impl TitleFit{
-    fn exact()->Self{Self{tier:0,unmatched_bp:0,edge:0,longest_first:0}}
+    fn exact()->Self{Self{tier:0,word_gap:0,unmatched_bp:0,edge:0,longest_first:0}}
     fn fallback(length:usize)->Self{
-        Self{tier:2,unmatched_bp:0,edge:0,longest_first:-(length as i64)}
+        Self{tier:2,word_gap:0,unmatched_bp:0,edge:0,longest_first:-(length as i64)}
     }
 }
 /// Preserve non-Latin title words for ranking. Legacy index keys fold to ASCII:
@@ -160,7 +161,7 @@ fn semantic_extension(short:&[String],long:&[String])->Option<TitleFit>{
     let matched=short.iter().map(|s|s.chars().count()).sum::<usize>();
     let total=long.iter().map(|s|s.chars().count()).sum::<usize>();
     if total==0{return None;}
-    Some(TitleFit{tier:1,
+    Some(TitleFit{tier:1,word_gap:0,
         unmatched_bp:((total-matched)*10_000/total) as u32,
         edge:if prefix{0}else{1},longest_first:-(matched as i64)})
 }
@@ -190,7 +191,7 @@ fn title_fit(key:&str,words:&[String],release_words:&[String],row:&Aka,
     // source release (checked by filter). Never accept a partial word.
     if row.clean.strip_prefix(key).is_some_and(|tail|
         !tail.is_empty() && tail.bytes().all(|b|b.is_ascii_digit())){
-        return Some(TitleFit{tier:1,unmatched_bp,edge:0,
+        return Some(TitleFit{tier:1,word_gap:0,unmatched_bp,edge:0,
             longest_first:-(short as i64)});
     }
     let alias_words=crate::title_normalization::clean_words(&row.title);
@@ -202,13 +203,13 @@ fn title_fit(key:&str,words:&[String],release_words:&[String],row:&Aka,
     if row.clean.starts_with(key)
         && release_words.windows(alias_words.len())
             .any(|window|window==alias_words.as_slice()){
-        return Some(TitleFit{tier:1,unmatched_bp,edge:0,
+        return Some(TitleFit{tier:1,word_gap:0,unmatched_bp,edge:0,
             longest_first:-(short as i64)});
     }
     let prefix=words.starts_with(&alias_words)||alias_words.starts_with(words);
     let suffix=words.ends_with(&alias_words)||alias_words.ends_with(words);
     if !prefix&&!suffix{return None;}
-    Some(TitleFit{tier:1,unmatched_bp,edge:if prefix{0}else{1},
+    Some(TitleFit{tier:1,word_gap:0,unmatched_bp,edge:if prefix{0}else{1},
         longest_first:-(short as i64)})
 }
 
@@ -304,7 +305,7 @@ fn title_in_original_release_fit(
     if !full && (matched<4||matched.saturating_mul(2)<total||unmatched>16){
         return None;
     }
-    Some(TitleFit{tier:0,longest_first:-(matched as i64),
+    Some(TitleFit{tier:0,word_gap:0,longest_first:-(matched as i64),
         unmatched_bp:((unmatched as u64*10_000)/total as u64) as u32,
         edge:if full{0}else{1}})
 }
@@ -329,7 +330,7 @@ fn title_prefix_in_original_release_fit(
     if !full && (matched<4||matched.saturating_mul(2)<total||unmatched>16){
         return None;
     }
-    Some(TitleFit{tier:0,longest_first:-(matched as i64),
+    Some(TitleFit{tier:0,word_gap:0,longest_first:-(matched as i64),
         unmatched_bp:((unmatched as u64*10_000)/total as u64) as u32,
         edge:0})
 }
@@ -356,7 +357,7 @@ fn title_suffix_in_original_release_fit(
         if !full && (matched<4||matched.saturating_mul(2)<total||unmatched>16){
             continue;
         }
-        let fit=TitleFit{tier:0,longest_first:-(matched as i64),
+        let fit=TitleFit{tier:0,word_gap:0,longest_first:-(matched as i64),
             unmatched_bp:((unmatched as u64*10_000)/total as u64) as u32,
             edge:1};
         if best.is_none_or(|old|fit<old){best=Some(fit);}
@@ -385,7 +386,7 @@ fn release_is_imdb_title_suffix_fit(
     if matched<4||matched.saturating_mul(2)<total||unmatched>16{
         return None;
     }
-    Some(TitleFit{tier:0,longest_first:-(matched as i64),
+    Some(TitleFit{tier:0,word_gap:0,longest_first:-(matched as i64),
         unmatched_bp:((unmatched as u64*10_000)/total as u64) as u32,
         edge:1})
 }
@@ -804,6 +805,11 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     // strongest verifiable alignment. The discovery order is irrelevant.
     // Repeat appearances via exact/forward/reverse retrieval do not change
     // the winner, and aliases of the same IMDb work are compared as one work.
+    // Original title boundaries are deliberately absent from Tantivy's
+    // compact normalized key. Distinguish Supernatural (1) from
+    // Super-Natural / Super.Natural (2) at shortlist ranking time only.
+    // No extra search, SQL lookup, allocation, or index rebuild.
+    let source_word_count=crate::title_normalization::title_word_count(title);
     let mut groups:BTreeMap<String,Vec<(Aka,TitleFit)>>=BTreeMap::new();
     let semantic_content_length=semantic_content.iter()
         .map(|word|word.chars().count()).sum::<usize>();
@@ -823,7 +829,7 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
             // title but never replace a verified unique anime identity.
             let preference=if exact_anime && strict_anime_ids.len()==1 {2}
                 else if exact_country {1}else{0};
-            let fit=TitleFit{tier:0,longest_first:-preference,
+            let fit=TitleFit{tier:0,word_gap:0,longest_first:-preference,
                 unmatched_bp:0,edge:0};
             groups.entry(row.imdb_id.clone()).or_default().push((row,fit));
             continue;
@@ -848,7 +854,7 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
             // Score the length of the original qualified title instead,
             // keeping ordinary lexical fit/season gates and the later
             // regional vote tie-breakers unchanged.
-            evidence.push(TitleFit{tier:0,longest_first:-(semantic_content_length as i64),
+            evidence.push(TitleFit{tier:0,word_gap:0,longest_first:-(semantic_content_length as i64),
                 unmatched_bp:0,edge:0});
         }
         if extended_title_matches.contains(&alias_key){
@@ -869,11 +875,23 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
         // Score the full source title consistently, including exact-match
         // rows that are also returned by a different discovery direction.
         if alias_semantic==semantic_content{
-            evidence.push(TitleFit{tier:0,longest_first:-(semantic_content_length as i64),
+            evidence.push(TitleFit{tier:0,word_gap:0,longest_first:-(semantic_content_length as i64),
                 unmatched_bp:0,edge:0});
         }
-        let fit=evidence.into_iter().min().unwrap_or(TitleFit::fallback(
+        let mut fit=evidence.into_iter().min().unwrap_or(TitleFit::fallback(
             row.clean.len()));
+        // Distinct spellings can collapse to the same compact search key.
+        // Prefer a candidate with the SAME number of original title words
+        // before length, year, region or IMDb vote count breaks ties.
+        // Do not penalize legitimate country equivalents, AniDB translations,
+        // or validated partial prefix/suffix matches.
+        if fit.tier==0 && row.clean==key
+            && !country_title_matches.contains(&alias_key)
+        {
+            let alias_count=crate::title_normalization::title_word_count(&row.title);
+            fit.word_gap=source_word_count.abs_diff(alias_count)
+                .min(u16::MAX as usize) as u16;
+        }
         groups.entry(row.imdb_id.clone()).or_default().push((row,fit));
     }
     // A shorter AKA can otherwise tie a complete title, e.g. "Bleach" for
