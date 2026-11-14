@@ -1317,6 +1317,17 @@ mod tests{
     }
 
     #[test]
+    fn requested_production_year_is_a_hard_constraint_only_in_strict_mode(){
+        assert!(year_eligible(true,Some(2023),2023));
+        assert!(!year_eligible(true,Some(2023),2005));
+        assert!(!year_eligible(true,Some(2023),0));
+        assert!(year_eligible(true,None,2005));
+        assert!(year_eligible(true,None,0));
+        assert!(year_eligible(false,Some(2023),2005));
+        assert!(year_eligible(false,Some(2023),0));
+    }
+
+    #[test]
     fn strict_year_is_required_for_movie_and_series_duplicate_identities(){
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
