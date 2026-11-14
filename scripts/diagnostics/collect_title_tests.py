@@ -124,7 +124,7 @@ class Reader:
                     fmt=vals[0]; rest=iter(vals[1:]); unresolved=[]
                     def repl(m):
                         key=m[1]; val=env.get(key,UNKNOWN) if key else next(rest,UNKNOWN)
-                        
+
                         if val is UNKNOWN:unresolved.append(key);return m[0]
                         return str(val)
                     value=re.sub(r'\{([A-Za-z_0-9]*)\}',repl,fmt)
