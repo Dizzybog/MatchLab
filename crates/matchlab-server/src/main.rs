@@ -4228,6 +4228,31 @@ mod tests {
         assert_eq!(public_match_response(Some(winner)),json!({
             "sid_start":"tt2359704:5:3","sid_end":"tt2359704:5:3",
             "asid_start":"16187:3","asid_end":"16187:3"}));
+        // A local P2 is a cour, not necessarily a new IMDb season.
+        // Stone Ocean parts 1/2/3 all remain in IMDb season five.
+        let second=diagnose(&path,&MatchRequest{
+            title:"JoJo's Bizarre Adventure Stone Ocean P2E03".into(),
+            year:None,series:None}).unwrap();
+        let second=second.selected.expect("second Stone Ocean cour");
+        assert_eq!(public_match_response(Some(second)),json!({
+            "sid_start":"tt2359704:5:15","sid_end":"tt2359704:5:15",
+            "asid_start":"17286:3","asid_end":"17286:3"}));
+        let cour_only=diagnose(&path,&MatchRequest{
+            title:"JoJo's Bizarre Adventure Stone Ocean P2".into(),
+            year:None,series:None}).unwrap();
+        assert_eq!(cour_only.parsed["anime_local_part_is_cour"],true);
+        let cour_only=cour_only.selected.expect("named second cour");
+        assert_eq!(cour_only["season"],5);
+        assert!(cour_only["episode_range"].is_null(),
+            "P2 without episodes must not imply all of S05: {cour_only}");
+        let cour_range=diagnose(&path,&MatchRequest{
+            title:"JoJo's Bizarre Adventure Stone Ocean P2 (01-12) [Batch]".into(),
+            year:None,series:None}).unwrap();
+        let cour_range=cour_range.selected.expect("bounded second cour");
+        assert_eq!(public_match_response(Some(cour_range)),json!({
+            "sid_start":"tt2359704:5:13","sid_end":"tt2359704:5:24",
+            "asid_start":"17286:1","asid_end":"17286:12"}));
+
         // An explicit Part 3 title uses its own AniDB-local episode three,
         // corresponding to the parent show's IMDb/TVDB S05E27.
         let third=diagnose(&path,&MatchRequest{
@@ -5309,6 +5334,23 @@ mod tests {
             assert_eq!(public["sid_end"],format!("tt0300001:{season}:12"),"{raw}");
         }
 
+        for (raw,season) in [
+            ("[SubsPlease] Sword Art Online - Alicization S2 (01-12) (720p) [Batch]",4),
+            ("[SubsPlease] Sword Art Online - Alicization P2 (01-12) (720p) [Batch]",4),
+            ("[SubsPlease] Sword Art Online - Alicization S3 (01-12) (720p) [Batch]",3),
+        ]{
+            let d=find(raw);
+            assert_eq!(d.parsed["anime_local_part_verified"]["base_season"],3,
+                "{raw}: {:?}",d.parsed);
+            let winner=d.selected.expect("verified local anime batch");
+            assert_eq!(winner["season"],season,"{raw}: {winner}");
+            assert_eq!(winner["season_end"],season,"{raw}: {winner}");
+            assert_eq!(winner["episode"],1,"{raw}: {winner}");
+            assert_eq!(winner["episode_end"],12,"{raw}: {winner}");
+            let response=public_match_response(Some(winner));
+            assert_eq!(response["sid_start"],format!("tt0300001:{season}:1"),"{raw}");
+            assert_eq!(response["sid_end"],format!("tt0300001:{season}:12"),"{raw}");
+        }
         // The word "Alicization" is not blindly inherited for non-anime.
         let ordinary=find("Anime Library/Ordinary.Show.S01E01.mkv");
         let ordinary=ordinary.selected.unwrap();
