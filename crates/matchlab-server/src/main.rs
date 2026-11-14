@@ -4788,6 +4788,52 @@ mod tests {
     }
 
     #[test]
+    fn strict_named_film_in_year_range_pack_matches_without_inventing_a_film_year(){
+        let path="Harry Potter (2001-2012)/Harry Potter and the Sorcerer's Stone";
+        let parsed=matchlab_parser::parse_title(path,false).unwrap();
+        assert_eq!(parsed["title"],"Harry Potter and the Sorcerer's Stone",
+            "use the individual film's title, not the collection name");
+        assert!(parsed.get("year").is_none(),
+            "a collection range cannot become a strict individual year");
+        let range=movie_collection_year_range(&parsed);
+        assert_eq!(range,Some((2001,2012)));
+        let db=Connection::open_in_memory().unwrap();
+        let candidate=|id:&str,year:i32|imdb_matcher::Match{
+            imdb_id:id.into(),
+            title:"Harry Potter and the Sorcerer's Stone".into(),
+            matched_title:"Harry Potter and the Sorcerer's Stone".into(),
+            year,category:"movie".into(),media_type:"movie".into(),
+            anime_ids:std::collections::BTreeMap::new(),
+        };
+        let gate=ImdbIdentityGate{
+            policy:MatchPolicy::PublicApi,strict:true,year:None,
+            has_season:false,has_quality:false,
+            collection_year_range:range,season_range_end:None,
+            verified_anime_range:None,verified_absolute_episode:None,
+        };
+        let filtered=filter_request_imdb_candidates(&db,vec![
+            candidate("tt0241527",2001),
+            candidate("tt9999999",2015),
+            candidate("tt8888888",1998),
+        ],gate);
+        assert_eq!(filtered.iter().map(|c|c.imdb_id.as_str())
+            .collect::<Vec<_>>(),vec!["tt0241527"]);
+        // The child year is still authoritative; a yearless child in an
+        // ordinary single-year parent still inherits the exact year.
+        for (path,expected) in [
+            ("Harry Potter (2001-2012)/Harry Potter 1 (2001)",Some(2001)),
+            ("Harry Potter (2001-2012)/Harry Potter 2 (2002)",Some(2002)),
+            ("Harry Potter (2001-2012)/Harry Potter and the Sorcerer's Stone (2001)",Some(2001)),
+            ("Harry Potter (2001-2012)/Harry Potter and the Sorcerer's Stone",None),
+            ("Harry Potter (2001)/Harry Potter and the Sorcerer's Stone",Some(2001)),
+        ]{
+            let parsed=matchlab_parser::parse_title(path,false).unwrap();
+            assert_eq!(parsed.get("year").and_then(Value::as_i64),
+                expected.map(i64::from),"{path}: {parsed:?}");
+        }
+    }
+
+    #[test]
     fn matching_parent_year_selects_2005_doctor_who_not_1963() {
         // The same IMDb title is shared by two series. The folder's
         // production year disambiguates the actual episode filename.
