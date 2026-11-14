@@ -995,6 +995,7 @@ fn diagnose_with_policy(
             // uniquely identified AniDB work. Only a completely mapped
             // part-local interval can become canonical IMDb endpoints.
             let mut local_promoted=false;
+            let mut named_part_unresolved:Option<String>=None;
             if !absolute_agrees_with_season {
                 let local_hint=parsed_value.get("anime_local_part_candidate")
                     .and_then(|h|Some((
@@ -1006,10 +1007,20 @@ fn diagnose_with_policy(
                     && (season_hint==Some(local)
                         || (marker=="P" && season_hint.is_none()))
                     && let Some(imdb)=exact_anime_identity(&db,&name)?
-                    && let Some(first)=anime_title::resolve_local_part(
+                {
+                    // A proven named part with an INCOMPLETE local range
+                    // must never fall back to an unrelated global S02.
+                    // S3==base is already absolute and is exempt.
+                    if let Some(base)=anime_title::named_part_base(
+                        &db,&imdb,&name).map_err(|e|e.to_string())?
+                        && !(marker=="S" && local==base)
+                    {
+                        named_part_unresolved=Some(name.clone());
+                    }
+                    if let Some(first)=anime_title::resolve_local_part(
                         &db,&imdb,&name,&marker,local,start)
                             .map_err(|e|e.to_string())?
-                {
+                    {
                     let effective=if marker=="S" && local==first.base_season {
                         1
                     }else{local};
@@ -1046,10 +1057,23 @@ fn diagnose_with_policy(
                         verified_anime_range_imdb=None;
                         local_promoted=true;
                     }
+                    }
                 }
             }
             if !local_promoted {
-                if let Some(season)=season_hint
+                if let Some(name)=named_part_unresolved {
+                    // Preserve the exact anime identity but no unverified
+                    // S02 or absolute episode endpoints. The candidate
+                    // remains visible for diagnostics and future imports.
+                    verified_anime_range_imdb=None;
+                    if let Some(parsed)=parsed_value.as_object_mut(){
+                        parsed.insert("title".into(),json!(name));
+                        parsed.insert("seasons".into(),json!([]));
+                        parsed.insert("episodes".into(),json!([]));
+                        parsed.insert("anime_local_part_range_unresolved".into(),
+                            json!(true));
+                    }
+                }else if let Some(season)=season_hint
                     && !absolute_agrees_with_season {
 
                 // A verified absolute anime episode 01..24 could belong
