@@ -158,36 +158,35 @@ pub fn resolve_season_range(
         resolve_season_preloaded(imdb,season,episode,&links,&maps,&splits)).collect())
 }
 
-// Only the highest (offset,start) rank and whether it contains two
-// DIFFERENT AniDB coordinates can affect the answer. The former Vec+sort
-// cloned every candidate String and sorted all of them for every episode
-// in a batch. Keep the same ambiguity policy with constant-size state.
+// Preserve exactly the first TWO entries of the legacy STABLE sort:
+// descending (offset,start), then ascending AniDB ID. Duplicate entries
+// retain insertion order. Only the runner-up can make the top match
+// ambiguous in the original algorithm. Keep both in constant-size state,
+// without cloning every candidate or allocating a Vec per episode.
 #[derive(Clone,Copy)]
 struct SeasonWinner<'a> {
     offset:i64,start:i64,anidb:&'a str,anime_episode:i64,
 }
+fn season_precedes(a:SeasonWinner<'_>,b:SeasonWinner<'_>)->bool{
+    (a.offset,a.start)>(b.offset,b.start)
+        ||((a.offset,a.start)==(b.offset,b.start) && a.anidb<b.anidb)
+}
 fn consider_season<'a>(
-    best:&mut Option<SeasonWinner<'a>>,ambiguous:&mut bool,
+    best:&mut Option<SeasonWinner<'a>>,runner:&mut Option<SeasonWinner<'a>>,
     offset:i64,start:i64,anidb:&'a str,anime_episode:i64,
 ){
-    // Invalid candidates must not change winner ranking or ambiguity.
     if canonical_asid(anidb,anime_episode).is_none(){return;}
+    let candidate=SeasonWinner{offset,start,anidb,anime_episode};
     match *best {
-        None => {
-            *best=Some(SeasonWinner{offset,start,anidb,anime_episode});
-            *ambiguous=false;
+        None=>*best=Some(candidate),
+        Some(previous) if season_precedes(candidate,previous)=>{
+            *runner=Some(previous);
+            *best=Some(candidate);
         },
-        Some(old) => match (offset,start).cmp(&(old.offset,old.start)){
-            std::cmp::Ordering::Greater => {
-                *best=Some(SeasonWinner{offset,start,anidb,anime_episode});
-                *ambiguous=false;
-            },
-            std::cmp::Ordering::Equal => {
-                if old.anidb!=anidb||old.anime_episode!=anime_episode{
-                    *ambiguous=true;
-                }
-            },
-            std::cmp::Ordering::Less => {},
+        Some(_)=>{
+            if runner.is_none_or(|old|season_precedes(candidate,old)){
+                *runner=Some(candidate);
+            }
         },
     }
 }
@@ -197,7 +196,7 @@ fn resolve_season_preloaded(
 )->Option<Episode>{
     if season<=0||episode<=0{return None;}
     let mut best:Option<SeasonWinner<'_>>=None;
-    let mut ambiguous=false;
+    let mut runner:Option<SeasonWinner<'_>>=None;
     for indexed in &splits.links {
         let link=indexed.link;
         for (&m,&is_split) in indexed.mappings.iter().zip(&indexed.split) {
@@ -206,7 +205,7 @@ fn resolve_season_preloaded(
             if !is_split&&!m.explicit.is_empty(){
                 for &(ani,tv) in &m.explicit{
                     if tv==episode{
-                        consider_season(&mut best,&mut ambiguous,
+                        consider_season(&mut best,&mut runner,
                             m.offset,m.start,&link.anidb,ani);
                     }
                 }
@@ -214,12 +213,15 @@ fn resolve_season_preloaded(
             }
             let ani=if is_split{episode+m.start.max(1)-1}else{episode-m.offset};
             if ani<m.start.max(1)||(m.end>0&&ani>m.end){continue;}
-            consider_season(&mut best,&mut ambiguous,
+            consider_season(&mut best,&mut runner,
                 m.offset,m.start,&link.anidb,ani);
         }
     }
-    if ambiguous{return None;}
     let best=best?;
+    if runner.is_some_and(|second|
+        second.offset==best.offset&&second.start==best.start
+        &&(second.anidb!=best.anidb
+            ||second.anime_episode!=best.anime_episode)){return None;}
     Some(Episode{imdb_id:imdb.into(),season,episode,
         anidb_id:best.anidb.to_owned(),anidb_episode:best.anime_episode})
 }
@@ -431,7 +433,7 @@ mod tests{
         for _case in 0..1000 {
             let mut old_season:Vec<(i64,i64,String,i64)>=Vec::new();
             let mut best_season=None;
-            let mut ambiguous_season=false;
+            let mut runner_season=None;
             let mut old_absolute=std::collections::BTreeMap::<(String,i64,i64,i64),u8>::new();
             let mut best_absolute=None;
             let mut ambiguous_absolute=false;
@@ -444,7 +446,7 @@ mod tests{
                 let episode=pick(105_000) as i64;
                 let strength=(pick(3)+1) as u8;
                 old_season.push((offset,start,id.into(),ani));
-                consider_season(&mut best_season,&mut ambiguous_season,
+                consider_season(&mut best_season,&mut runner_season,
                     offset,start,id,ani);
                 old_absolute.entry((id.into(),ani,season,episode))
                     .and_modify(|seen|*seen=(*seen).max(strength))
@@ -465,10 +467,14 @@ mod tests{
                     None
                 }else{Some((first.2.clone(),first.3))}
             });
-            let actual_season=if ambiguous_season {None}else{
-                best_season.map(|best:SeasonWinner<'_>|
-                    (best.anidb.to_owned(),best.anime_episode))
-            };
+            let actual_season=best_season.and_then(|best:SeasonWinner<'_>|{
+                if runner_season.is_some_and(|runner:SeasonWinner<'_>|
+                    runner.offset==best.offset&&runner.start==best.start
+                    &&(runner.anidb!=best.anidb
+                        ||runner.anime_episode!=best.anime_episode)){
+                    None
+                }else{Some((best.anidb.to_owned(),best.anime_episode))}
+            });
             assert_eq!(actual_season,expected_season);
 
             // The old absolute resolver merged identical keys using their
