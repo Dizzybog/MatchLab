@@ -263,6 +263,57 @@ pub fn resolve_episode_from_exact_part_title(
     Ok(mapped.filter(|m|m.season==inferred_season))
 }
 
+/// Independently verified local S/P coordinates for a named AniDB work.
+/// They are never derived from arithmetic alone: the established part
+/// crosswalk supplies the real IMDb and AniDB episode IDs.
+pub struct LocalPartCoordinate {
+    pub base_season:i64,
+    pub mapped:episode_crosswalk::Episode,
+}
+
+/// Resolve S2/P2 *within* an exact named anime work. A global S2 release
+/// stays global, and a Part 3 S01E03 keeps its established part/episode
+/// offset. The requested equality exception applies to S3 when the named
+/// work starts at IMDb S03, not to P3 (which means a third part).
+pub fn resolve_local_part(
+    db:&Connection,imdb:&str,title:&str,marker:&str,local:i64,episode:i64,
+)->rusqlite::Result<Option<LocalPartCoordinate>>{
+    if local<2 || local>99 || episode<=0 || episode>99_999
+        || !matches!(marker,"S"|"P") {return Ok(None);}
+    let key=imdb_matcher::clean_title(title);
+    if key.len()<7 {return Ok(None);}
+    // A canonical series is NEVER a named part, even if only its
+    // second season happens to be indexed in the AniDB crosswalk.
+    let canonical:i64=db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM titles
+            WHERE imdb_id=?1 AND clean_title=?2 AND original=1
+            AND type IN ('tvSeries','tvMiniSeries') LIMIT 1)",
+        params![imdb,key],|r|r.get(0))?;
+    if canonical!=0{return Ok(None);}
+    let Some(base)=season_from_title(db,imdb,title)? else{return Ok(None)};
+    if base<=1{return Ok(None);}
+    let effective=if marker=="S" && local==base {1}else{local};
+    // The original named-part resolver validates the exact AniDB alias,
+    // family ordering, per-episode offsets, bounds and ambiguity.
+    let Some(mapped)=resolve(db,imdb,title,effective,episode)? else{
+        return Ok(None);
+    };
+    if !within_known_season_bounds(db,imdb,mapped.season,mapped.episode)?{
+        return Ok(None);
+    }
+    let valid=if marker=="S" && local==base {
+        mapped.season==base
+    }else if marker=="S" {
+        base.checked_add(local-1)==Some(mapped.season)
+    }else{
+        // Parts can occupy the same IMDb season (JoJo Stone Ocean) or
+        // successive seasons (SAO Alicization). The actual crosswalk,
+        // not arithmetic, is authoritative for P2/P3.
+        mapped.season>=base
+    };
+    Ok(valid.then_some(LocalPartCoordinate{base_season:base,mapped}))
+}
+
 /// Infer an IMDb/TVDB season from a title-specific AniDB alias without an episode.
 /// Only publish a season when one uniquely identified AniDB work maps to exactly
 /// one positive TVDB season. Never manufacture an episode or an ASID.
