@@ -596,6 +596,7 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     let country_qualified=crate::country_aliases::qualified(release_title);
     let country=country_qualified.as_ref().map(|(code,_)|*code);
     let semantic_release=semantic_words(title);
+    let source_word_count=crate::title_normalization::title_word_count(title);
     let semantic_full_release=semantic_words(release_title);
     let semantic_content=semantic_release_content_words(release_title);
 
@@ -620,7 +621,8 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
         // BLEACH 千年血戦篇). Require the entire imported IMDb alias to match
         // the entire parsed title in Unicode-aware normalized words.
         discovered.retain(|row|row.clean==key
-            &&semantic_words(&row.title)==semantic_release);
+            &&semantic_words(&row.title)==semantic_release
+            &&crate::title_normalization::title_word_count(&row.title)==source_word_count);
     }
     // Presence in the index is NOT enough: the source's complete significant
     // words must equal the parsed title, and at least one exact alias must
@@ -630,7 +632,8 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     let exact_only=strict || (!force_full && key.len()>=6 && country_qualified.is_none()
         && !semantic_content.is_empty() && semantic_release==semantic_content
         && discovered.iter().any(|row|
-            row.clean==key && semantic_words(&row.title)==semantic_content));
+            row.clean==key && semantic_words(&row.title)==semantic_content
+            &&crate::title_normalization::title_word_count(&row.title)==source_word_count));
     if !exact_only && key.len()>=4{
         discovered.extend(tantivy_aliases(db,&key,false)?);
         if key.len()>=8{
@@ -728,7 +731,8 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     // type/season. Avoid letting another alias with the same ASCII key
     // masquerade as a verified complete title; resume full discovery.
     if !strict && exact_only && !eligible_rows.iter().any(|row|
-        row.clean==key && semantic_words(&row.title)==semantic_content){
+        row.clean==key && semantic_words(&row.title)==semantic_content
+            &&crate::title_normalization::title_word_count(&row.title)==source_word_count){
         return search_inner_mode(db,title,year,series,required_season,
             release_title,_has_episode,limit,true,false);
     }
@@ -809,14 +813,14 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     // compact normalized key. Distinguish Supernatural (1) from
     // Super-Natural / Super.Natural (2) at shortlist ranking time only.
     // No extra search, SQL lookup, allocation, or index rebuild.
-    let source_word_count=crate::title_normalization::title_word_count(title);
     let mut groups:BTreeMap<String,Vec<(Aka,TitleFit)>>=BTreeMap::new();
     let semantic_content_length=semantic_content.iter()
         .map(|word|word.chars().count()).sum::<usize>();
     for row in rows{
         if strict {
             let exact_imdb=row.clean==key
-                &&semantic_words(&row.title)==semantic_release;
+                &&semantic_words(&row.title)==semantic_release
+                &&crate::title_normalization::title_word_count(&row.title)==source_word_count;
             let alias_key=(row.imdb_id.clone(),row.title.clone());
             let exact_country=country_title_matches.contains(&alias_key);
             let exact_anime=strict_anime_ids.contains(&row.imdb_id);
