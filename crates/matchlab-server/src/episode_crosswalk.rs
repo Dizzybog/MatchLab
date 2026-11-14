@@ -29,11 +29,24 @@ fn links(db:&Connection,imdb:&str)->rusqlite::Result<Vec<Link>>{
         out.push(Link{anidb:ids[0].clone(),tvdb:String::new(),trakt:0,direct:true});
     }
     let tvdbs:BTreeSet<String>=out.iter().filter(|l|!l.tvdb.is_empty()).map(|l|l.tvdb.clone()).collect();
+    // Small families are cheaper to scan inline. Large AniDB families
+    // previously checked every discovered sibling against the entire
+    // growing link list: O(family²). Build a membership set only after
+    // the family becomes large enough, preserving direct duplicates and
+    // the original source-row order exactly.
+    let mut seen:Option<std::collections::HashSet<(String,String)>>=None;
     for tvdb in tvdbs {
         let mut stmt=db.prepare("SELECT DISTINCT anidb_id FROM episode_map WHERE tvdb_id=?1")?;
         for id in stmt.query_map([&tvdb],|r|r.get::<_,String>(0))? {
             let id=id?;
-            if !out.iter().any(|l|l.anidb==id&&l.tvdb==tvdb){
+            let exists=if out.len()<8{
+                out.iter().any(|l|l.anidb==id&&l.tvdb==tvdb)
+            }else{
+                let set=seen.get_or_insert_with(||out.iter()
+                    .map(|l|(l.anidb.clone(),l.tvdb.clone())).collect());
+                !set.insert((id.clone(),tvdb.clone()))
+            };
+            if !exists{
                 out.push(Link{anidb:id,tvdb:tvdb.clone(),trakt:0,direct:false});
             }
         }
@@ -66,11 +79,17 @@ struct LinkedMappings<'a>{
     link:&'a Link,
     // Preserve the order of mapping rows and every duplicate/overlap.
     mappings:Vec<&'a Mapping>,
+    // Split status depends only on the immutable family/season metadata,
+    // NOT on the episode number. Evaluate once per map row, then reuse.
+    split:Vec<bool>,
     // This is identical to the old per-episode first-absolute-row check.
     absolute_offset:i64,
     first_absolute_end:Option<i64>,
 }
 struct SplitIndex<'a>{
+    // Keep the reference partner graph only for parity tests. Production
+    // resolves it into one Boolean per mapping row in split_index().
+    #[cfg(test)]
     partners:HashMap<(&'a str,i64),Vec<(&'a str,i64)>>,
     links:Vec<LinkedMappings<'a>>,
 }
@@ -94,6 +113,11 @@ fn split_index<'a>(links:&'a[Link],maps:&'a[Mapping])->SplitIndex<'a>{
         let mappings=by_anidb.get(link.anidb.as_str()).into_iter()
             .flatten().copied().filter(|m|
                 link.tvdb.is_empty()||link.tvdb==m.tvdb).collect::<Vec<_>>();
+        let split=mappings.iter().map(|m|link.trakt>0
+            && partners.get(&(m.tvdb.as_str(),m.tv_season)).is_some_and(|others|
+                others.iter().any(|(id,trakt)|
+                    *id!=link.anidb.as_str() && *trakt!=link.trakt)))
+            .collect::<Vec<_>>();
         let mut absolute_count=0usize;
         let mut first_absolute=None;
         for &m in &mappings{
@@ -105,13 +129,18 @@ fn split_index<'a>(links:&'a[Link],maps:&'a[Mapping])->SplitIndex<'a>{
         let absolute_offset=if absolute_count==1{
             first_absolute.map_or(0,|m:&Mapping|m.offset)
         }else{0};
-        LinkedMappings{link,mappings,absolute_offset,
+        LinkedMappings{link,mappings,split,absolute_offset,
             first_absolute_end:first_absolute.map(|m|m.end)}
     }).collect();
     // The temporary AniDB lookup map is intentionally dropped here.
     // LinkedMappings has already captured only the relevant references.
-    SplitIndex{partners,links:indexed_links}
+    SplitIndex{
+        #[cfg(test)]
+        partners,
+        links:indexed_links,
+    }
 }
+#[cfg(test)]
 fn split(link:&Link,m:&Mapping,index:&SplitIndex<'_>)->bool{
     link.trakt>0&&index.partners.get(&(m.tvdb.as_str(),m.tv_season))
         .is_some_and(|other|other.iter().any(|(id,trakt)|
@@ -149,38 +178,72 @@ pub fn resolve_season_range(
         resolve_season_preloaded(imdb,season,episode,&links,&maps,&splits)).collect())
 }
 
+// Preserve exactly the first TWO entries of the legacy STABLE sort:
+// descending (offset,start), then ascending AniDB ID. Duplicate entries
+// retain insertion order. Only the runner-up can make the top match
+// ambiguous in the original algorithm. Keep both in constant-size state,
+// without cloning every candidate or allocating a Vec per episode.
+#[derive(Clone,Copy)]
+struct SeasonWinner<'a> {
+    offset:i64,start:i64,anidb:&'a str,anime_episode:i64,
+}
+fn season_precedes(a:SeasonWinner<'_>,b:SeasonWinner<'_>)->bool{
+    (a.offset,a.start)>(b.offset,b.start)
+        ||((a.offset,a.start)==(b.offset,b.start) && a.anidb<b.anidb)
+}
+fn consider_season<'a>(
+    best:&mut Option<SeasonWinner<'a>>,runner:&mut Option<SeasonWinner<'a>>,
+    offset:i64,start:i64,anidb:&'a str,anime_episode:i64,
+){
+    if canonical_asid(anidb,anime_episode).is_none(){return;}
+    let candidate=SeasonWinner{offset,start,anidb,anime_episode};
+    match *best {
+        None=>*best=Some(candidate),
+        Some(previous) if season_precedes(candidate,previous)=>{
+            *runner=Some(previous);
+            *best=Some(candidate);
+        },
+        Some(_)=>{
+            if runner.is_none_or(|old|season_precedes(candidate,old)){
+                *runner=Some(candidate);
+            }
+        },
+    }
+}
 fn resolve_season_preloaded(
     imdb:&str,season:i64,episode:i64,_links:&[Link],_maps:&[Mapping],
     splits:&SplitIndex<'_>,
 )->Option<Episode>{
     if season<=0||episode<=0{return None;}
-    let mut candidates=vec![];
+    let mut best:Option<SeasonWinner<'_>>=None;
+    let mut runner:Option<SeasonWinner<'_>>=None;
     for indexed in &splits.links {
         let link=indexed.link;
-        for &m in &indexed.mappings {
-        let is_split=split(link,m,splits);
-        if is_split&&link.trakt!=season{continue;}
-        if !is_split&&m.tv_season!=season{continue;}
-        if !is_split{
-            if !m.explicit.is_empty(){
+        for (&m,&is_split) in indexed.mappings.iter().zip(&indexed.split) {
+            if is_split&&link.trakt!=season{continue;}
+            if !is_split&&m.tv_season!=season{continue;}
+            if !is_split&&!m.explicit.is_empty(){
                 for &(ani,tv) in &m.explicit{
-                    if tv==episode{candidates.push((m.offset,m.start,link.anidb.clone(),ani));}
+                    if tv==episode{
+                        consider_season(&mut best,&mut runner,
+                            m.offset,m.start,&link.anidb,ani);
+                    }
                 }
                 continue;
             }
+            let ani=if is_split{episode+m.start.max(1)-1}else{episode-m.offset};
+            if ani<m.start.max(1)||(m.end>0&&ani>m.end){continue;}
+            consider_season(&mut best,&mut runner,
+                m.offset,m.start,&link.anidb,ani);
         }
-        let ani=if is_split{episode+m.start.max(1)-1}else{episode-m.offset};
-        if ani<m.start.max(1)||(m.end>0&&ani>m.end){continue;}
-        candidates.push((m.offset,m.start,link.anidb.clone(),ani));
-    }}
-    // Invalid alternatives must not compete with a valid mapping.
-    candidates.retain(|(_,_,anidb,ani)|canonical_asid(anidb,*ani).is_some());
-    candidates.sort_by(|a,b|b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
-    let Some(best)=candidates.first()else{return None};
-    if candidates.get(1).is_some_and(|second|second.0==best.0&&second.1==best.1&&(second.2!=best.2||second.3!=best.3)){
-        return None;
     }
-    Some(Episode{imdb_id:imdb.into(),season,episode,anidb_id:best.2.clone(),anidb_episode:best.3})
+    let best=best?;
+    if runner.is_some_and(|second|
+        second.offset==best.offset&&second.start==best.start
+        &&(second.anidb!=best.anidb
+            ||second.anime_episode!=best.anime_episode)){return None;}
+    Some(Episode{imdb_id:imdb.into(),season,episode,
+        anidb_id:best.anidb.to_owned(),anidb_episode:best.anime_episode})
 }
 pub fn resolve_absolute(db:&Connection,imdb:&str,episode:i64)->rusqlite::Result<Option<Episode>>{
     if episode<=0{return Ok(None);}
@@ -223,73 +286,86 @@ pub fn resolve_absolute_range(
         imdb,episode,&links,&maps,&splits)).collect())
 }
 
+// A full BTreeMap of candidates is unnecessary when the only possible
+// answer is a unique strongest coordinate. Deduplicate identical tuples
+// as they stream in, preserve the strongest evidence priority, and retain
+// ambiguity across different tuples at that same evidence strength.
+#[derive(Clone,Copy,PartialEq,Eq)]
+struct AbsoluteWinner<'a>{
+    anidb:&'a str,anime_episode:i64,season:i64,episode:i64,strength:u8,
+}
+fn consider_absolute<'a>(
+    best:&mut Option<AbsoluteWinner<'a>>,ambiguous:&mut bool,
+    anidb:&'a str,anime_episode:i64,season:i64,episode:i64,strength:u8,
+){
+    if canonical_asid(anidb,anime_episode).is_none()
+        ||!(1..=9_999).contains(&season)||!(1..=99_999).contains(&episode){
+        return;
+    }
+    let candidate=AbsoluteWinner{anidb,anime_episode,season,episode,strength};
+    match *best{
+        None=>{
+            *best=Some(candidate);
+            *ambiguous=false;
+        },
+        Some(previous) if strength>previous.strength=>{
+            *best=Some(candidate);
+            *ambiguous=false;
+        },
+        Some(previous) if strength==previous.strength=>{
+            if (previous.anidb,previous.anime_episode,
+                previous.season,previous.episode)!=(anidb,anime_episode,season,episode){
+                *ambiguous=true;
+            }
+        },
+        _=>{},
+    }
+}
 fn resolve_absolute_preloaded(
     imdb:&str,episode:i64,_links:&[Link],_maps:&[Mapping],
     splits:&SplitIndex<'_>,
 )->Option<Episode>{
     if !(1..=99_999).contains(&episode){return None;}
-    // A TVDB family includes sequels, movies and cours with different AniDB
-    // identities. An open-ended season default is weaker evidence than a
-    // concrete bounded episode mapping (or an explicit episode pair).
-    // Keep ties at the strongest evidence level ambiguous.
-    let mut candidates=std::collections::BTreeMap::<(String,i64,i64,i64),u8>::new();
-    let mut register=|candidate:(String,i64,i64,i64),strength:u8|{
-        candidates.entry(candidate)
-            .and_modify(|previous|*previous=(*previous).max(strength))
-            .or_insert(strength);
-    };
-    for indexed in &splits.links {
+    let mut best:Option<AbsoluteWinner<'_>>=None;
+    let mut ambiguous=false;
+    for indexed in &splits.links{
         let link=indexed.link;
-        // Both absolute-row count and the first absolute row's end bound
-        // were computed in link order once, not twice for every episode.
+        // Computed once per crosswalk snapshot: preserve first absolute
+        // mapping row, duplicate links and source-row traversal order.
         let local=episode-indexed.absolute_offset;
         if local<=0||indexed.first_absolute_end
             .is_some_and(|end|end>0&&local>end){continue;}
-        for &m in &indexed.mappings {
+        for (&m,&is_split) in indexed.mappings.iter().zip(&indexed.split){
             if m.tv_season<=0{continue;}
-            // Explicit episode pairs are authoritative even if the mapping
-            // range describes another numbering domain.
             if !m.explicit.is_empty(){
-                for &(ani,tv) in &m.explicit {
+                for &(ani,tv) in &m.explicit{
                     if ani==local&&tv>0{
-                        let season=if split(link,m,splits){link.trakt}else{m.tv_season};
+                        let season=if is_split{link.trakt}else{m.tv_season};
                         if season>0{
-                            register((link.anidb.clone(),local,season,tv),3);
+                            consider_absolute(&mut best,&mut ambiguous,
+                                &link.anidb,local,season,tv,3);
                         }
                     }
                 }
                 continue;
             }
             if local<m.start.max(1)||(m.end>0&&local>m.end){continue;}
-            // Related AniDB works from the same TVDB family are not proof
-            // that this IMDb title owns every episode of an open-ended
-            // sequel. Indirect links require a finite range or exact pair.
-            if !link.direct && (m.start<=0 || m.end<=0){continue;}
-            let is_split=split(link,m,splits);
+            // Indirect links never make unbounded default rows proof of
+            // ownership. The old evidence tiers (3/2/1) stay unchanged.
+            if !link.direct && (m.start<=0||m.end<=0){continue;}
             let season=if is_split{link.trakt}else{m.tv_season};
-            let tv=if is_split{
-                local-m.start.max(1)+1
-            }else{
-                local+m.offset
-            };
+            let tv=if is_split{local-m.start.max(1)+1}else{local+m.offset};
             if season>0&&tv>0{
-                // An explicit start/end range proves this number belongs to
-                // this AniDB work. Default open-ended seasons do not.
                 let strength=if m.start>0&&m.end>0{2}else{1};
-                register((link.anidb.clone(),local,season,tv),strength);
+                consider_absolute(&mut best,&mut ambiguous,
+                    &link.anidb,local,season,tv,strength);
             }
         }
     }
-    // Invalid coordinates must never compete with verified candidates.
-    candidates.retain(|(id,ani,season,tv),_|
-        canonical_asid(id,*ani).is_some()
-        && (1..=9_999).contains(season)
-        && (1..=99_999).contains(tv));
-    let strongest=candidates.values().copied().max()?;
-    let mut winners=candidates.into_iter().filter(|(_,strength)|*strength==strongest);
-    let ((anidb_id,anidb_episode,season,episode),_)=winners.next()?;
-    if winners.next().is_some(){return None;}
-    Some(Episode{imdb_id:imdb.into(),season,episode,anidb_id,anidb_episode})
+    if ambiguous{return None;}
+    let best=best?;
+    Some(Episode{imdb_id:imdb.into(),season:best.season,episode:best.episode,
+        anidb_id:best.anidb.to_owned(),anidb_episode:best.anime_episode})
 }
 
 /// Reverse lookup: AniDB work + AniDB-local (often absolute) episode number
@@ -322,8 +398,8 @@ pub fn resolve_anidb(
         for indexed in splits.links.iter()
             .filter(|indexed|indexed.link.anidb==anidb_id){
             let link=indexed.link;
-            for &m in indexed.mappings.iter().filter(|m|m.tv_season>0){
-                let split_part=split(link,m,&splits);
+            for (&m,&split_part) in indexed.mappings.iter().zip(&indexed.split){
+                if m.tv_season<=0{continue;}
                 let season=if split_part{link.trakt}else{m.tv_season};
                 if season<=0||season>9_999{continue;}
                 let ep_candidates:Vec<i64>=if split_part{
@@ -365,6 +441,119 @@ pub fn resolve_anidb(
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn streaming_winners_match_original_sort_and_dedup_for_1000_fixtures(){
+        let ids=["100","101","102","bad","0","123"];
+        let mut state=0x18f3a11c_u64;
+        let mut pick=|n:u64|{
+            state=state.wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state%n
+        };
+        for _case in 0..1000 {
+            let mut old_season:Vec<(i64,i64,String,i64)>=Vec::new();
+            let mut best_season=None;
+            let mut runner_season=None;
+            let mut old_absolute=std::collections::BTreeMap::<(String,i64,i64,i64),u8>::new();
+            let mut best_absolute=None;
+            let mut ambiguous_absolute=false;
+            for _ in 0..38 {
+                let id=ids[pick(ids.len() as u64) as usize];
+                let offset=pick(8) as i64-3;
+                let start=pick(7) as i64;
+                let ani=pick(105_000) as i64;
+                let season=pick(10_100) as i64;
+                let episode=pick(105_000) as i64;
+                let strength=(pick(3)+1) as u8;
+                old_season.push((offset,start,id.into(),ani));
+                consider_season(&mut best_season,&mut runner_season,
+                    offset,start,id,ani);
+                old_absolute.entry((id.into(),ani,season,episode))
+                    .and_modify(|seen|*seen=(*seen).max(strength))
+                    .or_insert(strength);
+                consider_absolute(&mut best_absolute,&mut ambiguous_absolute,
+                    id,ani,season,episode,strength);
+            }
+            // The old season resolver filtered invalid ASIDs, sorted by
+            // descending (offset,start), and rejected a different runner-up
+            // tied at the strongest rank.
+            old_season.retain(|(_,_,id,ani)|canonical_asid(id,*ani).is_some());
+            old_season.sort_by(|a,b|b.0.cmp(&a.0)
+                .then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+            let expected_season=old_season.first().and_then(|first|{
+                if old_season.get(1).is_some_and(|runner|
+                    runner.0==first.0&&runner.1==first.1
+                    &&(runner.2!=first.2||runner.3!=first.3)){
+                    None
+                }else{Some((first.2.clone(),first.3))}
+            });
+            let actual_season=best_season.and_then(|best:SeasonWinner<'_>|{
+                if runner_season.is_some_and(|runner:SeasonWinner<'_>|
+                    runner.offset==best.offset&&runner.start==best.start
+                    &&(runner.anidb!=best.anidb
+                        ||runner.anime_episode!=best.anime_episode)){
+                    None
+                }else{Some((best.anidb.to_owned(),best.anime_episode))}
+            });
+            assert_eq!(actual_season,expected_season);
+
+            // The old absolute resolver merged identical keys using their
+            // maximum evidence strength and required one strongest key.
+            old_absolute.retain(|(id,ani,season,episode),_|
+                canonical_asid(id,*ani).is_some()
+                &&(1..=9_999).contains(season)
+                &&(1..=99_999).contains(episode));
+            let max=old_absolute.values().copied().max();
+            let mut top=old_absolute.into_iter().filter(|(_,strength)|
+                Some(*strength)==max);
+            let expected_absolute=match (top.next(),top.next()){
+                (Some((key,_)),None)=>Some(key),
+                _=>None,
+            };
+            let actual_absolute=if ambiguous_absolute {None}else{
+                best_absolute.map(|best:AbsoluteWinner<'_>|(
+                    best.anidb.to_owned(),best.anime_episode,
+                    best.season,best.episode))
+            };
+            assert_eq!(actual_absolute,expected_absolute);
+        }
+    }
+
+    #[test]
+    fn large_ani_family_link_lookup_preserves_direct_duplicates_and_order(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO anime_series_map VALUES('tt1234567','100','700',0);
+            INSERT INTO anime_series_map VALUES('tt1234567','100','700',0);")
+            .unwrap();
+        for id in 100..125{
+            db.execute("INSERT INTO episode_map VALUES (?1,'700')",
+                [id.to_string()]).unwrap();
+        }
+        let actual=links(&db,"tt1234567").unwrap();
+        assert_eq!(actual.iter().filter(|l|l.direct).count(),2);
+        let mut expected=vec![
+            ("100".to_owned(),"700".to_owned(),true),
+            ("100".to_owned(),"700".to_owned(),true),
+        ];
+        let mut stmt=db.prepare("SELECT DISTINCT anidb_id FROM episode_map
+            WHERE tvdb_id='700'").unwrap();
+        let ids=stmt.query_map([],|r|r.get::<_,String>(0)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        for id in ids{
+            if !expected.iter().any(|(seen,tvdb,_)|*seen==id&&tvdb=="700"){
+                expected.push((id,"700".into(),false));
+            }
+        }
+        let got=actual.iter().map(|l|
+            (l.anidb.clone(),l.tvdb.clone(),l.direct)).collect::<Vec<_>>();
+        assert_eq!(got,expected);
+        assert_eq!(got.len(),26);
+    }
+
     #[test]
     fn bleach_absolute_320_prefers_bounded_episode_over_shared_tvdb_open_sequels(){
         let db=Connection::open_in_memory().unwrap();
@@ -524,6 +713,13 @@ mod tests{
                 tv_season:3,start:1,end:12,offset:0,explicit:vec![]},
         ];
         let index=split_index(&links,&maps);
+        for indexed in &index.links{
+            assert_eq!(indexed.mappings.len(),indexed.split.len());
+            for (&map,&cached) in indexed.mappings.iter().zip(&indexed.split){
+                assert_eq!(cached,split(indexed.link,map,&index),
+                    "the cached split flag must equal the historical rule");
+            }
+        }
         for link in &links{
             for map in &maps{
                 let previous=link.trakt>0&&links.iter().any(|other|
