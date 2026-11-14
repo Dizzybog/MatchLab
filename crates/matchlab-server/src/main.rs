@@ -4971,6 +4971,25 @@ mod tests {
         assert_eq!(part["anime"]["asid"],"101:1");
         assert_eq!(public_match_response(Some(part))["sid_start"],"tt0300001:3:1");
 
+        // A numeric video filename gets its identity from two independently
+        // parsed parent folders, but only when the combined name resolves to
+        // an exact verified AniDB work and a real season crosswalk.
+        for raw in [
+            "[HorribleSubs] Sword Art Online/Alicization/02 [1080p].mkv",
+            "Sword Art Online/Alicization/02.mkv",
+        ] {
+            let nested=find(raw);
+            assert_eq!(nested.parsed["title"],"Sword Art Online - Alicization","{raw}");
+            assert_eq!(nested.parsed["anime_title_verified"],true,"{raw}");
+            let selected=nested.selected.expect("verified named-part video");
+            assert_eq!(selected["imdb_id"],"tt0300001","{raw}");
+            assert_eq!(selected["season"],3,"{raw}");
+            assert_eq!(selected["episode"],2,"{raw}");
+            assert_eq!(selected["anime"]["asid"],"101:2","{raw}");
+            assert_eq!(public_match_response(Some(selected))["sid_start"],
+                "tt0300001:3:2","{raw}");
+        }
+
         // The word "Alicization" is not blindly inherited for non-anime.
         let ordinary=find("Anime Library/Ordinary.Show.S01E01.mkv");
         let ordinary=ordinary.selected.unwrap();
