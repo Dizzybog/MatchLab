@@ -520,6 +520,41 @@ mod tests{
     }
 
     #[test]
+    fn large_ani_family_link_lookup_preserves_direct_duplicates_and_order(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO anime_series_map VALUES('tt1234567','100','700',0);
+            INSERT INTO anime_series_map VALUES('tt1234567','100','700',0);")
+            .unwrap();
+        for id in 100..125{
+            db.execute("INSERT INTO episode_map VALUES (?1,'700')",
+                [id.to_string()]).unwrap();
+        }
+        let actual=links(&db,"tt1234567").unwrap();
+        assert_eq!(actual.iter().filter(|l|l.direct).count(),2);
+        let mut expected=vec![
+            ("100".to_owned(),"700".to_owned(),true),
+            ("100".to_owned(),"700".to_owned(),true),
+        ];
+        let mut stmt=db.prepare("SELECT DISTINCT anidb_id FROM episode_map
+            WHERE tvdb_id='700'").unwrap();
+        let ids=stmt.query_map([],|r|r.get::<_,String>(0)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        for id in ids{
+            if !expected.iter().any(|(seen,tvdb,_)|*seen==id&&tvdb=="700"){
+                expected.push((id,"700".into(),false));
+            }
+        }
+        let got=actual.iter().map(|l|
+            (l.anidb.clone(),l.tvdb.clone(),l.direct)).collect::<Vec<_>>();
+        assert_eq!(got,expected);
+        assert_eq!(got.len(),26);
+    }
+
+    #[test]
     fn bleach_absolute_320_prefers_bounded_episode_over_shared_tvdb_open_sequels(){
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE anime_series_map(
