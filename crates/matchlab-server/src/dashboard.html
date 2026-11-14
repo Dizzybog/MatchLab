@@ -487,7 +487,14 @@ async function history(){
     });
   }catch(e){
     if(requestId!==historyRequestId)return;
-    $('rows').innerHTML='<tr><td colspan="6">'+esc(e.message)+'</td></tr>';
+    if(e.message.includes('History and statistics migration is running in the background')){
+      $('rows').innerHTML='<tr><td colspan="6" class="muted">History is initializing in the background…</td></tr>';
+      // /dash is useful immediately; retry only the deferred history panel.
+      // A filter switch invalidates this retry via historyRequestId.
+      setTimeout(()=>{if(requestId===historyRequestId)history()},2500);
+    }else{
+      $('rows').innerHTML='<tr><td colspan="6">'+esc(e.message)+'</td></tr>';
+    }
   }
 }
 function setHistoryFilter(value){
