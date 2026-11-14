@@ -28,6 +28,12 @@ pub struct Match {
     pub imdb_id:String,pub title:String,pub year:i32,pub category:String,
     pub matched_title:String,pub anime_ids:BTreeMap<String,String>,pub media_type:String,
 }
+/// Strict mode treats an explicit release production year as an identity
+/// constraint. The candidate's IMDb year must be known and exactly equal.
+/// Non-strict keeps year as a ranking signal instead of a hard gate.
+pub(crate) fn year_eligible(strict:bool,year:Option<i32>,candidate_year:i32)->bool{
+    !strict || year.is_none_or(|requested|candidate_year==requested)
+}
 fn is_series(t:&str)->bool {t=="tvSeries" || t=="tvMiniSeries"}
 fn allowed(t:&str,series:bool,year:Option<i32>)->bool {
     if series {is_series(t)} else {
@@ -730,7 +736,7 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     // season/crosswalk checks; unknown IMDb years (0) cannot satisfy it.
     // Non-strict retains its existing year-distance ranking unchanged.
     let rows=if strict {
-        rows.into_iter().filter(|row|year.is_none_or(|y|row.year==y))
+        rows.into_iter().filter(|row|year_eligible(true,year,row.year))
             .collect()
     }else{rows};
     let eligible_rows=filter_eligible(db,rows,series,year,required_season)?;
@@ -760,7 +766,7 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
             // torrent year before the identity enters the strict shortlist.
             let anime_rows=filter_eligible(db,
                 aliases.into_iter().map(Aka::from)
-                    .filter(|row|year.is_none_or(|y|row.year==y)).collect(),
+                    .filter(|row|year_eligible(true,year,row.year)).collect(),
                 series,year,required_season)?;
             strict_anime_ids.extend(anime_rows.iter().map(|row|row.imdb_id.clone()));
             rows.extend(anime_rows);
