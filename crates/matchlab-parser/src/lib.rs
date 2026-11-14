@@ -4409,6 +4409,7 @@ mod tests {
             ("Harry Potter (2001-2012)/Harry Potter 8 (2011)",Some(2011)),
             ("Harry Potter (2001-2012)/Harry Potter 2 (2002)/Harry.Potter.2.mkv",Some(2002)),
             ("Harry Potter (2001-2012)/Harry Potter and the Sorcerer's Stone",None),
+            ("Harry potter (2001-2012)/ harry potter and the sorcerer's stone",None),
             ("Harry Potter (2001–2012)/Harry Potter and the Sorcerer's Stone",None),
             ("Harry Potter (2001—2012)/Harry Potter and the Sorcerer's Stone",None),
             ("Harry Potter (2001-2012)/Harry Potter and the Sorcerer's Stone (2001)",Some(2001)),
