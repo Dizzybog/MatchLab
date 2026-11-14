@@ -158,37 +158,70 @@ pub fn resolve_season_range(
         resolve_season_preloaded(imdb,season,episode,&links,&maps,&splits)).collect())
 }
 
+// Only the highest (offset,start) rank and whether it contains two
+// DIFFERENT AniDB coordinates can affect the answer. The former Vec+sort
+// cloned every candidate String and sorted all of them for every episode
+// in a batch. Keep the same ambiguity policy with constant-size state.
+#[derive(Clone,Copy)]
+struct SeasonWinner<'a> {
+    offset:i64,start:i64,anidb:&'a str,anime_episode:i64,
+}
+fn consider_season<'a>(
+    best:&mut Option<SeasonWinner<'a>>,ambiguous:&mut bool,
+    offset:i64,start:i64,anidb:&'a str,anime_episode:i64,
+){
+    // Invalid candidates must not change winner ranking or ambiguity.
+    if canonical_asid(anidb,anime_episode).is_none(){return;}
+    match *best {
+        None => {
+            *best=Some(SeasonWinner{offset,start,anidb,anime_episode});
+            *ambiguous=false;
+        },
+        Some(old) => match (offset,start).cmp(&(old.offset,old.start)){
+            std::cmp::Ordering::Greater => {
+                *best=Some(SeasonWinner{offset,start,anidb,anime_episode});
+                *ambiguous=false;
+            },
+            std::cmp::Ordering::Equal => {
+                if old.anidb!=anidb||old.anime_episode!=anime_episode{
+                    *ambiguous=true;
+                }
+            },
+            std::cmp::Ordering::Less => {},
+        },
+    }
+}
 fn resolve_season_preloaded(
     imdb:&str,season:i64,episode:i64,_links:&[Link],_maps:&[Mapping],
     splits:&SplitIndex<'_>,
 )->Option<Episode>{
     if season<=0||episode<=0{return None;}
-    let mut candidates=vec![];
+    let mut best:Option<SeasonWinner<'_>>=None;
+    let mut ambiguous=false;
     for indexed in &splits.links {
         let link=indexed.link;
         for (&m,&is_split) in indexed.mappings.iter().zip(&indexed.split) {
-        if is_split&&link.trakt!=season{continue;}
-        if !is_split&&m.tv_season!=season{continue;}
-        if !is_split{
-            if !m.explicit.is_empty(){
+            if is_split&&link.trakt!=season{continue;}
+            if !is_split&&m.tv_season!=season{continue;}
+            if !is_split&&!m.explicit.is_empty(){
                 for &(ani,tv) in &m.explicit{
-                    if tv==episode{candidates.push((m.offset,m.start,link.anidb.clone(),ani));}
+                    if tv==episode{
+                        consider_season(&mut best,&mut ambiguous,
+                            m.offset,m.start,&link.anidb,ani);
+                    }
                 }
                 continue;
             }
+            let ani=if is_split{episode+m.start.max(1)-1}else{episode-m.offset};
+            if ani<m.start.max(1)||(m.end>0&&ani>m.end){continue;}
+            consider_season(&mut best,&mut ambiguous,
+                m.offset,m.start,&link.anidb,ani);
         }
-        let ani=if is_split{episode+m.start.max(1)-1}else{episode-m.offset};
-        if ani<m.start.max(1)||(m.end>0&&ani>m.end){continue;}
-        candidates.push((m.offset,m.start,link.anidb.clone(),ani));
-    }}
-    // Invalid alternatives must not compete with a valid mapping.
-    candidates.retain(|(_,_,anidb,ani)|canonical_asid(anidb,*ani).is_some());
-    candidates.sort_by(|a,b|b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
-    let Some(best)=candidates.first()else{return None};
-    if candidates.get(1).is_some_and(|second|second.0==best.0&&second.1==best.1&&(second.2!=best.2||second.3!=best.3)){
-        return None;
     }
-    Some(Episode{imdb_id:imdb.into(),season,episode,anidb_id:best.2.clone(),anidb_episode:best.3})
+    if ambiguous{return None;}
+    let best=best?;
+    Some(Episode{imdb_id:imdb.into(),season,episode,
+        anidb_id:best.anidb.to_owned(),anidb_episode:best.anime_episode})
 }
 pub fn resolve_absolute(db:&Connection,imdb:&str,episode:i64)->rusqlite::Result<Option<Episode>>{
     if episode<=0{return Ok(None);}
