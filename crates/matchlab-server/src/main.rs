@@ -5074,6 +5074,98 @@ mod tests {
     }
 
     #[test]
+    fn named_anime_local_season_equal_base_is_absolute_not_shifted(){
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-sao-local-parts-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+                imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,
+                category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES
+                ('tt0300001','Sword Art Online','swordartonline',2012,
+                    'series','',1,0,'tvSeries'),
+                ('tt0300002','Ordinary Show','ordinaryshow',2010,
+                    'series','',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt0300001',4),('tt0300002',3);
+            INSERT INTO season_episodes VALUES
+                ('tt0300001',1,3,3),('tt0300001',3,3,3),
+                ('tt0300001',4,3,3),('tt0300002',2,3,3);
+            INSERT INTO anime_series_map VALUES
+                ('tt0300001','100','456',0),('tt0300001','101','456',0),
+                ('tt0300001','102','456',0);
+            INSERT INTO anime_ids VALUES('tt0300001','anidb','100');
+            INSERT INTO anidb_titles VALUES
+                ('100','Sword Art Online','swordartonline','main','en'),
+                ('101','Sword Art Online Alicization',
+                    'swordartonlinealicization','main','en'),
+                ('102','Sword Art Online Alicization Part 2',
+                    'swordartonlinealicizationpart2','main','en');
+            INSERT INTO episode_map VALUES
+                ('100','456',1,1,1,3,0,''),
+                ('101','456',1,3,1,3,0,''),
+                ('102','456',1,4,1,3,0,'');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        let lookup=|name:&str| diagnose(&path,&MatchRequest{
+            title:name.into(),year:None,series:None})
+            .unwrap_or_else(|e|panic!("{name}: {e}"));
+        for (raw,season) in [
+            ("Sword Art Online - Alicization S1E02 [1080p].mkv",3),
+            ("Sword Art Online - Alicization S2E02 [1080p].mkv",4),
+            ("Sword Art Online - Alicization S3E02 [1080p].mkv",3),
+        ] {
+            let d=lookup(raw);
+            assert_eq!(d.parsed["anime_local_season_resolved"]["base_season"],3,
+                "{raw}: {:?}",d.parsed);
+            assert_eq!(d.parsed["seasons"],json!([season]),
+                "{raw}: {:?}",d.parsed);
+            let selected=d.selected.expect("verified named anime part");
+            assert_eq!(selected["imdb_id"],"tt0300001","{raw}: {selected}");
+            assert_eq!(selected["season"],season,"{raw}: {selected}");
+            assert_eq!(selected["episode"],2,"{raw}: {selected}");
+            let asid=if season==3{"101:2"}else{"102:2"};
+            assert_eq!(selected["anime"]["asid"],asid,"{raw}: {selected}");
+            assert_eq!(public_match_response(Some(selected))["sid_start"],
+                format!("tt0300001:{season}:2"),"{raw}");
+        }
+        // P2 and P3 are season/part-only markers; they must not be
+        // mistakenly treated as episode two or episode three.
+        for (raw,season) in [
+            ("Sword Art Online - Alicization P2 [1080p].mkv",4),
+            ("Sword Art Online - Alicization P3 [1080p].mkv",3),
+            ("[HorribleSubs] Sword Art Online - Alicization S2 [1080p].mkv",4),
+            ("Sword Art Online - Alicization S3 [1080p].mkv",3),
+        ]{
+            let d=lookup(raw);
+            assert_eq!(d.parsed["seasons"],json!([season]),
+                "{raw}: {:?}",d.parsed);
+            let winner=d.selected.expect("named anime season");
+            assert_eq!(winner["season"],season,"{raw}: {winner}");
+            assert_eq!(winner["season_end"],season,"{raw}: {winner}");
+            assert_eq!(public_match_response(Some(winner))["sid_start"],
+                format!("tt0300001:{season}:1"),"{raw}");
+        }
+        let ordinary=lookup("Ordinary.Show.S02E02.mkv");
+        assert_eq!(ordinary.selected.as_ref().unwrap()["season"],2);
+        assert!(ordinary.parsed.get("anime_local_season_resolved").is_none());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
     fn bluray_stream_file_uses_movie_folder_not_stream_or_numeric_leaf(){
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
