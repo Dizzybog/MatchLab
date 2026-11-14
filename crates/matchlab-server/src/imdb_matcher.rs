@@ -1319,18 +1319,18 @@ mod tests{
             CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
             CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
             INSERT INTO titles VALUES
-                ('ttmovie2005','The Island','theisland',2005,'movie','US',1,0,'movie'),
-                ('ttmovie2023','The Island','theisland',2023,'movie','US',1,0,'movie'),
-                ('ttseries2005','Example Show','exampleshow',2005,'series','US',1,0,'tvSeries'),
-                ('ttseries2023','Example Show','exampleshow',2023,'series','US',1,0,'tvSeries'),
-                ('ttunknown','Example Show','exampleshow',0,'series','US',1,0,'tvSeries');
-            INSERT INTO imdb_ratings VALUES('ttmovie2005',1000000),
-                ('ttmovie2023',1),('ttseries2005',1000000),('ttseries2023',1);")
+                ('tt9002005','The Island','theisland',2005,'movie','US',1,0,'movie'),
+                ('tt9002023','The Island','theisland',2023,'movie','US',1,0,'movie'),
+                ('tt8002005','Example Show','exampleshow',2005,'series','US',1,0,'tvSeries'),
+                ('tt8002023','Example Show','exampleshow',2023,'series','US',1,0,'tvSeries'),
+                ('tt8000000','Example Show','exampleshow',0,'series','US',1,0,'tvSeries');
+            INSERT INTO imdb_ratings VALUES('tt9002005',1000000),
+                ('tt9002023',1),('tt8002005',1000000),('tt8002023',1);")
             .unwrap();
 
         for (title,year,series,release,expected) in [
-            ("The Island",2023,false,"The.Island.2023.1080p", "ttmovie2023"),
-            ("Example Show",2023,true,"Example.Show.2023.S01E01", "ttseries2023"),
+            ("The Island",2023,false,"The.Island.2023.1080p", "tt9002023"),
+            ("Example Show",2023,true,"Example.Show.2023.S01E01", "tt8002023"),
         ]{
             let (strict,_) = search_inner_mode(&db,title,Some(year),series,0,
                 release,series,20,false,true).unwrap();
@@ -1346,7 +1346,7 @@ mod tests{
         let (broad,_) = search_inner_mode(&db,"The Island",Some(2023),false,0,
             "The.Island.2023",false,20,false,false).unwrap();
         assert_eq!(broad.len(),2,"non-strict keeps wrong-year candidates as lower-ranked fallbacks");
-        assert_eq!(broad[0].imdb_id,"ttmovie2023");
+        assert_eq!(broad[0].imdb_id,"tt9002023");
     }
 
     #[test]
@@ -1360,21 +1360,21 @@ mod tests{
             CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
             CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
             INSERT INTO titles VALUES
-                ('ttanime2005','The Duke of Death','thedukeofdeath',
+                ('tt7002005','The Duke of Death','thedukeofdeath',
                     2005,'series','US',1,0,'tvSeries'),
-                ('ttanime2021','The Duke of Death','thedukeofdeath',
+                ('tt7002021','The Duke of Death','thedukeofdeath',
                     2021,'series','US',1,0,'tvSeries');
             INSERT INTO anidb_titles VALUES
                 ('7777','Shinigami Bocchan','shinigamibocchan','main','ja');
             INSERT INTO anime_series_map VALUES
-                ('ttanime2005','7777','12345',0),
-                ('ttanime2021','7777','12345',0);")
+                ('tt7002005','7777','12345',0),
+                ('tt7002021','7777','12345',0);")
             .unwrap();
         let search=|year|search_inner_mode(&db,"Shinigami Bocchan",year,true,0,
             "Shinigami.Bocchan.S01E01",true,20,false,true).unwrap().0;
         let found=search(Some(2021));
         assert_eq!(found.len(),1);
-        assert_eq!(found[0].imdb_id,"ttanime2021");
+        assert_eq!(found[0].imdb_id,"tt7002021");
         assert!(search(Some(2019)).is_empty(),"no year-compatible identity exists");
         assert_eq!(search(None).len(),2,"without year, both AniDB identities remain");
     }
