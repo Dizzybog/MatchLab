@@ -3286,6 +3286,38 @@ pub fn collection_year_span(component:&str)->Option<(i32,i32)>{
         .map(|(start,end,_,_)|(start,end))
 }
 
+// A directory can name an anime work and its separately named cour/part,
+// while the video leaf contains only an ordinal: "Series/Named Part/02.mkv".
+// Produce a *candidate*, never a canonical IMDb episode or synthetic title:
+// the matcher must confirm the combined name against a unique exact AniDB
+// alias and an actual crosswalk entry before promoting these coordinates.
+static ANIME_ORDINAL_VIDEO_LEAF_RE:Lazy<regex::Regex>=Lazy::new(||regex::Regex::new(
+    r"(?i)^0*([1-9][0-9]{0,3})(?:[ ._]+\\[(?:480|576|720|1080|2160)p(?:[ .][^]\\r\\n]{1,48})?\\])?\\.(?:mkv|mp4|avi|m4v|webm)$"
+).expect("valid anime ordinal video leaf"));
+
+fn anime_path_part_episode_candidate(layers:&[Value])->Option<Value>{
+    if layers.len()<3{return None;}
+    let leaf=layers.last()?.get("raw")?.as_str()?;
+    let caps=ANIME_ORDINAL_VIDEO_LEAF_RE.captures(leaf)?;
+    let episode=caps.get(1)?.as_str().parse::<i64>().ok()?;
+    if (1900..=2100).contains(&episode){return None;}
+    let base=layers.get(layers.len()-3)?.get("parsed")?
+        .get("title")?.as_str()?.trim();
+    let part=layers.get(layers.len()-2)?.get("parsed")?
+        .get("title")?.as_str()?.trim();
+    if generic_path_title(base)||generic_path_title(part)
+        ||base.chars().filter(|c|c.is_alphabetic()).count()<4
+        ||part.chars().filter(|c|c.is_alphabetic()).count()<3
+        ||part.to_ascii_lowercase().starts_with("season ")
+        ||part.contains(['/', '\\\\'])
+    {
+        return None;
+    }
+    let title=format!("{base} - {part}");
+    Some(json!({"title":title,"episode":episode,
+        "numbering":"absolute","verified":false,"path_part":true}))
+}
+
 /// Parse a hierarchical torrent path from ancestor to leaf. Any explicit,
 /// non-empty metadata value on a deeper level overrides the same field from
 /// an ancestor (year, season, episode, quality, resolution, codec, etc.).
@@ -3407,6 +3439,21 @@ pub fn parse_title(
         if components.len()>1 {
             path_layers.push(json!({"raw":component,"parsed":layer}));
         }
+    }
+    // A numeric file leaf is ambiguous even in a named anime folder.
+    // Publish only a tentative part+episode candidate for metadata checking.
+    if !merged.contains_key("anime_episode_candidate")
+        && !merged.contains_key("anime_episode_range_candidate")
+        && !merged.contains_key("episode_start")
+        && merged.get("seasons").and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+        && let Some(candidate)=anime_path_part_episode_candidate(&path_layers)
+        && merged.get("episodes").and_then(Value::as_array)
+            .is_none_or(|episodes|episodes.is_empty()
+                ||(episodes.len()==1
+                    && episodes[0].as_i64()==candidate["episode"].as_i64()))
+    {
+        merged.insert("anime_episode_candidate".into(),candidate);
     }
     let title=if !leaf_title.is_empty()&&!leaf_title_generic{
         leaf_title
