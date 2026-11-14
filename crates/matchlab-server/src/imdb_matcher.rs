@@ -632,8 +632,7 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     let exact_only=strict || (!force_full && key.len()>=6 && country_qualified.is_none()
         && !semantic_content.is_empty() && semantic_release==semantic_content
         && discovered.iter().any(|row|
-            row.clean==key && semantic_words(&row.title)==semantic_content
-            &&crate::title_normalization::title_word_count(&row.title)==source_word_count));
+            row.clean==key && semantic_words(&row.title)==semantic_content));
     if !exact_only && key.len()>=4{
         discovered.extend(tantivy_aliases(db,&key,false)?);
         if key.len()>=8{
@@ -731,8 +730,7 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     // type/season. Avoid letting another alias with the same ASCII key
     // masquerade as a verified complete title; resume full discovery.
     if !strict && exact_only && !eligible_rows.iter().any(|row|
-        row.clean==key && semantic_words(&row.title)==semantic_content
-            &&crate::title_normalization::title_word_count(&row.title)==source_word_count){
+        row.clean==key && semantic_words(&row.title)==semantic_content){
         return search_inner_mode(db,title,year,series,required_season,
             release_title,_has_episode,limit,true,false);
     }
