@@ -2573,6 +2573,36 @@ static PACK_SEASON_SUFFIX_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)(?:^|[ ._-])s0?([1-9][0-9]?)[ ._-]*$")
         .expect("valid anime pack season suffix")
 });
+// A named AniDB work may cover several IMDb seasons. "Alicization S2"
+// and "Alicization P2" mean the second season/part *inside* that work,
+// not a global S02. This is a hint only: exact identity and the base IMDb
+// season must be independently verified in /match before shifting anything.
+static ANIME_LOCAL_PART_RE:Lazy<Regex>=Lazy::new(||Regex::new(
+    r"(?i)(?:^|[ ._-])(?P<kind>[sp])0*(?P<local>[1-9][0-9]?)(?:$|[ ._\[(]|e[0-9])"
+).expect("bounded local anime season or part marker"));
+
+fn named_anime_local_season_candidate(raw:&str)->Option<Value>{
+    for caps in ANIME_LOCAL_PART_RE.captures_iter(raw){
+        let marker=caps.get(0)?;
+        let local=caps.name("local")?.as_str().parse::<i64>().ok()?;
+        let before=raw.get(..marker.start())?.trim_matches(
+            |c:char|c.is_whitespace()||matches!(c,'.'|'_'|'-'));
+        let name=if before.starts_with('['){
+            before.split_once(']')?.1.trim()
+        }else{before};
+        if name.chars().filter(|c|c.is_alphabetic()).count()<6
+            || generic_path_title(name) {continue;}
+        // The suffix is only meaningful if it follows a real title,
+        // rather than a filename extension, resolution or release group.
+        let title=clean_title(name);
+        if title.is_empty(){continue;}
+        return Some(json!({"title":title,"local_season":local,
+            "marker":caps.name("kind")?.as_str().to_ascii_uppercase(),
+            "verified":false}));
+    }
+    None
+}
+
 fn unmarked_single_anime_episode_candidate(
     raw: &str, result: &Map<String, Value>, translate_languages: bool,
 ) -> Result<Option<Value>, ParseError> {
@@ -3006,6 +3036,9 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
         )? {
             result.insert("anime_episode_candidate".into(),candidate);
         }
+    }
+    if let Some(candidate)=named_anime_local_season_candidate(raw){
+        result.insert("anime_local_season_candidate".into(),candidate);
     }
     preserve_fansub_part_title(raw, &mut result)?;
     if result.get("title").and_then(Value::as_str)
