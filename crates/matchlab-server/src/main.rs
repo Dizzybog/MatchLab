@@ -1222,9 +1222,12 @@ fn diagnose_with_policy(
         let original_episodes=parsed_value.get("episodes").cloned();
         let parsed_ep=original_episodes.as_ref().and_then(Value::as_array)
             .and_then(|a|match a.as_slice(){[one]=>one.as_i64(),_=>None});
-        // Bare P2 is a part, not episode 2. Only an S2E02-style episode
-        // is trusted at this stage; P2 may still resolve a season-only pack.
-        let explicit_ep=if marker=="P"{None}else{parsed_ep};
+        let marked_ep=parsed_value.get("anime_local_part_candidate")
+            .and_then(|hint|hint.get("episode")).and_then(Value::as_i64);
+        // A bare P2 is a part, not episode 2. P2E03, on the other hand,
+        // is an explicit part-local episode, verified by the same crosswalk.
+        let explicit_ep=if marker=="P" {marked_ep}
+            else{marked_ep.or(parsed_ep)};
         let probe=explicit_ep.unwrap_or(1);
         if let Some(imdb)=exact_anime_identity(&db,&name)?
             && let Some(verified)=anime_title::resolve_local_part(
@@ -1238,6 +1241,12 @@ fn diagnose_with_policy(
                 parsed.insert("episodes".into(),if explicit_ep.is_some(){
                     json!([mapped.episode])
                 }else{json!([])});
+                if marker=="P" && mapped.season==verified.base_season
+                    && explicit_ep.is_none() {
+                    // A second cour within the SAME IMDb season is not
+                    // proof that the torrent contains its whole season.
+                    parsed.insert("anime_local_part_is_cour".into(),json!(true));
+                }
                 parsed.insert("anime_local_part_verified".into(),json!({
                     "imdb_id":imdb,"base_season":verified.base_season,
                     "local_marker":marker,"local_number":local,
@@ -1850,6 +1859,7 @@ fn diagnose_with_policy(
     // whose metadata verified season 1 (e.g. [Group][Chaos_Head][BDRip]).
     // A supplied episode or batch is never expanded to the entire season.
     if !airdate_only && episodes.is_empty() && !parsed.contains_key("episode_start")
+        && !parsed.contains_key("anime_local_part_is_cour")
         && !parsed.contains_key("absolute_episode_candidate")
         && !parsed.contains_key("anime_episode_candidate")
         && !parsed.contains_key("anime_episode_range_candidate")
