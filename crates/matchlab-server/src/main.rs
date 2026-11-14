@@ -4814,7 +4814,7 @@ mod tests {
             CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
             INSERT INTO titles VALUES
                 ('tt0241527','Harry Potter and the Sorcer''s Stone',
-                    'harrypotterandthesorcerersstone',2001,'movie','US',1,0,'movie'),
+                    'harrypotterthesorcerersstone',2001,'movie','US',1,0,'movie'),
                 ('tt3333333','Stream','stream',2024,'movie','US',1,0,'movie'),
                 ('tt4444444','0000','0000',2000,'movie','US',1,0,'movie');
             INSERT INTO imdb_ratings VALUES
@@ -4854,7 +4854,7 @@ mod tests {
         };
         db.execute("INSERT INTO titles VALUES
             ('tt5555555','Harry Potter and the Sorcer''s Stone',
-             'harrypotterandthesorcerersstone',2002,'movie','US',0,1,'movie')",[])
+             'harrypotterthesorcerersstone',2002,'movie','US',0,1,'movie')",[])
             .unwrap();
         assert!(bottom_up_imdb_path_match(&db,&parsed,None,false,0,
             false,false,|hits|filter_request_imdb_candidates(&db,hits,gate))
