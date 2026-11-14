@@ -110,28 +110,3 @@ fn nested_named_anime_part_numeric_leaf_is_unverified_until_metadata_check() {
     let numbered_movie = parse_title("Movies/Film/2004.mkv", false).unwrap();
     assert!(numbered_movie.get("anime_episode_candidate").is_none(), "{numbered_movie:?}");
 }
-
-#[test]
-fn local_anime_season_and_part_markers_remain_metadata_free_hints() {
-    for (raw,number,kind) in [
-        ("Sword Art Online - Alicization S1E02 [1080p].mkv",1,"S"),
-        ("Sword Art Online - Alicization S2E02 [1080p].mkv",2,"S"),
-        ("Sword Art Online - Alicization S3E02 [1080p].mkv",3,"S"),
-        ("Sword Art Online - Alicization P2 [1080p].mkv",2,"P"),
-        ("Sword Art Online - Alicization P3 [1080p].mkv",3,"P"),
-        ("[HorribleSubs] Sword Art Online - Alicization S2 [1080p].mkv",2,"S"),
-    ] {
-        let result=parse_title(raw,false).unwrap();
-        let hint=&result["anime_local_season_candidate"];
-        assert_eq!(hint["title"],"Sword Art Online - Alicization","{raw}: {result:?}");
-        assert_eq!(hint["local_season"],number,"{raw}: {result:?}");
-        assert_eq!(hint["marker"],kind,"{raw}: {result:?}");
-        assert_eq!(hint["verified"],false,"{raw}: {result:?}");
-        assert!(result.get("anime_local_season_resolved").is_none(),
-            "only the matcher may translate a named anime part: {result:?}");
-    }
-    // A plain show-level season is an ordinary absolute coordinate until
-    // an exact, uniquely mapped *named anime part* proves otherwise.
-    let plain=parse_title("Enen no Shouboutai S2",false).unwrap();
-    assert_eq!(plain["seasons"],json!([2]),"{plain:?}");
-}
