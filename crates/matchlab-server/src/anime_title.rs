@@ -301,12 +301,15 @@ pub fn named_part_base(
 )->rusqlite::Result<Option<i64>>{
     let key=imdb_matcher::clean_title(title);
     if key.len()<7{return Ok(None);}
-    let canonical:i64=db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM titles
-            WHERE imdb_id=?1 AND clean_title=?2 AND original=1
-            AND type IN ('tvSeries','tvMiniSeries') LIMIT 1)",
-        params![imdb,key],|r|r.get(0))?;
-    if canonical!=0{return Ok(None);}
+    // Title evidence is served only by the immutable Tantivy index.
+    // Never scan the large IMDb titles table from a matching request.
+    let canonical=crate::tantivy_search::title_aliases_exact(db,&key)
+        .map_err(|error|rusqlite::Error::ToSqlConversionFailure(
+            Box::new(std::io::Error::other(error))))?
+        .into_iter().any(|alias|alias.imdb_id==imdb && alias.original
+            && alias.clean==key
+            && matches!(alias.media_type.as_str(),"tvSeries"|"tvMiniSeries"));
+    if canonical{return Ok(None);}
     let ids=aliases(db,imdb,title)?.into_iter()
         .filter_map(|(id,alias)|(alias==key).then_some(id))
         .collect::<BTreeSet<_>>();
