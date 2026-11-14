@@ -725,6 +725,14 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     // Apply media-type and season eligibility once, after lexical discovery
     // has exhausted EVERY path. A more specific suffix can no longer be
     // starved by a shorter prefix/alias.
+    // In strict mode a supplied production year is an absolute identity
+    // constraint, not merely a sorting signal. Apply it before any expensive
+    // season/crosswalk checks; unknown IMDb years (0) cannot satisfy it.
+    // Non-strict retains its existing year-distance ranking unchanged.
+    let rows=if strict {
+        rows.into_iter().filter(|row|year.is_none_or(|y|row.year==y))
+            .collect()
+    }else{rows};
     let eligible_rows=filter_eligible(db,rows,series,year,required_season)?;
     // An exact title can exist but be ineligible for the requested media
     // type/season. Avoid letting another alias with the same ASCII key
@@ -747,8 +755,12 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
         if !ids.is_empty(){
             let aliases=crate::tantivy_search::titles_by_ids(
                 db,&ids.iter().cloned().collect::<Vec<_>>()).map_err(index_error)?;
+            // AniDB aliases can resolve to a differently named IMDb work.
+            // Its IMDb production year must still agree with an explicit
+            // torrent year before the identity enters the strict shortlist.
             let anime_rows=filter_eligible(db,
-                aliases.into_iter().map(Aka::from).collect(),
+                aliases.into_iter().map(Aka::from)
+                    .filter(|row|year.is_none_or(|y|row.year==y)).collect(),
                 series,year,required_season)?;
             strict_anime_ids.extend(anime_rows.iter().map(|row|row.imdb_id.clone()));
             rows.extend(anime_rows);
