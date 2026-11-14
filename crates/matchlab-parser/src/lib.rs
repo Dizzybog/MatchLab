@@ -2582,7 +2582,10 @@ static LOCAL_ANIME_PART_MARKER_RE:Lazy<regex::Regex>=Lazy::new(||{
     ).expect("valid bounded anime S/P marker")
 });
 fn local_anime_part_candidate(raw:&str)->Option<Value>{
-    if !raw.bytes().any(|b|matches!(b,b's'|b'S'|b'p'|b'P')) {
+    // Cheap linear prefilter: most release names contain an S or P but
+    // almost none contain an immediately numbered S/P marker.
+    if !raw.as_bytes().windows(2).any(|pair|
+        matches!(pair[0],b's'|b'S'|b'p'|b'P') && pair[1].is_ascii_digit()) {
         return None;
     }
     for caps in LOCAL_ANIME_PART_MARKER_RE.captures_iter(raw){
