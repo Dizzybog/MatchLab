@@ -91,6 +91,8 @@ Title matching preserves word boundaries in addition to Tantivy's compact normal
 
 **Strict production-year rule:** If a torrent filename supplies a year (or the `/match` request explicitly supplies one), the selected IMDb identity **must have that exact year**. Candidates with another year or no valid year are excluded, including AniDB-linked IMDb identities and episode-driven promotions. A release without a production year retains the existing title/episode matching rules. Non-strict mode continues to rank approximate years instead of excluding them. Date-based episodes use their separate airdate logic rather than interpreting an episode airdate as a show's production year.
 
+**Movie collections:** A parent folder such as `Harry Potter (2001-2012)/` is a range, not an individual release year. For `Harry Potter (2001-2012)/Harry Potter 1 (2001)`, strict matching uses the child's exact **2001**. For `Harry Potter (2001-2012)/Harry Potter and the Sorcerer's Stone`, no single year is inferred; an exact film title with an IMDb year **within 2001–2012** may satisfy the public match eligibility gate. An out-of-range or unmatched title does not gain an identity from the collection label.
+
 **Strict exact-title matching is enabled by default:** MatchLab compares
 complete IMDb and exact AniDB aliases in the same ranked candidate set.
 An unambiguous exact AniDB title can identify a named anime season/part even
