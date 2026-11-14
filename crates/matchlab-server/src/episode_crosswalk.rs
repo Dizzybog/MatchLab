@@ -74,6 +74,9 @@ struct LinkedMappings<'a>{
     first_absolute_end:Option<i64>,
 }
 struct SplitIndex<'a>{
+    // Keep the reference partner graph only for parity tests. Production
+    // resolves it into one Boolean per mapping row in split_index().
+    #[cfg(test)]
     partners:HashMap<(&'a str,i64),Vec<(&'a str,i64)>>,
     links:Vec<LinkedMappings<'a>>,
 }
@@ -118,7 +121,11 @@ fn split_index<'a>(links:&'a[Link],maps:&'a[Mapping])->SplitIndex<'a>{
     }).collect();
     // The temporary AniDB lookup map is intentionally dropped here.
     // LinkedMappings has already captured only the relevant references.
-    SplitIndex{partners,links:indexed_links}
+    SplitIndex{
+        #[cfg(test)]
+        partners,
+        links:indexed_links,
+    }
 }
 #[cfg(test)]
 fn split(link:&Link,m:&Mapping,index:&SplitIndex<'_>)->bool{
