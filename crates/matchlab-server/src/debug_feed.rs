@@ -309,6 +309,16 @@ fn replay_request(title:&str,details:&Value)->Option<Value>{
     Some(json!({"title":title,"year":year,"series":series}))
 }
 
+fn stored_matcher_context(details:&Value)->Option<Value>{
+    let context=details.get("matcher_context")?.as_object()?;
+    let strict_mode=context.get("strict_mode")?.as_bool()?;
+    let semantic_revision=context.get("semantic_revision")?.as_str()?;
+    if semantic_revision.trim().is_empty(){return None;}
+    // Only stored, typed provenance is meaningful. Never infer historical
+    // policy from the current process or forward unrelated stored fields.
+    Some(json!({"strict_mode":strict_mode,"semantic_revision":semantic_revision}))
+}
+
 fn diagnostic_row(
     id: i64, created_at: String, title: String, status: String,
     imdb_id: Option<String>, match_source: Option<String>,
@@ -324,6 +334,7 @@ fn diagnostic_row(
         "parsed":details.get("parsed"),"selected":details.get("selected"),
         "reason":details.get("reason"),
         "source_policy":details.get("ml_source_policy"),
+        "matcher_context":stored_matcher_context(&details),
         "request_context_available":request.is_some(),
         "replay_request":request,
     });
@@ -684,6 +695,52 @@ mod tests {
                 "matched".into(),None,None,1,details,false);
             assert_eq!(row["request_context_available"],false);
             assert!(row["replay_request"].is_null());
+        }
+    }
+
+    #[test]
+    fn feed_preserves_stored_matcher_policy_without_private_details(){
+        let path=history_db();
+        for (strict_mode,revision) in [(false,"prior-broad-v1"),(true,"strict-v4")]{
+            let details=json!({"parsed":{"title":"Example"},
+                "matcher_context":{"strict_mode":strict_mode,
+                    "semantic_revision":revision,"unrelated":"fixture"}});
+            dashboard_history::record(&path,"Example","unmatched",None,&details,1);
+        }
+        dashboard_history::record(&path,"Legacy Example","unmatched",None,
+            &json!({"parsed":{"title":"Legacy Example"}}),1);
+        let page=feed(&path,0,100,false,false).unwrap();
+        let items=page["items"].as_array().unwrap();
+        assert_eq!(items.len(),3);
+        assert_eq!(items[0]["matcher_context"],json!({
+            "strict_mode":false,"semantic_revision":"prior-broad-v1"}));
+        assert_eq!(items[1]["matcher_context"],json!({
+            "strict_mode":true,"semantic_revision":"strict-v4"}));
+        assert!(items[2]["matcher_context"].is_null(),
+            "a legacy row must not inherit current matching policy");
+        assert!(items.iter().all(|item|item.get("details").is_none()));
+        let full=single(&path,1).unwrap().unwrap();
+        assert_eq!(full["matcher_context"],items[0]["matcher_context"]);
+        assert_eq!(full["details"]["matcher_context"]["unrelated"],"fixture");
+        assert!(full["matcher_context"].get("unrelated").is_none());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn legacy_null_and_malformed_matcher_context_remain_unknown(){
+        for context in [Value::Null,json!("opaque legacy value"),json!([]),
+            json!({}),json!({"strict_mode":true}),
+            json!({"semantic_revision":"v4"}),
+            json!({"strict_mode":null,"semantic_revision":"v4"}),
+            json!({"strict_mode":"false","semantic_revision":"v4"}),
+            json!({"strict_mode":0,"semantic_revision":"v4"}),
+            json!({"strict_mode":false,"semantic_revision":4}),
+            json!({"strict_mode":false,"semantic_revision":""}),
+            json!({"strict_mode":true,"semantic_revision":"  "})]{
+            let row=diagnostic_row(1,"time".into(),"Example".into(),
+                "unmatched".into(),None,None,1,
+                json!({"matcher_context":context}),false);
+            assert!(row["matcher_context"].is_null(),"{context:?}");
         }
     }
 }

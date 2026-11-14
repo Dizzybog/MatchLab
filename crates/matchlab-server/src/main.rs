@@ -111,6 +111,39 @@ struct Candidate {
     source: String,
 }
 
+fn complete_candidate_alias(candidate:&Candidate,title:&str)->bool{
+    imdb_matcher::clean_title(&candidate.matched_title)==imdb_matcher::clean_title(title)
+        &&imdb_matcher::semantic_words(&candidate.matched_title)==imdb_matcher::semantic_words(title)
+        &&title_normalization::title_word_count(&candidate.matched_title)
+            ==title_normalization::title_word_count(title)
+}
+
+fn unmarked_crosswalk_identity_eligible(
+    top:Option<&Candidate>,candidate:&Candidate,title:&str,
+    exact_anime_ids:&std::collections::BTreeSet<String>,
+)->bool{
+    // Anchor to the existing top title fit. A lower exact short alias must
+    // not outrank a stronger full-release recovery. An independently exact
+    // AniDB title may still name a translated series or a specific part.
+    top.is_none_or(|top|!complete_candidate_alias(top,title))
+        ||complete_candidate_alias(candidate,title)
+        ||exact_anime_ids.contains(&candidate.imdb_id)
+}
+
+fn unresolved_date_predates_identity(winner:&Value,date:&str,requested_year:Option<i32>)->bool{
+    if requested_year.is_some()||winner["category"]!="series"
+        ||winner["air_date"].as_str().is_some_and(|date|!date.is_empty()){
+        return false;
+    }
+    let release_year=date.split('-').next()
+        .filter(|year|year.len()==4&&year.bytes().all(|c|c.is_ascii_digit()))
+        .and_then(|year|year.parse::<i64>().ok());
+    match (release_year,winner["year"].as_i64()){
+        (Some(release),Some(start))=>release>0&&start>release,
+        _=>false,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Diagnostic {
     parsed: Value,
@@ -1831,6 +1864,9 @@ fn diagnose_with_policy(
                 }
                 if let Some(index)=canonical {chosen_index=index;}else{
                     for (index,candidate) in imdb.iter().enumerate(){
+                        if seasons.is_empty()&&!unmarked_crosswalk_identity_eligible(
+                            imdb.first(),candidate,title,
+                            &anime_episode_evidence.eligible_exact_ids){continue;}
                         let mapped=match seasons.first().copied(){
                             Some(season)=>{
                                 let titled=anime_title::resolve(
@@ -2030,6 +2066,15 @@ fn diagnose_with_policy(
             }
         }
     }
+    // A calendar release must not select a series that did not yet exist
+    // when no episode airdate independently supports the identity. A
+    // resolved pre-premiere special or timezone-adjusted date is proof;
+    // unknown production years and explicit identity-year overrides keep
+    // their established behavior. Never guess a replacement show here.
+    let rejected_future_airdate=airdate_only&&dated.as_deref().is_some_and(|date|
+        selected.as_ref().is_some_and(|winner|
+            unresolved_date_predates_identity(winner,date,req.year)));
+    if rejected_future_airdate {selected=None;}
     // A season pack such as Supernatural.S02 covers the season's episodes.
     // A specific S02E01 must never be expanded to the entire season.
     if let (Some((start,end)),Some(winner))=(season_range,selected.as_mut()){
@@ -2343,7 +2388,9 @@ fn diagnose_with_policy(
     if let Some(winner)=selected.as_mut(){
         reconcile_series_coordinates(&db,winner,parsed)?;
     }
-    let reason = if anidb_candidate.is_some() && selected.as_ref()
+    let reason = if rejected_future_airdate&&selected.is_none(){
+        "Release date predates the series without a verified episode airdate"
+    }else if anidb_candidate.is_some() && selected.as_ref()
         .is_some_and(|winner|winner["imdb_id"].is_null()) {
         "Independently verified AniDB episode without IMDb identity"
     }else if anidb_candidate.is_some() {
@@ -2409,7 +2456,7 @@ static TORRENT_MATCH_CACHE:OnceLock<query_cache::QueryCache<Diagnostic>>=OnceLoc
 // A semantic matcher change must invalidate old persistent ML match results,
 // even when metadata.sqlite3, learned regex rules and the strict-mode flag
 // are unchanged. Bump this revision when altering title/year eligibility.
-const MATCHER_SEMANTIC_REVISION:&str="verified-coordinate-ranges-and-media-v4";
+const MATCHER_SEMANTIC_REVISION:&str="complete-title-precedence-and-metadata-boundaries-v5";
 fn scoped_match_generation(metadata:&str,strict:bool)->String{
     format!("{metadata}:matcher={MATCHER_SEMANTIC_REVISION}:strict={strict}")
 }
@@ -2450,6 +2497,13 @@ fn history_details_with_request(mut details:Value,req:&MatchRequest,policy:Match
         // no override; an absent object on legacy history means unknown.
         record.insert("request_context".into(),json!({
             "year":req.year,"series":req.series
+        }));
+        // The boot policy and compiled semantics are immutable. Store their
+        // actual values with the event, never infer them when reading old
+        // history. This decoration still happens after pristine cache storage.
+        record.insert("matcher_context".into(),json!({
+            "strict_mode":strict_match_mode(),
+            "semantic_revision":MATCHER_SEMANTIC_REVISION
         }));
         // Policy is replay provenance even when learning is disabled.
         // Retain the existing key used by the independent ML evidence queue.
@@ -6648,15 +6702,22 @@ mod tests {
                 let details=history_details_with_request(pristine.clone(),&req,policy);
                 assert_eq!(details["request_context"],json!({"year":year,"series":series}));
                 assert_eq!(details["ml_source_policy"],source);
+                assert_eq!(details["matcher_context"],json!({
+                    "strict_mode":strict_match_mode(),
+                    "semantic_revision":MATCHER_SEMANTIC_REVISION
+                }));
                 assert!(!details["request_context"].as_object().unwrap().contains_key("title"));
                 dashboard_history::record(&path,&req.title,"unmatched",None,&details,1);
                 let stored=dashboard_history::history(&path,1,0,None).unwrap();
                 assert_eq!(stored["items"][0]["details"]["request_context"],
                     details["request_context"],"persist explicit nulls and false overrides");
                 assert_eq!(stored["items"][0]["details"]["ml_source_policy"],source);
+                assert_eq!(stored["items"][0]["details"]["matcher_context"],
+                    details["matcher_context"]);
                 let error=history_details_with_request(json!({"error":"fixture"}),&req,policy);
                 assert_eq!(error["request_context"],details["request_context"]);
                 assert_eq!(error["ml_source_policy"],source);
+                assert_eq!(error["matcher_context"],details["matcher_context"]);
                 assert_eq!(error["error"],"fixture");
             }
         }
@@ -6665,6 +6726,7 @@ mod tests {
         assert_eq!(serde_json::to_value(&cached).unwrap(),pristine);
         assert!(pristine.get("request_context").is_none());
         assert!(pristine.get("ml_source_policy").is_none());
+        assert!(pristine.get("matcher_context").is_none());
         assert_eq!(public_match_response(cached.selected),public_match_response(diagnostic.selected));
         std::fs::remove_dir_all(folder).unwrap();
     }
@@ -6846,6 +6908,109 @@ mod tests {
         assert_eq!(movies[0].imdb_id,"tt1");
         assert_eq!(shows.len(),1);
         assert_eq!(shows[0].imdb_id,"tt2");
+    }
+    #[test]
+    fn unmarked_crosswalk_promotion_respects_the_top_complete_title_and_exact_anime_aliases(){
+        let candidate=|id:&str,title:&str|Candidate{
+            imdb_id:id.into(),title:title.into(),year:2020,media_type:"tvSeries".into(),
+            matched_title:title.into(),anime_ids:Default::default(),source:"imdb".into(),
+        };
+        let top=candidate("tt4644488","Dragon Ball Super");
+        let weaker=candidate("tt0088509","Dragon Ball");
+        let exact=candidate("tt9000800","Dragon Ball Super");
+        let translated=candidate("tt9000801","A Different Canonical Name");
+        let mut anime=std::collections::BTreeSet::new();
+        assert!(!unmarked_crosswalk_identity_eligible(Some(&top),&weaker,"Dragon Ball Super",&anime));
+        assert!(unmarked_crosswalk_identity_eligible(Some(&top),&exact,"Dragon Ball Super",&anime),
+            "equally complete identities retain their established episode ranking");
+        anime.insert(translated.imdb_id.clone());
+        assert!(unmarked_crosswalk_identity_eligible(Some(&top),&translated,"Dragon Ball Super",&anime),
+            "a complete AniDB alias may name a translated canonical IMDb title or part");
+        let recovered=candidate("tt9000802","Monster The Ed Gein Story");
+        let shorter=candidate("tt9000803","Monster");
+        assert!(unmarked_crosswalk_identity_eligible(Some(&recovered),&shorter,"Monster",&anime),
+            "a lower exact short alias must not establish a new anchor over the stronger top release fit");
+        assert!(!complete_candidate_alias(&candidate("tt9000804","BLEACH 千年血戦篇"),"BLEACH 中"),
+            "equal ASCII keys do not prove equal Unicode titles");
+        assert!(!complete_candidate_alias(&candidate("tt9000805","FooBar"),"Foo Bar"),
+            "compact keys do not erase original word boundaries");
+    }
+    #[test]
+    fn dated_identity_veto_requires_known_future_year_and_no_independent_airdate(){
+        let selected=|year|json!({"category":"series","year":year});
+        assert!(unresolved_date_predates_identity(&selected(2025),"2019-02-15",None));
+        assert!(unresolved_date_predates_identity(&selected(2025),"2024-12-31",None),
+            "a hypothetical timezone adjustment is not proof without an episode airdate");
+        for year in [0,2015,2019]{
+            assert!(!unresolved_date_predates_identity(&selected(year),"2019-02-15",None));
+        }
+        assert!(!unresolved_date_predates_identity(&selected(2025),"2019-02-15",Some(2025)));
+        let special=json!({"category":"series","year":2025,"season":0,"episode":1,
+            "air_date":"2024-12-31"});
+        assert!(!unresolved_date_predates_identity(&special,"2024-12-31",None),
+            "an independently resolved pre-premiere special remains valid");
+        let timezone=json!({"category":"series","year":2025,"air_date":"2025-01-01"});
+        assert!(!unresolved_date_predates_identity(&timezone,"2024-12-31",None));
+        assert!(!unresolved_date_predates_identity(&selected(2025),"invalid",None));
+    }
+    #[test]
+    fn unmarked_dragon_ball_super_keeps_its_exact_identity_without_guessed_season_coordinates(){
+        // Real AnimeAPI/AnimeLists links: Super11210 has only an absolute
+        // default; original231 has positive-season maps. Independent public
+        // season metadata uses Super maxima14/13/19/30/55, so absolute104
+        // has no verified season conversion in this imported crosswalk.
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-exact-anime-identity-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,title_type TEXT,language TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,
+                tvdb_season INTEGER,start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO titles VALUES
+                ('tt4644488','Dragon Ball Super','dragonballsuper',2015,'series','',1,0,'tvSeries'),
+                ('tt0088509','Dragon Ball','dragonball',1986,'series','',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt4644488',5),('tt0088509',6);
+            INSERT INTO season_episodes VALUES
+                ('tt4644488',1,14,14),('tt4644488',2,13,13),('tt4644488',3,19,19),
+                ('tt4644488',4,30,30),('tt4644488',5,55,55),('tt0088509',5,31,31);
+            INSERT INTO anidb_titles VALUES
+                ('11210','Dragon Ball Super','dragonballsuper','main','en'),
+                ('231','Dragon Ball','dragonball','main','en');
+            INSERT INTO anime_series_map VALUES
+                ('tt4644488','11210','295068',1),('tt0088509','231','76666',1);
+            INSERT INTO episode_map VALUES
+                ('11210','295068',1,-1,1,0,0,''),('231','76666',1,-1,1,0,0,''),
+                ('231','76666',1,2,14,28,-13,''),('231','76666',1,3,29,68,-28,''),
+                ('231','76666',1,4,69,101,-68,''),('231','76666',1,5,102,132,-101,''),
+                ('231','76666',1,6,133,153,-132,'');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        for episode in [80,104,116]{
+            for raw in [format!("Dragon Ball Super - {episode} WEB-DL"),
+                format!("Dragon Ball Super Episode {episode} WEB-DL")]{
+                let result=diagnose(&path,&MatchRequest{title:raw.clone(),year:None,series:None}).unwrap();
+                assert_eq!(public_match_response(result.selected),json!({
+                    "sid_start":"tt4644488","sid_end":"tt4644488",
+                    "asid_start":null,"asid_end":null
+                }),"the exact sequel must not become original Dragon Ball: {raw}");
+            }
+        }
+        let original=diagnose(&path,&MatchRequest{
+            title:"Dragon Ball - 104 WEB-DL".into(),year:None,series:None}).unwrap();
+        assert_eq!(public_match_response(original.selected),json!({
+            "sid_start":"tt0088509:5:3","sid_end":"tt0088509:5:3",
+            "asid_start":"231:104","asid_end":"231:104"
+        }));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
     }
     #[test]
     fn anime_episode_candidate_does_not_give_a_movie_its_tvdb_siblings_episodes(){
