@@ -3292,7 +3292,7 @@ pub fn collection_year_span(component:&str)->Option<(i32,i32)>{
 // the matcher must confirm the combined name against a unique exact AniDB
 // alias and an actual crosswalk entry before promoting these coordinates.
 static ANIME_ORDINAL_VIDEO_LEAF_RE:Lazy<regex::Regex>=Lazy::new(||regex::Regex::new(
-    r"(?i)^0*([1-9][0-9]{0,3})(?:[ ._]+\\[(?:480|576|720|1080|2160)p(?:[ .][^]\\r\\n]{1,48})?\\])?\\.(?:mkv|mp4|avi|m4v|webm)$"
+    r"(?i)^0*([1-9][0-9]{0,3})(?:[ ._]+\[(?:480|576|720|1080|2160)p(?:[ .][^\]\r\n]{1,48})?\])?\.(?:mkv|mp4|avi|m4v|webm)$"
 ).expect("valid anime ordinal video leaf"));
 
 fn anime_path_part_episode_candidate(layers:&[Value])->Option<Value>{
@@ -3309,7 +3309,7 @@ fn anime_path_part_episode_candidate(layers:&[Value])->Option<Value>{
         ||base.chars().filter(|c|c.is_alphabetic()).count()<4
         ||part.chars().filter(|c|c.is_alphabetic()).count()<3
         ||part.to_ascii_lowercase().starts_with("season ")
-        ||part.contains(['/', '\\\\'])
+        ||part.contains(['/', '\\'])
     {
         return None;
     }
