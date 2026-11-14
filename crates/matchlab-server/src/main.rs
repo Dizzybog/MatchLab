@@ -5374,6 +5374,16 @@ mod tests {
             assert_eq!(response["sid_start"],format!("tt0300001:{season}:1"),"{raw}");
             assert_eq!(response["sid_end"],format!("tt0300001:{season}:12"),"{raw}");
         }
+        // If the named part is real but a requested local season has no
+        // mapped sibling, do NOT reinterpret it as global S04 just because
+        // the IMDb work has S04. Preserve the identity, no fake SID/ASID.
+        let unresolved=find("Sword Art Online - Alicization S4E02 [1080p].mkv");
+        assert_eq!(unresolved.parsed["anime_local_part_unresolved"]["base_season"],
+            3,"{:?}",unresolved.parsed);
+        let unresolved=unresolved.selected.expect("retain exact anime identity");
+        assert_eq!(unresolved["imdb_id"],"tt0300001");
+        assert!(unresolved["season"].is_null(),"{unresolved}");
+        assert!(unresolved["episode"].is_null(),"{unresolved}");
         // The word "Alicization" is not blindly inherited for non-anime.
         let ordinary=find("Anime Library/Ordinary.Show.S01E01.mkv");
         let ordinary=ordinary.selected.unwrap();
