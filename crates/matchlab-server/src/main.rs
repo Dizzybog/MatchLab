@@ -960,6 +960,39 @@ fn diagnose_with_policy(
     let mut parsed_value=parse_cached(&req.title)?;
     let db=open_db(db_path).map_err(|e|e.to_string())?;
 
+    // An unadorned named anime part may end with a spaced hyphen:
+    // "Sword Art Online - Alicization". The general release parser can
+    // mistake the final word for a torrent release group and truncate the
+    // title to "Sword Art Online". Recover it ONLY when the raw input is
+    // exactly the two parsed components, a unique AniDB alias confirms
+    // the joined name, and its crosswalk proves an IMDb season. Ordinary
+    // release groups (e.g. -GROUP) keep their original parser semantics.
+    if req.series!=Some(false)
+        && parsed_value.get("seasons").and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+        && parsed_value.get("episodes").and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+        && parsed_value.get("episode_start").is_none()
+        && parsed_value.get("year").is_none()
+        && let (Some(base),Some(group))=(
+            parsed_value.get("title").and_then(Value::as_str),
+            parsed_value.get("group").and_then(Value::as_str))
+    {
+        let joined=format!("{base} - {group}");
+        if req.title.trim().eq_ignore_ascii_case(&joined)
+            && let Some(imdb)=exact_anime_identity(&db,&joined)?
+            && anime_title::season_from_title(&db,&imdb,&joined)
+                .map_err(|e|e.to_string())?.is_some()
+            && let Some(parsed)=parsed_value.as_object_mut()
+        {
+            parsed.insert("title".into(),json!(joined));
+            parsed.remove("group");
+            parsed.insert("anime_title_verified".into(),json!(true));
+            parsed.insert("anime_part_title_recovered".into(),
+                json!("verified_misclassified_release_group"));
+        }
+    }
+
     // An unmarked range (Title 01-07, (01-25), 01~12) is not authoritative.
     // The parser exposes a tentative title and endpoints, without changing
     // regular release parsing. Use it only when Tantivy finds an exact,
@@ -5270,7 +5303,7 @@ mod tests {
             INSERT INTO seasons VALUES('tt0300001',4);
             INSERT INTO seasons VALUES('tt0300002',3);
             INSERT INTO season_episodes VALUES('tt0300001',1,12,12);
-            INSERT INTO season_episodes VALUES('tt0300001',3,12,12);
+            INSERT INTO season_episodes VALUES('tt0300001',3,25,25);
             INSERT INTO season_episodes VALUES('tt0300001',4,12,12);
             INSERT INTO season_episodes VALUES('tt0300002',1,12,12);
             INSERT INTO anime_series_map VALUES('tt0300001','100','456',0);
@@ -5326,6 +5359,29 @@ mod tests {
                 "tt0300001:3:2","{raw}");
         }
 
+        // No season or episode token: the exact AniDB part title alone
+        // identifies IMDb S03. The public season pack must use the *IMDb*
+        // episode upper bound (25, with a recap in this fixture), not the
+        // shorter AniDB range (only episodes 1..12 have crosswalk evidence).
+        for raw in [
+            "Sword Art Online Alicization",
+            "Sword Art Online - Alicization",
+            "[HorribleSubs] Sword Art Online - Alicization [1080p]",
+        ] {
+            let d=find(raw);
+            let winner=d.selected.expect("title-only named anime part");
+            assert_eq!(winner["imdb_id"],"tt0300001","{raw}: {winner}");
+            assert_eq!(winner["season"],3,"{raw}: {winner}");
+            assert_eq!(winner["episode"],1,"{raw}: {winner}");
+            assert_eq!(winner["episode_end"],25,"{raw}: {winner}");
+            let public=public_match_response(Some(winner));
+            assert_eq!(public, json!({
+                "sid_start":"tt0300001:3:1",
+                "sid_end":"tt0300001:3:25",
+                "asid_start":null,"asid_end":null
+            }),"{raw}");
+        }
+
         // Distinct local-vs-global S numbering is handled by the exact
         // AniDB part crosswalk, never by arithmetic alone.
         for (raw,season,asid) in [
@@ -5355,7 +5411,7 @@ mod tests {
             assert_eq!(winner["season_end"],season,"{raw}: {winner}");
             let public=public_match_response(Some(winner));
             assert_eq!(public["sid_start"],format!("tt0300001:{season}:1"),"{raw}");
-            assert_eq!(public["sid_end"],format!("tt0300001:{season}:12"),"{raw}");
+            assert_eq!(public["sid_end"],format!("tt0300001:{season}:{}",if season==3{25}else{12}),"{raw}");
         }
 
         for (raw,season) in [
