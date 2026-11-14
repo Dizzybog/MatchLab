@@ -695,6 +695,24 @@ struct ImdbIdentityGate<'a>{
     verified_anime_range:Option<&'a str>,
     verified_absolute_episode:Option<&'a str>,
 }
+// The AniDB episode resolver can promote an IMDb identity independently of
+// imdb_matcher::search_validated. It must obey the SAME strict production-year
+// rule, not just the ranked IMDb shortlist. The narrow primary-key lookup is
+// necessary ONLY when a requested year exists and the resolver produced a
+// separate anime identity; yearless and non-strict requests incur no SQL.
+fn strict_anime_imdb_year_eligible(
+    db:&Connection,anime:&Value,year:Option<i32>,strict:bool,
+)->bool{
+    if !strict {return true;}
+    let Some(year)=year else{return true;};
+    let Some(imdb)=anime.get("imdb_id").and_then(Value::as_str)else{
+        return false;
+    };
+    db.query_row("SELECT EXISTS(SELECT 1 FROM titles WHERE imdb_id=?1 AND year=?2)",
+        rusqlite::params![imdb,year],|row|row.get::<_,bool>(0))
+        .unwrap_or(false)
+}
+
 fn filter_request_imdb_candidates(
     db:&Connection,hits:Vec<imdb_matcher::Match>,gate:ImdbIdentityGate<'_>,
 )->Vec<imdb_matcher::Match>{
@@ -1358,6 +1376,11 @@ fn diagnose_with_policy(
                 && imdb_matcher::clean_title(&c.matched_title)==key && c.imdb_id!=anime_id
         })
     });
+    // The separate AniDB-priority branch below does not pass through
+    // filter_request_imdb_candidates: validate its IMDb production year
+    // before it can publish an SID in strict mode.
+    let anime=anime.filter(|a|strict_anime_imdb_year_eligible(
+        &db,a,year,strict_match_mode()));
     let mut selected = if let Some(a) = &anime {
         let imdb_id = a["imdb_id"].as_str().unwrap_or_default();
         let season = a["season"].as_i64();
@@ -4860,6 +4883,28 @@ mod tests {
             false,false,|hits|filter_request_imdb_candidates(&db,hits,gate))
             .unwrap().is_none(),
             "without a production year, shared-title remakes must remain ambiguous");
+    }
+
+    #[test]
+    fn strict_year_also_filters_direct_anime_priority_identities(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            INSERT INTO titles VALUES
+                ('tt1111111','Anime 2005','anime2005',2005,'series','',1,0,'tvSeries'),
+                ('tt2222222','Anime 2021','anime2021',2021,'series','',1,0,'tvSeries'),
+                ('tt3333333','Unknown year anime','unknownyearanime',0,'series','',1,0,'tvSeries');")
+            .unwrap();
+        let old=json!({"imdb_id":"tt1111111","season":1,"episode":4});
+        let recent=json!({"imdb_id":"tt2222222","season":1,"episode":4});
+        let unknown=json!({"imdb_id":"tt3333333","season":1,"episode":4});
+        assert!(strict_anime_imdb_year_eligible(&db,&recent,Some(2021),true));
+        assert!(!strict_anime_imdb_year_eligible(&db,&old,Some(2021),true));
+        assert!(!strict_anime_imdb_year_eligible(&db,&unknown,Some(2021),true));
+        assert!(!strict_anime_imdb_year_eligible(&db,&json!({"imdb_id":"tt0000000"}),Some(2021),true));
+        assert!(!strict_anime_imdb_year_eligible(&db,&json!({}),Some(2021),true));
+        assert!(strict_anime_imdb_year_eligible(&db,&old,None,true));
+        assert!(strict_anime_imdb_year_eligible(&db,&old,Some(2021),false));
     }
 
     #[test]
