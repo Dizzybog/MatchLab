@@ -191,10 +191,18 @@ fn alerts(title: &str, status: &str, details: &Value) -> Vec<Value> {
     let season = selected["season"].as_i64();
     let episode = selected["episode"].as_i64();
     let is_series = selected["category"] == "series";
-    if is_series && (season.is_some_and(|v| v <= 0) || episode.is_some_and(|v| v <= 0)) {
+    // Use the public SID contract, including season-zero specials and any
+    // explicitly selected zero episode. Missing values are not invalid IDs.
+    let invalid_season=["season","season_end"].into_iter()
+        .filter_map(|field|selected[field].as_i64())
+        .any(|value|!crate::valid_sid_coordinate(value,0));
+    let invalid_episode=["episode","episode_end"].into_iter()
+        .filter_map(|field|selected[field].as_i64())
+        .any(|value|!crate::valid_sid_coordinate(0,value));
+    if is_series && (invalid_season||invalid_episode) {
         findings.push(json!({
             "code":"invalid_selected_coordinate","severity":"high",
-            "message":"Selected series has a nonpositive season or episode"
+            "message":"Selected series has coordinates outside public SID bounds"
         }));
     }
     if is_series && season.is_some_and(|v| v > 60) {
@@ -290,12 +298,24 @@ fn alerts(title: &str, status: &str, details: &Value) -> Vec<Value> {
     findings
 }
 
+fn replay_request(title:&str,details:&Value)->Option<Value>{
+    let context=details.get("request_context")?.as_object()?;
+    let year=context.get("year")?;
+    let series=context.get("series")?;
+    if !year.is_null()&&year.as_i64().and_then(|n|i32::try_from(n).ok()).is_none(){
+        return None;
+    }
+    if !series.is_null()&&!series.is_boolean(){return None;}
+    Some(json!({"title":title,"year":year,"series":series}))
+}
+
 fn diagnostic_row(
     id: i64, created_at: String, title: String, status: String,
     imdb_id: Option<String>, match_source: Option<String>,
     duration_ms: i64, details: Value, include_details: bool,
 ) -> Value {
     let flags = alerts(&title, &status, &details);
+    let request=replay_request(&title,&details);
     let mut item = json!({
         "id":id,"created_at":created_at,"title":title,"status":status,
         "imdb_id":imdb_id,"match_source":match_source,
@@ -303,6 +323,9 @@ fn diagnostic_row(
         "alerts":flags,
         "parsed":details.get("parsed"),"selected":details.get("selected"),
         "reason":details.get("reason"),
+        "source_policy":details.get("ml_source_policy"),
+        "request_context_available":request.is_some(),
+        "replay_request":request,
     });
     if include_details {
         item["details"] = details;
@@ -315,8 +338,11 @@ fn feed(
     include_details: bool,
 ) -> Result<Value, String> {
     let db = open_history(path)?;
-    let (oldest_id, latest_id, retained) = bounds(&db)?;
-    let mut stmt = db.prepare(
+    // Keep bounds and rows coherent within this page while the independent
+    // history writer prunes older statuses. Pages remain a rolling feed.
+    let snapshot=db.unchecked_transaction().map_err(|error|error.to_string())?;
+    let (oldest_id, latest_id, retained) = bounds(&snapshot)?;
+    let mut stmt = snapshot.prepare(
         "SELECT id,created_at,title,status,imdb_id,match_source,duration_ms,details
          FROM requests WHERE id > ?1 ORDER BY id ASC LIMIT ?2"
     ).map_err(|error| error.to_string())?;
@@ -351,7 +377,9 @@ fn feed(
     Ok(json!({
         "items":items,"after_id":after_id,"next_after_id":next_after_id,
         "has_more":has_more,"latest_id":latest_id,"oldest_id":oldest_id,
-        "retained":retained,"retention_limit":1000,
+        "retained":retained,
+        "retention_limit":crate::dashboard_history::MAX_RETAINED_HISTORY,
+        "retention_per_status":crate::dashboard_history::MAX_HISTORY_PER_FILTER,
         "cursor_expired":after_id > 0 &&
             oldest_id.is_some_and(|oldest| oldest > after_id.saturating_add(1)),
         "notice":"Anomaly flags are heuristics, not verified parser defects"
@@ -418,7 +446,9 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> Respon
         let (oldest_id, latest_id, retained) = bounds(&db)?;
         Ok::<_, String>(json!({
             "oldest_id":oldest_id,"latest_id":latest_id,
-            "retained":retained,"retention_limit":1000
+            "retained":retained,
+            "retention_limit":crate::dashboard_history::MAX_RETAINED_HISTORY,
+            "retention_per_status":crate::dashboard_history::MAX_HISTORY_PER_FILTER
         }))
     }).await;
     match result {
@@ -593,5 +623,67 @@ mod tests {
         let found=alerts("Show season pack","matched",&details);
         assert!(found.iter().any(|a|a["code"]=="unusual_season_number"));
         assert!(found.iter().any(|a|a["code"]=="reversed_selected_range"));
+    }
+
+    #[test]
+    fn canonical_sid_bounds_include_season_zero_and_explicit_zero_episodes(){
+        for episode in [Value::Null,json!(0),json!(1)]{
+            let details=json!({"parsed":{"title":"Example Series",
+                "seasons":[0],"special_episode":true},
+                "selected":{"category":"series","season":0,"episode":episode}});
+            assert!(!alerts("Example.Series.Behind.The.Scenes","matched",&details)
+                .iter().any(|a|a["code"]=="invalid_selected_coordinate"));
+        }
+        for (season,episode) in [(-1,1),(0,-1),(10_000,1),(1,100_000)]{
+            let details=json!({"selected":{"category":"series",
+                "season":season,"episode":episode}});
+            assert!(alerts("Example Series","matched",&details).iter()
+                .any(|a|a["code"]=="invalid_selected_coordinate"));
+        }
+        let invalid_end=json!({"selected":{"category":"series","season":1,
+            "episode":1,"season_end":10_000,"episode_end":2}});
+        assert!(alerts("Example Series","matched",&invalid_end).iter()
+            .any(|a|a["code"]=="invalid_selected_coordinate"));
+    }
+
+    #[test]
+    fn source_policy_and_retention_contract_are_visible_without_private_details(){
+        let item=diagnostic_row(1,"time".into(),"Example Series".into(),
+            "matched".into(),None,None,1,
+            json!({"ml_source_policy":"dashboard_diagnostic"}),false);
+        assert_eq!(item["source_policy"],"dashboard_diagnostic");
+        assert!(item.get("details").is_none());
+        let path=history_db();
+        let page=feed(&path,0,1,false,false).unwrap();
+        assert_eq!(page["retention_limit"],crate::dashboard_history::MAX_RETAINED_HISTORY);
+        assert_eq!(page["retention_limit"],1500);
+        assert_eq!(page["retention_per_status"],500);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn replay_requests_preserve_explicit_overrides_and_unknown_legacy_context(){
+        for (year,series) in [(json!(2024),json!(true)),(Value::Null,Value::Null)]{
+            let details=json!({"request_context":{"year":year,"series":series}});
+            let request=replay_request("Example.Movie.2020.1080p",&details).unwrap();
+            assert_eq!(request["title"],"Example.Movie.2020.1080p");
+            assert_eq!(request["year"],year);
+            assert_eq!(request["series"],series);
+            let row=diagnostic_row(1,"time".into(),"Example".into(),
+                "matched".into(),None,None,1,details,false);
+            assert_eq!(row["request_context_available"],true);
+            assert_eq!(row["replay_request"]["year"],year);
+            assert!(row.get("details").is_none());
+        }
+        for details in [json!({}),json!({"request_context":{"year":null}}),
+            json!({"request_context":{"year":"2024","series":true}}),
+            json!({"request_context":{"year":null,"series":"true"}}),
+            json!({"request_context":{"year":2_147_483_648_i64,"series":null}})]{
+            assert!(replay_request("Example",&details).is_none());
+            let row=diagnostic_row(1,"time".into(),"Example".into(),
+                "matched".into(),None,None,1,details,false);
+            assert_eq!(row["request_context_available"],false);
+            assert!(row["replay_request"].is_null());
+        }
     }
 }

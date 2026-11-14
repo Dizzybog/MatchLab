@@ -150,7 +150,7 @@ pub(crate) fn semantic_words(raw:&str)->Vec<String>{
     use unicode_normalization::{UnicodeNormalization,char::is_combining_mark};
     let folded=raw.to_lowercase()
         .replace('æ',"ae").replace('ø',"o").replace('œ',"oe")
-        .replace('ß',"ss").replace(['\'','’'], "");
+        .replace('ß',"ss").replace(['\'','’','`'], "");
     let folded=folded.nfkd().filter(|c|!is_combining_mark(*c))
         .collect::<String>();
     folded.split(|c:char|!c.is_alphanumeric())
@@ -1030,38 +1030,71 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     output.sort_by(|a,b|a.0.cmp(&b.0));
     Ok((output.into_iter().take(limit).map(|(_,m)|m).collect(),exact_only))
 }
+/// A uniquely named AniDB part can use coordinates local to that part.
+/// Prove the complete interval within the already identified IMDb family
+/// before preferring it to a different work's ordinary/global bounds.
+pub(crate) fn verified_named_part_remap(
+    db:&Connection,imdb:&str,title:&str,season:i64,start:i64,end:i64,
+)->rusqlite::Result<bool>{
+    if !(1..=9_999).contains(&season)||start<=0||end<start
+        ||end>99_999||end-start>=1_000{return Ok(false);}
+    let aliases=crate::tantivy_search::anime_aliases_exact(db,title)
+        .map_err(index_error)?;
+    if aliases.is_empty()||aliases.iter().any(|alias|alias.imdb_id!=imdb)
+        ||aliases.iter().map(|alias|alias.anidb_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>().len()!=1
+        ||!crate::anime_title::has_specific_alias(db,imdb,title)?{
+        return Ok(false);
+    }
+    let mapped=crate::anime_title::resolve_range(db,imdb,title,season,start,end)?;
+    Ok(mapped.len()==(end-start+1) as usize
+        &&mapped.iter().all(Option::is_some)
+        &&mapped.iter().enumerate().any(|(index,episode)|
+            episode.as_ref().is_some_and(|episode|
+                episode.season!=season||episode.episode!=start+index as i64)))
+}
+
 /// A matching English IMDb alias can belong to an older OVA with too few
 /// episodes, while the modern TV series is linked only by AniDB's English
 /// alias (e.g. JoJo 1993 versus JoJo 2012 S02E37).
 ///
-/// Keep normal title ranking untouched when an already-ranked candidate has
-/// independently confirmed episode coverage. Only on an episode-evidence
-/// miss consult Tantivy's *exact* anime aliases and promote a UNIQUE
-/// verified series identity. No SQLite title scan, no guessed offsets, and
-/// no additional index query on ordinary successful matches.
+/// Prefer a verified named-part remap, then positive IMDb episode coverage,
+/// then the established crosswalk fallback. Preserve order within each tier.
+/// Only an episode-evidence miss can introduce a uniquely verified identity
+/// from exact AniDB aliases. Named-part checks run only for competing
+/// candidates; title discovery never scans SQLite or guesses offsets.
 pub fn prefer_verified_episode_identity(
     db:&Connection,mut candidates:Vec<Match>,title:&str,season:i64,episode:i64,
 )->rusqlite::Result<Vec<Match>>{
     if !(1..=9_999).contains(&season)||!(1..=99_999).contains(&episode){
         return Ok(candidates);
     }
-    let proven=|id:&str|->rusqlite::Result<bool>{
+    let competing=candidates.len()>1;
+    let evidence=|id:&str|->rusqlite::Result<u8>{
+        if competing && verified_named_part_remap(db,id,title,season,episode,episode)?{
+            return Ok(3);
+        }
         let max:Option<i64>=db.query_row(
             "SELECT max_episode FROM season_episodes WHERE imdb_id=?1 AND season=?2",
             params![id,season],|r|r.get(0)).optional()?;
-        if max.is_some_and(|max|max>=episode){return Ok(true);}
-        Ok(crate::episode_crosswalk::resolve_season(
-            db,id,season,episode)?.is_some())
+        if max.is_some_and(|max|(episode..=99_999).contains(&max)){return Ok(2);}
+        // A direct AniDB default can be open-ended. It is weaker identity
+        // evidence than an independently confirmed IMDb episode in another
+        // same-name series; keep it as a fallback when bounds are unknown.
+        Ok(u8::from(crate::episode_crosswalk::resolve_season(
+            db,id,season,episode)?.is_some()))
     };
-    // A canonical IMDb episode is stronger than an unrelated exact title.
+    // A verified named-part remap precedes ordinary/global IMDb bounds;
+    // those bounds in turn precede an open-ended alternate crosswalk.
     // Preserve relative ranking among equally supported candidates.
     let mut support=Vec::with_capacity(candidates.len());
-    for candidate in &candidates{support.push(proven(&candidate.imdb_id)?);}
-    if support.iter().any(|supported|*supported){
+    for candidate in &candidates{support.push(evidence(&candidate.imdb_id)?);}
+    let strongest=support.iter().copied().max().unwrap_or(0);
+    if strongest>0{
         let mut confirmed=Vec::new();
         let mut unconfirmed=Vec::new();
         for (candidate,supported) in candidates.into_iter().zip(support) {
-            if supported {confirmed.push(candidate)}else{unconfirmed.push(candidate)}
+            if supported==strongest {confirmed.push(candidate)}else{unconfirmed.push(candidate)}
         }
         confirmed.extend(unconfirmed);
         return Ok(confirmed);
@@ -1081,7 +1114,7 @@ pub fn prefer_verified_episode_identity(
     // with identical aliases solely because of a database iteration order.
     let mut verified=Vec::new();
     for id in exact_anime_ids {
-        if candidates.iter().any(|c|c.imdb_id==id) || !proven(&id)?{continue;}
+        if candidates.iter().any(|c|c.imdb_id==id) || evidence(&id)?==0{continue;}
         verified.push(id);
     }
     if verified.len()!=1{return Ok(candidates);}
@@ -1122,6 +1155,38 @@ pub fn prefer_verified_episode_identity(
 }
 #[cfg(test)]
 mod tests{
+
+    #[test]
+    fn strict_complete_aliases_equate_and_with_ampersand_without_omitting_words(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('tt3007572','Locke & Key','lockekey',2020,'series','US',1,0,'tvSeries'),
+                ('tt3457530','Fat Tony & Co','fattonyco',2014,'series','US',1,0,'tvMiniSeries'),
+                ('tt0000001','Locke Key','lockekey',2020,'series','US',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt3007572',3),('tt3457530',1),('tt0000001',3);
+            INSERT INTO imdb_ratings VALUES('tt3007572',1),('tt0000001',1000000);")
+            .unwrap();
+        for (title,season,expected) in [
+            ("Locke and Key",3,"tt3007572"),
+            ("Locke & Key",3,"tt3007572"),
+            ("Fat Tony and Co",1,"tt3457530"),
+            ("Fat Tony & Co",1,"tt3457530"),
+            ("Locke Key",3,"tt0000001"),
+        ]{
+            let raw=format!("{title}.S{season:02}E01.1080p.WEB-DL-GROUP");
+            let found=search_inner_mode(&db,title,None,true,season,&raw,
+                true,20,false,true).unwrap().0;
+            assert_eq!(found.len(),1,"{title}: {found:?}");
+            assert_eq!(found[0].imdb_id,expected,
+                "the connective is equivalent, but cannot be silently omitted");
+        }
+    }
 
     #[test]
     fn strict_matches_equivalent_unicode_apostrophes_and_decomposed_accents(){

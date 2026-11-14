@@ -2,6 +2,10 @@
 
 Review date: 2026-11-14. Baseline: [`db411d123f2a5d94da93ef52016f2a7c7972a1e6`](https://github.com/Dizzybog/MatchLab/tree/db411d123f2a5d94da93ef52016f2a7c7972a1e6).
 
+Follow-up: [measured startup and live API accuracy audit](STARTUP_AND_ACCURACY.md)
+includes exhaustive executed-title inventory, source-label comparisons against
+the deployed service, real upstream alias spellings, and additional fixes.
+
 ## Assessment and method
 
 MatchLab has substantial domain-specific protection: strict exact-title and year checks, independent IMDb/AniDB evidence, verified episode crosswalks, generation-scoped caches, staged metadata replacement, and conservative regex promotion. The most significant confirmed defect was an ambiguity check that could publish an AniDB identity when duplicate mapping rows concealed another equally strong identity. Other confirmed problems affected Unicode input, parser paths, cache provenance, metadata transport, and community-input isolation.

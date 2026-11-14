@@ -17,6 +17,59 @@ fn has(tokens:&[String],choices:&[&str])->Option<String>{
 fn pair(tokens:&[String],first:&str,second:&str)->bool{
     tokens.windows(2).any(|p|p[0]==first&&p[1]==second)
 }
+fn parsed_date(parsed:&Value)->Option<chrono::NaiveDate>{
+    parsed["date"].as_str().and_then(|value|
+        chrono::NaiveDate::parse_from_str(value,"%Y-%m-%d").ok())
+}
+fn represented_date_start(tokens:&[String],parsed:&Value)->Option<usize>{
+    let date=parsed_date(parsed)?;
+    let year=chrono::Datelike::year(&date);
+    let month=chrono::Datelike::month(&date);
+    let day=chrono::Datelike::day(&date);
+    let number=|value:&str|->Option<u32>{
+        (!value.is_empty()&&value.len()<=2&&value.bytes().all(|b|b.is_ascii_digit()))
+            .then(||value.parse().ok()).flatten()
+    };
+    let matches_year=|value:&str|value.len()==4&&value.parse::<i32>().ok()==Some(year);
+    let matches_month=|value:&str|{
+        number(value)==Some(month)||match value{
+            "jan"|"january"=>month==1,"feb"|"february"=>month==2,
+            "mar"|"march"=>month==3,"apr"|"april"=>month==4,
+            "may"=>month==5,"jun"|"june"=>month==6,
+            "jul"|"july"=>month==7,"aug"|"august"=>month==8,
+            "sep"|"sept"|"september"=>month==9,"oct"|"october"=>month==10,
+            "nov"|"november"=>month==11,"dec"|"december"=>month==12,_=>false,
+        }
+    };
+    tokens.windows(3).position(|parts|
+        matches_year(&parts[0])&&matches_month(&parts[1])&&number(&parts[2])==Some(day)
+        ||matches_year(&parts[2])&&(
+            number(&parts[0])==Some(day)&&matches_month(&parts[1])
+            ||matches_month(&parts[0])&&number(&parts[1])==Some(day)))
+}
+// Production years, calendar dates and collection intervals are distinct
+// parser fields. Their already-described year tokens are release boundaries,
+// not omitted title words or independent evidence of a missing movie year.
+fn represented_years(tokens:&[String],parsed:&Value)->Vec<String>{
+    let mut years=Vec::new();
+    if let Some(year)=parsed["year"].as_i64().filter(|n|(1900..=2100).contains(n)){
+        years.push(year.to_string());
+    }
+    if let Some(date)=parsed_date(parsed){
+        years.push(chrono::Datelike::year(&date).to_string());
+    }
+    if let Some(range)=parsed["collection_year_range"].as_array()
+        &&range.len()==2
+        &&let (Some(start),Some(end))=(range[0].as_i64(),range[1].as_i64())
+        &&(1900..=2100).contains(&start)&&start<=end&&end<=2100
+    {
+        let (start,end)=(start.to_string(),end.to_string());
+        // A range inherited from a parent must not hide a separate child
+        // year. Require its two endpoints together in this basename.
+        if pair(tokens,&start,&end){years.extend([start,end]);}
+    }
+    years
+}
 fn present(parsed:&Value,field:&str)->bool{
     match &parsed[field]{
         Value::Null=>false,
@@ -162,6 +215,8 @@ fn extraction_review(raw:&str,parsed:&Value)->Vec<Value>{
     let name=leaf(raw);
     let release=tokens(name);
     let mut issues=Vec::new();
+    let years=represented_years(&release,parsed);
+    let date_start=represented_date_start(&release,parsed);
     let structural=|token:&str|{
         let b=token.as_bytes();
         let explicit_sxe=b.first()==Some(&b's')
@@ -173,18 +228,23 @@ fn extraction_review(raw:&str,parsed:&Value)->Vec<Value>{
             &&l.bytes().all(|c|c.is_ascii_digit())
             &&r.bytes().all(|c|c.is_ascii_digit()));
         explicit_sxe||numeric_pair||supported_pixel_height(token)
+            ||years.iter().any(|year|year==token)
             ||matches!(token,"x264"|"x265"|"h264"|"h265"|"hevc"|
                 "webdl"|"webrip"|"bluray"|"bdrip"|"hdrip"|"hdtv")
     };
-    if let Some(split)=release.iter().position(|t|structural(t))
+    if let Some(split)=release.iter().enumerate()
+        .position(|(index,t)|structural(t)||date_start==Some(index))
         &&split>0
         &&let Some(parsed_title)=parsed["title"].as_str()
         &&!parsed_title.is_empty()
     {
         let extracted=tokens(parsed_title);
         let expected_prefix=&release[..split];
-        let aligned=extracted.iter().zip(expected_prefix)
+        let aligned=!extracted.is_empty()&&extracted.iter().zip(expected_prefix)
             .all(|(a,b)|a==b);
+        let omitted=expected_prefix.get(extracted.len()..).unwrap_or_default();
+        let known_hd_tag=parsed["quality"]=="HDTV"&&omitted.len()==2
+            &&omitted[0]=="hd"&&supported_pixel_height(&format!("{}p",omitted[1]));
         if aligned && extracted.len()>expected_prefix.len()
             &&extracted.iter().any(|t|structural(t)){
             issues.push(json!({
@@ -193,7 +253,7 @@ fn extraction_review(raw:&str,parsed:&Value)->Vec<Value>{
                 "severity":"review",
                 "message":"Parsed title may contain release metadata beyond its title boundary"
             }));
-        } else if aligned && extracted.len()+1<expected_prefix.len() {
+        } else if aligned && extracted.len()+1<expected_prefix.len()&&!known_hd_tag {
             issues.push(json!({
                 "code":"field_underextracted_title","field":"title",
                 "confidence":"review","signal":"unparsed_title_prefix",
@@ -301,13 +361,19 @@ fn explicit_marker_disagreements(raw:&str,parsed:&Value)->Vec<Value>{
     if let Some(marker)=unique(quality)
         &&let Some(value)=parsed["quality"].as_str()
         &&!value.is_empty()
-        &&value.chars().filter(char::is_ascii_alphanumeric)
-            .collect::<String>().to_ascii_lowercase()!=marker
     {
-        out.push(json!({"code":"field_mismatch_quality",
-            "field":"quality","confidence":"review",
-            "signal":"explicit_quality_disagrees","severity":"review",
-            "message":"Parsed release quality differs from a single explicit marker"}));
+        let normalized=value.chars().filter(char::is_ascii_alphanumeric)
+            .collect::<String>().to_ascii_lowercase();
+        let supported_compound=(marker=="bluray"&&normalized=="blurayremux"
+                &&t.iter().any(|word|word=="remux"))
+            ||(marker=="webdl"&&normalized=="webdlrip"
+                &&t.iter().any(|word|word=="rip"));
+        if normalized!=marker&&!supported_compound{
+            out.push(json!({"code":"field_mismatch_quality",
+                "field":"quality","confidence":"review",
+                "signal":"explicit_quality_disagrees","severity":"review",
+                "message":"Parsed release quality differs from a single explicit marker"}));
+        }
     }
     out
 }
@@ -418,7 +484,11 @@ pub fn audit(raw:&str,parsed:&Value,selected:&Value)->Vec<Value>{
 
     // Title: no reliable token alone proves a *correct* title, but a wholly
     // missing parsed title in a plausible release warrants review.
+    let banner=name.trim();
+    let banner=banner.strip_prefix('[').and_then(|inner|inner.strip_suffix(']'))
+        .unwrap_or(banner).trim();
     if !present(parsed,"title")
+        &&!parsed["site"].as_str().is_some_and(|site|banner.eq_ignore_ascii_case(site))
         && t.iter().any(|s|s.len()>=4&&s.bytes().any(|b|b.is_ascii_alphabetic())){
         missing(&mut out,parsed,"title","nonempty_release_name","review");
     }
@@ -479,8 +549,10 @@ pub fn audit(raw:&str,parsed:&Value,selected:&Value)->Vec<Value>{
     // and never use this as an automatic correction.
     if !present(parsed,"year") && (present(parsed,"resolution")||
         present(parsed,"codec")||quality.is_some()){
+        let described=represented_years(&t,parsed);
         if let Some(year)=t.iter().find(|s|s.len()==4&&s.bytes().all(|b|b.is_ascii_digit())
-            &&s.parse::<i32>().is_ok_and(|v|(1900..=2035).contains(&v))){
+            &&s.parse::<i32>().is_ok_and(|v|(1900..=2035).contains(&v))
+            &&!described.contains(s)){
             missing(&mut out,parsed,"year",year,"review");
         }
     }
@@ -628,6 +700,110 @@ mod tests{
                 "codec":"mpeg"}),Value::Null);
         assert!(!ambiguous.iter().any(|v|v=="field_mismatch_resolution"
             ||v=="field_mismatch_codec"));
+    }
+    #[test]
+    fn parsed_years_are_release_boundaries_not_missing_title_words(){
+        for (raw,parsed) in [
+            ("Example.Movie.2024.10bit.English.1080p",json!({
+                "title":"Example Movie","year":2024,"resolution":"1080p"})),
+            ("Example.Movie.2023.Jan.17.720p",json!({
+                "title":"Example Movie","date":"2023-01-17","resolution":"720p"})),
+            ("Example.Movie.Collection.2006-2009.1080p",json!({
+                "title":"Example Movie Collection","collection_year_range":[2006,2009],
+                "resolution":"1080p"})),
+        ]{
+            let flags=codes(raw,parsed,Value::Null);
+            assert!(!flags.iter().any(|code|matches!(code.as_str(),
+                "field_underextracted_title"|"field_missing_year")),"{flags:?}");
+        }
+        let incomplete=codes("Example.Long.Movie.Title.2024.1080p",
+            json!({"title":"Example","year":2024,"resolution":"1080p"}),Value::Null);
+        assert!(incomplete.contains(&"field_underextracted_title".into()));
+    }
+    #[test]
+    fn date_and_collection_hints_do_not_hide_an_independent_missing_year(){
+        for (raw,parsed) in [
+            ("Example.Movie.2020.2023.Jan.17.720p",json!({
+                "title":"Example Movie","date":"2023-01-17","resolution":"720p"})),
+            ("Example.Movie.2006.1080p",json!({
+                "title":"Example Movie","collection_year_range":[2006,2009],
+                "resolution":"1080p"})),
+            ("Example.Movie.2023.720p",json!({
+                "title":"Example Movie","date":"2023-02-30","resolution":"720p"})),
+        ]{
+            assert!(codes(raw,parsed,Value::Null).contains(&"field_missing_year".into()));
+        }
+    }
+    #[test]
+    fn non_latin_titles_without_ascii_words_do_not_prove_underextraction(){
+        for (raw,title) in [
+            ("[Example.org]示例影片.2024.1080p","示例影片"),
+            ("Publisher.SITE.Пример.2024.720p","Пример"),
+        ]{
+            let flags=codes(raw,json!({"title":title,"year":2024}),Value::Null);
+            assert!(!flags.contains(&"field_underextracted_title".into()),"{flags:?}");
+        }
+    }
+    #[test]
+    fn complete_matching_calendar_dates_start_at_the_first_component(){
+        let parsed=json!({"title":"Example Movie","date":"2024-07-11"});
+        for raw in ["Example.Movie.2024.07.11","Example.Movie.11.07.2024",
+            "Example.Movie.07.11.2024","Example.Movie.11.July.2024",
+            "Example.Movie.Jul.11.2024"]{
+            assert_eq!(represented_date_start(&tokens(raw),&parsed),Some(2));
+            let flags=codes(raw,parsed.clone(),Value::Null);
+            assert!(!flags.contains(&"field_underextracted_title".into()),"{flags:?}");
+        }
+        for raw in ["Example.Movie.12.July.2024","Example.Movie.11.June.2024",
+            "Example.Movie.July.11.2023","Example.Movie.11.Arbitrary.2024"]{
+            assert_eq!(represented_date_start(&tokens(raw),&parsed),None);
+        }
+        let invalid=json!({"date":"2024-02-30"});
+        assert_eq!(represented_date_start(&tokens("Example.Movie.30.02.2024"),&invalid),None);
+        let truncated=codes("Example.Long.Movie.Title.11.July.2024",
+            json!({"title":"Example","date":"2024-07-11"}),Value::Null);
+        assert!(truncated.contains(&"field_underextracted_title".into()));
+    }
+    #[test]
+    fn confirmed_hd_height_before_a_date_is_metadata_but_missing_title_words_are_not(){
+        let parsed=json!({"title":"Example Movie","date":"2024-07-11","quality":"HDTV"});
+        let flags=codes("Example.Movie.HD.720.11.July.2024",parsed.clone(),Value::Null);
+        assert!(!flags.contains(&"field_underextracted_title".into()));
+        for raw in ["Example.Movie.HD.9999.11.July.2024",
+            "Example.Movie.Missing.Words.HD.720.11.July.2024"]{
+            assert!(codes(raw,parsed.clone(),Value::Null)
+                .contains(&"field_underextracted_title".into()));
+        }
+    }
+    #[test]
+    fn complete_quality_modifiers_are_compared_with_their_source_marker(){
+        for (raw,quality) in [
+            ("Example.Movie.2024.1080p.BluRay.REMUX.mkv","BluRay REMUX"),
+            ("Example.Movie.2024.WebDl.Rip.2160p.mkv","WEB-DLRip"),
+            ("Example.Movie.2024.WEB.DL.Rip.2160p.mkv","WEB-DLRip"),
+        ]{
+            let flags=codes(raw,json!({"title":"Example Movie","year":2024,
+                "quality":quality}),Value::Null);
+            assert!(!flags.contains(&"field_mismatch_quality".into()),"{flags:?}");
+        }
+        for (raw,quality) in [
+            ("Example.Movie.1080p.WEB-DL.mkv","WEB-DLRip"),
+            ("Example.Movie.1080p.BluRay.mkv","BluRay REMUX"),
+            ("Example.Movie.1080p.HDTV.ts","TeleSync"),
+        ]{
+            let flags=codes(raw,json!({"title":"Example Movie","quality":quality}),Value::Null);
+            assert!(flags.contains(&"field_mismatch_quality".into()));
+        }
+    }
+    #[test]
+    fn a_site_only_banner_does_not_prove_a_missing_movie_title(){
+        for raw in ["Example.org","[Example.org]"]{
+            let site_only=codes(raw,json!({"site":"Example.org"}),Value::Null);
+            assert!(!site_only.contains(&"field_missing_title".into()));
+        }
+        let release=codes("Example.Movie.2024.1080p.mkv",
+            json!({"site":"Example.org"}),Value::Null);
+        assert!(release.contains(&"field_missing_title".into()));
     }
     #[test]
     fn detects_swapped_season_episode_without_writing_parser_output(){

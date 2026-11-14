@@ -10,8 +10,9 @@ use std::{
     time::Duration,
 };
 
-const MAX_HISTORY_PER_FILTER: i64 = 500;
+pub(crate) const MAX_HISTORY_PER_FILTER: i64 = 500;
 const REQUEST_STATUSES:[&str;3]=["matched","unmatched","error"];
+pub(crate) const MAX_RETAINED_HISTORY:i64=MAX_HISTORY_PER_FILTER*REQUEST_STATUSES.len() as i64;
 const PRUNE_BATCH: i64 = 1_000;
 const HISTORY_BATCH_SIZE:usize = 64;
 // Dedicated SQLite ML job spool (independent of the 500-row-per-filter

@@ -52,7 +52,7 @@ Match a release name:
 ```bash
 curl -X POST http://127.0.0.1:8765/match \
   -H 'Content-Type: application/json' \
-  -d '{"title":"Supernatural.S01E01-E22.1080p"}'
+  -d '{"title":"Supernatural.2005.S01E01-E22.1080p"}'
 ```
 
 Example response:
@@ -67,6 +67,10 @@ Example response:
 ```
 
 A **SID** is an IMDb title ID, optionally followed by season and episode. An **ASID** identifies an AniDB anime episode; it is returned only when the mapping can be verified. Unmatched values are `null`.
+
+The year in this example identifies the 2005 series. `Supernatural` also names
+an anime series; without a production year, exact anime-title priority can
+select that other identity. Include the year when known to disambiguate titles.
 
 | Endpoint | Purpose |
 | --- | --- |

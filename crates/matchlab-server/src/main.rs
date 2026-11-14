@@ -1711,25 +1711,54 @@ fn diagnose_with_policy(
         if series && verified_absolute_episode_imdb.is_none()
             && full_release_imdb.is_none() {
             if let Some(ep)=episodes.first().copied(){
-                for (index,candidate) in imdb.iter().enumerate(){
-                    let mapped=match seasons.first().copied(){
-                        Some(season)=>{
-                            let titled=anime_title::resolve(
-                                &db,&candidate.imdb_id,anime_resolve_title,season,ep)
-                                .map_err(|e|e.to_string())?;
-                            if titled.is_some(){titled}
-                            else if anime_title::has_specific_alias(
-                                &db,&candidate.imdb_id,anime_resolve_title)
-                                .map_err(|e|e.to_string())?{None}
-                            else{episode_crosswalk::resolve_season(
-                                &db,&candidate.imdb_id,season,ep)
-                                .map_err(|e|e.to_string())?}
-                        },
-                        None=>episode_crosswalk::resolve_absolute(
-                            &db,&candidate.imdb_id,ep)
-                            .map_err(|e|e.to_string())?,
-                    };
-                    if mapped.is_some(){chosen_index=index;break;}
+                // Preserve positive IMDb evidence for the entire explicit
+                // request before switching to a different identity solely
+                // because it has an AniDB crosswalk. Open-ended defaults
+                // can otherwise make an old same-name OVA claim S02E37.
+                // This chooses only the identity: its named-part resolver
+                // still interprets local/global coordinates below.
+                let requested_end=episodes.iter().copied().max().unwrap_or(ep)
+                    .max(parsed.get("episode_end").and_then(Value::as_i64)
+                        .unwrap_or(ep));
+                let mut canonical=None;
+                // An explicit or inherited production year already ranks
+                // same-name identities; episode coverage must not replace it.
+                if year.is_none() && imdb.len()>1 && seasons.len()==1 && ep>0
+                    && valid_sid_coordinate(seasons[0],requested_end){
+                    for (index,candidate) in imdb.iter().enumerate(){
+                        if imdb_matcher::verified_named_part_remap(
+                            &db,&candidate.imdb_id,anime_resolve_title,
+                            seasons[0],ep,requested_end).map_err(|e|e.to_string())?{
+                            canonical=Some(index);
+                            break;
+                        }
+                        if season_episode_end(&db,&candidate.imdb_id,seasons[0])?
+                            .is_some_and(|max|max>=requested_end)&&canonical.is_none(){
+                            canonical=Some(index);
+                        }
+                    }
+                }
+                if let Some(index)=canonical {chosen_index=index;}else{
+                    for (index,candidate) in imdb.iter().enumerate(){
+                        let mapped=match seasons.first().copied(){
+                            Some(season)=>{
+                                let titled=anime_title::resolve(
+                                    &db,&candidate.imdb_id,anime_resolve_title,season,ep)
+                                    .map_err(|e|e.to_string())?;
+                                if titled.is_some(){titled}
+                                else if anime_title::has_specific_alias(
+                                    &db,&candidate.imdb_id,anime_resolve_title)
+                                    .map_err(|e|e.to_string())?{None}
+                                else{episode_crosswalk::resolve_season(
+                                    &db,&candidate.imdb_id,season,ep)
+                                    .map_err(|e|e.to_string())?}
+                            },
+                            None=>episode_crosswalk::resolve_absolute(
+                                &db,&candidate.imdb_id,ep)
+                                .map_err(|e|e.to_string())?,
+                        };
+                        if mapped.is_some(){chosen_index=index;break;}
+                    }
                 }
             }
         }
@@ -2322,6 +2351,22 @@ fn match_generations(db_path:&PathBuf)->(Option<String>,Option<String>){
     (namespace,fingerprint)
 }
 
+fn history_details_with_request(mut details:Value,req:&MatchRequest,policy:MatchPolicy)->Value{
+    if let Some(record)=details.as_object_mut(){
+        // Both keys must be present: explicit null means the new event had
+        // no override; an absent object on legacy history means unknown.
+        record.insert("request_context".into(),json!({
+            "year":req.year,"series":req.series
+        }));
+        // Policy is replay provenance even when learning is disabled.
+        // Retain the existing key used by the independent ML evidence queue.
+        record.insert("ml_source_policy".into(),json!(
+            if matches!(policy,MatchPolicy::PublicApi){"public_api"}
+            else{"dashboard_diagnostic"}));
+    }
+    details
+}
+
 fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result<Diagnostic,String>{
     let start=Instant::now();
     // Dashboard-only exploratory diagnostics deliberately bypass matching
@@ -2371,26 +2416,21 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result
         Ok(d)=>{
             // One serialization for the optional ML cache and bounded
             // history queue; ownership is transferred to the writer.
-            let mut details=serde_json::to_value(d).unwrap_or(Value::Null);
+            let details=serde_json::to_value(d).unwrap_or(Value::Null);
             if cacheable && let Some(ref ns)=generation {
                 learning_cache::put_match(
                     &req.title,req.year,req.series,ns,&details);
             }
-            // Keep policy metadata in durable history only, never in the
-            // cached/public Diagnostic. Exploratory dashboard selections are
-            // not valid supervisory labels for the title learner.
-            if local_learning::active(){
-                if let Some(record)=details.as_object_mut(){
-                    record.insert("ml_source_policy".into(),json!(
-                        if public_policy{"public_api"}else{"dashboard_diagnostic"}));
-                }
-            }
+            // Request provenance belongs to history, after the cache has
+            // copied the pristine Diagnostic. It never changes API output.
+            let details=history_details_with_request(details,req,policy);
             let status=if d.selected.is_some(){"matched"}else{"unmatched"};
             dashboard_history::record_async(
                 &state.history,&req.title,status,d.selected.as_ref(),details,elapsed);
         },
         Err(error)=>dashboard_history::record_async(
-            &state.history,&req.title,"error",None,json!({"error":error}),elapsed),
+            &state.history,&req.title,"error",None,
+            history_details_with_request(json!({"error":error}),req,policy),elapsed),
     }
     result
 }
@@ -4223,6 +4263,104 @@ mod tests {
     }
 
     #[test]
+    fn verified_imdb_episode_bounds_precede_other_identity_open_crosswalk(){
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-jojo-open-crosswalk-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(
+                imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,
+                category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE imdb_ratings(imdb_id TEXT,num_votes INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            INSERT INTO titles VALUES
+                ('tt2359704','JoJo''s Bizarre Adventure','jojosbizarreadventure',
+                    2012,'series','US',1,0,'tvSeries'),
+                ('tt0248119','JoJo''s Bizarre Adventure','jojosbizarreadventure',
+                    1993,'series','US',1,0,'tvMiniSeries');
+            INSERT INTO seasons VALUES('tt2359704',5),('tt0248119',2);
+            INSERT INTO season_episodes VALUES
+                ('tt2359704',2,48,48),('tt0248119',2,6,6);
+            -- Reverse the ordinary ranking so the evidence promotion itself
+            -- is exercised, independently of the later crosswalk scan.
+            INSERT INTO imdb_ratings VALUES('tt2359704',10),('tt0248119',1000000);
+            INSERT INTO anime_series_map VALUES
+                ('tt2359704','9304','262954',0),('tt0248119','789','83950',0);
+            INSERT INTO anime_ids VALUES
+                ('tt2359704','anidb','9304'),('tt0248119','anidb','789');
+            INSERT INTO anidb_titles VALUES
+                ('9304','JoJo''s Bizarre Adventure','jojosbizarreadventure','main','en'),
+                ('789','JoJo''s Bizarre Adventure','jojosbizarreadventure','main','en');
+            -- The TV work has no S02 crosswalk in this sparse snapshot.
+            -- An open OVA default is not evidence against its known S02.
+            INSERT INTO episode_map VALUES
+                ('9304','262954',1,1,1,26,0,''),
+                ('789','83950',1,2,0,0,0,'');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        let raw="JoJos Bizarre Adventure S02E37 DUBBED XviD-AFG";
+        let initial=imdb_matcher::search(&db,"JoJos Bizarre Adventure",None,true,2,
+            raw,true,20).unwrap();
+        assert_eq!(initial[0].imdb_id,"tt0248119");
+        let preferred=imdb_matcher::prefer_verified_episode_identity(
+            &db,initial,"JoJos Bizarre Adventure",2,37).unwrap();
+        assert_eq!(preferred[0].imdb_id,"tt2359704",
+            "positive IMDb coverage outranks an open-ended alternate");
+        for (release,end) in [(raw,37),
+            ("JoJos Bizarre Adventure S02E37-E48 DUBBED XviD-AFG",48)]{
+            let result=diagnose_with_policy(&path,&MatchRequest{
+                title:release.into(),year:None,series:None},MatchPolicy::PublicApi)
+                .unwrap();
+            let winner=result.selected.expect("verified TV episode");
+            assert_eq!(winner["imdb_id"],"tt2359704");
+            assert_eq!(public_match_response(Some(winner)),json!({
+                "sid_start":"tt2359704:2:37",
+                "sid_end":format!("tt2359704:2:{end}"),
+                "asid_start":null,"asid_end":null
+            }),"{release}");
+        }
+        // The preservation rule needs the COMPLETE requested range. An
+        // earlier endpoint alone must not count as verified pack coverage.
+        db.execute("UPDATE season_episodes SET max_episode=40
+            WHERE imdb_id='tt2359704'",[]).unwrap();
+        db.execute("DELETE FROM season_episodes WHERE imdb_id='tt0248119'",[])
+            .unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        let partial=diagnose_with_policy(&path,&MatchRequest{
+            title:"JoJos Bizarre Adventure S02E37-E48 DUBBED XviD-AFG".into(),
+            year:None,series:None},MatchPolicy::PublicApi).unwrap();
+        assert_ne!(partial.selected.unwrap()["imdb_id"],"tt2359704",
+            "max 40 cannot prove the complete E37-E48 request");
+        // Outlier episode numbers cannot establish positive IMDb evidence.
+        db.execute("UPDATE season_episodes SET max_episode=100000
+            WHERE imdb_id='tt2359704'",[]).unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        let outlier=diagnose_with_policy(&path,&MatchRequest{
+            title:raw.into(),year:None,series:None},MatchPolicy::PublicApi).unwrap();
+        assert_eq!(outlier.selected.unwrap()["imdb_id"],"tt0248119");
+        // Missing bounds remain uncertain and preserve the established
+        // crosswalk fallback; no negative metadata rule is introduced.
+        db.execute("DELETE FROM season_episodes",[]).unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        let unknown=diagnose_with_policy(&path,&MatchRequest{
+            title:raw.into(),year:None,series:None},MatchPolicy::PublicApi).unwrap();
+        assert_eq!(unknown.selected.unwrap()["imdb_id"],"tt0248119");
+        drop(db);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
     fn stone_ocean_named_part_uses_canonical_jojo_imdb_season_five(){
         let stamp=std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
@@ -4253,26 +4391,40 @@ mod tests {
             INSERT INTO season_episodes VALUES ('tt2359704',1,26,26),
                 ('tt2359704',5,38,38);
             INSERT INTO anime_series_map VALUES
-                ('tt2359704','16187','262954',0),
+                ('tt2359704','9304','262954',1),
+                ('tt2359704','16187','262954',6),
                 ('tt2359704','17286','262954',0),
                 ('tt2359704','17664','262954',0);
-            INSERT INTO anime_ids VALUES('tt2359704','anidb','16187');
+            INSERT INTO anime_ids VALUES('tt2359704','anidb','9304');
             INSERT INTO anidb_titles VALUES
-                ('16187','JoJo''s Bizarre Adventure Stone Ocean',
-                 'jojosbizarreadventurestoneocean','main','en'),
-                ('17286','JoJo''s Bizarre Adventure Stone Ocean Part 2',
-                 'jojosbizarreadventurestoneoceanpart2','main','en'),
-                ('17664','JoJo''s Bizarre Adventure Stone Ocean Part 3',
-                 'jojosbizarreadventurestoneoceanpart3','main','en');
+                ('16187','JoJo`s Bizarre Adventure: Stone Ocean',
+                 'jojosbizarreadventurestoneocean','official','en'),
+                ('17286','JoJo`s Bizarre Adventure: Stone Ocean (Part 2)',
+                 'jojosbizarreadventurestoneoceanpart2','official','en'),
+                ('17664','JoJo`s Bizarre Adventure: Stone Ocean (Part 3)',
+                 'jojosbizarreadventurestoneoceanpart3','official','en');
             -- Anime-Lists maps Stone Ocean's three AniDB cours into the
             -- same TVDB/IMDb season five, offset by 0, 12, and 24.
             -- Unbounded defaults are season evidence, not independent
             -- proof that AniDB work 16187 owns episode 27.
             INSERT INTO episode_map VALUES
+                ('9304','262954',1,1,0,0,0,''),
                 ('16187','262954',1,5,1,0,0,''),
                 ('17286','262954',1,5,1,0,12,''),
                 ('17664','262954',1,5,1,0,24,'');").unwrap();
         tantivy_search::warmup(&db).unwrap();
+        // Official AniDB English aliases use a backtick, not an ASCII
+        // apostrophe. The compact index key already agrees; verify strict
+        // query-time words too, without rebuilding or changing the schema.
+        for possessive in ["JoJo's","JoJo’s","JoJos","JoJo`s"]{
+            let title=format!("{possessive} Bizarre Adventure Stone Ocean");
+            assert_eq!(tantivy_search::anidb_ids_exact_title(&db,&title).unwrap(),
+                std::collections::BTreeSet::from(["16187".to_owned()]));
+            assert_eq!(tantivy_search::anime_aliases_exact(&db,&title).unwrap()
+                .into_iter().map(|alias|alias.anidb_id)
+                .collect::<std::collections::BTreeSet<_>>(),
+                std::collections::BTreeSet::from(["16187".to_owned()]));
+        }
         assert_eq!(anidb_matcher::named_part_season(
             &db,"JoJo's Bizarre Adventure Stone Ocean").unwrap(),
             Some(anidb_matcher::NamedPart{anidb_id:"16187".into(),season:5}));
@@ -4339,12 +4491,72 @@ mod tests {
         assert_eq!(public_match_response(Some(winner)),json!({
             "sid_start":"tt2359704:5:27","sid_end":"tt2359704:5:27",
             "asid_start":"17664:3","asid_end":"17664:3"}));
+        for possessive in ["JoJo’s","JoJos","JoJo`s"]{
+            for (suffix,start,end,asid_start,asid_end) in [
+                ("S01E27.mkv",27,27,"17664:3","17664:3"),
+                ("P2E03",15,15,"17286:3","17286:3"),
+                ("P2 (01-12) [Batch]",13,24,"17286:1","17286:12"),
+                ("Part 3 S01E03",27,27,"17664:3","17664:3"),
+            ]{
+                let raw=format!("{possessive} Bizarre Adventure Stone Ocean {suffix}");
+                let result=diagnose(&path,&MatchRequest{
+                    title:raw.clone(),year:None,series:None}).unwrap();
+                let winner=result.selected.expect("official backtick part alias");
+                assert_eq!(public_match_response(Some(winner)),json!({
+                    "sid_start":format!("tt2359704:5:{start}"),
+                    "sid_end":format!("tt2359704:5:{end}"),
+                    "asid_start":asid_start,"asid_end":asid_end
+                }),"{raw}");
+            }
+        }
         let title_only=diagnose(&path,&MatchRequest{
             title:"JoJo's Bizarre Adventure Stone Ocean".into(),
             year:None,series:None}).unwrap();
         let winner=title_only.selected.expect("named part title");
         assert_eq!(winner["imdb_id"],"tt2359704","{winner}");
         assert_eq!(winner["season"],5,"{winner}");
+        // A same-name work can have enough GLOBAL S01 episodes while
+        // Stone Ocean's S01 is LOCAL to its verified IMDb season five.
+        // Introduce that independent collision only after the basic source
+        // alias regressions above, then exercise both identity rank stages.
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("INSERT INTO titles VALUES
+                ('tt2359704','JoJo''s Bizarre Adventure: Stone Ocean',
+                 'jojosbizarreadventurestoneocean',2012,'series','US',0,1,'tvSeries'),
+                ('tt9990002','JoJo''s Bizarre Adventure: Stone Ocean',
+                 'jojosbizarreadventurestoneocean',2022,'series','US',1,0,'tvMiniSeries');
+            INSERT INTO seasons VALUES('tt9990002',1);
+            INSERT INTO season_episodes VALUES('tt9990002',1,38,38);
+            INSERT INTO imdb_ratings VALUES('tt2359704',10),('tt9990002',1000000);")
+            .unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        let title="JoJo's Bizarre Adventure Stone Ocean";
+        let raw="JoJo's Bizarre Adventure Stone Ocean S01E27.mkv";
+        assert!(imdb_matcher::verified_named_part_remap(&db,
+            "tt2359704",title,1,27,27).unwrap());
+        assert!(!imdb_matcher::verified_named_part_remap(&db,
+            "tt9990002",title,1,27,27).unwrap(),
+            "the exact AniDB part belongs to another IMDb identity");
+        for (start,end) in [(0,27),(27,26),(1,1_001),(27,i64::MAX)]{
+            assert!(!imdb_matcher::verified_named_part_remap(&db,
+                "tt2359704",title,1,start,end).unwrap());
+        }
+        let initial=imdb_matcher::search(&db,title,None,true,1,raw,true,20).unwrap();
+        let preferred=imdb_matcher::prefer_verified_episode_identity(
+            &db,initial,title,1,27).unwrap();
+        assert_eq!(preferred[0].imdb_id,"tt2359704",
+            "verified local S01 -> global S05 outranks a competing global S01 bound");
+        for (raw,end) in [(raw,27),
+            ("JoJo's Bizarre Adventure Stone Ocean S01E27-E30.mkv",30)]{
+            let result=diagnose(&path,&MatchRequest{
+                title:raw.into(),year:None,series:None}).unwrap();
+            assert_eq!(public_match_response(result.selected),json!({
+                "sid_start":"tt2359704:5:27",
+                "sid_end":format!("tt2359704:5:{end}"),
+                "asid_start":"17664:3","asid_end":format!("17664:{}",end-24)
+            }),"verified local part must beat a competing global bound: {raw}");
+        }
+        drop(db);
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
     }
@@ -6222,6 +6434,51 @@ mod tests {
             serde_json::to_value(&sample).unwrap()).unwrap();
         assert_eq!(restored.selected,sample.selected);
         assert_eq!(restored.imdb_candidates[0].source,"imdb");
+    }
+    #[test]
+    fn history_retains_request_context_without_polluting_cached_diagnostics(){
+        let sample=Diagnostic{
+            parsed:json!({"title":"Example","seasons":[1],"episodes":[7]}),
+            normalized_title:"example".into(),imdb_candidates:vec![],
+            anime_candidate:None,anidb_candidate:None,selected:None,
+            reason:"Unmatched fixture".into(),
+        };
+        let cache=query_cache::QueryCache::new(1,Duration::from_secs(30));
+        let diagnostic=cache.get_or_compute("fixture".into(),||Ok(sample),|_|true).unwrap();
+        let pristine=serde_json::to_value(&diagnostic).unwrap();
+        let folder=std::env::temp_dir().join(format!("matchlab-history-context-{}-{}",
+            std::process::id(),std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let path=folder.join("history.sqlite3");
+        dashboard_history::initialize(&path).unwrap();
+        // Provenance is independent of ML enablement: both request policies
+        // are always recorded by the same history decoration path.
+        for (policy,source) in [(MatchPolicy::PublicApi,"public_api"),
+            (MatchPolicy::DashboardDiagnostic,"dashboard_diagnostic")]{
+            for (year,series) in [(Some(2005),Some(false)),(None,None),(None,Some(true))]{
+                let req=MatchRequest{title:"Example.S01E07".into(),year,series};
+                let details=history_details_with_request(pristine.clone(),&req,policy);
+                assert_eq!(details["request_context"],json!({"year":year,"series":series}));
+                assert_eq!(details["ml_source_policy"],source);
+                assert!(!details["request_context"].as_object().unwrap().contains_key("title"));
+                dashboard_history::record(&path,&req.title,"unmatched",None,&details,1);
+                let stored=dashboard_history::history(&path,1,0,None).unwrap();
+                assert_eq!(stored["items"][0]["details"]["request_context"],
+                    details["request_context"],"persist explicit nulls and false overrides");
+                assert_eq!(stored["items"][0]["details"]["ml_source_policy"],source);
+                let error=history_details_with_request(json!({"error":"fixture"}),&req,policy);
+                assert_eq!(error["request_context"],details["request_context"]);
+                assert_eq!(error["ml_source_policy"],source);
+                assert_eq!(error["error"],"fixture");
+            }
+        }
+        let cached=cache.get_or_compute("fixture".into(),
+            ||panic!("history decoration must not invalidate the diagnostic"),|_|true).unwrap();
+        assert_eq!(serde_json::to_value(&cached).unwrap(),pristine);
+        assert!(pristine.get("request_context").is_none());
+        assert!(pristine.get("ml_source_policy").is_none());
+        assert_eq!(public_match_response(cached.selected),public_match_response(diagnostic.selected));
+        std::fs::remove_dir_all(folder).unwrap();
     }
     #[test]
     fn changed_regex_generation_invalidates_30_second_parser_memory_cache(){
