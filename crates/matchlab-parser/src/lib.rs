@@ -2583,6 +2583,7 @@ static ANIME_LOCAL_PART_RE:Lazy<Regex>=Lazy::new(||Regex::new(
 
 fn named_anime_local_season_candidate(raw:&str)->Option<Value>{
     for caps in ANIME_LOCAL_PART_RE.captures_iter(raw){
+        let Ok(caps)=caps else{continue};
         let marker=caps.get(0)?;
         let local=caps.name("local")?.as_str().parse::<i64>().ok()?;
         let before=raw.get(..marker.start())?.trim_matches(
