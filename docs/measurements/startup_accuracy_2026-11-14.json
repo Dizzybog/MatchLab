@@ -1,0 +1,2196 @@
+{
+  "schema": "matchlab.startup-accuracy-measurements.v1",
+  "measurement_date": "2026-11-14",
+  "target": {
+    "url": "https://MatchLab.notprod.fyi",
+    "build_sha_observed_before_and_after": "1d3d6687ced39151d036c58f2d40b68a2d1e44eb",
+    "local_learning_enabled": true,
+    "restarted_or_reconfigured": false
+  },
+  "local_baseline": {
+    "source_commit": "9ab237525f53c580c48f9af9fddb9de8603075df",
+    "equivalent_merged_tree": "e14754732f9398b2172b49044f87293815315caf",
+    "rust": "1.100.0",
+    "architecture": "x86_64",
+    "cpu_model": "Intel Xeon Platinum 8573C",
+    "cgroup_cpu_quota_cores": 2,
+    "memory_limit_bytes": 8589934592,
+    "ml_enabled": false,
+    "strict": true,
+    "release_binary_sha256": "9ad58634b6404abd0b6abdfe515c946513c3cba7a2028dd826203f05f63540f6"
+  },
+  "http_campaign": {
+    "parser_requests": 1205,
+    "matcher_requests": 383,
+    "total": 1588,
+    "http_200": 1588,
+    "http_errors": 0,
+    "timeouts": 0,
+    "rate_limited": 0,
+    "parallel_sequential_streams": 2,
+    "per_stream_delay_seconds": 0.15,
+    "latency_note": "Curl process, proxy, TLS, Cloudflare and network round-trip included; not isolated backend service time."
+  },
+  "startup": {
+    "runs": 19,
+    "summary": [
+      {
+        "scenario": "disk_index_restart",
+        "imdb_alias_rows": 100,
+        "runs": 5,
+        "successful_runs": 5,
+        "spawn_to_live": {
+          "n": 5,
+          "min_ms": 12.805952000007892,
+          "median_ms": 14.43745200003832,
+          "p95_ms": 15.971750000062457,
+          "max_ms": 15.971750000062457
+        },
+        "spawn_to_ready": {
+          "n": 5,
+          "min_ms": 13.170508000030168,
+          "median_ms": 14.834907000022213,
+          "p95_ms": 16.689826999936486,
+          "max_ms": 16.689826999936486
+        },
+        "first_parse": {
+          "n": 5,
+          "min_ms": 46.964440000010654,
+          "median_ms": 55.41657999992822,
+          "p95_ms": 114.64156599981834,
+          "max_ms": 114.64156599981834
+        },
+        "first_match": {
+          "n": 5,
+          "min_ms": 2.938253999900553,
+          "median_ms": 3.580647000035242,
+          "p95_ms": 8.532784999943033,
+          "max_ms": 8.532784999943033
+        },
+        "warm_parse_process_medians": {
+          "n": 5,
+          "min_ms": 0.45210149994545645,
+          "median_ms": 0.5963725000128761,
+          "p95_ms": 0.7560484999658001,
+          "max_ms": 0.7560484999658001
+        },
+        "warm_match_process_medians": {
+          "n": 5,
+          "min_ms": 0.8442719999948167,
+          "median_ms": 1.004886500027169,
+          "p95_ms": 1.2074855001174,
+          "max_ms": 1.2074855001174
+        },
+        "peak_rss_kib": {
+          "min": 19460,
+          "median": 19600,
+          "max": 19748
+        }
+      },
+      {
+        "scenario": "disk_index_restart",
+        "imdb_alias_rows": 10000,
+        "runs": 5,
+        "successful_runs": 5,
+        "spawn_to_live": {
+          "n": 5,
+          "min_ms": 12.680026999987604,
+          "median_ms": 13.294493000103103,
+          "p95_ms": 14.05685400004586,
+          "max_ms": 14.05685400004586
+        },
+        "spawn_to_ready": {
+          "n": 5,
+          "min_ms": 12.863285000094038,
+          "median_ms": 14.247317000126714,
+          "p95_ms": 17.12744700012081,
+          "max_ms": 17.12744700012081
+        },
+        "first_parse": {
+          "n": 5,
+          "min_ms": 42.429577000120844,
+          "median_ms": 44.62600200008637,
+          "p95_ms": 47.52797100013595,
+          "max_ms": 47.52797100013595
+        },
+        "first_match": {
+          "n": 5,
+          "min_ms": 3.0033239997919736,
+          "median_ms": 3.970796999965387,
+          "p95_ms": 5.963109000049371,
+          "max_ms": 5.963109000049371
+        },
+        "warm_parse_process_medians": {
+          "n": 5,
+          "min_ms": 0.41743799988580577,
+          "median_ms": 0.5786899999975503,
+          "p95_ms": 0.6972730000143201,
+          "max_ms": 0.6972730000143201
+        },
+        "warm_match_process_medians": {
+          "n": 5,
+          "min_ms": 0.7766819999233121,
+          "median_ms": 1.051834499889992,
+          "p95_ms": 1.6478885000879018,
+          "max_ms": 1.6478885000879018
+        },
+        "peak_rss_kib": {
+          "min": 19784,
+          "median": 19976,
+          "max": 20200
+        }
+      },
+      {
+        "scenario": "disk_index_restart",
+        "imdb_alias_rows": 100000,
+        "runs": 5,
+        "successful_runs": 5,
+        "spawn_to_live": {
+          "n": 5,
+          "min_ms": 12.186213000177304,
+          "median_ms": 13.011238999979469,
+          "p95_ms": 16.4033290000134,
+          "max_ms": 16.4033290000134
+        },
+        "spawn_to_ready": {
+          "n": 5,
+          "min_ms": 12.969681000186029,
+          "median_ms": 13.792678999834607,
+          "p95_ms": 17.95722199994998,
+          "max_ms": 17.95722199994998
+        },
+        "first_parse": {
+          "n": 5,
+          "min_ms": 44.96545300003163,
+          "median_ms": 51.359094999952504,
+          "p95_ms": 73.01468199989358,
+          "max_ms": 73.01468199989358
+        },
+        "first_match": {
+          "n": 5,
+          "min_ms": 3.1865230000676092,
+          "median_ms": 3.8212539998312423,
+          "p95_ms": 8.981243000107497,
+          "max_ms": 8.981243000107497
+        },
+        "warm_parse_process_medians": {
+          "n": 5,
+          "min_ms": 0.4394134999756716,
+          "median_ms": 0.4715575000773242,
+          "p95_ms": 0.671847999910824,
+          "max_ms": 0.671847999910824
+        },
+        "warm_match_process_medians": {
+          "n": 5,
+          "min_ms": 0.7742114999018668,
+          "median_ms": 1.029435000077683,
+          "p95_ms": 1.154220999978861,
+          "max_ms": 1.154220999978861
+        },
+        "peak_rss_kib": {
+          "min": 20272,
+          "median": 20400,
+          "max": 20520
+        }
+      },
+      {
+        "scenario": "missing_metadata",
+        "imdb_alias_rows": 0,
+        "runs": 1,
+        "successful_runs": 1,
+        "spawn_to_live": {
+          "n": 1,
+          "min_ms": 8.043541000006371,
+          "median_ms": 8.043541000006371,
+          "p95_ms": 8.043541000006371,
+          "max_ms": 8.043541000006371
+        },
+        "first_parse": {
+          "n": 1,
+          "min_ms": 75.58368700006213,
+          "median_ms": 75.58368700006213,
+          "p95_ms": 75.58368700006213,
+          "max_ms": 75.58368700006213
+        },
+        "first_match": {
+          "n": 1,
+          "min_ms": 0.7210400001440576,
+          "median_ms": 0.7210400001440576,
+          "p95_ms": 0.7210400001440576,
+          "max_ms": 0.7210400001440576
+        },
+        "warm_parse_process_medians": {
+          "n": 1,
+          "min_ms": 0.5811755000877383,
+          "median_ms": 0.5811755000877383,
+          "p95_ms": 0.5811755000877383,
+          "max_ms": 0.5811755000877383
+        },
+        "peak_rss_kib": {
+          "min": 17684,
+          "median": 17684,
+          "max": 17684
+        }
+      },
+      {
+        "scenario": "no_index",
+        "imdb_alias_rows": 100,
+        "runs": 1,
+        "successful_runs": 1,
+        "spawn_to_live": {
+          "n": 1,
+          "min_ms": 20.031708000033177,
+          "median_ms": 20.031708000033177,
+          "p95_ms": 20.031708000033177,
+          "max_ms": 20.031708000033177
+        },
+        "spawn_to_ready": {
+          "n": 1,
+          "min_ms": 70.29965800006721,
+          "median_ms": 70.29965800006721,
+          "p95_ms": 70.29965800006721,
+          "max_ms": 70.29965800006721
+        },
+        "first_parse": {
+          "n": 1,
+          "min_ms": 71.60015099998418,
+          "median_ms": 71.60015099998418,
+          "p95_ms": 71.60015099998418,
+          "max_ms": 71.60015099998418
+        },
+        "first_match": {
+          "n": 1,
+          "min_ms": 4.361301000017193,
+          "median_ms": 4.361301000017193,
+          "p95_ms": 4.361301000017193,
+          "max_ms": 4.361301000017193
+        },
+        "warm_parse_process_medians": {
+          "n": 1,
+          "min_ms": 0.6103319999510859,
+          "median_ms": 0.6103319999510859,
+          "p95_ms": 0.6103319999510859,
+          "max_ms": 0.6103319999510859
+        },
+        "warm_match_process_medians": {
+          "n": 1,
+          "min_ms": 2.4679220000507485,
+          "median_ms": 2.4679220000507485,
+          "p95_ms": 2.4679220000507485,
+          "max_ms": 2.4679220000507485
+        },
+        "peak_rss_kib": {
+          "min": 26828,
+          "median": 26828,
+          "max": 26828
+        }
+      },
+      {
+        "scenario": "no_index",
+        "imdb_alias_rows": 10000,
+        "runs": 1,
+        "successful_runs": 1,
+        "spawn_to_live": {
+          "n": 1,
+          "min_ms": 13.593218000096385,
+          "median_ms": 13.593218000096385,
+          "p95_ms": 13.593218000096385,
+          "max_ms": 13.593218000096385
+        },
+        "spawn_to_ready": {
+          "n": 1,
+          "min_ms": 120.02489100018465,
+          "median_ms": 120.02489100018465,
+          "p95_ms": 120.02489100018465,
+          "max_ms": 120.02489100018465
+        },
+        "first_parse": {
+          "n": 1,
+          "min_ms": 116.08482099995854,
+          "median_ms": 116.08482099995854,
+          "p95_ms": 116.08482099995854,
+          "max_ms": 116.08482099995854
+        },
+        "first_match": {
+          "n": 1,
+          "min_ms": 2.9560630000560195,
+          "median_ms": 2.9560630000560195,
+          "p95_ms": 2.9560630000560195,
+          "max_ms": 2.9560630000560195
+        },
+        "warm_parse_process_medians": {
+          "n": 1,
+          "min_ms": 0.6133054999963861,
+          "median_ms": 0.6133054999963861,
+          "p95_ms": 0.6133054999963861,
+          "max_ms": 0.6133054999963861
+        },
+        "warm_match_process_medians": {
+          "n": 1,
+          "min_ms": 1.8944634999797927,
+          "median_ms": 1.8944634999797927,
+          "p95_ms": 1.8944634999797927,
+          "max_ms": 1.8944634999797927
+        },
+        "peak_rss_kib": {
+          "min": 38088,
+          "median": 38088,
+          "max": 38088
+        }
+      },
+      {
+        "scenario": "no_index",
+        "imdb_alias_rows": 100000,
+        "runs": 1,
+        "successful_runs": 1,
+        "spawn_to_live": {
+          "n": 1,
+          "min_ms": 3.8243559999955323,
+          "median_ms": 3.8243559999955323,
+          "p95_ms": 3.8243559999955323,
+          "max_ms": 3.8243559999955323
+        },
+        "spawn_to_ready": {
+          "n": 1,
+          "min_ms": 882.411379000132,
+          "median_ms": 882.411379000132,
+          "p95_ms": 882.411379000132,
+          "max_ms": 882.411379000132
+        },
+        "first_parse": {
+          "n": 1,
+          "min_ms": 130.08323799999744,
+          "median_ms": 130.08323799999744,
+          "p95_ms": 130.08323799999744,
+          "max_ms": 130.08323799999744
+        },
+        "first_match": {
+          "n": 1,
+          "min_ms": 3.6563700000442623,
+          "median_ms": 3.6563700000442623,
+          "p95_ms": 3.6563700000442623,
+          "max_ms": 3.6563700000442623
+        },
+        "warm_parse_process_medians": {
+          "n": 1,
+          "min_ms": 1.5876549999802592,
+          "median_ms": 1.5876549999802592,
+          "p95_ms": 1.5876549999802592,
+          "max_ms": 1.5876549999802592
+        },
+        "warm_match_process_medians": {
+          "n": 1,
+          "min_ms": 1.1117100001456492,
+          "median_ms": 1.1117100001456492,
+          "p95_ms": 1.1117100001456492,
+          "max_ms": 1.1117100001456492
+        },
+        "peak_rss_kib": {
+          "min": 68756,
+          "median": 68756,
+          "max": 68756
+        }
+      }
+    ],
+    "limitations": [
+      "Synthetic uniformly distributed movie aliases; zero AniDB/episode rows.",
+      "OS page cache is not dropped; no-index means missing Tantivy index, not cold disk.",
+      "No public network import; missing-metadata sources fail at a loopback refused port.",
+      "Readiness is polled concurrently; discovery precision is limited by poll and request scheduling.",
+      "Peak RSS is Linux VmHWM sampled every 5ms through the request probes.",
+      "Same-title warm requests exercise caches, not distinct-title throughput.",
+      "The first match runs after parser probes, so its parser cache is already warm."
+    ],
+    "match_first": {
+      "runs": 7,
+      "summary": [
+        {
+          "scenario": "disk_index_restart",
+          "imdb_alias_rows": 100000,
+          "runs": 5,
+          "successful_runs": 5,
+          "spawn_to_live": {
+            "n": 5,
+            "min_ms": 12.626713999907224,
+            "median_ms": 13.631063000048016,
+            "p95_ms": 14.429842999561515,
+            "max_ms": 14.429842999561515
+          },
+          "spawn_to_ready": {
+            "n": 5,
+            "min_ms": 13.229889999820443,
+            "median_ms": 15.317870000217226,
+            "p95_ms": 16.571245999784878,
+            "max_ms": 16.571245999784878
+          },
+          "first_parse": {
+            "n": 5,
+            "min_ms": 0.7394710000880877,
+            "median_ms": 0.8669829999234935,
+            "p95_ms": 0.8867399997143366,
+            "max_ms": 0.8867399997143366
+          },
+          "first_match": {
+            "n": 5,
+            "min_ms": 47.07507899956909,
+            "median_ms": 47.584266000285425,
+            "p95_ms": 59.439497999846935,
+            "max_ms": 59.439497999846935
+          },
+          "warm_parse_process_medians": {
+            "n": 5,
+            "min_ms": 0.47811350009396847,
+            "median_ms": 0.5601689999821247,
+            "p95_ms": 0.7706234998750006,
+            "max_ms": 0.7706234998750006
+          },
+          "warm_match_process_medians": {
+            "n": 5,
+            "min_ms": 0.8092994999060465,
+            "median_ms": 0.9985640001559659,
+            "p95_ms": 1.0316369998690789,
+            "max_ms": 1.0316369998690789
+          },
+          "peak_rss_kib": {
+            "min": 20060,
+            "median": 20300,
+            "max": 20364
+          }
+        },
+        {
+          "scenario": "missing_metadata",
+          "imdb_alias_rows": 0,
+          "runs": 1,
+          "successful_runs": 1,
+          "spawn_to_live": {
+            "n": 1,
+            "min_ms": 7.681667999804631,
+            "median_ms": 7.681667999804631,
+            "p95_ms": 7.681667999804631,
+            "max_ms": 7.681667999804631
+          },
+          "first_parse": {
+            "n": 1,
+            "min_ms": 53.01641699998072,
+            "median_ms": 53.01641699998072,
+            "p95_ms": 53.01641699998072,
+            "max_ms": 53.01641699998072
+          },
+          "first_match": {
+            "n": 1,
+            "min_ms": 0.6334820000120089,
+            "median_ms": 0.6334820000120089,
+            "p95_ms": 0.6334820000120089,
+            "max_ms": 0.6334820000120089
+          },
+          "warm_parse_process_medians": {
+            "n": 1,
+            "min_ms": 0.5021035001391283,
+            "median_ms": 0.5021035001391283,
+            "p95_ms": 0.5021035001391283,
+            "max_ms": 0.5021035001391283
+          },
+          "peak_rss_kib": {
+            "min": 17400,
+            "median": 17400,
+            "max": 17400
+          }
+        },
+        {
+          "scenario": "no_index",
+          "imdb_alias_rows": 100000,
+          "runs": 1,
+          "successful_runs": 1,
+          "spawn_to_live": {
+            "n": 1,
+            "min_ms": 16.961985999842,
+            "median_ms": 16.961985999842,
+            "p95_ms": 16.961985999842,
+            "max_ms": 16.961985999842
+          },
+          "spawn_to_ready": {
+            "n": 1,
+            "min_ms": 710.3064769999037,
+            "median_ms": 710.3064769999037,
+            "p95_ms": 710.3064769999037,
+            "max_ms": 710.3064769999037
+          },
+          "first_parse": {
+            "n": 1,
+            "min_ms": 0.8955049997894093,
+            "median_ms": 0.8955049997894093,
+            "p95_ms": 0.8955049997894093,
+            "max_ms": 0.8955049997894093
+          },
+          "first_match": {
+            "n": 1,
+            "min_ms": 47.86731600006533,
+            "median_ms": 47.86731600006533,
+            "p95_ms": 47.86731600006533,
+            "max_ms": 47.86731600006533
+          },
+          "warm_parse_process_medians": {
+            "n": 1,
+            "min_ms": 0.5299055001160013,
+            "median_ms": 0.5299055001160013,
+            "p95_ms": 0.5299055001160013,
+            "max_ms": 0.5299055001160013
+          },
+          "warm_match_process_medians": {
+            "n": 1,
+            "min_ms": 0.9354234998681932,
+            "median_ms": 0.9354234998681932,
+            "p95_ms": 0.9354234998681932,
+            "max_ms": 0.9354234998681932
+          },
+          "peak_rss_kib": {
+            "min": 58828,
+            "median": 58828,
+            "max": 58828
+          }
+        }
+      ],
+      "release_binary_sha256": "22b89319e97b3fe302c07fbd98c2e9cea1b520c141cdfef5197f9631c041c91c",
+      "settings": {
+        "restarts": 5,
+        "samples": 10,
+        "poll_seconds": 0.01,
+        "first_request": "match",
+        "ml_enabled": false,
+        "strict": true,
+        "max_concurrent_matches": 2,
+        "override_marker": "animelists_override_cf23576e1fd0aaef"
+      },
+      "source": "Final follow-up binary; same startup code, matching safety fixes included."
+    },
+    "total_process_runs": 26
+  },
+  "source_title_inventory": {
+    "counts": {
+      "records": 4187,
+      "kind:engine": 2505,
+      "mode:live": 3749,
+      "kind:parse_title": 1618,
+      "mode:replay": 334,
+      "mode:canonical": 104,
+      "kind:parse_many_input": 64
+    },
+    "unique_inputs_including_engine_components": 1759,
+    "unique_public_inputs": 1222,
+    "unique_batch_inputs": 22,
+    "unique_engine_only_inputs": 537,
+    "stable_public_false_translation_parity_cases": 1205,
+    "unstable_public_baseline_inputs": 0,
+    "invalid_trace_lines": []
+  },
+  "parser": {
+    "primary_remote": {
+      "cases": 400,
+      "outcomes": {
+        "matched_expectation": 358,
+        "mismatch": 20,
+        "unlabeled": 22
+      },
+      "roles": {
+        "expectation": 378,
+        "unlabeled": 22
+      },
+      "compared": 378,
+      "matches_expectation": 358,
+      "latency_ms": {
+        "p50": 472.332,
+        "p95": 667.488
+      },
+      "identifier_metrics": {},
+      "metric_scope": "Only explicitly labeled cases with both expected identifier endpoints. Reference, partial and unknown expectations are excluded. Recall includes unavailable labeled positive cases; precision excludes them.",
+      "assertions": {
+        "manual_unscored": 129,
+        "scored": 913,
+        "passed": 869
+      }
+    },
+    "primary_local": {
+      "cases": 400,
+      "outcomes": {
+        "matched_expectation": 378,
+        "unlabeled": 22
+      },
+      "roles": {
+        "expectation": 378,
+        "unlabeled": 22
+      },
+      "compared": 378,
+      "matches_expectation": 378,
+      "latency_ms": {
+        "p50": 1.024,
+        "p95": 2.47
+      },
+      "identifier_metrics": {},
+      "metric_scope": "Only explicitly labeled cases with both expected identifier endpoints. Reference, partial and unknown expectations are excluded. Recall includes unavailable labeled positive cases; precision excludes them.",
+      "assertions": {
+        "manual_unscored": 129,
+        "scored": 913,
+        "passed": 913
+      }
+    },
+    "release_300_remote": {
+      "cases": 311,
+      "matched_cases": 311,
+      "assertions": 722,
+      "passed_assertions": 722,
+      "missing": 0,
+      "transport_failures": 0
+    },
+    "combined": {
+      "inputs": 711,
+      "scored_cases": 689,
+      "unscored_cases": 22,
+      "remote_matching_scored_cases": 669,
+      "local_matching_scored_cases": 689,
+      "scored_assertions": 1635,
+      "remote_passed_assertions": 1591,
+      "local_passed_assertions": 1635
+    },
+    "root_exact_title_assertions": {
+      "remote_passed": 43,
+      "local_passed": 57,
+      "total": 57,
+      "scope": "Biased difficult regression cohort; not population title accuracy."
+    },
+    "extra_version_parity": {
+      "cases": 805,
+      "exact_whole_response_equal": 331,
+      "equal_after_recursively_excluding_new_local_part_hint": 797,
+      "remaining_differences": {
+        "technical_edition": 7,
+        "hierarchy_candidate": 1
+      },
+      "independent_accuracy_evidence": false
+    },
+    "primary_failed_cases": [
+      {
+        "title": "[HorribleSubs] Sword Art Online/Alicization/02 [1080p].mkv",
+        "differences": [
+          {
+            "path": [
+              "anime_episode_candidate",
+              "title"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "Sword Art Online - Alicization",
+            "actual": null,
+            "actual_missing": true
+          },
+          {
+            "path": [
+              "anime_episode_candidate",
+              "episode"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": 2,
+            "actual": null,
+            "actual_missing": true
+          },
+          {
+            "path": [
+              "anime_episode_candidate",
+              "numbering"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "absolute",
+            "actual": null,
+            "actual_missing": true
+          },
+          {
+            "path": [
+              "anime_episode_candidate",
+              "verified"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": false,
+            "actual": null,
+            "actual_missing": true
+          },
+          {
+            "path": [
+              "anime_episode_candidate",
+              "path_part"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": true,
+            "actual": null,
+            "actual_missing": true
+          }
+        ],
+        "sources": [
+          {
+            "file": "crates/matchlab-parser/tests/anime_hierarchy_regressions.rs",
+            "test": "nested_named_anime_part_numeric_leaf_is_unverified_until_metadata_check",
+            "line": 94
+          }
+        ]
+      },
+      {
+        "title": "Sword Art Online - Alicization S2E02 [1080p].mkv",
+        "differences": [
+          {
+            "path": [
+              "anime_local_part_candidate",
+              "title"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "Sword Art Online - Alicization",
+            "actual": null,
+            "actual_missing": true
+          },
+          {
+            "path": [
+              "anime_local_part_candidate",
+              "local"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": 2,
+            "actual": null,
+            "actual_missing": true
+          },
+          {
+            "path": [
+              "anime_local_part_candidate",
+              "episode"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": 2,
+            "actual": null,
+            "actual_missing": true
+          },
+          {
+            "path": [
+              "anime_local_part_candidate",
+              "verified"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": false,
+            "actual": null,
+            "actual_missing": true
+          }
+        ],
+        "sources": [
+          {
+            "file": "crates/matchlab-parser/tests/anime_hierarchy_regressions.rs",
+            "test": "named_part_local_markers_are_candidates_not_parser_guesses",
+            "line": 114
+          }
+        ]
+      },
+      {
+        "title": "Sword Art Online - Alicization S3E02 [1080p].mkv",
+        "differences": [
+          {
+            "path": [
+              "anime_local_part_candidate",
+              "title"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "Sword Art Online - Alicization",
+            "actual": null,
+            "actual_missing": true
+          },
+          {
+            "path": [
+              "anime_local_part_candidate",
+              "local"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": 3,
+            "actual": null,
+            "actual_missing": true
+          },
+          {
+            "path": [
+              "anime_local_part_candidate",
+              "episode"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": 2,
+            "actual": null,
+            "actual_missing": true
+          },
+          {
+            "path": [
+              "anime_local_part_candidate",
+              "verified"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": false,
+            "actual": null,
+            "actual_missing": true
+          }
+        ],
+        "sources": [
+          {
+            "file": "crates/matchlab-parser/tests/anime_hierarchy_regressions.rs",
+            "test": "named_part_local_markers_are_candidates_not_parser_guesses",
+            "line": 114
+          }
+        ]
+      },
+      {
+        "title": "Sword Art Online - Alicization P2 [720p].mkv",
+        "differences": [
+          {
+            "path": [
+              "anime_local_part_candidate",
+              "title"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "Sword Art Online - Alicization",
+            "actual": null,
+            "actual_missing": true
+          },
+          {
+            "path": [
+              "anime_local_part_candidate",
+              "local"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": 2,
+            "actual": null,
+            "actual_missing": true
+          },
+          {
+            "path": [
+              "anime_local_part_candidate",
+              "episode"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": null,
+            "actual": null,
+            "actual_missing": true
+          },
+          {
+            "path": [
+              "anime_local_part_candidate",
+              "verified"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": false,
+            "actual": null,
+            "actual_missing": true
+          }
+        ],
+        "sources": [
+          {
+            "file": "crates/matchlab-parser/tests/anime_hierarchy_regressions.rs",
+            "test": "named_part_local_markers_are_candidates_not_parser_guesses",
+            "line": 114
+          }
+        ]
+      },
+      {
+        "title": "Sword Art Online - Alicization P2E03.mkv",
+        "differences": [
+          {
+            "path": [
+              "anime_local_part_candidate",
+              "title"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "Sword Art Online - Alicization",
+            "actual": null,
+            "actual_missing": true
+          },
+          {
+            "path": [
+              "anime_local_part_candidate",
+              "local"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": 2,
+            "actual": null,
+            "actual_missing": true
+          },
+          {
+            "path": [
+              "anime_local_part_candidate",
+              "episode"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": 3,
+            "actual": null,
+            "actual_missing": true
+          },
+          {
+            "path": [
+              "anime_local_part_candidate",
+              "verified"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": false,
+            "actual": null,
+            "actual_missing": true
+          }
+        ],
+        "sources": [
+          {
+            "file": "crates/matchlab-parser/tests/anime_hierarchy_regressions.rs",
+            "test": "named_part_local_markers_are_candidates_not_parser_guesses",
+            "line": 114
+          }
+        ]
+      },
+      {
+        "title": "[SubsPlease] Sword Art Online - Alicization S2 (01-12) [Batch]",
+        "differences": [
+          {
+            "path": [
+              "anime_local_part_candidate",
+              "title"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "Sword Art Online - Alicization",
+            "actual": null,
+            "actual_missing": true
+          },
+          {
+            "path": [
+              "anime_local_part_candidate",
+              "local"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": 2,
+            "actual": null,
+            "actual_missing": true
+          },
+          {
+            "path": [
+              "anime_local_part_candidate",
+              "episode"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": null,
+            "actual": null,
+            "actual_missing": true
+          },
+          {
+            "path": [
+              "anime_local_part_candidate",
+              "verified"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": false,
+            "actual": null,
+            "actual_missing": true
+          }
+        ],
+        "sources": [
+          {
+            "file": "crates/matchlab-parser/tests/anime_hierarchy_regressions.rs",
+            "test": "named_part_local_markers_are_candidates_not_parser_guesses",
+            "line": 114
+          }
+        ]
+      },
+      {
+        "title": "新闻.2026/11/10.1080p.WEB-DL",
+        "differences": [
+          {
+            "path": [
+              "date"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "2026-11-10",
+            "actual": null,
+            "actual_missing": true
+          },
+          {
+            "path": [
+              "title"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "新闻",
+            "actual": "10",
+            "actual_missing": false
+          },
+          {
+            "path": [
+              "episodes"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": [],
+            "actual": [
+              10
+            ],
+            "actual_missing": false
+          }
+        ],
+        "sources": [
+          {
+            "file": "crates/matchlab-parser/src/lib.rs",
+            "test": "unicode_slash_airdates_remain_one_release_component",
+            "line": 4506
+          }
+        ]
+      },
+      {
+        "title": "Новости.10/11/2026.1080p.WEB-DL",
+        "differences": [
+          {
+            "path": [
+              "date"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "2026-11-10",
+            "actual": null,
+            "actual_missing": true
+          },
+          {
+            "path": [
+              "title"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "Новости",
+            "actual": "2026",
+            "actual_missing": false
+          }
+        ],
+        "sources": [
+          {
+            "file": "crates/matchlab-parser/src/lib.rs",
+            "test": "unicode_slash_airdates_remain_one_release_component",
+            "line": 4506
+          }
+        ]
+      },
+      {
+        "title": "Dagsrevyen/新闻.2026/11/10.1080p.WEB-DL",
+        "differences": [
+          {
+            "path": [
+              "date"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "2026-11-10",
+            "actual": null,
+            "actual_missing": true
+          },
+          {
+            "path": [
+              "title"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "新闻",
+            "actual": "10",
+            "actual_missing": false
+          },
+          {
+            "path": [
+              "episodes"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": [],
+            "actual": [
+              10
+            ],
+            "actual_missing": false
+          }
+        ],
+        "sources": [
+          {
+            "file": "crates/matchlab-parser/src/lib.rs",
+            "test": "unicode_slash_airdates_remain_one_release_component",
+            "line": 4506
+          }
+        ]
+      },
+      {
+        "title": "[broken publisher/Example.Show.S01/S01E02.mkv",
+        "differences": [
+          {
+            "path": [
+              "title"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "Example Show",
+            "actual": "broken publisher/Example.Show",
+            "actual_missing": false
+          }
+        ],
+        "sources": [
+          {
+            "file": "crates/matchlab-parser/src/lib.rs",
+            "test": "malformed_annotations_do_not_swallow_path_separators",
+            "line": 4525
+          }
+        ]
+      },
+      {
+        "title": "【broken publisher/Example.Show.S01/S01E02.mkv",
+        "differences": [
+          {
+            "path": [
+              "title"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "Example Show",
+            "actual": "broken publisher/Example.Show",
+            "actual_missing": false
+          }
+        ],
+        "sources": [
+          {
+            "file": "crates/matchlab-parser/src/lib.rs",
+            "test": "malformed_annotations_do_not_swallow_path_separators",
+            "line": 4525
+          }
+        ]
+      },
+      {
+        "title": "(broken publisher/Example.Show.S01/S01E02.mkv",
+        "differences": [
+          {
+            "path": [
+              "title"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "Example Show",
+            "actual": "broken publisher/Example.Show",
+            "actual_missing": false
+          }
+        ],
+        "sources": [
+          {
+            "file": "crates/matchlab-parser/src/lib.rs",
+            "test": "malformed_annotations_do_not_swallow_path_separators",
+            "line": 4525
+          }
+        ]
+      },
+      {
+        "title": "{broken publisher/Example.Show.S01/S01E02.mkv",
+        "differences": [
+          {
+            "path": [
+              "title"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "Example Show",
+            "actual": "broken publisher/Example.Show",
+            "actual_missing": false
+          }
+        ],
+        "sources": [
+          {
+            "file": "crates/matchlab-parser/src/lib.rs",
+            "test": "malformed_annotations_do_not_swallow_path_separators",
+            "line": 4525
+          }
+        ]
+      },
+      {
+        "title": "V.1984/S01E02.mkv",
+        "differences": [
+          {
+            "path": [
+              "title"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "V",
+            "actual": "mkv",
+            "actual_missing": false
+          }
+        ],
+        "sources": [
+          {
+            "file": "crates/matchlab-parser/src/lib.rs",
+            "test": "one_letter_work_titles_can_be_inherited_from_parent_folders",
+            "line": 4545
+          }
+        ]
+      },
+      {
+        "title": "X.1984/S01E02.mkv",
+        "differences": [
+          {
+            "path": [
+              "title"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "X",
+            "actual": "mkv",
+            "actual_missing": false
+          }
+        ],
+        "sources": [
+          {
+            "file": "crates/matchlab-parser/src/lib.rs",
+            "test": "one_letter_work_titles_can_be_inherited_from_parent_folders",
+            "line": 4545
+          }
+        ]
+      },
+      {
+        "title": "M.1984/S01E02.mkv",
+        "differences": [
+          {
+            "path": [
+              "title"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "M",
+            "actual": "mkv",
+            "actual_missing": false
+          }
+        ],
+        "sources": [
+          {
+            "file": "crates/matchlab-parser/src/lib.rs",
+            "test": "one_letter_work_titles_can_be_inherited_from_parent_folders",
+            "line": 4545
+          }
+        ]
+      },
+      {
+        "title": "Example  Show.S01E02.1080p",
+        "differences": [
+          {
+            "path": [
+              "title"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "Example Show",
+            "actual": "Example  Show",
+            "actual_missing": false
+          }
+        ],
+        "sources": [
+          {
+            "file": "crates/matchlab-parser/src/lib.rs",
+            "test": "guarded_cleaner_normalizes_unicode_and_ascii_whitespace",
+            "line": 4560
+          }
+        ]
+      },
+      {
+        "title": "Example  Show.S01E02.1080p",
+        "differences": [
+          {
+            "path": [
+              "title"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "Example Show",
+            "actual": "Example  Show",
+            "actual_missing": false
+          }
+        ],
+        "sources": [
+          {
+            "file": "crates/matchlab-parser/src/lib.rs",
+            "test": "guarded_cleaner_normalizes_unicode_and_ascii_whitespace",
+            "line": 4560
+          }
+        ]
+      },
+      {
+        "title": "Example  Show.S01E02.1080p",
+        "differences": [
+          {
+            "path": [
+              "title"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "Example Show",
+            "actual": "Example  Show",
+            "actual_missing": false
+          }
+        ],
+        "sources": [
+          {
+            "file": "crates/matchlab-parser/src/lib.rs",
+            "test": "guarded_cleaner_normalizes_unicode_and_ascii_whitespace",
+            "line": 4560
+          }
+        ]
+      },
+      {
+        "title": "Example\u000b\u000bShow.S01E02.1080p",
+        "differences": [
+          {
+            "path": [
+              "title"
+            ],
+            "op": "eq",
+            "coercion": null,
+            "expected": "Example Show",
+            "actual": "Example\u000b\u000bShow",
+            "actual_missing": false
+          }
+        ],
+        "sources": [
+          {
+            "file": "crates/matchlab-parser/src/lib.rs",
+            "test": "guarded_cleaner_normalizes_unicode_and_ascii_whitespace",
+            "line": 4560
+          }
+        ]
+      }
+    ]
+  },
+  "matcher": {
+    "full_response_expectation_agreement": {
+      "passed": 366,
+      "scored": 378,
+      "unscored_ambiguous": 5
+    },
+    "ordinary_300_variant_agreement": {
+      "passed": 300,
+      "total": 300,
+      "independent_works": 30
+    },
+    "additional_hard_expectations": {
+      "passed": 66,
+      "total": 78
+    },
+    "positive_sid_exact_endpoints": {
+      "passed": 363,
+      "total": 375
+    },
+    "positive_imdb_identity_ignoring_coordinates": {
+      "passed": 366,
+      "total": 375
+    },
+    "sid_expected_abstentions": {
+      "passed": 3,
+      "total": 3
+    },
+    "positive_asid_exact_endpoints": {
+      "passed": 12,
+      "total": 20
+    },
+    "asid_expected_abstentions": {
+      "passed": 20,
+      "total": 21
+    },
+    "sid_disagreement_types": {
+      "different_work_id": 2,
+      "correct_work_wrong_or_missing_coordinates": 3,
+      "abstention": 7
+    },
+    "independent_identity_claims": 51,
+    "scope": "Source expectation agreement. P345 corroborates identity references, not intent or episode numbering. Yearless Supernatural is intentionally ambiguous; ASIDs absent from labels are unscored.",
+    "failed_cases": [
+      {
+        "id": "matcher-0307",
+        "request": {
+          "title": "JoJos Bizarre Adventure S02E37 DUBBED XviD-AFG"
+        },
+        "expected": {
+          "sid_start": "tt2359704:2:37",
+          "sid_end": "tt2359704:2:37"
+        },
+        "response": {
+          "asid_end": "789:37",
+          "asid_start": "789:37",
+          "sid_end": "tt0248119:2:37",
+          "sid_start": "tt0248119:2:37"
+        },
+        "source": {
+          "path": "crates/matchlab-server/src/main.rs",
+          "line": 4196,
+          "test": "jojo_s02e37_dubbed_xvid_preserves_imdb_and_egypt_anidb_episode"
+        },
+        "notes": "IMDb identity is real. Source AniDB IDs 10000/10001/10002 are synthetic; ASID excluded."
+      },
+      {
+        "id": "matcher-0312",
+        "request": {
+          "title": "Supernatural.S01E01-E22.1080p"
+        },
+        "expected": {
+          "sid_start": "tt0460681:1:1",
+          "sid_end": "tt0460681:1:22",
+          "asid_start": null,
+          "asid_end": null
+        },
+        "response": {
+          "asid_end": "7654:22",
+          "asid_start": "7654:1",
+          "sid_end": "tt1679482:1:22",
+          "sid_start": "tt1679482:1:1"
+        },
+        "source": {
+          "path": "README.md",
+          "line": 55,
+          "test": "README API example"
+        },
+        "notes": "Committed documented public response."
+      },
+      {
+        "id": "matcher-0328",
+        "request": {
+          "title": "Amélie.2001.1080p"
+        },
+        "expected": {
+          "sid_start": "tt0211915",
+          "sid_end": "tt0211915"
+        },
+        "response": {
+          "asid_end": null,
+          "asid_start": null,
+          "sid_end": null,
+          "sid_start": null
+        },
+        "source": {
+          "path": "crates/matchlab-server/src/imdb_matcher.rs",
+          "line": 1127,
+          "test": "strict_matches_equivalent_unicode_apostrophes_and_decomposed_accents"
+        },
+        "notes": ""
+      },
+      {
+        "id": "matcher-0330",
+        "request": {
+          "title": "JoJo’s Bizarre Adventure.2012.S01E01.1080p"
+        },
+        "expected": {
+          "sid_start": "tt2359704:1:1",
+          "sid_end": "tt2359704:1:1"
+        },
+        "response": {
+          "asid_end": null,
+          "asid_start": null,
+          "sid_end": null,
+          "sid_start": null
+        },
+        "source": {
+          "path": "crates/matchlab-server/src/imdb_matcher.rs",
+          "line": 1127,
+          "test": "strict_matches_equivalent_unicode_apostrophes_and_decomposed_accents"
+        },
+        "notes": ""
+      },
+      {
+        "id": "matcher-0341",
+        "request": {
+          "title": "JoJo's Bizarre Adventure Stone Ocean - 27"
+        },
+        "expected": {
+          "sid_start": "tt2359704:5:27",
+          "sid_end": "tt2359704:5:27",
+          "asid_start": "17664:3",
+          "asid_end": "17664:3"
+        },
+        "response": {
+          "asid_end": null,
+          "asid_start": null,
+          "sid_end": "tt2359704",
+          "sid_start": "tt2359704"
+        },
+        "source": {
+          "path": "crates/matchlab-server/src/main.rs",
+          "line": 4283,
+          "test": "stone_ocean_named_part_uses_canonical_jojo_imdb_season_five"
+        },
+        "notes": "Real IMDb and AniDB identities; source explicitly documents real Anime-Lists offsets 0/12/24. Literal source unit default is non-strict."
+      },
+      {
+        "id": "matcher-0342",
+        "request": {
+          "title": "JoJo's Bizarre Adventure Stone Ocean 27"
+        },
+        "expected": {
+          "sid_start": "tt2359704:5:27",
+          "sid_end": "tt2359704:5:27",
+          "asid_start": "17664:3",
+          "asid_end": "17664:3"
+        },
+        "response": {
+          "asid_end": null,
+          "asid_start": null,
+          "sid_end": null,
+          "sid_start": null
+        },
+        "source": {
+          "path": "crates/matchlab-server/src/main.rs",
+          "line": 4284,
+          "test": "stone_ocean_named_part_uses_canonical_jojo_imdb_season_five"
+        },
+        "notes": "Real IMDb and AniDB identities; source explicitly documents real Anime-Lists offsets 0/12/24. Literal source unit default is non-strict."
+      },
+      {
+        "id": "matcher-0343",
+        "request": {
+          "title": "JoJo's Bizarre Adventure Stone Ocean 27.mkv"
+        },
+        "expected": {
+          "sid_start": "tt2359704:5:27",
+          "sid_end": "tt2359704:5:27",
+          "asid_start": "17664:3",
+          "asid_end": "17664:3"
+        },
+        "response": {
+          "asid_end": null,
+          "asid_start": null,
+          "sid_end": null,
+          "sid_start": null
+        },
+        "source": {
+          "path": "crates/matchlab-server/src/main.rs",
+          "line": 4285,
+          "test": "stone_ocean_named_part_uses_canonical_jojo_imdb_season_five"
+        },
+        "notes": "Real IMDb and AniDB identities; source explicitly documents real Anime-Lists offsets 0/12/24. Literal source unit default is non-strict."
+      },
+      {
+        "id": "matcher-0344",
+        "request": {
+          "title": "JoJo's Bizarre Adventure Stone Ocean S01E27.mkv"
+        },
+        "expected": {
+          "sid_start": "tt2359704:5:27",
+          "sid_end": "tt2359704:5:27",
+          "asid_start": "17664:3",
+          "asid_end": "17664:3"
+        },
+        "response": {
+          "asid_end": "9304:27",
+          "asid_start": "9304:27",
+          "sid_end": "tt2359704:1:27",
+          "sid_start": "tt2359704:1:27"
+        },
+        "source": {
+          "path": "crates/matchlab-server/src/main.rs",
+          "line": 4286,
+          "test": "stone_ocean_named_part_uses_canonical_jojo_imdb_season_five"
+        },
+        "notes": "Real IMDb and AniDB identities; source explicitly documents real Anime-Lists offsets 0/12/24. Literal source unit default is non-strict."
+      },
+      {
+        "id": "matcher-0345",
+        "request": {
+          "title": "JoJo's Bizarre Adventure Stone Ocean - 03"
+        },
+        "expected": {
+          "sid_start": "tt2359704:5:3",
+          "sid_end": "tt2359704:5:3",
+          "asid_start": "16187:3",
+          "asid_end": "16187:3"
+        },
+        "response": {
+          "asid_end": "9304:3",
+          "asid_start": "9304:3",
+          "sid_end": "tt2359704:1:3",
+          "sid_start": "tt2359704:1:3"
+        },
+        "source": {
+          "path": "crates/matchlab-server/src/main.rs",
+          "line": 4302,
+          "test": "stone_ocean_named_part_uses_canonical_jojo_imdb_season_five"
+        },
+        "notes": ""
+      },
+      {
+        "id": "matcher-0346",
+        "request": {
+          "title": "JoJo's Bizarre Adventure Stone Ocean P2E03"
+        },
+        "expected": {
+          "sid_start": "tt2359704:5:15",
+          "sid_end": "tt2359704:5:15",
+          "asid_start": "17286:3",
+          "asid_end": "17286:3"
+        },
+        "response": {
+          "asid_end": null,
+          "asid_start": null,
+          "sid_end": null,
+          "sid_start": null
+        },
+        "source": {
+          "path": "crates/matchlab-server/src/main.rs",
+          "line": 4311,
+          "test": "stone_ocean_named_part_uses_canonical_jojo_imdb_season_five"
+        },
+        "notes": ""
+      },
+      {
+        "id": "matcher-0347",
+        "request": {
+          "title": "JoJo's Bizarre Adventure Stone Ocean Part 3 S01E03"
+        },
+        "expected": {
+          "sid_start": "tt2359704:5:27",
+          "sid_end": "tt2359704:5:27",
+          "asid_start": "17664:3",
+          "asid_end": "17664:3"
+        },
+        "response": {
+          "asid_end": null,
+          "asid_start": null,
+          "sid_end": null,
+          "sid_start": null
+        },
+        "source": {
+          "path": "crates/matchlab-server/src/main.rs",
+          "line": 4336,
+          "test": "stone_ocean_named_part_uses_canonical_jojo_imdb_season_five"
+        },
+        "notes": ""
+      },
+      {
+        "id": "matcher-0348",
+        "request": {
+          "title": "JoJo's Bizarre Adventure Stone Ocean P2 (01-12) [Batch]"
+        },
+        "expected": {
+          "sid_start": "tt2359704:5:13",
+          "sid_end": "tt2359704:5:24",
+          "asid_start": "17286:1",
+          "asid_end": "17286:12"
+        },
+        "response": {
+          "asid_end": null,
+          "asid_start": null,
+          "sid_end": null,
+          "sid_start": null
+        },
+        "source": {
+          "path": "crates/matchlab-server/src/main.rs",
+          "line": 4326,
+          "test": "stone_ocean_named_part_uses_canonical_jojo_imdb_season_five"
+        },
+        "notes": ""
+      }
+    ],
+    "controlled_local_primary_metadata_replay": {
+      "scope": "Controlled local HTTP replay using actual filtered AnimeAPI and Anime-Lists rows, actual saved English AniDB aliases, and controlled IMDb title/episode fixtures. Not production recall or full catalog accuracy.",
+      "binary_sha256": "22b89319e97b3fe302c07fbd98c2e9cea1b520c141cdfef5197f9631c041c91c",
+      "summary": {
+        "cases": 9,
+        "matched_expectation": 9
+      },
+      "imports": [
+        {
+          "command": "import-animeapi",
+          "status": 0,
+          "output": ""
+        },
+        {
+          "command": "import-animelists",
+          "status": 0,
+          "output": ""
+        },
+        {
+          "command": "import-anidb-titles",
+          "status": 0,
+          "output": ""
+        }
+      ],
+      "integrity_check": "ok",
+      "actual_english_aliases": [
+        {
+          "anidb_id": "16187",
+          "name": "JoJo`s Bizarre Adventure: Stone Ocean",
+          "type": "official"
+        },
+        {
+          "anidb_id": "17286",
+          "name": "JoJo 2022",
+          "type": "syn"
+        },
+        {
+          "anidb_id": "17286",
+          "name": "JoJo`s Bizarre Adventure: Stone Ocean (Part 2)",
+          "type": "official"
+        },
+        {
+          "anidb_id": "17286",
+          "name": "jojo6",
+          "type": "syn"
+        },
+        {
+          "anidb_id": "17664",
+          "name": "JoJo`s Bizarre Adventure: Stone Ocean (Part 3)",
+          "type": "official"
+        }
+      ],
+      "imported_links": [
+        [
+          "tt2359704",
+          "10206",
+          "262954",
+          2
+        ],
+        [
+          "tt2359704",
+          "10835",
+          "262954",
+          3
+        ],
+        [
+          "tt2359704",
+          "11734",
+          "262954",
+          4
+        ],
+        [
+          "tt2359704",
+          "14173",
+          "262954",
+          5
+        ],
+        [
+          "tt2359704",
+          "16187",
+          "262954",
+          6
+        ],
+        [
+          "tt2359704",
+          "17286",
+          "262954",
+          0
+        ],
+        [
+          "tt2359704",
+          "17664",
+          "262954",
+          0
+        ],
+        [
+          "tt0248119",
+          "789",
+          "83950",
+          2
+        ],
+        [
+          "tt2359704",
+          "9304",
+          "262954",
+          1
+        ]
+      ],
+      "imported_mappings": [
+        [
+          "10206",
+          "262954",
+          1,
+          2,
+          1,
+          24,
+          0,
+          ""
+        ],
+        [
+          "10835",
+          "262954",
+          1,
+          2,
+          1,
+          0,
+          24,
+          ""
+        ],
+        [
+          "11734",
+          "262954",
+          1,
+          3,
+          0,
+          0,
+          0,
+          ""
+        ],
+        [
+          "14173",
+          "262954",
+          1,
+          4,
+          0,
+          0,
+          0,
+          ""
+        ],
+        [
+          "16187",
+          "262954",
+          1,
+          5,
+          1,
+          12,
+          0,
+          ""
+        ],
+        [
+          "17286",
+          "262954",
+          1,
+          5,
+          1,
+          12,
+          12,
+          ""
+        ],
+        [
+          "17664",
+          "262954",
+          1,
+          5,
+          1,
+          0,
+          24,
+          ""
+        ],
+        [
+          "789",
+          "83950",
+          0,
+          0,
+          0,
+          0,
+          0,
+          ";1-0;2-0;3-0;4-0;5-0;6-0;7-0;"
+        ],
+        [
+          "789",
+          "83950",
+          1,
+          2,
+          0,
+          0,
+          0,
+          ""
+        ],
+        [
+          "9304",
+          "262954",
+          0,
+          0,
+          0,
+          0,
+          7,
+          ""
+        ],
+        [
+          "9304",
+          "262954",
+          1,
+          1,
+          0,
+          0,
+          0,
+          ""
+        ]
+      ],
+      "results": [
+        {
+          "id": "matcher-0307",
+          "request": {
+            "title": "JoJos Bizarre Adventure S02E37 DUBBED XviD-AFG"
+          },
+          "expected": {
+            "sid_start": "tt2359704:2:37",
+            "sid_end": "tt2359704:2:37"
+          },
+          "response": {
+            "status": 200,
+            "duration_ms": 89.75862400029655,
+            "body": {
+              "asid_end": null,
+              "asid_start": null,
+              "sid_end": "tt2359704:2:37",
+              "sid_start": "tt2359704:2:37"
+            }
+          },
+          "matched_expectation": true,
+          "differences": []
+        },
+        {
+          "id": "matcher-0341",
+          "request": {
+            "title": "JoJo's Bizarre Adventure Stone Ocean - 27"
+          },
+          "expected": {
+            "sid_start": "tt2359704:5:27",
+            "sid_end": "tt2359704:5:27",
+            "asid_start": "17664:3",
+            "asid_end": "17664:3"
+          },
+          "response": {
+            "status": 200,
+            "duration_ms": 14.04215699994893,
+            "body": {
+              "asid_end": "17664:3",
+              "asid_start": "17664:3",
+              "sid_end": "tt2359704:5:27",
+              "sid_start": "tt2359704:5:27"
+            }
+          },
+          "matched_expectation": true,
+          "differences": []
+        },
+        {
+          "id": "matcher-0342",
+          "request": {
+            "title": "JoJo's Bizarre Adventure Stone Ocean 27"
+          },
+          "expected": {
+            "sid_start": "tt2359704:5:27",
+            "sid_end": "tt2359704:5:27",
+            "asid_start": "17664:3",
+            "asid_end": "17664:3"
+          },
+          "response": {
+            "status": 200,
+            "duration_ms": 9.955338000054326,
+            "body": {
+              "asid_end": "17664:3",
+              "asid_start": "17664:3",
+              "sid_end": "tt2359704:5:27",
+              "sid_start": "tt2359704:5:27"
+            }
+          },
+          "matched_expectation": true,
+          "differences": []
+        },
+        {
+          "id": "matcher-0343",
+          "request": {
+            "title": "JoJo's Bizarre Adventure Stone Ocean 27.mkv"
+          },
+          "expected": {
+            "sid_start": "tt2359704:5:27",
+            "sid_end": "tt2359704:5:27",
+            "asid_start": "17664:3",
+            "asid_end": "17664:3"
+          },
+          "response": {
+            "status": 200,
+            "duration_ms": 10.138236999864603,
+            "body": {
+              "asid_end": "17664:3",
+              "asid_start": "17664:3",
+              "sid_end": "tt2359704:5:27",
+              "sid_start": "tt2359704:5:27"
+            }
+          },
+          "matched_expectation": true,
+          "differences": []
+        },
+        {
+          "id": "matcher-0344",
+          "request": {
+            "title": "JoJo's Bizarre Adventure Stone Ocean S01E27.mkv"
+          },
+          "expected": {
+            "sid_start": "tt2359704:5:27",
+            "sid_end": "tt2359704:5:27",
+            "asid_start": "17664:3",
+            "asid_end": "17664:3"
+          },
+          "response": {
+            "status": 200,
+            "duration_ms": 7.212378000076569,
+            "body": {
+              "asid_end": "17664:3",
+              "asid_start": "17664:3",
+              "sid_end": "tt2359704:5:27",
+              "sid_start": "tt2359704:5:27"
+            }
+          },
+          "matched_expectation": true,
+          "differences": []
+        },
+        {
+          "id": "matcher-0345",
+          "request": {
+            "title": "JoJo's Bizarre Adventure Stone Ocean - 03"
+          },
+          "expected": {
+            "sid_start": "tt2359704:5:3",
+            "sid_end": "tt2359704:5:3",
+            "asid_start": "16187:3",
+            "asid_end": "16187:3"
+          },
+          "response": {
+            "status": 200,
+            "duration_ms": 8.475582000301074,
+            "body": {
+              "asid_end": "16187:3",
+              "asid_start": "16187:3",
+              "sid_end": "tt2359704:5:3",
+              "sid_start": "tt2359704:5:3"
+            }
+          },
+          "matched_expectation": true,
+          "differences": []
+        },
+        {
+          "id": "matcher-0346",
+          "request": {
+            "title": "JoJo's Bizarre Adventure Stone Ocean P2E03"
+          },
+          "expected": {
+            "sid_start": "tt2359704:5:15",
+            "sid_end": "tt2359704:5:15",
+            "asid_start": "17286:3",
+            "asid_end": "17286:3"
+          },
+          "response": {
+            "status": 200,
+            "duration_ms": 5.894670999623486,
+            "body": {
+              "asid_end": "17286:3",
+              "asid_start": "17286:3",
+              "sid_end": "tt2359704:5:15",
+              "sid_start": "tt2359704:5:15"
+            }
+          },
+          "matched_expectation": true,
+          "differences": []
+        },
+        {
+          "id": "matcher-0347",
+          "request": {
+            "title": "JoJo's Bizarre Adventure Stone Ocean Part 3 S01E03"
+          },
+          "expected": {
+            "sid_start": "tt2359704:5:27",
+            "sid_end": "tt2359704:5:27",
+            "asid_start": "17664:3",
+            "asid_end": "17664:3"
+          },
+          "response": {
+            "status": 200,
+            "duration_ms": 4.755561999900237,
+            "body": {
+              "asid_end": "17664:3",
+              "asid_start": "17664:3",
+              "sid_end": "tt2359704:5:27",
+              "sid_start": "tt2359704:5:27"
+            }
+          },
+          "matched_expectation": true,
+          "differences": []
+        },
+        {
+          "id": "matcher-0348",
+          "request": {
+            "title": "JoJo's Bizarre Adventure Stone Ocean P2 (01-12) [Batch]"
+          },
+          "expected": {
+            "sid_start": "tt2359704:5:13",
+            "sid_end": "tt2359704:5:24",
+            "asid_start": "17286:1",
+            "asid_end": "17286:12"
+          },
+          "response": {
+            "status": 200,
+            "duration_ms": 13.923477999924216,
+            "body": {
+              "asid_end": "17286:12",
+              "asid_start": "17286:1",
+              "sid_end": "tt2359704:5:24",
+              "sid_start": "tt2359704:5:13"
+            }
+          },
+          "matched_expectation": true,
+          "differences": []
+        }
+      ],
+      "child_terminated": true
+    }
+  },
+  "primary_metadata_sources": {
+    "anime_lists": {
+      "url": "https://raw.githubusercontent.com/Anime-Lists/anime-lists/refs/heads/master/anime-list.xml",
+      "sha256": "4869e21aeaec2d1910485293ae96f8db873a1cff49497631199926520145a43f"
+    },
+    "anime_api": {
+      "url": "https://raw.githubusercontent.com/nattadasu/animeApi/refs/heads/v3/database/animeapi.tsv",
+      "sha256": "2ecd27a1bc1ac2038eafdb068ab38755926dd70ecb053c18016881c1feca52e1"
+    },
+    "actual_anidb_aliases": [
+      {
+        "anidb_id": "16187",
+        "official_english": [
+          "JoJo`s Bizarre Adventure: Stone Ocean"
+        ],
+        "imdb_ids": [
+          "tt2359704"
+        ]
+      },
+      {
+        "anidb_id": "17286",
+        "official_english": [
+          "JoJo`s Bizarre Adventure: Stone Ocean (Part 2)"
+        ],
+        "imdb_ids": [
+          "tt2359704"
+        ]
+      },
+      {
+        "anidb_id": "17664",
+        "official_english": [
+          "JoJo`s Bizarre Adventure: Stone Ocean (Part 3)"
+        ],
+        "imdb_ids": [
+          "tt2359704"
+        ]
+      }
+    ]
+  },
+  "validation": {
+    "workspace_rust_tests_passed": 498,
+    "regex_auditor_tests_passed": 5,
+    "python_tests_passed": 99,
+    "all_targets_check": "passed with RUSTFLAGS=-D warnings",
+    "release_build": "passed with RUSTFLAGS=-D warnings",
+    "local_startup_scenarios_passed": 26,
+    "production_remote_retest_after_new_fixes": "Not performed; no deployment authorized or changed.",
+    "controlled_primary_metadata_replay_passed": 9
+  }
+}

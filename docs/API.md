@@ -32,9 +32,11 @@ than silently reporting successful readiness.
 ```bash
 curl -X POST http://127.0.0.1:8765/match \
   -H "Content-Type: application/json" \
-  -d '{"title":"Supernatural.S01E01-E22.1080p"}'
+  -d '{"title":"Supernatural.2005.S01E01-E22.1080p"}'
 ```
 
+The production year disambiguates the 2005 series from the anime adaptation.
+Without it, the documented exact AniDB-title priority can select the anime.
 Example response (assuming the selected IMDb identity is `tt0460681`):
 
 ```json
@@ -59,7 +61,7 @@ If the title has a season but no episode and the imported `season_episodes` tabl
 For a season-labelled episode range, if the AniDB crosswalk is incomplete but imported IMDb season bounds independently confirm the entire range, MatchLab publishes both IMDb SID endpoints and leaves both ASIDs null. If the IMDb episode table also lacks the bounds, the season is retained in strict diagnostics and the public SID stays a bare title ID. No episode-zero placeholder is ever emitted.
 
 
-For a URL query, use `GET /match?title=Supernatural.S01E01`. Both
+For a URL query, use `GET /match?title=Supernatural.2005.S01E01`. Both
 endpoints accept `title` or `t_title` as the request input. A supplied
 `year` can constrain matching.
 
@@ -169,7 +171,7 @@ metadata is different from a work's country of production.
 ```bash
 curl -X POST http://127.0.0.1:8765/parse \
   -H "Content-Type: application/json" \
-  -d '{"title":"Supernatural.S02E03.1080p.WEB-DL"}'
+  -d '{"title":"Supernatural.2005.S02E03.1080p.WEB-DL"}'
 ```
 
 The JSON contains every field the parser recognizes, such as `title`, `seasons`, `episodes`, `year`, `date`, `resolution`, `quality`, `codec`, `languages` and release metadata. A trailing unmarked number, for example `Jojo's bizarre adventure stone ocean 27`, may produce an `anime_episode_candidate` object with `title`, `episode`, `numbering: "absolute"` and `verified: false`. This is **not** a confirmed episode in `/parse`. During `/match`, MatchLab promotes the candidate only when Tantivy resolves the shortened title to a unique exact anime alias; the existing IMDb/AniDB crosswalk still determines whether any canonical SID/ASID can be published. Titles such as `District 9`, numbers in movie titles, production years and technical markers never become verified anime episodes merely by ending in digits. The same verification applies to names with and without a separating dash.
