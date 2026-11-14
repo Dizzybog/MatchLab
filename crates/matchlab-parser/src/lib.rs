@@ -3114,6 +3114,27 @@ fn split_release_path(raw:&str)->Vec<&str>{
     components
 }
 
+/// Distinguish a Blu-ray transport-stream file from an ordinary title.
+/// Disc layouts use `Film/BDMV/STREAM/00000.m2ts` or `Film/STREAM/0000.m2ts`.
+/// A solitary `Stream/0000.m2ts` is ambiguous: it may be the title of
+/// the film "Stream", so do not suppress that folder without a parent.
+fn bluray_stream_folder_index(components:&[&str])->Option<usize>{
+    let leaf=components.last()?.trim();
+    let (stem,extension)=leaf.rsplit_once('.')?;
+    if !extension.eq_ignore_ascii_case("m2ts")
+        ||stem.is_empty()||!stem.bytes().all(|ch|ch.is_ascii_digit())
+    {return None;}
+    let folder=components.len().checked_sub(2)?;
+    (folder>0 && components[folder].trim().eq_ignore_ascii_case("stream"))
+        .then_some(folder)
+}
+
+/// A verified Blu-ray folder path is independent release evidence when the
+/// file itself has a numeric transport-stream filename and no quality/year.
+pub fn bluray_movie_stream_path(path:&str)->bool{
+    bluray_stream_folder_index(&split_release_path(path)).is_some()
+}
+
 /// Detect a collection's year window, not the production year of an
 /// individual movie. Only parent path components use this signal.
 pub fn collection_year_span(component:&str)->Option<(i32,i32)>{
@@ -3140,6 +3161,7 @@ pub fn parse_title(
     let date_normalized=normalize_slash_dates(raw_title);
     let raw_title=date_normalized.as_ref();
     let components=split_release_path(raw_title);
+    let bluray_stream_folder=bluray_stream_folder_index(&components);
     let mut merged=Map::new();
     let mut fallback_parent_title:Option<String>=None;
     // Preserve title candidates separately. The parser cannot determine if
@@ -3173,6 +3195,23 @@ pub fn parse_title(
         }else{
             parse_path_component(component,translate_languages)?
         };
+        // In a validated Blu-ray STREAM layout, BDMV and STREAM folders
+        // and the numeric .m2ts leaf are structural, not IMDb titles.
+        // Never allow fake years/episodes from the filename to leak into
+        // the final parse or to influence the bottom-up title matcher.
+        // Keep real "Stream" films matchable outside this structure.
+        if let Some(folder)=bluray_stream_folder
+            && (index>=folder || (index+1==folder
+                &&component.trim().eq_ignore_ascii_case("bdmv")))
+        {
+            for field in ["title","year","seasons","episodes","episode_start",
+                "episode_end","episode_count","episode_range_numbering",
+                "absolute_episode_candidate","anime_episode_candidate",
+                "anime_episode_range_candidate","anime_season_episode_candidate",
+                "episode_title"]{
+                layer.remove(field);
+            }
+        }
         // A collection label such as "Harry Potter (2001-2012)" is NOT
         // evidence that every child film was released in 2001 or 2012.
         // The generated year handlers can extract either endpoint. Prevent
@@ -4399,6 +4438,39 @@ mod tests {
         // Non-title metadata inherits through movie paths as well.
         let movie=parse_title("Movie.Name.2005.2160p/Movie.Name.mkv",false).unwrap();
         assert_eq!(movie["year"],2005);
+    }
+
+    #[test]
+    fn bluray_stream_numeric_filename_inherits_nearest_real_movie_title(){
+        for (input,expected_title,expected_year) in [
+            ("Harry Potter and the Sorcerer's Stone/stream/0000.m2ts",
+                "Harry Potter and the Sorcerer's Stone",None),
+            ("Harry Potter and the Sorcerer's Stone/BDMV/STREAM/00000.m2ts",
+                "Harry Potter and the Sorcerer's Stone",None),
+            ("Harry Potter and the Sorcerer's Stone (2001)/BDMV/STREAM/00001.M2TS",
+                "Harry Potter and the Sorcerer's Stone",Some(2001)),
+            ("Harry Potter (2001-2012)/Harry Potter and the Sorcerer's Stone/STREAM/0000.m2ts",
+                "Harry Potter and the Sorcerer's Stone",None),
+        ]{
+            let parsed=parse_title(input,false).unwrap();
+            assert!(bluray_movie_stream_path(input));
+            assert_eq!(parsed["title"],json!(expected_title),"{input}: {parsed:?}");
+            assert_eq!(parsed.get("year").and_then(Value::as_i64),
+                expected_year.map(i64::from),"{input}: {parsed:?}");
+            assert_eq!(parsed["seasons"],json!([]),"{input}: {parsed:?}");
+            assert_eq!(parsed["episodes"],json!([]),"{input}: {parsed:?}");
+            for node in parsed["path_layers"].as_array().unwrap().iter().rev().take(2){
+                assert!(node["parsed"].get("title").is_none(),
+                    "technical layer cannot become a title: {input}: {parsed:?}");
+            }
+        }
+        // Do not globally mark "Stream" as a generic title.
+        assert!(!bluray_movie_stream_path("Stream/0000.m2ts"));
+        assert!(!bluray_movie_stream_path("Stream/Stream.2024.mkv"));
+        assert!(!bluray_movie_stream_path("Harry Potter/stream/featurette.m2ts"));
+        let film=parse_title("Stream (2024)/Stream.2024.mkv",false).unwrap();
+        assert_eq!(film["title"],"Stream");
+        assert_eq!(film["year"],2024);
     }
 
     #[test]
