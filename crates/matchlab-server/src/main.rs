@@ -1051,11 +1051,12 @@ fn diagnose_with_policy(
             }
         }
     }
-    // When the video leaf is only "02.mkv", the immediate two parent
-    // directories can describe a series and its named anime part.
-    // The parser exposes this only as a candidate. Promote it solely if an
-    // exact unique AniDB alias AND an independently mapped episode agree;
-    // a numeric movie file or ordinary TV folder never creates a SID.
+    // A video file named only "02.mkv" may inherit a named anime part
+    // from its two parents. Promote its unverified parser candidate only
+    // when the exact AniDB identity AND named-part season crosswalk agree.
+    // Never use whole-series absolute episode 2 as a fallback here: that
+    // can silently convert Alicization's local episode 2 to season-one E02.
+    let mut verified_path_part:Option<Value>=None;
     if req.series!=Some(false)
         && let Some(hint)=parsed_value.get("anime_episode_candidate")
         && hint.get("path_part").and_then(Value::as_bool)==Some(true)
@@ -1064,19 +1065,21 @@ fn diagnose_with_policy(
             hint.get("episode").and_then(Value::as_i64))
     {
         let name=name.to_owned();
-        let mapped=anime_candidate(&db,&name,None,episode)
-            .map_err(|error|error.to_string())?;
-        let exact=exact_anime_identity(&db,&name)?;
-        if let Some(mapped)=mapped
-            && mapped.get("imdb_id").and_then(Value::as_str)==exact.as_deref()
-            && mapped.get("season").and_then(Value::as_i64).is_some()
-            && mapped.get("episode").and_then(Value::as_i64).is_some()
-            && let Some(parsed)=parsed_value.as_object_mut()
+        if let Some(imdb)=exact_anime_identity(&db,&name)?
+            && let Some(mapped)=anime_title::resolve_episode_from_exact_part_title(
+                &db,&imdb,&name,episode).map_err(|e|e.to_string())?
         {
-            parsed.insert("title".into(),json!(name));
-            parsed.insert("episodes".into(),json!([episode]));
-            parsed.insert("seasons".into(),json!([]));
-            parsed.insert("anime_title_verified".into(),json!(true));
+            verified_path_part=Some(json!({
+                "imdb_id":mapped.imdb_id,"season":mapped.season,
+                "episode":mapped.episode,"anidb_id":mapped.anidb_id,
+                "anidb_episode":mapped.anidb_episode
+            }));
+            if let Some(parsed)=parsed_value.as_object_mut(){
+                parsed.insert("title".into(),json!(name));
+                parsed.insert("episodes".into(),json!([episode]));
+                parsed.insert("seasons".into(),json!([]));
+                parsed.insert("anime_title_verified".into(),json!(true));
+            }
         }
     }
     // A bare final number ("Stone Ocean 27") is not a trusted episode:
@@ -1367,7 +1370,9 @@ fn diagnose_with_policy(
         .and_then(Value::as_str)
         .or(anime_subfolder_title.as_deref()).unwrap_or(title);
     let anime_resolve_key=imdb_matcher::clean_title(anime_resolve_title);
-    let anime = if verified_chinese_override.is_some()
+    let anime = if let Some(verified)=verified_path_part {
+        Some(verified)
+    } else if verified_chinese_override.is_some()
         || verified_absolute_episode_imdb.is_some() {
         // A separately verified absolute episode owns its crosswalk.
         // Otherwise retain the established anime-priority path, including
