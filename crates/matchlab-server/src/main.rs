@@ -2096,7 +2096,7 @@ fn diagnose_logged(state:&AppState,req:&MatchRequest,policy:MatchPolicy)->Result
     result
 }
 
-async fn ml_status()->Json<Value>{
+fn ml_status_snapshot()->Value{
     let mut report=field_learning::status();
     if let Some(object)=report.as_object_mut(){
         object.insert("capacity".into(),ml_config::status());
@@ -2110,7 +2110,19 @@ async fn ml_status()->Json<Value>{
         object.insert("general_regex".into(),general_learning::status());
         object.insert("compiled_parser_replay".into(),matchlab_parser::replay_cache_status());
     }
-    Json(report)
+    report
+}
+async fn ml_status()->Json<Value>{
+    // Some status providers lazily build parser regex catalogues. Never do
+    // that work on Tokio's HTTP executor; a dashboard poll must not stall
+    // liveness, /parse or parallel matching requests.
+    match tokio::task::spawn_blocking(ml_status_snapshot).await{
+        Ok(report)=>Json(report),
+        Err(error)=>{
+            tracing::debug!(%error,"ML telemetry snapshot unavailable");
+            Json(json!({"status":"unavailable","error":"ML telemetry unavailable"}))
+        }
+    }
 }
 
 /// Preserve bookmarks to the original dashboard while reserving / for
