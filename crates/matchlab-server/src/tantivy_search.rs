@@ -1068,15 +1068,16 @@ pub fn title_aliases_inside(db:&Connection,key:&str)->Result<Vec<TitleAlias>,Str
 pub fn anime_aliases_exact(db:&Connection,raw_title:&str)->Result<Vec<AnimeAlias>,String>{
     let key=crate::title_normalization::clean_title(raw_title);
     if key.is_empty(){return Ok(Vec::new());}
+    // Reuse the strict Unicode identity check for ASCII aliases as well:
+    // Supernatural, Super-Natural and Super.Natural have the same compact
+    // Tantivy key, but only the latter two have two original title words.
+    let expected_words=crate::imdb_matcher::semantic_words(raw_title);
+    let expected_count=crate::title_normalization::title_word_count(raw_title);
     Ok(lookup_aliases(db,AliasLookupKind::ExactTitle,&key)?
         .into_iter()
         .filter(|alias|alias.source=="anidb" &&alias.normalized==key)
-        // Tantivy's compact ASCII key may drop non-Latin title words.
-        // Strict mode must never treat BLEACH and BLEACH 千年血戦篇 as
-        // identical just because their indexed ASCII keys are equal.
-        .filter(|alias| (raw_title.is_ascii() && alias.name.is_ascii())
-            || crate::imdb_matcher::semantic_words(&alias.name)
-                ==crate::imdb_matcher::semantic_words(raw_title))
+        .filter(|alias|crate::title_normalization::title_word_count(&alias.name)==expected_count
+            &&crate::imdb_matcher::semantic_words(&alias.name)==expected_words)
         .filter_map(|alias|Some(AnimeAlias{
             anidb_id:alias.anidb_id?,
             imdb_id:alias.imdb_id?,
