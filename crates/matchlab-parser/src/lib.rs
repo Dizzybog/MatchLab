@@ -1988,23 +1988,6 @@ fn patch_missing_coordinates(raw: &str, translate_languages: bool, result: &mut 
         {
             result.insert("seasons".into(), json!([season]));
             result.insert("episodes".into(), json!([episode]));
-            // Four-digit Spanish CAP can be two different season/episode
-            // grammars: CAP.4123 => S41E23 or S4E123. Only the matcher,
-            // with IMDb season bounds, can disambiguate them. Keep the
-            // historical parser choice for compatibility and expose a hint.
-            if let (Some(left),Some(right))=(caps.get(1),caps.get(2))
-                && left.as_str().len()==2
-                && let Ok(short_season)=left.as_str()[..1].parse::<i64>()
-                && let Ok(long_episode)=format!("{}{}", &left.as_str()[1..],right.as_str())
-                    .parse::<i64>()
-                && long_episode>99
-            {
-                result.insert("spanish_compact_episode_candidate".into(),json!({
-                    "season":short_season,"episode":long_episode,
-                    "alternate_season":season,"alternate_episode":episode,
-                    "verified":false
-                }));
-            }
             if let Some(marker) = caps.get(0) {
                 set_title_from_release_prefix(raw, marker.start(), translate_languages, result)?;
             }
@@ -2824,7 +2807,19 @@ fn release_without_leading_site_banners(raw:&str)->Option<&str>{
 fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<String,Value>,ParseError> {
     let original_raw = raw;
     let normalized = normalize_release_confusables(raw);
-    let raw = normalized.as_ref();
+    let release = normalized.as_ref();
+    // Identify a collection's YYYY-YYYY range before running any episode
+    // handler. Otherwise year extraction may leave "-1983" behind as E1983.
+    let protected_years=collection_year_span_with_offset(release)
+        .filter(|(_,_,start,_)|release[..*start].chars().any(char::is_alphabetic));
+    let masked=protected_years.map(|(_,_,start,end)|{
+        let mut clean=String::with_capacity(release.len());
+        clean.push_str(&release[..start]);
+        clean.extend(std::iter::repeat_n(' ',end-start));
+        clean.push_str(&release[end..]);
+        clean
+    });
+    let raw=masked.as_deref().unwrap_or(release);
     let mut result=engine_parse(raw,translate_languages)?;
     if let Some(content)=release_without_leading_site_banners(raw){
         // Correct only the title. Site, source, quality, language and all
@@ -2952,31 +2947,19 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
         // The qualifier belongs to the release, not the canonical show name.
         set_title_from_release_prefix(raw,marker_start,translate_languages,&mut result)?;
     }
-    // The generated year handler can remove the FIRST endpoint and expose
-    // the SECOND (e.g. 1983) to a generic episode regex. Treat a full
-    // chronological interval as collection metadata, not TV coordinates.
-    if let Some((start,end,offset))=collection_year_span_with_offset(raw)
-        && raw[..offset].chars().filter(|c|c.is_alphabetic()).count()>=3
-        && !EXPLICIT_EPISODE_SHAPE_RE.is_match(raw)
-            .map_err(|e|ParseError::Regex(e.to_string()))?
-        && !S_E_COORDS_RE.is_match(raw)
-            .map_err(|e|ParseError::Regex(e.to_string()))?
-    {
-        if result.get("year").and_then(Value::as_i64)
-            .is_some_and(|y|y==i64::from(start)||y==i64::from(end)){
-            result.remove("year");
+    if let Some((start,end,offset,_))=protected_years {
+        // A year interval without TV coordinates denotes a collection,
+        // not a single film's production year or an episode range.
+        if result.get("seasons").and_then(Value::as_array).is_none_or(Vec::is_empty)
+            && result.get("episodes").and_then(Value::as_array).is_none_or(Vec::is_empty)
+            && !result.contains_key("episode_start")
+        {
+            result.insert("collection_year_range".into(),json!([start,end]));
+            set_title_from_release_prefix(release,offset,translate_languages,&mut result)?;
         }
-        for field in ["episode_start","episode_end","episode_count",
-            "episode_range_numbering","absolute_episode_candidate",
-            "anime_episode_candidate","anime_episode_range_candidate",
-            "episode_title"] {
-            result.remove(field);
-        }
-        result.insert("episodes".into(),json!([]));
-        result.insert("collection_year_range".into(),json!([start,end]));
-        set_title_from_release_prefix(raw,offset,translate_languages,&mut result)?;
-    }else if let Some(episode_title)=extract_release_episode_title(raw,&result)? {
-        result.insert("episode_title".into(),json!(episode_title));
+    }
+    if let Some(episode_title) = extract_release_episode_title(raw, &result)? {
+        result.insert("episode_title".into(), json!(episode_title));
     }
     Ok(result)
 }
@@ -3175,23 +3158,25 @@ pub fn bluray_movie_stream_path(path:&str)->bool{
     bluray_stream_folder_index(&split_release_path(path)).is_some()
 }
 
-/// Detect a collection year interval, including a flat (no-directory) release.
-/// The offset lets the parser recover its true title before any year handler
-/// can turn the second year into a bogus absolute episode.
-fn collection_year_span_with_offset(component:&str)->Option<(i32,i32,usize)>{
+/// Find the exact byte span of a collection year window so that both year
+/// tokens can be protected from later episode recognition.
+fn collection_year_span_with_offset(component:&str)->Option<(i32,i32,usize,usize)>{
     static SPAN:Lazy<regex::Regex>=Lazy::new(||regex::Regex::new(
         r"(?:^|[^0-9])(?P<start>(?:19|20)[0-9]{2})\s*[-–—]\s*(?P<end>(?:19|20)[0-9]{2})(?:$|[^0-9])"
     ).expect("bounded collection year-span grammar"));
     if !component.contains(['-','–','—']){return None;}
     SPAN.captures_iter(component).find_map(|caps|{
-        let start_token=caps.name("start")?;
-        let start=start_token.as_str().parse::<i32>().ok()?;
-        let end=caps.name("end")?.as_str().parse::<i32>().ok()?;
-        (start<end).then_some((start,end,start_token.start()))
+        let first=caps.name("start")?;
+        let last=caps.name("end")?;
+        let start=first.as_str().parse::<i32>().ok()?;
+        let end=last.as_str().parse::<i32>().ok()?;
+        (start<end).then_some((start,end,first.start(),last.end()))
     })
 }
+/// Return collection years, not the production year of each child film.
 pub fn collection_year_span(component:&str)->Option<(i32,i32)>{
-    collection_year_span_with_offset(component).map(|(start,end,_)|(start,end))
+    collection_year_span_with_offset(component)
+        .map(|(start,end,_,_)|(start,end))
 }
 
 /// Parse a hierarchical torrent path from ancestor to leaf. Any explicit,
