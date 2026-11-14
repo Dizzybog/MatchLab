@@ -2967,8 +2967,24 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
             }
             result.insert("episodes".into(),json!([]));
             result.insert("seasons".into(),json!([]));
-            // A collection's date span is not a single film's release year.
-            result.remove("year");
+            // A collection's two endpoint years are not the production
+            // year of a single film. Preserve an INDEPENDENT year outside
+            // the protected span (e.g. "2001-2012 Remaster.2024").
+            if result.get("year").and_then(Value::as_i64)
+                .is_some_and(|year|year==i64::from(start)||year==i64::from(end)){
+                result.remove("year");
+            }
+            if !result.contains_key("year") {
+                static INDEPENDENT_YEAR:Lazy<regex::Regex>=Lazy::new(||{
+                    regex::Regex::new(r"(?:^|[^[:alnum:]])((?:19|20)[0-9]{2})(?:$|[^[:alnum:]])")
+                        .expect("valid production year token")
+                });
+                if let Some(year)=INDEPENDENT_YEAR.captures_iter(raw).find_map(|caps|
+                    caps.get(1).and_then(|token|token.as_str().parse::<i64>().ok()))
+                {
+                    result.insert("year".into(),json!(year));
+                }
+            }
             result.insert("collection_year_range".into(),json!([start,end]));
             set_title_from_release_prefix(release,offset,translate_languages,&mut result)?;
         }
