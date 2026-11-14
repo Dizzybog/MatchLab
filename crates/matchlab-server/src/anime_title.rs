@@ -315,13 +315,7 @@ pub fn named_part_base(
         .collect::<BTreeSet<_>>();
     if ids.len()!=1{return Ok(None);}
     let selected=ids.iter().next().expect("unique AniDB alias");
-    let mut stmt=db.prepare(
-        "SELECT DISTINCT tvdb_season FROM episode_map
-         WHERE anidb_id=?1 AND anidb_season>0 AND tvdb_season>0")?;
-    let seasons=stmt.query_map([selected],|row|row.get::<_,i64>(0))?
-        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
-    if seasons.len()!=1{return Ok(None);}
-    let base=*seasons.iter().next().unwrap();
+    let Some(base)=unique_mapped_season(db,selected)? else{return Ok(None)};
     if base<=1{return Ok(None);}
     let related:i64=db.query_row(
         "SELECT EXISTS(SELECT 1 FROM episode_map mine
@@ -367,6 +361,21 @@ pub fn resolve_local_part(
     Ok(valid.then_some(LocalPartCoordinate{base_season:base,mapped}))
 }
 
+// One prepared query and at most two DISTINCT rows are enough to
+// prove a unique positive season. No per-request BTreeSet or full
+// result materialization is necessary.
+fn unique_mapped_season(db:&Connection,id:&str)->rusqlite::Result<Option<i64>>{
+    let mut stmt=db.prepare("SELECT DISTINCT tvdb_season FROM episode_map
+        WHERE anidb_id=?1 AND anidb_season>0 AND tvdb_season>0 LIMIT 2")?;
+    let mut rows=stmt.query([id])?;
+    let first=match rows.next()?{
+        Some(row)=>row.get::<_,i64>(0)?,
+        None=>return Ok(None),
+    };
+    if rows.next()?.is_some(){return Ok(None);}
+    Ok(Some(first))
+}
+
 /// Infer an IMDb/TVDB season from a title-specific AniDB alias without an episode.
 /// Only publish a season when one uniquely identified AniDB work maps to exactly
 /// one positive TVDB season. Never manufacture an episode or an ASID.
@@ -380,31 +389,48 @@ pub fn season_from_title(db:&Connection,imdb:&str,title:&str)->rusqlite::Result<
     let unique:BTreeSet<_>=ids.into_iter().map(|(id,_)|id).collect();
     if unique.len()!=1{return Ok(None);}
     let selected=unique.iter().next().unwrap();
-    let mut stmt=db.prepare("SELECT DISTINCT tvdb_season FROM episode_map
-        WHERE anidb_id=?1 AND anidb_season>0 AND tvdb_season>0")?;
-    let seasons=stmt.query_map([selected],|r|r.get::<_,i64>(0))?
-        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
-    if seasons.len()!=1{return Ok(None);}
-    Ok(seasons.iter().next().copied())
+    unique_mapped_season(db,selected)
 }
 
 /// Recognize a title-only anime part only when an exact alias has a unique
 /// IMDb identity and a uniquely mapped positive season.
 pub fn season_from_any_exact_title(db:&Connection,title:&str)->rusqlite::Result<Option<i64>>{
     let key=imdb_matcher::clean_title(title);
-    if key.is_empty()||(!crate::strict_match_mode()&&key.len()<4){
-        return Ok(None);
-    }
-    let aliases=if crate::strict_match_mode(){
+    let strict=crate::strict_match_mode();
+    if key.is_empty()||(!strict&&key.len()<4){return Ok(None);}
+    let aliases=if strict{
         crate::tantivy_search::anime_aliases_exact(db,title)
     }else{crate::tantivy_search::anime_aliases(db,&key,4)};
-    let ids=aliases.map_err(|error|rusqlite::Error::ToSqlConversionFailure(
-            Box::new(std::io::Error::other(error))))?
-        .into_iter().filter(|a|a.clean_title==key).map(|a|a.imdb_id)
-        .collect::<BTreeSet<_>>();
-    if ids.len()!=1{return Ok(None);}
-    let imdb=ids.iter().next().unwrap();
-    season_from_title(db,imdb,if crate::strict_match_mode(){title}else{&key})
+    let found=aliases.map_err(|error|rusqlite::Error::ToSqlConversionFailure(
+            Box::new(std::io::Error::other(error))))?;
+    // An exact title must name one IMDb identity. In strict mode we
+    // already have the FULL AniDB alias postings at this point: the
+    // former call to season_from_title repeated the very same Tantivy
+    // lookup, Unicode word checks and alias materialization.
+    let mut selected_imdb:Option<&str>=None;
+    let mut selected_anidb:Option<&str>=None;
+    for alias in found.iter().filter(|a|a.clean_title==key){
+        if selected_imdb.is_some_and(|id|id!=alias.imdb_id){
+            return Ok(None);
+        }
+        selected_imdb=Some(&alias.imdb_id);
+        if strict {
+            if selected_anidb.is_some_and(|id|id!=alias.anidb_id){
+                return Ok(None);
+            }
+            selected_anidb=Some(&alias.anidb_id);
+        }
+    }
+    let Some(imdb)=selected_imdb else{return Ok(None)};
+    if strict {
+        return match selected_anidb{
+            Some(id)=>unique_mapped_season(db,id),
+            None=>Ok(None),
+        };
+    }
+    // Non-strict season_from_title intentionally performs a broader
+    // source-boundary alias lookup. Retain that behavior exactly.
+    season_from_title(db,imdb,&key)
 }
 
 #[cfg(test)]
