@@ -45,6 +45,8 @@ pub struct ParseContext {
 struct HandlerMatch {
     match_len: usize,
     match_index: usize,
+    /// Physical deletion can exclude delimiters used by the lexical match.
+    removal_span: Option<(usize,usize)>,
     remove: bool,
     skip_from_title: bool,
 }
@@ -365,6 +367,22 @@ impl ParserEngine {
             if is_hdr_format {
                 raw.pattern = Some(r"\b(?:HDR(?:10)?|HLG)\b".to_owned());
             }
+            match (raw.name.as_str(),raw.pattern.as_deref()) {
+                ("bit_depth",Some(r"(?:8|10|12)[-\.]?(?=bit\b)")) => {
+                    // Capture only the number, retaining the native $1bit
+                    // conversion for both singular and plural release tags.
+                    raw.pattern=Some(r"(8|10|12)[-\.]?(?=bits?\b)".into());
+                }
+                ("channels",Some(r"(?:\b|(?<=MA))7[\.\- ]1(.?ch(annel)?)?\b")) => {
+                    raw.pattern=Some(r"(?:\b|(?<=MA)|(?<=TrueHD))7[\.\- ]1(.?ch(annel)?)?\b".into());
+                }
+                ("audio",Some(r"\bDTS(?!(.?HD.?Ma(ster)?|.X)).?(HD.?HR|HD)?\b")) => {
+                    // A group named HDMasterTeam after DTS- is not a
+                    // complete DTS-HD MA marker. Keep the group separator.
+                    raw.pattern=Some(r"\bDTS(?!(.?HD.?Ma(ster)?|.X)(?:\b|[0-9]))(?:.?(HD.?HR|HD))?\b".into());
+                }
+                _=>{},
+            }
             let options: HandlerOptions = raw.options.into();
             let transform = if is_hdr_format {
                 TransformSpec::HdrFormat
@@ -463,9 +481,11 @@ impl ParserEngine {
                 continue;
             };
 
+            let (removal_index,removal_len)=match_result.removal_span
+                .unwrap_or((match_result.match_index,match_result.match_len));
             if match_result.remove {
-                let start = match_result.match_index.min(title.len());
-                let end = (match_result.match_index + match_result.match_len).min(title.len());
+                let start = removal_index.min(title.len());
+                let end = (removal_index + removal_len).min(title.len());
                 if start <= end && title.is_char_boundary(start) && title.is_char_boundary(end) {
                     let previous_len=title.len();
                     title.replace_range(start..end, "");
@@ -489,7 +509,7 @@ impl ParserEngine {
                 && match_result.skip_from_title
                 && match_result.match_index < end_of_title
             {
-                end_of_title = end_of_title.saturating_sub(match_result.match_len);
+                end_of_title = end_of_title.saturating_sub(removal_len);
             }
         }
 
@@ -551,9 +571,39 @@ impl ParserEngine {
         {
             return Ok(None);
         }
-        let captures = regex
-            .captures(title.as_bytes())
-            .map_err(|e| ParseError::Regex(e.to_string()))?;
+        let captures=if handler.name=="network" {
+            // A rejected title word must not hide a later genuine source
+            // tag, e.g. Runs.Through.It.1992.iT.WEB-DL. Only network
+            // handlers need this contextual search; other handlers retain
+            // their original first-capture behavior.
+            let mut eligible=None;
+            for candidate in regex.captures_iter(title.as_bytes()) {
+                let candidate=candidate.map_err(|e|ParseError::Regex(e.to_string()))?;
+                let Some(found)=candidate.get(0)else{continue;};
+                let text=&title[found.start()..found.end()];
+                let title_word_it=text.eq_ignore_ascii_case("it")&&found.start()<end_of_title;
+                // Season/episode removal may have moved a valid source tag
+                // left of the date's saved offset; an earlier title boundary
+                // still establishes that the tag is release metadata.
+                let before_date=matched.get("date")
+                    .is_some_and(|date|found.start()<date.match_index.min(end_of_title));
+                if title_word_it||before_date {
+                    let prefix=&title[..found.start()];
+                    let bracketed=[('[',']'),('(',')'),('【','】'),('（','）')]
+                        .iter().any(|(open,close)|
+                            prefix.rfind(*open)
+                                .is_some_and(|start|!prefix[start..].contains(*close))
+                                &&title[found.end()..].trim_start().starts_with(*close));
+                    if !bracketed{continue;}
+                }
+                eligible=Some(candidate);
+                break;
+            }
+            eligible
+        }else{
+            regex.captures(title.as_bytes())
+                .map_err(|e|ParseError::Regex(e.to_string()))?
+        };
         let Some(captures) = captures else {
             return Ok(None);
         };
@@ -757,9 +807,16 @@ impl ParserEngine {
                 source_index: Some(handler.source_index),
             });
         result.insert(handler.name.clone(), transformed);
+        // Date grammars consume surrounding delimiters to validate token
+        // boundaries. Removing those delimiters can join Show + HDTV and
+        // hide the following metadata from later word-boundary handlers.
+        let removal=if handler.name=="date"&&handler.options.remove {
+            captures.get(1).map(|date|(date.start(),date.end()-date.start()))
+        }else{None};
         Ok(Some(HandlerMatch {
-            match_len: raw_match.len(),
-            match_index: m0.start(),
+            match_len:raw_match.len(),
+            match_index:m0.start(),
+            removal_span:removal,
             remove: handler.options.remove,
             skip_from_title: is_before_title || handler.options.skip_from_title,
         }))
@@ -831,6 +888,7 @@ impl ParserEngine {
                     return Ok(Some(HandlerMatch {
                         match_len: m0.end() - m0.start(),
                         match_index: start_index + m0.start(),
+                        removal_span:None,
                         remove: true,
                         skip_from_title: false,
                     }));
@@ -918,6 +976,7 @@ impl ParserEngine {
                             return Ok(Some(HandlerMatch {
                                 match_len: m0.end() - m0.start(),
                                 match_index: idx,
+                                removal_span:None,
                                 remove: false,
                                 skip_from_title: false,
                             }));
@@ -948,6 +1007,7 @@ impl ParserEngine {
                     return Ok(Some(HandlerMatch {
                         match_len: m.end() - m.start(),
                         match_index: m.start(),
+                        removal_span:None,
                         remove: false,
                         skip_from_title: false,
                     }));
@@ -1900,6 +1960,9 @@ static SEASON_WORD_COORDS_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)(?:^|[ ._-])(?:seasons?|staffel|saison|seizoen|temporada|sezon|seson)[ ._-]+(\d{1,2})\b")
         .expect("valid explicit season word regex")
 });
+static EXPLICIT_SEASON_LABEL_RE:Lazy<regex::Regex>=Lazy::new(||regex::Regex::new(
+    r"(?i)(?:^|[^[:alnum:]])(?:[st][0-9]{1,3}|[0-9]{1,2}[ ._-]*сезон(?:а|ы|ов)?)(?:$|[^[:alnum:]])"
+).expect("bounded standalone season label"));
 static SEASON_WORD_IN_TITLE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)[ ._-]+(?:seasons?|staffel|saison|seizoen|temporada|sezon|seson)(?:[ ._-]*\d{1,2})?")
         .expect("valid season word cleanup regex")
@@ -2992,9 +3055,17 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
     let raw=masked.as_deref().unwrap_or(release);
     let mut result=engine_parse(raw,translate_languages)?;
     if let Some(content)=release_without_leading_site_banners(raw){
-        // Correct only the title. Site, source, quality, language and all
-        // other fields still come from the original raw release.
+        // Recover the title from the actual release. Publisher words can
+        // also establish a fake boundary that turns It into iTunes; recheck
+        // only that ambiguous network value. Other original metadata stays.
         let clean=engine_parse(content,translate_languages)?;
+        if result.get("network").and_then(Value::as_str)==Some("iTunes"){
+            if let Some(network)=clean.get("network"){
+                result.insert("network".into(),network.clone());
+            }else{
+                result.remove("network");
+            }
+        }
         let title=clean.get("title").and_then(Value::as_str)
             .filter(|title|!generic_path_title(title)
                 && clean.get("extension").and_then(Value::as_str)
@@ -3140,7 +3211,17 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
                 result.remove(field);
             }
             result.insert("episodes".into(),json!([]));
-            result.insert("seasons".into(),json!([]));
+            // A collection's year endpoints do not invalidate independent
+            // S01 / S01-06 / Season 1 labels. Keep native season extraction
+            // only when the raw release supplies an explicit season marker.
+            let explicit_season=EXPLICIT_SEASON_LABEL_RE.is_match(release)
+                ||SEASON_WORD_COORDS_RE.is_match(release)
+                    .map_err(|e|ParseError::Regex(e.to_string()))?
+                ||EAST_ASIAN_SEASON_RE.is_match(release)
+                    .map_err(|e|ParseError::Regex(e.to_string()))?;
+            if !explicit_season {
+                result.insert("seasons".into(),json!([]));
+            }
             // A collection's two endpoint years are not the production
             // year of a single film. Preserve an INDEPENDENT year outside
             // the protected span (e.g. "2001-2012 Remaster.2024").

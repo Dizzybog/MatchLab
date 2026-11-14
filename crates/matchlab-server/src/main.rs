@@ -2316,7 +2316,7 @@ static TORRENT_MATCH_CACHE:OnceLock<query_cache::QueryCache<Diagnostic>>=OnceLoc
 // A semantic matcher change must invalidate old persistent ML match results,
 // even when metadata.sqlite3, learned regex rules and the strict-mode flag
 // are unchanged. Bump this revision when altering title/year eligibility.
-const MATCHER_SEMANTIC_REVISION:&str="title-word-boundaries-strict-year-collection-protection-v2";
+const MATCHER_SEMANTIC_REVISION:&str="exact-bilingual-aliases-parser-boundaries-v3";
 fn scoped_match_generation(metadata:&str,strict:bool)->String{
     format!("{metadata}:matcher={MATCHER_SEMANTIC_REVISION}:strict={strict}")
 }

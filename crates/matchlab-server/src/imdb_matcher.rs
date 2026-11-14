@@ -157,6 +157,54 @@ pub(crate) fn semantic_words(raw:&str)->Vec<String>{
         .filter(|word|!word.is_empty() && *word!="and")
         .map(str::to_owned).collect()
 }
+fn complete_title_alias(row:&Aka,key:&str,words:&[String],word_count:usize)->bool{
+    row.clean==key && semantic_words(&row.title).as_slice()==words
+        &&crate::title_normalization::title_word_count(&row.title)==word_count
+}
+
+/// One terminal pair may contain a second full title alias. Nested/multiple
+/// brackets and trailing text stay ordinary literal titles, never recursion.
+fn bilingual_title_parts(title:&str)->Option<(&str,&str)>{
+    let title=title.trim();
+    if title.len()>512{return None;}
+    let open=match title.as_bytes().last()?{b')'=>'(',b']'=>'[',_=>return None};
+    let index=title.rfind(open)?;
+    let first=title[..index].trim();
+    let second=title[index+1..title.len()-1].trim();
+    if first.is_empty()||second.is_empty()
+        ||first.contains(['(',')','[',']','{','}'])
+        ||second.contains(['(',')','[',']','{','}']){return None;}
+    Some((first,second))
+}
+
+/// Both complete names must independently resolve to the same unique
+/// eligible IMDb work. A translated name in brackets is not permission to
+/// discard unknown text or to choose the first/highest-vote intersection.
+fn bilingual_exact_aliases(
+    db:&Connection,title:&str,year:Option<i32>,series:bool,season:i64,
+)->rusqlite::Result<Vec<Aka>>{
+    let Some((first,second))=bilingual_title_parts(title)else{return Ok(Vec::new());};
+    let eligible_aliases=|name:&str|->rusqlite::Result<Vec<Aka>>{
+        let key=clean_title(name);
+        if key.is_empty(){return Ok(Vec::new());}
+        let words=semantic_words(name);
+        let count=crate::title_normalization::title_word_count(name);
+        let rows=exact(db,&key)?.into_iter().filter(|row|
+            complete_title_alias(row,&key,&words,count)
+                &&year_eligible(true,year,row.year)).collect();
+        filter_eligible(db,rows,series,year,season)
+    };
+    let first=eligible_aliases(first)?;
+    if first.is_empty(){return Ok(Vec::new());}
+    let second=eligible_aliases(second)?;
+    let first_ids=first.iter().map(|row|row.imdb_id.as_str()).collect::<HashSet<_>>();
+    let shared=second.iter().filter(|row|first_ids.contains(row.imdb_id.as_str()))
+        .map(|row|row.imdb_id.as_str()).collect::<std::collections::BTreeSet<_>>();
+    if shared.len()!=1{return Ok(Vec::new());}
+    let id=shared.into_iter().next().expect("one verified bilingual identity").to_owned();
+    drop(first_ids);
+    Ok(first.into_iter().chain(second).filter(|row|row.imdb_id==id).collect())
+}
 /// Check whole-word containment in *both* directions; score the proportion
 /// of the longer title not covered by the shorter title.
 fn semantic_extension(short:&[String],long:&[String])->Option<TitleFit>{
@@ -626,9 +674,8 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
         // Compact ASCII keys may collide for Unicode titles (Bleach vs
         // BLEACH 千年血戦篇). Require the entire imported IMDb alias to match
         // the entire parsed title in Unicode-aware normalized words.
-        discovered.retain(|row|row.clean==key
-            &&semantic_words(&row.title)==semantic_release
-            &&crate::title_normalization::title_word_count(&row.title)==source_word_count);
+        discovered.retain(|row|
+            complete_title_alias(row,&key,&semantic_release,source_word_count));
     }
     // Presence in the index is NOT enough: the source's complete significant
     // words must equal the parsed title, and at least one exact alias must
@@ -818,6 +865,17 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
             }
         }
     }
+    // An eligible full literal (including an ambiguous literal shortlist)
+    // always preempts bilingual interpretation. Only exact component aliases
+    // can fill an otherwise empty strict result; broad mode is unchanged.
+    let mut bilingual_title_matches=HashSet::new();
+    if strict && rows.is_empty(){
+        let aliases=bilingual_exact_aliases(db,title,year,series,required_season)?;
+        for row in aliases{
+            bilingual_title_matches.insert((row.imdb_id.clone(),row.title.clone()));
+            rows.push(row);
+        }
+    }
     if rows.is_empty(){return Ok((vec![],false));}
     // Keep all plausible identities until ranked. Unrelated word fragments
     // are rejected before season eligibility and expensive ID lookups.
@@ -834,13 +892,13 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
         .map(|word|word.chars().count()).sum::<usize>();
     for row in rows{
         if strict {
-            let exact_imdb=row.clean==key
-                &&semantic_words(&row.title)==semantic_release
-                &&crate::title_normalization::title_word_count(&row.title)==source_word_count;
+            let exact_imdb=complete_title_alias(&row,&key,
+                &semantic_release,source_word_count);
             let alias_key=(row.imdb_id.clone(),row.title.clone());
             let exact_country=country_title_matches.contains(&alias_key);
             let exact_anime=strict_anime_ids.contains(&row.imdb_id);
-            if !exact_imdb && !exact_country && !exact_anime {continue;}
+            let exact_bilingual=bilingual_title_matches.contains(&alias_key);
+            if !exact_imdb && !exact_country && !exact_anime && !exact_bilingual {continue;}
             // Prefer a unique exact AniDB identity: a named cour/season may
             // point to the correct parent IMDb series instead of a same-name
             // OVA. If the AniDB alias resolves to several eligible IMDb IDs,
@@ -1155,6 +1213,133 @@ pub fn prefer_verified_episode_identity(
 }
 #[cfg(test)]
 mod tests{
+
+    fn bilingual_fixture()->Connection{
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,start INTEGER,
+                end INTEGER,offset INTEGER,map TEXT);").unwrap();
+        for (id,title,year,kind) in [
+            ("tt9883996","Caballo soñador",2020,"movie"),
+            ("tt9883996","Dream Horse",2020,"movie"),
+            ("tt8265928","Love at Second Sight",2019,"movie"),
+            ("tt8265928","Mon Inconnue",2019,"movie"),
+            ("tt0296042","Ichi the Killer",2001,"movie"),
+            ("tt0296042","Koroshiya 1",2001,"movie"),
+            ("tt6805938","El abismo",2022,"movie"),
+            ("tt6805938","The Ledge",2022,"movie"),
+            // Synthetic collisions exercise complete-set intersections,
+            // independent source years/types, and Unicode/word boundaries.
+            ("tt0000101","Love at Second Sight",2019,"movie"),
+            ("tt0000102","El abismo",2022,"movie"),
+            ("tt0000103","The Ledge",2022,"movie"),
+            ("tt0000200","Bright Dream",2020,"movie"),
+            ("tt0000200","Dream Horse 夢",2020,"movie"),
+            ("tt0000400","Calendar Primary",2020,"movie"),
+            ("tt0000400","Calendar Other",2021,"movie"),
+            ("tt0000500","Type Primary",2020,"movie"),
+            ("tt0000500","Type Other",2020,"tvSeries"),
+            ("tt0000600","Complete Series",2020,"tvSeries"),
+            ("tt0000600","Serie Complete",2020,"tvSeries"),
+            ("tt0000700","Primary Alias",2020,"movie"),
+            ("tt0000700","Second Alias",2020,"movie"),
+            ("tt0000701","Primary Alias (Second Alias)",2020,"movie"),
+            ("tt0000702","Primary Alias (Second Alias)",2020,"movie"),
+            ("tt0000801","Shared First",2020,"movie"),
+            ("tt0000801","Shared Second",2020,"movie"),
+            ("tt0000802","Shared First",2020,"movie"),
+            ("tt0000802","Shared Second",2020,"movie"),
+        ]{
+            db.execute("INSERT INTO titles VALUES(?1,?2,?3,?4,'work','US',1,0,?5)",
+                params![id,title,clean_title(title),year,kind]).unwrap();
+        }
+        db.execute_batch("INSERT INTO seasons VALUES('tt0000500',2),('tt0000600',2);
+            INSERT INTO imdb_ratings VALUES('tt0000101',1000000),('tt0000102',1000000),
+                ('tt0000103',1000000),('tt0000700',1000000),('tt0000801',1000000);")
+            .unwrap();
+        db
+    }
+
+    #[test]
+    fn strict_bilingual_complete_aliases_require_one_shared_eligible_identity(){
+        let db=bilingual_fixture();
+        for (title,year,expected) in [
+            ("Caballo sonador (Dream Horse)",2020,"tt9883996"),
+            ("Love at Second Sight [Mon Inconnue]",2019,"tt8265928"),
+            ("Ichi The Killer (Koroshiya 1)",2001,"tt0296042"),
+            ("El abismo (The Ledge)",2022,"tt6805938"),
+        ]{
+            let release=format!("{title}.{year}.1080p.WEB-DL-GROUP");
+            let found=search_inner_mode(&db,title,Some(year),false,0,
+                &release,false,1,false,true).unwrap().0;
+            assert_eq!(found.len(),1,"{title}: {found:?}");
+            assert_eq!(found[0].imdb_id,expected,
+                "both complete aliases identify the work, regardless of competing votes");
+            let wrong_year=search_inner_mode(&db,title,Some(2025),false,0,
+                &release,false,20,false,true).unwrap().0;
+            assert!(wrong_year.is_empty(),"strict production year remains mandatory");
+        }
+        let series=search_inner_mode(&db,"Complete Series [Serie Complete]",Some(2020),
+            true,2,"Complete.Series.[Serie.Complete].S02E01",true,20,false,true)
+            .unwrap().0;
+        assert_eq!(series[0].imdb_id,"tt0000600");
+        assert!(search_inner_mode(&db,"Complete Series [Serie Complete]",Some(2020),
+            true,7,"Complete.Series.[Serie.Complete].S07E01",true,20,false,true)
+            .unwrap().0.is_empty(),"both components retain season eligibility");
+    }
+
+    #[test]
+    fn strict_bilingual_aliases_never_drop_unknown_or_inexact_components(){
+        let db=bilingual_fixture();
+        for (title,year,series) in [
+            ("Dream Horse (Mon Inconnue)",None,false),
+            ("Dream Horse [Not a Catalog Alias]",Some(2020),false),
+            ("Bright Dream [Dream Horse 葉]",Some(2020),false),
+            ("Bright Dream [Dream and Horse 夢]",Some(2020),false),
+            ("Calendar Primary (Calendar Other)",Some(2020),false),
+            ("Calendar Primary (Calendar Other)",Some(2021),false),
+            ("Type Primary [Type Other]",Some(2020),false),
+            ("Type Primary [Type Other]",Some(2020),true),
+            ("Shared First [Shared Second]",Some(2020),false),
+        ]{
+            let found=search_inner_mode(&db,title,year,series,0,title,false,1,
+                false,true).unwrap().0;
+            assert!(found.is_empty(),"unverified/ambiguous component: {title}: {found:?}");
+        }
+    }
+
+    #[test]
+    fn eligible_full_literal_bracket_titles_preempt_bilingual_interpretation(){
+        let db=bilingual_fixture();
+        let title="Primary Alias (Second Alias)";
+        let found=search_inner_mode(&db,title,Some(2020),false,0,title,false,20,
+            false,true).unwrap().0;
+        assert_eq!(found.len(),2,"retain the complete ambiguous literal shortlist");
+        assert!(found.iter().all(|row|matches!(row.imdb_id.as_str(),
+            "tt0000701"|"tt0000702")),
+            "a high-vote shared component identity cannot replace full literal titles");
+    }
+
+    #[test]
+    fn bilingual_component_grammar_is_terminal_balanced_bounded_and_nonrecursive(){
+        assert_eq!(bilingual_title_parts("Caballo soñador (Dream Horse)"),
+            Some(("Caballo soñador","Dream Horse")));
+        assert_eq!(bilingual_title_parts("Ichi the Killer[Koroshiya 1]"),
+            Some(("Ichi the Killer","Koroshiya 1")));
+        for title in ["First (Second) trailing","First ((Second))",
+            "First [Second)","First (Second]","First [Second] (Third)",
+            "(Second)","First []","First (Second", "First Second)"]{
+            assert!(bilingual_title_parts(title).is_none(),"{title}");
+        }
+        assert!(bilingual_title_parts(&format!("{} [Second]","é".repeat(256))).is_none());
+    }
 
     #[test]
     fn strict_complete_aliases_equate_and_with_ampersand_without_omitting_words(){
