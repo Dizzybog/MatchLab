@@ -1215,6 +1215,7 @@ fn diagnose_with_policy(
             hint.get("title").and_then(Value::as_str),
             hint.get("marker").and_then(Value::as_str),
             hint.get("local").and_then(Value::as_i64))
+        && (2..=99).contains(&local)
     {
         let name=name.to_owned();
         let marker=marker.to_owned();
@@ -1229,11 +1230,13 @@ fn diagnose_with_policy(
         let explicit_ep=if marker=="P" {marked_ep}
             else{marked_ep.or(parsed_ep)};
         let probe=explicit_ep.unwrap_or(1);
-        if let Some(imdb)=exact_anime_identity(&db,&name)?
-            && let Some(verified)=anime_title::resolve_local_part(
+        if let Some(imdb)=exact_anime_identity(&db,&name)? {
+            let base=anime_title::named_part_base(&db,&imdb,&name)
+                .map_err(|e|e.to_string())?;
+            if let Some(verified)=anime_title::resolve_local_part(
                 &db,&imdb,&name,&marker,local,probe)
                     .map_err(|e|e.to_string())?
-        {
+            {
             let mapped=verified.mapped;
             if let Some(parsed)=parsed_value.as_object_mut(){
                 parsed.insert("title".into(),json!(name));
@@ -1263,6 +1266,20 @@ fn diagnose_with_policy(
                     "episode":mapped.episode,"anidb_id":mapped.anidb_id,
                     "anidb_episode":mapped.anidb_episode
                 }));
+            }
+            } else if base.is_some_and(|base|
+                !(marker=="S" && local==base)) {
+                // The named part is proven, but this local coordinate is
+                // not. Never silently publish S02 or a whole season pack.
+                if let Some(parsed)=parsed_value.as_object_mut(){
+                    parsed.insert("title".into(),json!(name));
+                    parsed.insert("seasons".into(),json!([]));
+                    parsed.insert("episodes".into(),json!([]));
+                    parsed.insert("anime_local_part_unresolved".into(),
+                        json!({"imdb_id":imdb,"local_marker":marker,
+                            "local_number":local,"base_season":base}));
+                    parsed.insert("anime_title_verified".into(),json!(true));
+                }
             }
         }
     }
@@ -1570,7 +1587,8 @@ fn diagnose_with_policy(
         }else{
             anime_identity(&db,anime_resolve_title).map_err(|e|e.to_string())?
                 .map(|id|{
-                    let inferred=if seasons.is_empty() {
+                    let inferred=if seasons.is_empty()
+                        && !parsed.contains_key("anime_local_part_unresolved") {
                         anime_title::season_from_title(&db,&id,anime_resolve_title).ok().flatten()
                     } else {None};
                     json!({"imdb_id":id,"season":seasons.first().copied().or(inferred),
@@ -1860,6 +1878,7 @@ fn diagnose_with_policy(
     // A supplied episode or batch is never expanded to the entire season.
     if !airdate_only && episodes.is_empty() && !parsed.contains_key("episode_start")
         && !parsed.contains_key("anime_local_part_is_cour")
+        && !parsed.contains_key("anime_local_part_unresolved")
         && !parsed.contains_key("absolute_episode_candidate")
         && !parsed.contains_key("anime_episode_candidate")
         && !parsed.contains_key("anime_episode_range_candidate")
