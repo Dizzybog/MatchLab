@@ -689,7 +689,7 @@ fn filter_request_imdb_candidates(
         // Apply the same hard constraint after any supplementary candidate
         // promotion, including verified anime episode recovery. This also
         // covers dashboard diagnostics, not only the public API gate.
-        (!strict_match_mode() || gate.year.is_none_or(|y|candidate.year==y))
+        imdb_matcher::year_eligible(strict_match_mode(),gate.year,candidate.year)
             && (!matches!(gate.policy,MatchPolicy::PublicApi)
             ||year_signal_eligible(
                 gate.year,candidate.year,gate.has_season,
