@@ -87,6 +87,14 @@ Logging: `ERROR` remains at error level. MatchLab's formerly `WARN`-level nonfat
 
 The public `/match` and `/debug/match` endpoints have identical strict matching requirements. The dashboard's diagnostic endpoint is intentionally more permissive.
 
+Title matching preserves word boundaries in addition to Tantivy's compact normalized key: `Supernatural` (1 word) differs from `Super-Natural` / `Super.Natural` (2 words). **Strict** requires the original word count for exact IMDb and AniDB aliases. **Non-strict** uses the count only as a tie-break preference for normalized-key collisions, not as an exclusion: erroneous parser titles with additional words retain validated prefix/suffix recovery. Word counts are computed from existing names at query time; no metadata reindex is needed.
+
+**Strict production-year rule:** If a torrent filename supplies a year (or the `/match` request explicitly supplies one), the selected IMDb identity **must have that exact year**. Candidates with another year or no valid year are excluded, including AniDB-linked IMDb identities and episode-driven promotions. A release without a production year retains the existing title/episode matching rules. Non-strict mode continues to rank approximate years instead of excluding them. Date-based episodes use their separate airdate logic rather than interpreting an episode airdate as a show's production year.
+
+**Movie collections:** A parent folder such as `Harry Potter (2001-2012)/` is a range, not an individual release year. For `Harry Potter (2001-2012)/Harry Potter 1 (2001)`, strict matching uses the child's exact **2001**. For `Harry Potter (2001-2012)/Harry Potter and the Sorcerer's Stone`, no single year is inferred; an exact film title with an IMDb year **within 2001–2012** may satisfy the public match eligibility gate. An out-of-range or unmatched title does not gain an identity from the collection label.
+
+**Blu-ray folder layouts:** For `Harry Potter and the Sorcerer's Stone/STREAM/0000.m2ts` (or `.../BDMV/STREAM/00000.m2ts`), the technical directory and numeric stream filename cannot become IMDb identities or fake episodes. The matcher inherits the individual film's full title from its parent. In strict mode this verified disc structure permits a yearless **unambiguous exact IMDb movie title** to pass the public release-evidence gate. If the exact title belongs to multiple IMDb works and no release year is available, the result stays unmatched instead of guessing; a production year still requires exact equality. Ordinary yearless bare filenames retain their existing public eligibility rules.
+
 **Strict exact-title matching is enabled by default:** MatchLab compares
 complete IMDb and exact AniDB aliases in the same ranked candidate set.
 An unambiguous exact AniDB title can identify a named anime season/part even

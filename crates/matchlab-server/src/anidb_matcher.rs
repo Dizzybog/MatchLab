@@ -64,7 +64,9 @@ fn exact_anidb_ids(db:&Connection,title:&str)->Result<BTreeSet<String>,String>{
     if key.is_empty() || (!crate::strict_match_mode()&&key.len()<4){
         return Ok(BTreeSet::new());
     }
-    let ids=tantivy_search::anidb_ids_exact(db,&key)?;
+    let ids=if crate::strict_match_mode(){
+        tantivy_search::anidb_ids_exact_title(db,title)?
+    }else{tantivy_search::anidb_ids_exact(db,&key)?};
     Ok(ids.into_iter()
         .filter(|id|identifiers::canonical_asid(id,1).is_some()).collect())
 }
@@ -221,6 +223,31 @@ mod tests{
                 ('tt1785394','2369','74796',0);").unwrap();
         db
     }
+    #[test]
+    fn strict_anidb_id_matching_respects_original_title_word_boundaries(){
+        // The index intentionally compacts both titles to "supernatural".
+        // An AniDB-only work must not become a false positive because of
+        // a different original word segmentation.
+        let db=setup();
+        db.execute_batch("INSERT INTO anidb_titles VALUES
+            ('5001','Supernatural','supernatural','main','en'),
+            ('5002','Super-Natural','supernatural','main','en');
+            INSERT INTO episode_map VALUES
+            ('5001','tv1',1,-1,1,12,0,''),
+            ('5002','tv2',1,-1,1,12,0,'');").unwrap();
+        // Mode is globally controlled by MATCHLAB_STRICT_MODE; the
+        // title-aware Tantivy function is always the strict codepath.
+        assert_eq!(
+            tantivy_search::anidb_ids_exact_title(&db,"Supernatural").unwrap(),
+            BTreeSet::from(["5001".into()]));
+        assert_eq!(
+            tantivy_search::anidb_ids_exact_title(&db,"Super.Natural").unwrap(),
+            BTreeSet::from(["5002".into()]));
+        assert_eq!(
+            tantivy_search::anidb_ids_exact_title(&db,"Super-Natural").unwrap(),
+            BTreeSet::from(["5002".into()]));
+    }
+
     #[test]
     fn identifies_bleach_despite_five_imdb_links(){
         let db=setup();

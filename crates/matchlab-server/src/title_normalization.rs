@@ -16,6 +16,25 @@ pub fn clean_title(input:&str)->String{
         .collect()
 }
 
+/// Count the title's original words before Tantivy's compact ASCII key
+/// removes word boundaries. Dots, dashes, underscores and spaces separate
+/// words; apostrophes within names do not (JoJo's == Jojos: one word).
+/// Unlike clean_words, common connective words such as "and" still count.
+/// No allocations and no Tantivy index schema change are required.
+pub fn title_word_count(input:&str)->usize{
+    let mut count=0;
+    let mut in_word=false;
+    for ch in input.chars(){
+        if ch.is_alphanumeric(){
+            if !in_word{count+=1;}
+            in_word=true;
+        }else if ch!='\'' && ch!='’'{
+            in_word=false;
+        }
+    }
+    count
+}
+
 /// Retain normalized word boundaries for ranking partial title matches.
 /// A joined character prefix alone would confuse "Dune" and "Duneland".
 /// Only the shortlist ranker uses this; Tantivy's compact keys stay unchanged.
@@ -42,5 +61,19 @@ mod tests{
         assert_eq!(clean_words("JoJo's Bizarre Adventure"),
             vec!["jojos","bizarre","adventure"]);
         assert_eq!(clean_words("Pokémon and Ægir").concat(),clean_title("Pokémon and Ægir"));
+    }
+    #[test]
+    fn title_word_count_preserves_separators_and_apostrophes(){
+        assert_eq!(title_word_count("Supernatural"),1);
+        assert_eq!(title_word_count("Super-Natural"),2);
+        assert_eq!(title_word_count("Super.Natural"),2);
+        assert_eq!(title_word_count("Super_Natural"),2);
+        assert_eq!(title_word_count("Super  Natural"),2);
+        assert_eq!(title_word_count("JoJo's Bizarre Adventure"),3);
+        assert_eq!(title_word_count("JoJo’s Bizarre Adventure"),3);
+        assert_eq!(title_word_count("The Lord of the Rings"),5);
+        assert_eq!(title_word_count("Rock and Roll"),3);
+        assert_eq!(title_word_count("BLEACH 千年血戦篇"),2);
+        assert_eq!(title_word_count("..."),0);
     }
 }

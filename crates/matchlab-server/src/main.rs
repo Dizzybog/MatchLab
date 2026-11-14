@@ -670,30 +670,80 @@ fn verified_anime_subfolder_title(
     Ok(None)
 }
 
+/// A collection window belongs to a parent directory and is not a single
+/// film production year. Use the closest matching ancestor for a yearless
+/// movie release while leaving its actual production year unspecified.
+fn movie_collection_year_range(parsed:&serde_json::Map<String,Value>)->Option<(i32,i32)>{
+    let layers=parsed.get("path_layers")?.as_array()?;
+    layers.iter().take(layers.len().saturating_sub(1)).rev()
+        .filter_map(|layer|layer.get("raw").and_then(Value::as_str))
+        .find_map(matchlab_parser::collection_year_span)
+}
+
 /// Use identical production gates for both a filename and each parent directory.
 /// A candidate rejected later must not prevent the search from climbing.
 #[derive(Clone,Copy)]
 struct ImdbIdentityGate<'a>{
     policy:MatchPolicy,
+    strict:bool,
     year:Option<i32>,
     has_season:bool,
     has_quality:bool,
+    collection_year_range:Option<(i32,i32)>,
+    verified_bluray_stream:bool,
     season_range_end:Option<i64>,
     verified_anime_range:Option<&'a str>,
     verified_absolute_episode:Option<&'a str>,
 }
+// The AniDB episode resolver can promote an IMDb identity independently of
+// imdb_matcher::search_validated. It must obey the SAME strict production-year
+// rule, not just the ranked IMDb shortlist. The narrow primary-key lookup is
+// necessary ONLY when a requested year exists and the resolver produced a
+// separate anime identity; yearless and non-strict requests incur no SQL.
+fn strict_anime_imdb_year_eligible(
+    db:&Connection,anime:&Value,year:Option<i32>,strict:bool,
+)->bool{
+    if !strict {return true;}
+    let Some(year)=year else{return true;};
+    let Some(imdb)=anime.get("imdb_id").and_then(Value::as_str)else{
+        return false;
+    };
+    db.query_row("SELECT EXISTS(SELECT 1 FROM titles WHERE imdb_id=?1 AND year=?2)",
+        rusqlite::params![imdb,year],|row|row.get::<_,bool>(0))
+        .unwrap_or(false)
+}
+
 fn filter_request_imdb_candidates(
     db:&Connection,hits:Vec<imdb_matcher::Match>,gate:ImdbIdentityGate<'_>,
 )->Vec<imdb_matcher::Match>{
+    // In strict mode, a yearless complete film title in a real Blu-ray
+    // STREAM path is independent identity evidence. Require exactly ONE
+    // IMDb identity before treating a numbered transport stream as a release
+    // signal, so remakes sharing an exact title remain ambiguous without
+    // year metadata. Ordinary bare movie names keep their old public gate.
+    let unique_bluray_identity=gate.strict && gate.year.is_none()
+        &&!gate.has_season && gate.verified_bluray_stream
+        &&hits.iter().map(|row|row.imdb_id.as_str())
+            .collect::<std::collections::HashSet<_>>().len()==1;
     let mut filtered=hits.into_iter().filter(|candidate|{
-        !matches!(gate.policy,MatchPolicy::PublicApi)
+        // A box-set year window is contextual evidence for a yearless
+        // individual film, not the production year of every film in the pack.
+        // Strict has already verified the full title/alias before this gate.
+        let in_collection_range=gate.strict && gate.year.is_none()
+            && gate.collection_year_range.is_some_and(|(start,end)|
+                (start..=end).contains(&candidate.year));
+        // Apply the same hard constraint after any supplementary candidate
+        // promotion, including verified anime episode recovery. This also
+        // covers dashboard diagnostics, not only the public API gate.
+        imdb_matcher::year_eligible(gate.strict,gate.year,candidate.year)
+            && (!matches!(gate.policy,MatchPolicy::PublicApi)
             ||year_signal_eligible(
                 gate.year,candidate.year,gate.has_season,
                 !candidate.anime_ids.is_empty()
                     ||gate.verified_anime_range==Some(candidate.imdb_id.as_str())
                     ||gate.verified_absolute_episode==Some(candidate.imdb_id.as_str()),
                 gate.has_quality,
-            )
+            ) || in_collection_range || unique_bluray_identity)
     }).collect::<Vec<_>>();
     // An explicit season range is stricter than the season-1 tolerance
     // used for provisional title discovery. No range -> no SQL at all.
@@ -1128,8 +1178,13 @@ fn diagnose_with_policy(
             || exact_anime_identity(&db,title)?.is_some(),
     };
     let gate=ImdbIdentityGate{
-        policy,year,has_season:series&&!seasons.is_empty(),
+        policy,strict:strict_match_mode(),year,has_season:series&&!seasons.is_empty(),
         has_quality:parsed_quality,
+        collection_year_range:if year.is_none()&&!series{
+            movie_collection_year_range(parsed)
+        }else{None},
+        verified_bluray_stream:!series
+            &&matchlab_parser::bluray_movie_stream_path(&req.title),
         season_range_end:season_range.map(|(_,end)|end),
         verified_anime_range:verified_anime_range_imdb.as_deref(),
         verified_absolute_episode:verified_absolute_episode_imdb.as_deref(),
@@ -1321,6 +1376,11 @@ fn diagnose_with_policy(
                 && imdb_matcher::clean_title(&c.matched_title)==key && c.imdb_id!=anime_id
         })
     });
+    // The separate AniDB-priority branch below does not pass through
+    // filter_request_imdb_candidates: validate its IMDb production year
+    // before it can publish an SID in strict mode.
+    let anime=anime.filter(|a|strict_anime_imdb_year_eligible(
+        &db,a,year,strict_match_mode()));
     let mut selected = if let Some(a) = &anime {
         let imdb_id = a["imdb_id"].as_str().unwrap_or_default();
         let season = a["season"].as_i64();
@@ -1917,8 +1977,12 @@ static TORRENT_MATCH_CACHE:OnceLock<query_cache::QueryCache<Diagnostic>>=OnceLoc
 /// Strict and broad candidate discovery must never share a persisted or
 /// short-lived final result. Keep the full metadata/regex fingerprint, but
 /// append the immutable boot-time search policy.
+// A semantic matcher change must invalidate old persistent ML match results,
+// even when metadata.sqlite3, learned regex rules and the strict-mode flag
+// are unchanged. Bump this revision when altering title/year eligibility.
+const MATCHER_SEMANTIC_REVISION:&str="title-word-boundaries-strict-year-collection-v1";
 fn scoped_match_generation(metadata:&str,strict:bool)->String{
-    format!("{metadata}:strict={strict}")
+    format!("{metadata}:matcher={MATCHER_SEMANTIC_REVISION}:strict={strict}")
 }
 // Reuse the generation already checked by diagnose_logged, rather than
 // recomputing the filesystem/WAL SHA-256 to enter the same cache.
@@ -2860,8 +2924,8 @@ mod tests {
         let parsed=matchlab_parser::parse_title(
             "Monster/The.Ed.Gein.Story/E02.mkv",false).unwrap();
         let gate=ImdbIdentityGate{
-            policy:MatchPolicy::PublicApi,year:Some(2004),
-            has_season:false,has_quality:false,season_range_end:None,
+            policy:MatchPolicy::PublicApi,strict:false,year:Some(2004),
+            has_season:false,has_quality:false,collection_year_range:None,verified_bluray_stream:false,season_range_end:None,
             verified_anime_range:None,verified_absolute_episode:None,
         };
         let recovered=bottom_up_imdb_path_match(
@@ -2876,8 +2940,8 @@ mod tests {
         let parsed=matchlab_parser::parse_title(
             "The.Ed.Gein.Story/Monster/S02/E02.mkv",false).unwrap();
         let gate=ImdbIdentityGate{
-            policy:MatchPolicy::PublicApi,year:None,
-            has_season:true,has_quality:false,season_range_end:Some(2),
+            policy:MatchPolicy::PublicApi,strict:false,year:None,
+            has_season:true,has_quality:false,collection_year_range:None,verified_bluray_stream:false,season_range_end:Some(2),
             verified_anime_range:None,verified_absolute_episode:None,
         };
         let recovered=bottom_up_imdb_path_match(
@@ -4763,6 +4827,133 @@ mod tests {
     }
 
     #[test]
+    fn bluray_stream_file_uses_movie_folder_not_stream_or_numeric_leaf(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('tt0241527','Harry Potter and the Sorcer''s Stone',
+                    'harrypotterthesorcerersstone',2001,'movie','US',1,0,'movie'),
+                ('tt3333333','Stream','stream',2024,'movie','US',1,0,'movie'),
+                ('tt4444444','0000','0000',2000,'movie','US',1,0,'movie');
+            INSERT INTO imdb_ratings VALUES
+                ('tt0241527',5),('tt3333333',10000000),('tt4444444',10000000);")
+            .unwrap();
+        for path in [
+            "Harry Potter and the Sorcerer's Stone/stream/0000.m2ts",
+            "Harry Potter and the Sorcerer's Stone/BDMV/STREAM/00000.m2ts",
+            "Harry Potter (2001-2012)/Harry Potter and the Sorcerer's Stone/BDMV/STREAM/00000.m2ts",
+        ]{
+            let parsed=matchlab_parser::parse_title(path,false).unwrap();
+            assert_eq!(parsed["title"],"Harry Potter and the Sorcerer's Stone",
+                "{path}: {parsed:?}");
+            assert!(parsed.get("year").is_none(),"{path}: {parsed:?}");
+            assert!(matchlab_parser::bluray_movie_stream_path(path));
+            let gate=ImdbIdentityGate{
+                policy:MatchPolicy::PublicApi,strict:true,year:None,
+                has_season:false,has_quality:false,
+                collection_year_range:movie_collection_year_range(&parsed),
+                verified_bluray_stream:true,season_range_end:None,
+                verified_anime_range:None,verified_absolute_episode:None,
+            };
+            let found=bottom_up_imdb_path_match(&db,&parsed,None,false,0,
+                false,false,|hits|filter_request_imdb_candidates(&db,hits,gate))
+                .unwrap().unwrap_or_else(||panic!("failed disc movie: {path}"));
+            assert_eq!(found.0,"Harry Potter and the Sorcerer's Stone");
+            assert_eq!(found.1[0].imdb_id,"tt0241527",
+                "{path} must not match STREAM or 0000 despite more votes");
+        }
+        let path="Harry Potter and the Sorcerer's Stone/stream/0000.m2ts";
+        let parsed=matchlab_parser::parse_title(path,false).unwrap();
+        let gate=ImdbIdentityGate{
+            policy:MatchPolicy::PublicApi,strict:true,year:None,
+            has_season:false,has_quality:false,collection_year_range:None,
+            verified_bluray_stream:true,season_range_end:None,
+            verified_anime_range:None,verified_absolute_episode:None,
+        };
+        db.execute("INSERT INTO titles VALUES
+            ('tt5555555','Harry Potter and the Sorcer''s Stone',
+             'harrypotterthesorcerersstone',2002,'movie','US',0,1,'movie')",[])
+            .unwrap();
+        assert!(bottom_up_imdb_path_match(&db,&parsed,None,false,0,
+            false,false,|hits|filter_request_imdb_candidates(&db,hits,gate))
+            .unwrap().is_none(),
+            "without a production year, shared-title remakes must remain ambiguous");
+    }
+
+    #[test]
+    fn strict_year_also_filters_direct_anime_priority_identities(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            INSERT INTO titles VALUES
+                ('tt1111111','Anime 2005','anime2005',2005,'series','',1,0,'tvSeries'),
+                ('tt2222222','Anime 2021','anime2021',2021,'series','',1,0,'tvSeries'),
+                ('tt3333333','Unknown year anime','unknownyearanime',0,'series','',1,0,'tvSeries');")
+            .unwrap();
+        let old=json!({"imdb_id":"tt1111111","season":1,"episode":4});
+        let recent=json!({"imdb_id":"tt2222222","season":1,"episode":4});
+        let unknown=json!({"imdb_id":"tt3333333","season":1,"episode":4});
+        assert!(strict_anime_imdb_year_eligible(&db,&recent,Some(2021),true));
+        assert!(!strict_anime_imdb_year_eligible(&db,&old,Some(2021),true));
+        assert!(!strict_anime_imdb_year_eligible(&db,&unknown,Some(2021),true));
+        assert!(!strict_anime_imdb_year_eligible(&db,&json!({"imdb_id":"tt0000000"}),Some(2021),true));
+        assert!(!strict_anime_imdb_year_eligible(&db,&json!({}),Some(2021),true));
+        assert!(strict_anime_imdb_year_eligible(&db,&old,None,true));
+        assert!(strict_anime_imdb_year_eligible(&db,&old,Some(2021),false));
+    }
+
+    #[test]
+    fn strict_named_film_in_year_range_pack_matches_without_inventing_a_film_year(){
+        let path="Harry Potter (2001-2012)/Harry Potter and the Sorcerer's Stone";
+        let parsed=matchlab_parser::parse_title(path,false).unwrap();
+        assert_eq!(parsed["title"],"Harry Potter and the Sorcerer's Stone",
+            "use the individual film's title, not the collection name");
+        assert!(parsed.get("year").is_none(),
+            "a collection range cannot become a strict individual year");
+        let range=movie_collection_year_range(&parsed);
+        assert_eq!(range,Some((2001,2012)));
+        let db=Connection::open_in_memory().unwrap();
+        let candidate=|id:&str,year:i32|imdb_matcher::Match{
+            imdb_id:id.into(),
+            title:"Harry Potter and the Sorcerer's Stone".into(),
+            matched_title:"Harry Potter and the Sorcerer's Stone".into(),
+            year,category:"movie".into(),media_type:"movie".into(),
+            anime_ids:std::collections::BTreeMap::new(),
+        };
+        let gate=ImdbIdentityGate{
+            policy:MatchPolicy::PublicApi,strict:true,year:None,
+            has_season:false,has_quality:false,
+            collection_year_range:range,verified_bluray_stream:false,season_range_end:None,
+            verified_anime_range:None,verified_absolute_episode:None,
+        };
+        let filtered=filter_request_imdb_candidates(&db,vec![
+            candidate("tt0241527",2001),
+            candidate("tt9999999",2015),
+            candidate("tt8888888",1998),
+        ],gate);
+        assert_eq!(filtered.iter().map(|c|c.imdb_id.as_str())
+            .collect::<Vec<_>>(),vec!["tt0241527"]);
+        // The child year is still authoritative; a yearless child in an
+        // ordinary single-year parent still inherits the exact year.
+        for (path,expected) in [
+            ("Harry Potter (2001-2012)/Harry Potter 1 (2001)",Some(2001)),
+            ("Harry Potter (2001-2012)/Harry Potter 2 (2002)",Some(2002)),
+            ("Harry Potter (2001-2012)/Harry Potter and the Sorcerer's Stone (2001)",Some(2001)),
+            ("Harry Potter (2001-2012)/Harry Potter and the Sorcerer's Stone",None),
+            ("Harry Potter (2001)/Harry Potter and the Sorcerer's Stone",Some(2001)),
+        ]{
+            let parsed=matchlab_parser::parse_title(path,false).unwrap();
+            assert_eq!(parsed.get("year").and_then(Value::as_i64),
+                expected.map(i64::from),"{path}: {parsed:?}");
+        }
+    }
+
+    #[test]
     fn matching_parent_year_selects_2005_doctor_who_not_1963() {
         // The same IMDb title is shared by two series. The folder's
         // production year disambiguates the actual episode filename.
@@ -5221,9 +5412,9 @@ mod tests {
                 .is_ok_and(|max|max>=9))
             .map(|candidate|candidate.imdb_id.clone()).collect::<Vec<_>>();
         let gate=ImdbIdentityGate{
-            policy:MatchPolicy::DashboardDiagnostic,
+            policy:MatchPolicy::DashboardDiagnostic,strict:false,
             year:None,has_season:true,has_quality:true,
-            season_range_end:Some(9),verified_anime_range:None,
+            collection_year_range:None,verified_bluray_stream:false,season_range_end:Some(9),verified_anime_range:None,
             verified_absolute_episode:None,
         };
         let actual=filter_request_imdb_candidates(&db,hits,gate)

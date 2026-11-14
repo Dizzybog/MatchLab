@@ -3114,6 +3114,41 @@ fn split_release_path(raw:&str)->Vec<&str>{
     components
 }
 
+/// Distinguish a Blu-ray transport-stream file from an ordinary title.
+/// Disc layouts use `Film/BDMV/STREAM/00000.m2ts` or `Film/STREAM/0000.m2ts`.
+/// A solitary `Stream/0000.m2ts` is ambiguous: it may be the title of
+/// the film "Stream", so do not suppress that folder without a parent.
+fn bluray_stream_folder_index(components:&[&str])->Option<usize>{
+    let leaf=components.last()?.trim();
+    let (stem,extension)=leaf.rsplit_once('.')?;
+    if !extension.eq_ignore_ascii_case("m2ts")
+        ||stem.is_empty()||!stem.bytes().all(|ch|ch.is_ascii_digit())
+    {return None;}
+    let folder=components.len().checked_sub(2)?;
+    (folder>0 && components[folder].trim().eq_ignore_ascii_case("stream"))
+        .then_some(folder)
+}
+
+/// A verified Blu-ray folder path is independent release evidence when the
+/// file itself has a numeric transport-stream filename and no quality/year.
+pub fn bluray_movie_stream_path(path:&str)->bool{
+    bluray_stream_folder_index(&split_release_path(path)).is_some()
+}
+
+/// Detect a collection's year window, not the production year of an
+/// individual movie. Only parent path components use this signal.
+pub fn collection_year_span(component:&str)->Option<(i32,i32)>{
+    static SPAN:Lazy<regex::Regex>=Lazy::new(||regex::Regex::new(
+        r"(?:^|[^0-9])(?P<start>(?:19|20)[0-9]{2})\s*[-–—]\s*(?P<end>(?:19|20)[0-9]{2})(?:$|[^0-9])"
+    ).expect("bounded collection year-span grammar"));
+    if !component.contains(['-','–','—']){return None;}
+    SPAN.captures_iter(component).find_map(|caps|{
+        let start=caps.name("start")?.as_str().parse::<i32>().ok()?;
+        let end=caps.name("end")?.as_str().parse::<i32>().ok()?;
+        (start<end).then_some((start,end))
+    })
+}
+
 /// Parse a hierarchical torrent path from ancestor to leaf. Any explicit,
 /// non-empty metadata value on a deeper level overrides the same field from
 /// an ancestor (year, season, episode, quality, resolution, codec, etc.).
@@ -3126,6 +3161,7 @@ pub fn parse_title(
     let date_normalized=normalize_slash_dates(raw_title);
     let raw_title=date_normalized.as_ref();
     let components=split_release_path(raw_title);
+    let bluray_stream_folder=bluray_stream_folder_index(&components);
     let mut merged=Map::new();
     let mut fallback_parent_title:Option<String>=None;
     // Preserve title candidates separately. The parser cannot determine if
@@ -3154,11 +3190,58 @@ pub fn parse_title(
         // parser-only fallback. Four-digit year directories remain eligible.
         let bare_number_directory=is_parent && component.trim().len()<=3
             && component.trim().bytes().all(|b|b.is_ascii_digit());
-        let layer=if share_components{
+        let mut layer=if share_components{
             cached_path_component(component,translate_languages)?
         }else{
             parse_path_component(component,translate_languages)?
         };
+        // In a validated Blu-ray STREAM layout, BDMV and STREAM folders
+        // and the numeric .m2ts leaf are structural, not IMDb titles.
+        // Never allow fake years/episodes from the filename to leak into
+        // the final parse or to influence the bottom-up title matcher.
+        // Keep real "Stream" films matchable outside this structure.
+        if let Some(folder)=bluray_stream_folder
+            && (index>=folder || (index+1==folder
+                &&component.trim().eq_ignore_ascii_case("bdmv")))
+        {
+            for field in ["title","year","seasons","episodes","episode_start",
+                "episode_end","episode_count","episode_range_numbering",
+                "absolute_episode_candidate","anime_episode_candidate",
+                "anime_episode_range_candidate","anime_season_episode_candidate",
+                "episode_title"]{
+                layer.remove(field);
+            }
+        }
+        // A collection label such as "Harry Potter (2001-2012)" is NOT
+        // evidence that every child film was released in 2001 or 2012.
+        // The generated year handlers can extract either endpoint. Prevent
+        // inheritance of that endpoint, but let any explicit child year win.
+        if is_parent && let Some((start,end))=collection_year_span(component){
+            if layer.get("year").and_then(Value::as_i64)
+                .is_some_and(|year|year==i64::from(start)||year==i64::from(end)){
+                layer.remove("year");
+            }
+            // A Unicode en/em dash in a movie box-set range can otherwise
+            // be interpreted by the upstream parser as a huge absolute TV
+            // episode. Remove ONLY coordinates equal to the year endpoints
+            // in a parent component with no explicit TV season coordinates.
+            // Real child SxxExx and separate parent coordinates remain intact.
+            let fake_year_episode=layer.get("seasons").and_then(Value::as_array)
+                .is_none_or(Vec::is_empty)
+                &&layer.get("episodes").and_then(Value::as_array)
+                    .is_some_and(|episodes|!episodes.is_empty()
+                        &&episodes.iter().all(|value|
+                            value.as_i64().is_some_and(|ep|
+                                ep==i64::from(start)||ep==i64::from(end))));
+            if fake_year_episode{
+                for field in ["episodes","episode_start","episode_end",
+                    "episode_count","episode_range_numbering",
+                    "absolute_episode_candidate","anime_episode_candidate",
+                    "anime_episode_range_candidate"]{
+                    layer.remove(field);
+                }
+            }
+        }
         if let Some(title)=layer.get("title").and_then(Value::as_str){
             let title=title.trim();
             if !is_parent{
@@ -4355,6 +4438,77 @@ mod tests {
         // Non-title metadata inherits through movie paths as well.
         let movie=parse_title("Movie.Name.2005.2160p/Movie.Name.mkv",false).unwrap();
         assert_eq!(movie["year"],2005);
+    }
+
+    #[test]
+    fn bluray_stream_numeric_filename_inherits_nearest_real_movie_title(){
+        for (input,expected_title,expected_year) in [
+            ("Harry Potter and the Sorcerer's Stone/stream/0000.m2ts",
+                "Harry Potter and the Sorcerer's Stone",None),
+            ("Harry Potter and the Sorcerer's Stone/BDMV/STREAM/00000.m2ts",
+                "Harry Potter and the Sorcerer's Stone",None),
+            ("Harry Potter and the Sorcerer's Stone (2001)/BDMV/STREAM/00001.M2TS",
+                "Harry Potter and the Sorcerer's Stone",Some(2001)),
+            ("Harry Potter (2001-2012)/Harry Potter and the Sorcerer's Stone/STREAM/0000.m2ts",
+                "Harry Potter and the Sorcerer's Stone",None),
+        ]{
+            let parsed=parse_title(input,false).unwrap();
+            assert!(bluray_movie_stream_path(input));
+            assert_eq!(parsed["title"],json!(expected_title),"{input}: {parsed:?}");
+            assert_eq!(parsed.get("year").and_then(Value::as_i64),
+                expected_year.map(i64::from),"{input}: {parsed:?}");
+            assert_eq!(parsed["seasons"],json!([]),"{input}: {parsed:?}");
+            assert_eq!(parsed["episodes"],json!([]),"{input}: {parsed:?}");
+            for node in parsed["path_layers"].as_array().unwrap().iter().rev().take(2){
+                assert!(node["parsed"].get("title").is_none(),
+                    "technical layer cannot become a title: {input}: {parsed:?}");
+            }
+        }
+        // Do not globally mark "Stream" as a generic title.
+        assert!(!bluray_movie_stream_path("Stream/0000.m2ts"));
+        assert!(!bluray_movie_stream_path("Stream/Stream.2024.mkv"));
+        assert!(!bluray_movie_stream_path("Harry Potter/stream/featurette.m2ts"));
+        let film=parse_title("Stream (2024)/Stream.2024.mkv",false).unwrap();
+        assert_eq!(film["title"],"Stream");
+        assert_eq!(film["year"],2024);
+    }
+
+    #[test]
+    fn movie_collection_year_window_does_not_become_a_child_production_year(){
+        for (full,expected) in [
+            ("Harry Potter (2001-2012)/Harry Potter 1 (2001)",Some(2001)),
+            ("Harry Potter (2001-2012)/Harry Potter 2 (2002)",Some(2002)),
+            ("Harry Potter (2001-2012)/Harry Potter 8 (2011)",Some(2011)),
+            ("Harry Potter (2001-2012)/Harry Potter 2 (2002)/Harry.Potter.2.mkv",Some(2002)),
+            ("Harry Potter (2001-2012)/Harry Potter and the Sorcerer's Stone",None),
+            ("Harry potter (2001-2012)/ harry potter and the sorcerer's stone",None),
+            ("Harry Potter (2001–2012)/Harry Potter and the Sorcerer's Stone",None),
+            ("Harry Potter (2001—2012)/Harry Potter and the Sorcerer's Stone",None),
+            ("Harry Potter (2001-2012)/Harry Potter and the Sorcerer's Stone (2001)",Some(2001)),
+        ]{
+            let parsed=parse_title(full,false).unwrap();
+            assert_eq!(parsed.get("year").and_then(Value::as_i64),
+                expected.map(i64::from),"{full}: {parsed:?}");
+            assert_eq!(parsed["seasons"],json!([]),"{full}: {parsed:?}");
+            assert_eq!(parsed["episodes"],json!([]),"{full}: {parsed:?}");
+            assert!(parsed["title"].as_str().is_some_and(|title|
+                title.to_lowercase().starts_with("harry potter")),
+                "{full}: {parsed:?}");
+            let first=&parsed["path_layers"][0]["parsed"];
+            assert!(first.get("year").is_none(),
+                "a range endpoint must not become an inherited year: {parsed:?}");
+        }
+        assert_eq!(collection_year_span("Harry Potter (2001-2012)"),Some((2001,2012)));
+        assert_eq!(collection_year_span("Harry Potter (2001–2012)"),Some((2001,2012)));
+        assert_eq!(collection_year_span("Harry Potter (2001—2012)"),Some((2001,2012)));
+        assert_eq!(collection_year_span("Harry Potter (2001)"),None);
+        assert_eq!(collection_year_span("Harry Potter (2012-2001)"),None);
+        // A true single-year parent still supplies metadata to yearless leaves.
+        let film=parse_title("Movie Name (2001)/Movie.Name.mkv",false).unwrap();
+        assert_eq!(film["year"],2001);
+        // Do not erase an independent production year in the same parent.
+        let extra=parse_title("Harry Potter (2001-2012) Remaster.2024/Unspecified.mkv",false).unwrap();
+        assert_eq!(extra["year"],2024);
     }
 
     #[test]

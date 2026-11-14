@@ -570,10 +570,16 @@ pub fn aliases_for_imdb_ids(
 /// IMDb-independent AniDB identity lookup. Collect only AniDB ID postings
 /// (including works without an IMDb link) instead of rehydrating full title
 /// aliases. The cache key is tied to the immutable Tantivy generation.
-fn anidb_ids_exact_uncached(db:&Connection,key:&str)->Result<BTreeSet<String>,String>{
+fn anidb_ids_exact_uncached(
+    db:&Connection,key:&str,original_title:Option<&str>,
+)->Result<BTreeSet<String>,String>{
     if key.is_empty() ||(!crate::strict_match_mode()&&key.len()<4){
         return Ok(BTreeSet::new());
     }
+    let expected=original_title.map(|title|(
+        crate::title_normalization::title_word_count(title),
+        crate::imdb_matcher::semantic_words(title)
+    ));
     let (search,memory_dir)=open_search(db)?;
     let reader=search.reader.searcher();
     let query=TermQuery::new(
@@ -582,6 +588,12 @@ fn anidb_ids_exact_uncached(db:&Connection,key:&str)->Result<BTreeSet<String>,St
     let mut result=BTreeSet::new();
     for addr in hits{
         let doc:tantivy::TantivyDocument=reader.doc(addr).map_err(|e|e.to_string())?;
+        if let Some((count,words))=expected.as_ref(){
+            let Some(name)=doc.get_first(search.anime_title).and_then(|v|v.as_str())
+                else{continue};
+            if crate::title_normalization::title_word_count(name)!=*count
+                ||crate::imdb_matcher::semantic_words(name)!=*words {continue;}
+        }
         if let Some(id)=doc.get_first(search.anime_id).and_then(|v|v.as_str()){
             result.insert(id.to_owned());
         }
@@ -594,9 +606,25 @@ fn anidb_ids_exact_uncached(db:&Connection,key:&str)->Result<BTreeSet<String>,St
 pub fn anidb_ids_exact(db:&Connection,key:&str)->Result<BTreeSet<String>,String>{
     if let Some(cache_key)=lookup_cache_key(db,"anidb_exact",key){
         ANIDB_EXACT_LOOKUPS.get_or_init(||QueryCache::new(LOOKUP_CAP,LOOKUP_TTL))
-            .get_or_compute(cache_key,||anidb_ids_exact_uncached(db,key),
+             .get_or_compute(cache_key,||anidb_ids_exact_uncached(db,key,None),
                 |ids|ids.len()<=LOOKUP_MAX_ALIASES)
-    }else{anidb_ids_exact_uncached(db,key)}
+    }else{anidb_ids_exact_uncached(db,key,None)}
+}
+
+/// For strict episode and named-part matching, original punctuation must
+/// agree with the indexed AniDB alias. The normalized Tantivy term alone
+/// cannot distinguish one-word Supernatural from two-word Super-Natural.
+/// Filter only the exact postings, never search SQLite for title metadata.
+pub fn anidb_ids_exact_title(
+    db:&Connection,raw_title:&str
+)->Result<BTreeSet<String>,String>{
+    let key=crate::title_normalization::clean_title(raw_title);
+    if key.is_empty(){return Ok(BTreeSet::new());}
+    let compute=||anidb_ids_exact_uncached(db,&key,Some(raw_title));
+    if let Some(cache_key)=lookup_cache_key(db,"anidb_exact_original",raw_title){
+        ANIDB_EXACT_LOOKUPS.get_or_init(||QueryCache::new(LOOKUP_CAP,LOOKUP_TTL))
+            .get_or_compute(cache_key,compute,|ids|ids.len()<=LOOKUP_MAX_ALIASES)
+    }else{compute()}
 }
 
 /// A very short anime alias must not establish identity for a different
@@ -1068,15 +1096,16 @@ pub fn title_aliases_inside(db:&Connection,key:&str)->Result<Vec<TitleAlias>,Str
 pub fn anime_aliases_exact(db:&Connection,raw_title:&str)->Result<Vec<AnimeAlias>,String>{
     let key=crate::title_normalization::clean_title(raw_title);
     if key.is_empty(){return Ok(Vec::new());}
+    // Reuse the strict Unicode identity check for ASCII aliases as well:
+    // Supernatural, Super-Natural and Super.Natural have the same compact
+    // Tantivy key, but only the latter two have two original title words.
+    let expected_words=crate::imdb_matcher::semantic_words(raw_title);
+    let expected_count=crate::title_normalization::title_word_count(raw_title);
     Ok(lookup_aliases(db,AliasLookupKind::ExactTitle,&key)?
         .into_iter()
         .filter(|alias|alias.source=="anidb" &&alias.normalized==key)
-        // Tantivy's compact ASCII key may drop non-Latin title words.
-        // Strict mode must never treat BLEACH and BLEACH 千年血戦篇 as
-        // identical just because their indexed ASCII keys are equal.
-        .filter(|alias| (raw_title.is_ascii() && alias.name.is_ascii())
-            || crate::imdb_matcher::semantic_words(&alias.name)
-                ==crate::imdb_matcher::semantic_words(raw_title))
+        .filter(|alias|crate::title_normalization::title_word_count(&alias.name)==expected_count
+            &&crate::imdb_matcher::semantic_words(&alias.name)==expected_words)
         .filter_map(|alias|Some(AnimeAlias{
             anidb_id:alias.anidb_id?,
             imdb_id:alias.imdb_id?,
