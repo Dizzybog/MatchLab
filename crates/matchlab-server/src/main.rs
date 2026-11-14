@@ -690,7 +690,6 @@ struct ImdbIdentityGate<'a>{
     has_season:bool,
     has_quality:bool,
     collection_year_range:Option<(i32,i32)>,
-    collection_movie:bool,
     verified_bluray_stream:bool,
     season_range_end:Option<i64>,
     verified_anime_range:Option<&'a str>,
@@ -737,7 +736,7 @@ fn filter_request_imdb_candidates(
         // promotion, including verified anime episode recovery. This also
         // covers dashboard diagnostics, not only the public API gate.
         imdb_matcher::year_eligible(gate.strict,gate.year,candidate.year)
-            && (!gate.collection_movie ||
+            && (gate.collection_year_range.is_none() ||
                 !matches!(candidate.media_type.as_str(),"tvSeries"|"tvMiniSeries"))
             && (!matches!(gate.policy,MatchPolicy::PublicApi)
             ||year_signal_eligible(
@@ -1191,7 +1190,6 @@ fn diagnose_with_policy(
                 })
                 .or_else(||movie_collection_year_range(parsed))
         }else{None},
-        collection_movie:!series&&parsed.contains_key("collection_year_range"),
         verified_bluray_stream:!series
             &&matchlab_parser::bluray_movie_stream_path(&req.title),
         season_range_end:season_range.map(|(_,end)|end),
