@@ -422,7 +422,7 @@ fn verified_ordinary_imdb_episode_range(
 /// AniDB/TVDB crosswalk. A partial mapping never produces guessed endpoints.
 fn mapped_season_episode_range(
     db:&Connection,imdb:&str,title:&str,season:i64,start:i64,end:i64,
-    canonical_title:bool,
+    canonical_title:bool,force_named_part:bool,
 )->Result<Value,String>{
     let mut segments:Vec<Value>=Vec::new();
     let mut first:Option<episode_crosswalk::Episode>=None;
@@ -431,7 +431,7 @@ fn mapped_season_episode_range(
     // The canonical IMDb series title identifies a fixed IMDb season.
     // Never reinterpret it as a named AniDB part just because an OVA/movie
     // shares its alias (e.g. the base series Bleach).
-    let specific=if canonical_title {false} else {
+    let specific=if force_named_part {true}else if canonical_title {false}else{
         anime_title::has_specific_alias(db,imdb,title)
             .map_err(|e|e.to_string())?
     };
@@ -1025,7 +1025,7 @@ fn diagnose_with_policy(
                         1
                     }else{local};
                     let checked=mapped_season_episode_range(
-                        &db,&imdb,&name,effective,start,end,false)?;
+                        &db,&imdb,&name,effective,start,end,false,true)?;
                     if checked["complete"]==true
                         && checked["start_season"].as_i64()
                             ==Some(first.mapped.season)
@@ -1921,7 +1921,8 @@ fn diagnose_with_policy(
                                 && imdb_matcher::clean_title(&candidate.title)==anime_resolve_key)
                                 && anime_subfolder_title.is_none());
                         let mapped=mapped_season_episode_range(
-                            &db,&imdb_id,anime_resolve_title,season,1,end,canonical_title)?;
+                            &db,&imdb_id,anime_resolve_title,season,1,end,
+                            canonical_title,false)?;
                         // Keep the exact missing/ambiguous-map diagnostics
                         // without weakening the verified public ASID contract.
                         winner["anime_range_diagnostics"]=mapped.clone();
@@ -1959,7 +1960,7 @@ fn diagnose_with_policy(
                     let range=if linked {
                         let mapped=mapped_season_episode_range(
                             &db,&imdb_id,anime_resolve_title,season,start,end,
-                            parsed.get("anime_local_part_verified").is_some())?;
+                            parsed.get("anime_local_part_verified").is_some(),false)?;
                         // A partial AniDB mapping is not evidence that the
                         // explicitly labelled IMDb SxxEyy interval is wrong.
                         // Retain IMDb endpoints when the canonical IMDb
