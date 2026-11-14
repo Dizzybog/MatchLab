@@ -1000,6 +1000,15 @@ impl ParserEngine {
                     .map_err(|e| ParseError::Regex(e.to_string()))?
                     && let Ok(n) = m.as_str().parse::<i64>()
                 {
+                    // A film collection ordinal belongs to the full movie
+                    // name, not to the parent anime's episode numbering.
+                    let prefix=title[..m.start()]
+                        .trim_end_matches(|c:char|!c.is_alphanumeric());
+                    if prefix.rsplit(|c:char|!c.is_alphanumeric()).next()
+                        .is_some_and(|word|word.eq_ignore_ascii_case("movie")
+                            ||word.eq_ignore_ascii_case("film")) {
+                        return Ok(None);
+                    }
                     result.insert(
                         "episodes".to_owned(),
                         Value::Array(vec![Value::Number(n.into())]),
@@ -3242,6 +3251,30 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
             }
             result.insert("collection_year_range".into(),json!([start,end]));
             set_title_from_release_prefix(release,offset,translate_languages,&mut result)?;
+        }
+    }
+    // A repeated numeric work name followed by a broadcast date (20-20)
+    // is not bare S20E20 notation. Only remove coordinates equal to that
+    // identity number, and keep independently explicit episode markers.
+    let numeric_identity=result.get("title").and_then(Value::as_str)
+        .and_then(|title|title.split_once('-'))
+        .filter(|(left,right)|left==right&&!left.is_empty()&&left.len()<=2
+            &&left.bytes().all(|byte|byte.is_ascii_digit()))
+        .and_then(|(number,_)|number.parse::<i64>().ok());
+    if let Some(number)=numeric_identity
+        &&result.get("date").and_then(Value::as_str).is_some()
+        &&!EXPLICIT_EPISODE_RE.is_match(raw)
+            .map_err(|error|ParseError::Regex(error.to_string()))?
+        &&!X_COORDS_RE.is_match(raw)
+            .map_err(|error|ParseError::Regex(error.to_string()))?
+    {
+        for field in ["seasons","episodes"] {
+            if field=="seasons"&&EXPLICIT_SEASON_LABEL_RE.is_match(raw){continue;}
+            if result.get(field).and_then(Value::as_array)
+                .is_some_and(|values|!values.is_empty()
+                    &&values.iter().all(|value|value.as_i64()==Some(number))) {
+                result.insert(field.into(),json!([]));
+            }
         }
     }
     if let Some(episode_title) = extract_release_episode_title(raw, &result)? {

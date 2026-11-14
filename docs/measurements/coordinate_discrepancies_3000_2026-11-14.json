@@ -1,0 +1,243 @@
+{
+  "schema": "matchlab-matched-coordinate-audit-v1",
+  "date": "2026-11-14",
+  "base_commit": "09ff25f5499cdf223504548c5593a3b0718cac2e",
+  "baseline_binary_source_commit": "4bdefaa6ff692a77e3c857d8d121c0f4daf813c2",
+  "base_and_baseline_source_trees_identical": true,
+  "capture": {
+    "started_utc": "2026-11-14T21:15:58Z",
+    "completed_utc": "2026-11-14T21:21:38Z",
+    "pages": 295,
+    "http_attempts": 301,
+    "rows_scanned": 22334,
+    "matched_rows_scanned": 17220,
+    "qualifying_rows_seen": 3773,
+    "excluded_prior_rows": 0,
+    "duplicate_candidate_rows": 766,
+    "malformed_rows": 0,
+    "cursor_expired_pages": 0,
+    "history_resets": 0,
+    "capture_failures": 0,
+    "accepted_unique_titles": 3000,
+    "target": 3000,
+    "unique_request_strings_observed": 21840,
+    "elapsed_seconds": 340.5,
+    "accepted_per_minute": 528.69,
+    "selection_rule": "matched with selected start absent from parsed values or one-sided presence; scalar zero preserved; no anomaly-flag requirement",
+    "uniqueness_rule": "Exact original UTF-8 request strings AND NFC/case-folded basenames must be new; no ASCII title normalization; all prior analyzed seed inputs excluded",
+    "build_observations": [
+      {
+        "observed_utc": "2026-11-14T21:15:58Z",
+        "build_sha": "dfe78a5b67c08dddff935c589e29e300b8728565"
+      },
+      {
+        "observed_utc": "2026-11-14T21:16:59Z",
+        "build_sha": "dfe78a5b67c08dddff935c589e29e300b8728565"
+      },
+      {
+        "observed_utc": "2026-11-14T21:18:00Z",
+        "build_sha": "dfe78a5b67c08dddff935c589e29e300b8728565"
+      },
+      {
+        "observed_utc": "2026-11-14T21:19:01Z",
+        "build_sha": "dfe78a5b67c08dddff935c589e29e300b8728565"
+      },
+      {
+        "observed_utc": "2026-11-14T21:20:02Z",
+        "build_sha": "dfe78a5b67c08dddff935c589e29e300b8728565"
+      },
+      {
+        "observed_utc": "2026-11-14T21:21:03Z",
+        "build_sha": "dfe78a5b67c08dddff935c589e29e300b8728565"
+      }
+    ]
+  },
+  "validation": {
+    "validated_utc": "2026-11-14T21:22:27.038336+00:00",
+    "accepted": 3000,
+    "target_reached": true,
+    "unique_raw_requests": 3000,
+    "unique_nfc_casefold_basenames": 3000,
+    "unique_source_ids": 3000,
+    "excluded_seed_raw": 3383,
+    "excluded_seed_basenames": 3142,
+    "extra_recent_direct_fixture_requests_checked": 8,
+    "all_accepted_rows_valid": true,
+    "reason_counts": {
+      "episode_parsed_missing": 1719,
+      "season_parsed_missing": 1474,
+      "episode_selected_missing": 60,
+      "episode_value_diff": 54,
+      "season_value_diff": 7,
+      "season_selected_missing": 8
+    },
+    "cases_with_value_difference": 58,
+    "missing_only_cases": 2942,
+    "quarantined_rows": 0,
+    "capture_failures": 0,
+    "malformed_rows": 0,
+    "export_exactly_matches_durable_sqlite": true,
+    "candidates_sha256": "f41a4c4a1fc40af8e7d7b972079c17222936948b90dc59f685bfbebc1491d539",
+    "scope": "Novel eligible coordinate disagreements only; not 3000 proven errors or a production accuracy estimate."
+  },
+  "analysis_coverage": {
+    "captured_rows": 3000,
+    "native_replay_rows": 3000,
+    "mechanically_classified_rows": 3000,
+    "unique_row_ids": 3000,
+    "native_http_status_counts": {
+      "200": 3000
+    },
+    "rows_without_a_mechanical_shape_bucket": 0,
+    "rows_without_original_request_overrides": 3000
+  },
+  "mechanical_shape_buckets_not_correctness_labels": {
+    "imdb_season_pack_expansion": 1372,
+    "missing_season_inferred_for_episode": 1115,
+    "other_inferred_or_pack_coordinates": 299,
+    "calendar_to_verified_coordinates": 96,
+    "unresolved_coordinates_review": 60,
+    "coordinate_conversion_review": 58
+  },
+  "stored_diagnostic_vs_native_parser_disjoint_partitions": {
+    "identical": 2315,
+    "annotated_server_overlay_fields_only": 75,
+    "server_annotations_only": 573,
+    "other_native_or_runtime_rule_changes_unattributed": 20,
+    "unannotated_server_unverified_season_episode_suppression": 3,
+    "possible_server_bottom_up_path_presentation_title": 8,
+    "server_overlay_and_other_field_changes": 3,
+    "unannotated_server_unverified_batch_suppression": 2,
+    "unannotated_server_crosswalk_interval_overlay": 1
+  },
+  "existing_patch_signature_candidates_not_new_fix_claims": {
+    "existing_transport_stream_suffix_protection_PR145": 5,
+    "existing_site_publisher_title_boundary_handling_PR145_146_candidate": 1,
+    "existing_technical_bit_depth_boundary_handling_PR146_candidate": 8
+  },
+  "unknown_original_override_context_rows": 3000,
+  "unresolved_semantic_context_rows": 17,
+  "parser_release_replay": {
+    "phases": [
+      {
+        "label": "baseline",
+        "binary_sha256": "21015be7aa202201c321173a83752de6af1f01cd938db24586c393b45807c0d9",
+        "summary": {
+          "cases": 2,
+          "passed": 0,
+          "assertions": 9,
+          "assertions_passed": 5
+        }
+      },
+      {
+        "label": "after",
+        "binary_sha256": "d2e82b9f7706ef85da913b7914f2b0b6f76794379339c0ef2d6c685abda30ba7",
+        "summary": {
+          "cases": 2,
+          "passed": 2,
+          "assertions": 9,
+          "assertions_passed": 9
+        }
+      }
+    ],
+    "all_rows": {
+      "rows": 3000,
+      "all_before_after_http200": true,
+      "changed_rows": 2,
+      "unchanged_rows": 2998,
+      "changed_fields": {
+        "episodes": 2,
+        "seasons": 1,
+        "title": 1
+      }
+    },
+    "note": "All 3,000 inputs executed; only two original cases change, and both pass nine independently specified raw-syntax assertions. Unchanged objects are not correctness labels."
+  },
+  "matcher_controlled_replay": {
+    "scope": "Frozen before final-release execution. Nine original private titles replayed title-only in isolated controlled catalogs; original request overrides and full production aliases are unknown. Known canonical endpoints derive from primary feeds and independent public metadata. Seven deliberate safety/correctness probes plus nineteen preservation controls and five unknown-bound compatibility controls are scored separately; unknown-bound parity is not production accuracy.",
+    "expectations_sha256": "e855d6e02a2e6fde2d558b2cc95ab74b3a33173f84406e2c6fcc8febec56e854",
+    "binary_sha256": {
+      "before": "21015be7aa202201c321173a83752de6af1f01cd938db24586c393b45807c0d9",
+      "after": "d2e82b9f7706ef85da913b7914f2b0b6f76794379339c0ef2d6c685abda30ba7"
+    },
+    "summary": {
+      "preservation_control": {
+        "cases": 19,
+        "before_exact_pass": 19,
+        "after_exact_pass": 19
+      },
+      "private_actual_range": {
+        "cases": 9,
+        "before_exact_pass": 0,
+        "after_exact_pass": 8
+      },
+      "sanitized_correctness_control": {
+        "cases": 1,
+        "before_exact_pass": 0,
+        "after_exact_pass": 1
+      },
+      "sanitized_safety_control": {
+        "cases": 6,
+        "before_exact_pass": 0,
+        "after_exact_pass": 5
+      },
+      "unknown_bounds_compatibility_control": {
+        "cases": 5,
+        "before_exact_pass": 5,
+        "after_exact_pass": 5
+      }
+    },
+    "totals": {
+      "cases": 40,
+      "before_exact_pass": 24,
+      "after_exact_pass": 38
+    },
+    "all_owned_children_exited": true
+  },
+  "frozen_oracle_alternatives": {
+    "cases": 2,
+    "exact_verdicts_preserved": true,
+    "actual_inputs": 1,
+    "sanitized_inputs": 1,
+    "expected": "conservative abstention",
+    "actual": "bare Stampede movie identity tt9430698",
+    "assessment": "The identity is independently confirmed by primary metadata and Cinemeta. The fixture deliberately supplies a combined exact alias for the recovered full title. Production aliases separately confirm Movie14 and Stampede, not that combined spelling; these are controlled alternatives, not production recovery proof."
+  },
+  "checks": {
+    "workspace_rust_passed": 536,
+    "regex_auditor_passed": 5,
+    "python_passed": 99,
+    "all_targets_check": "passed",
+    "optimized_release_build": "passed",
+    "compiler_warnings_denied": true,
+    "cargo_locked": true,
+    "docker_and_native_arm64": "PR CI"
+  },
+  "source_sha256": {
+    "crates/matchlab-parser/src/lib.rs": "5b7c7dd1c027518a811b8d30e899f12d79ea0d72604c2e28c1cf56b439ba5ce9",
+    "crates/matchlab-parser/tests/coordinate_discrepancy_regressions.rs": "b97bd963297c4416f5b712387dd3aa2175b361a490e117227d56b7b563ec86d2",
+    "crates/matchlab-server/src/anime_title.rs": "f5d61cb11f0e1ea22b8106dc080ca9c3c1b5722caae74cab429da8716aeb0ee9",
+    "crates/matchlab-server/src/main.rs": "737049bf56e02e3338fcb1dc5bb20f732815aade60d3b2a0c019ab8f4cf40150"
+  },
+  "private_inputs_sha256": {
+    "candidates.json": "f41a4c4a1fc40af8e7d7b972079c17222936948b90dc59f685bfbebc1491d539",
+    "excluded-inputs.json": "adeab874939c97b9e3da61dbc8e90cb32e188a520cd4c5b7644b60aac41b9a60",
+    "extra-recent-direct-fixtures.json": "4b351e0998905f0fd8ebbd52d1fa4c82bd1a654a050b19ca0dfdaa9c5657f73f",
+    "independent-validation-final.json": "3b216d2a2ae5ee325e6a25f89a0a303859e9c26b47df23d7261ad8ca7e4de6a5",
+    "baseline-row-evidence-private.json": "889d791606a061a8dc4af2ccee6151574544fdbf037db66d1642eb4e16d717be",
+    "parser-confirmed-cases.json": "a8a0f6285eba28ca60649e85ae9d25fc104b1665d2202e6a6d1b6c374d59c5c4",
+    "parser-replay-private.json": "7cfb4d1c909eb64ac6a55a41091127a73a157454f1578f727078ead55b9bc647",
+    "matcher-expected-cases.json": "e855d6e02a2e6fde2d558b2cc95ab74b3a33173f84406e2c6fcc8febec56e854",
+    "matcher-local-before-after-report.json": "ede90eafcc89ac9cb7ed83fd2f88be14b47d3cf73c45291d64fcc039f5edb931",
+    "stampede-14318-aliases.json": "7014263965e60c1663c063c13cca04890645f603618d40d1e3332e12f85c0069"
+  },
+  "limitations": [
+    "Selected successful-coordinate-disagreement cohort, not a random production sample or 3,000 proven bugs.",
+    "Rolling retention can lose internal rows without cursor_expired; no exhaustiveness claim.",
+    "Native parse and stored server diagnostics differ in scope and metadata/rule versions.",
+    "Original year/series overrides are unknown; local title-only fixtures do not replay original requests.",
+    "Known IMDb bounds and missing/regional metadata are separate issues; absent data does not authorize relaxed validation.",
+    "The final scalar guard does not validate every range or change standalone episode/resolve conversion policy.",
+    "Raw requests, source IDs, paths, publishers and credentials are excluded from committed artifacts."
+  ]
+}
