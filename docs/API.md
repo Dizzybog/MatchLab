@@ -820,7 +820,11 @@ curl -fsS -H "Authorization: Bearer $MATCHLAB_DEBUG_API_TOKEN" \
   overrides mean they were absent on that request. Older records without this
   context return `request_context_available=false` and `replay_request=null`;
   their original overrides are unknown and must not be inferred from parsed
-  or selected metadata.
+  or selected metadata. When recorded, `matcher_context` exposes the request's
+  stored `strict_mode` boolean and `semantic_revision` string, including when
+  `include_details=false`. Missing, null or malformed historical context returns
+  `matcher_context=null`. These values come from that stored request and are
+  never inferred from the current server's matching mode or revision.
 
 The response returns `oldest_id`, `latest_id`, `retained`,
 `retention_limit` (1,500), `retention_per_status` (500), `next_after_id`,

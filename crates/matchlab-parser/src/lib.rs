@@ -336,6 +336,54 @@ fn parse_transform(expr: &str) -> TransformSpec {
     }
 }
 
+// A tag-only annotation can establish metadata before the usual title
+// boundary. A bracket containing prose ("The True Story") cannot.
+fn standalone_metadata_tag(title:&str,start:usize,end:usize)->bool {
+    let token=title[start..end].trim_matches(|c:char|c.is_whitespace()||c=='.');
+    [('[',']'),('(',')'),('【','】'),('（','）')].iter().any(|(open,close)|{
+        let Some(at)=title[..start].rfind(*open)else{return false;};
+        let body=&title[at+open.len_utf8()..];
+        let Some(len)=body.find(*close)else{return false;};
+        let body=&body[..len];
+        end<=at+open.len_utf8()+len
+            &&body.trim_matches(|c:char|c.is_whitespace()||c=='.')
+                .eq_ignore_ascii_case(token)
+    })
+}
+
+fn before_release_identity(
+    title:&str,at:usize,end_of_title:usize,matched:&HashMap<String,MatchInfo>,
+)->Result<bool,ParseError>{
+    if ["year","date","seasons","episodes"].iter().any(|key|
+        matched.get(*key).is_some_and(|identity|identity.match_index>1)) {
+        return Ok(at<end_of_title);
+    }
+    // Audio/channel/edition handlers precede coordinate handlers. Inspect
+    // explicit syntax without publishing new coordinates or numbering.
+    if EXPLICIT_EPISODE_RE.find(title)
+        .map_err(|error|ParseError::Regex(error.to_string()))?
+        .is_some_and(|marker|at<marker.start()) {
+        return Ok(true);
+    }
+    Ok(DASH_ANIME_EPISODE_RE.captures(title)
+        .map_err(|error|ParseError::Regex(error.to_string()))?
+        .and_then(|caps|caps.get(1).map(|prefix|at<prefix.end()))
+        .unwrap_or(false))
+}
+
+fn ambiguous_metadata_word(handler:&RuntimeHandler,text:&str)->bool {
+    let word=text.trim_matches(|c:char|c.is_whitespace()||c=='.');
+    match handler.name.as_str() {
+        "network"=>word.eq_ignore_ascii_case("nick"),
+        "audio"=>word.eq_ignore_ascii_case("true"),
+        "edition"=>word.eq_ignore_ascii_case("diamond"),
+        "channels"=>word.eq_ignore_ascii_case("mono"),
+        "languages"=>["mara","mar","pol","se","russian"].iter()
+            .any(|candidate|word.eq_ignore_ascii_case(candidate)),
+        _=>false,
+    }
+}
+
 impl ParserEngine {
     fn from_json(json_text: &str) -> Result<Self, ParseError> {
         let table: HandlerTable =
@@ -368,6 +416,14 @@ impl ParserEngine {
                 raw.pattern = Some(r"\b(?:HDR(?:10)?|HLG)\b".to_owned());
             }
             match (raw.name.as_str(),raw.pattern.as_deref()) {
+                ("edition",Some(r"\b\.Diamond\.\b"))=>{
+                    // Earlier year removal can leave a doubled dot before
+                    // this tag. Match the word without consuming separators.
+                    raw.pattern=Some(r"(?<=\.)Diamond(?=\.)".into());
+                }
+                ("audio",Some(r"\b(True[ .-]?HD|\.True\.)\b"))=>{
+                    raw.pattern=Some(r"\bTrue[ .-]?HD\b|(?<=\.)True(?=\.)".into());
+                }
                 ("bit_depth",Some(r"(?:8|10|12)[-\.]?(?=bit\b)")) => {
                     // Capture only the number, retaining the native $1bit
                     // conversion for both singular and plural release tags.
@@ -571,16 +627,52 @@ impl ParserEngine {
         {
             return Ok(None);
         }
-        let captures=if handler.name=="network" {
+        let contextual=matches!(handler.name.as_str(),"network"|"languages")||match &handler.transform {
+            TransformSpec::UniqConcatValue(value)=>match handler.name.as_str(){
+                "audio"=>value=="TrueHD",
+                "channels"=>value=="mono",
+                _=>false,
+            },
+            TransformSpec::Value(value)=>handler.name=="edition"&&value=="Diamond Edition",
+            _=>false,
+        };
+        let captures=if contextual {
             // A rejected title word must not hide a later genuine source
-            // tag, e.g. Runs.Through.It.1992.iT.WEB-DL. Only network
-            // handlers need this contextual search; other handlers retain
+            // tag, e.g. Runs.Through.It.1992.iT.WEB-DL. Search the bounded
+            // ambiguous metadata families as well; other handlers retain
             // their original first-capture behavior.
             let mut eligible=None;
             for candidate in regex.captures_iter(title.as_bytes()) {
                 let candidate=candidate.map_err(|e|ParseError::Regex(e.to_string()))?;
                 let Some(found)=candidate.get(0)else{continue;};
                 let text=&title[found.start()..found.end()];
+                if handler.name=="languages"
+                    &&let Some(content)=release_without_leading_site_banners(title) {
+                    let banners=&title[..title.len()-content.len()];
+                    if BANNER_DOMAIN_RE.find_iter(banners).any(|domain|
+                        domain.start()<=found.start()&&found.end()<=domain.end()) {
+                        continue;
+                    }
+                }
+                if ambiguous_metadata_word(handler,text) {
+                    let previous=title[..found.start()]
+                        .trim_end_matches(|c:char|!c.is_alphanumeric())
+                        .rsplit(|c:char|!c.is_alphanumeric()).next().unwrap_or("");
+                    let title_phrase=found.start()<end_of_title
+                        &&((text.eq_ignore_ascii_case("russian")
+                        &&previous.eq_ignore_ascii_case("in"))
+                        ||(text.eq_ignore_ascii_case("mar")
+                            &&previous.eq_ignore_ascii_case("del")));
+                    if (title_phrase||before_release_identity(
+                        title,found.start(),end_of_title,matched)?)
+                        &&!standalone_metadata_tag(title,found.start(),found.end()) {
+                        continue;
+                    }
+                }
+                if handler.name!="network" {
+                    eligible=Some(candidate);
+                    break;
+                }
                 let title_word_it=text.eq_ignore_ascii_case("it")&&found.start()<end_of_title;
                 // Season/episode removal may have moved a valid source tag
                 // left of the date's saved offset; an earlier title boundary
@@ -613,6 +705,16 @@ impl ParserEngine {
         // PCRE2 UTF mode returns offsets on UTF-8 boundaries. Borrow captures;
         // only episode/group context needs to retain an owned match.
         let raw_match = &title[m0.start()..m0.end()];
+        // Removing a terminal production year can make the last word of
+        // a hyphenated title look like a trailing release group. Genuine
+        // groups after the year or technical boundary remain eligible.
+        if handler.name=="group"&&matched.get("year").is_some_and(|year|
+                year.match_index>1&&m0.start()<year.match_index.min(end_of_title))
+            &&raw_match.starts_with('-')
+            &&!raw_match.contains(['[',']'])
+            &&title[m0.end()..].trim().is_empty() {
+            return Ok(None);
+        }
         // A terminal .ts is a transport-stream extension, not a low-quality
         // TeleSync marker. The early trash/quality handlers run before the
         // extension handler, so both must leave this suffix untouched.
@@ -789,8 +891,16 @@ impl ParserEngine {
                 break;
             }
         }
-        let is_skip_if_first =
-            handler.options.skip_if_first && has_other_match && all_before_others;
+        // 3D HOU is an explicit stereoscopic layout, including releases
+        // without a production year. A bare title word "3D" keeps the
+        // upstream first-token ambiguity guard.
+        let explicit_3d_layout=handler.name=="3d"&&raw_match.eq_ignore_ascii_case("3d")
+            &&title[m0.end()..].trim_start_matches([' ','.','_','-'])
+                .split(|c:char|!c.is_alphanumeric()).next()
+                .is_some_and(|word|word.eq_ignore_ascii_case("hou"))
+            &&["quality","resolution"].iter().any(|field|matched.contains_key(*field));
+        let is_skip_if_first = handler.options.skip_if_first&&has_other_match
+            &&all_before_others&&!explicit_3d_layout;
 
         if is_skip_if_first {
             return Ok(None);
@@ -3021,16 +3131,21 @@ fn cached_path_component(raw:&str,translate_languages:bool)
 // containing a URL are stripped; fansub groups and legitimate Chinese
 // titles are not advertisements. Retain the original input for metadata.
 static BANNER_DOMAIN_RE:Lazy<regex::Regex>=Lazy::new(||regex::Regex::new(
-    r"(?i)(?:^|[^a-z0-9_-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|org|net|ms|tv|mx|co|party|vip|nu|pics)(?:$|[^a-z0-9_-])"
+    r"(?i)(?:^|[^a-z0-9_-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|org|net|ms|tv|mx|co|party|vip|nu|pics|cc|pl|cz|nz|my|im|ws|ph|eu|pw|be|vc|red|info|lol|pe|xyz|re|site|to|biz|onl|vg|ps|me|io)(?:$|[^a-z0-9_-])"
 ).expect("bounded publisher domain grammar"));
 fn release_without_leading_site_banners(raw:&str)->Option<&str>{
     let mut remaining=raw.trim_start();
     let mut removed=false;
     loop {
-        let (open,close)=if remaining.starts_with('【'){('【','】')}
-            else if remaining.starts_with('['){('[',']')}
+        // Separators may join several advertisements. Skip them only
+        // after verifying that the next block is another complete banner.
+        let candidate=if removed {
+            remaining.trim_start_matches(|c:char|c.is_whitespace()||matches!(c,'.'|'_'|'-'))
+        }else{remaining};
+        let (open,close)=if candidate.starts_with('【'){('【','】')}
+            else if candidate.starts_with('['){('[',']')}
             else {break};
-        let Some(rest)=remaining.strip_prefix(open) else {break};
+        let Some(rest)=candidate.strip_prefix(open) else {break};
         let Some(end)=rest.find(close) else {break};
         let content=&rest[..end];
         if !contains_ascii_fold(content,"www.")
@@ -3276,6 +3391,20 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
                 result.insert(field.into(),json!([]));
             }
         }
+    }
+    // A digital publishing format can precede a separately parsed final
+    // publisher/group annotation. Retain real words and parenthetical
+    // titles; remove only the standalone format in this bounded suffix.
+    if let (Some(title),Some(group))=(result.get("title").and_then(Value::as_str),
+        result.get("group").and_then(Value::as_str))
+        &&title.get(title.len().saturating_sub(9)..)
+            .is_some_and(|suffix|suffix.eq_ignore_ascii_case("(digital)"))
+        &&raw.trim_end().strip_suffix(')').and_then(|tail|tail.rsplit_once('('))
+            .is_some_and(|(prefix,publisher)|publisher==group
+                &&prefix.trim_end().get(prefix.trim_end().len().saturating_sub(9)..)
+                    .is_some_and(|suffix|suffix.eq_ignore_ascii_case("(digital)"))) {
+        let title=title[..title.len()-9].trim_end().to_owned();
+        if !title.is_empty(){result.insert("title".into(),json!(title));}
     }
     if let Some(episode_title) = extract_release_episode_title(raw, &result)? {
         result.insert("episode_title".into(), json!(episode_title));

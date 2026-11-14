@@ -1,0 +1,369 @@
+{
+  "schema": "matchlab-sanitized-imdb-selected-title-wordcount-audit-v1",
+  "date": "2026-11-14",
+  "comparator": {
+    "left": "Exact historical parsed.title",
+    "right": "Exact historical selected.title chosen by matcher, as clarified by user",
+    "counter": "Unmodified current Rust title_normalization::title_word_count; original Unicode words, apostrophes/combining marks retained, ampersand counts as a connective",
+    "primary_title_substitution": false,
+    "same_id_indexed_imdb_alias_attestations": 3000,
+    "alias_attestation_does_not_prove_primary_title": true,
+    "counter_source_sha256": "ffcc5fbb08bd74144166ed86fbe7c715b080a75369428bddb164993ffc371237",
+    "counter_binary_sha256": "f5bdef1d5379138539f719cbaea0d75da6957a253c1598c4ba58640d18984a94",
+    "independent_schema_filter_controls": 19,
+    "independent_wordcounter_controls": 16
+  },
+  "capture": {
+    "started_utc": "2026-11-14T22:12:26Z",
+    "completed_utc": "2026-11-14T22:24:58Z",
+    "elapsed_seconds": 752.9,
+    "accepted_unique_titles": 3000,
+    "rows_scanned": 52951,
+    "matched_rows_scanned": 44526,
+    "pages": 688,
+    "http_attempts": 701,
+    "qualifying_rows_seen": 3118,
+    "excluded_prior_rows": 13,
+    "duplicate_candidate_rows": 96,
+    "malformed_rows": 0,
+    "cursor_expired_pages": 0,
+    "history_resets": 0,
+    "capture_failures": 0
+  },
+  "novelty": {
+    "exact_request_strings": 3000,
+    "nfc_casefold_basenames": 3000,
+    "source_ids": 3000,
+    "previous_inputs_excluded": 6507,
+    "previous_normalized_basenames_excluded": 6265,
+    "prior_overlap": 0,
+    "export_exactly_matches_durable_sqlite": true
+  },
+  "versions": {
+    "deployed_build_reported_during_capture": "fd02292468865b1c5bb5c491b39b3e61d74e8b8a",
+    "baseline_commit": "af27282548f8c97b210e473fbeeea906ebcdd784",
+    "baseline_binary_sha256": "d2e82b9f7706ef85da913b7914f2b0b6f76794379339c0ef2d6c685abda30ba7",
+    "after_binary_sha256": "896796ab45b7875041a44d8fc114925066d8ee9b5cf7022d6b772b9c9555d342",
+    "source_sha256": {
+      "crates/matchlab-parser/src/lib.rs": "324cedaf2ba63a8fe028c86710985ba8d4d9ba835d1d4caa367dfdf061f64ca9",
+      "crates/matchlab-parser/tests/wordcount_title_regressions.rs": "c88444501569cb8607a49d212b7807da84f686ce79ab15c52892d9b4329dcf99",
+      "crates/matchlab-server/src/debug_feed.rs": "d66965e61968f56064e91d1623f4d400d5cf28c86287af9c5ed3e39b5e14fa44",
+      "crates/matchlab-server/src/main.rs": "de7f0d8c5c60bf694c24bcb7c53ebf60986566eec64499b16b573a6bbdcec0e1"
+    },
+    "matcher_semantic_revision": "complete-title-precedence-and-metadata-boundaries-v5",
+    "graphify_indexed_commit": "09ff25f5499cdf223504548c5593a3b0718cac2e"
+  },
+  "population": {
+    "directions": {
+      "parsed_has_fewer_words": 811,
+      "parsed_has_more_words": 2189
+    },
+    "lexical_shapes_not_correctness_labels": {
+      "parsed_name_is_prefix_of_selected_name": 348,
+      "non_containing_names_need_independent_alias_evidence": 596,
+      "selected_name_is_prefix_of_parsed_name": 1234,
+      "selected_name_is_suffix_of_parsed_name": 631,
+      "parsed_name_is_suffix_of_selected_name": 162,
+      "selected_name_inside_parsed_name": 20,
+      "parsed_name_inside_selected_name": 9
+    },
+    "unique_selected_imdb_ids": 2336,
+    "source_policies": {
+      "public_api": 3000
+    },
+    "known_original_request_options": {
+      "year_null_and_series_null": 3000
+    },
+    "historical_matcher_runtime_context_unknown": 3000,
+    "matched_debug_probes_during_capture": 0
+  },
+  "baseline_analysis": {
+    "coverage": {
+      "captured_rows": 3000,
+      "joined_native_rows": 3000,
+      "row_evidence_records": 3000,
+      "native_http_status_counts": {
+        "200": 3000
+      },
+      "unjoined_or_unclassified_mechanical_rows": 0,
+      "original_year_series_context_known": 3000,
+      "historical_matcher_runtime_context_unknown": 3000
+    },
+    "stored_diagnostic_vs_native_disjoint_partitions_not_truth_labels": {
+      "identical": 2797,
+      "possible_server_bottom_up_path_presentation_title": 28,
+      "unannotated_server_unverified_batch_suppression": 3,
+      "server_annotations_only": 100,
+      "other_native_or_runtime_rule_changes_unattributed": 52,
+      "annotated_server_overlay_fields_only": 16,
+      "unannotated_server_unverified_season_episode_suppression": 4
+    },
+    "existing_patch_signature_candidates_not_accuracy_gains": {
+      "PR146_collection_year_range_preserves_explicit_season_candidate": 9,
+      "PR146_title_word_it_network_boundary_candidate": 22,
+      "PR146_bit_depth_capture_and_plural_candidate": 6,
+      "PR146_it_network_vs_group_boundary_candidate": 1,
+      "PR146_date_delimiter_or_network_date_boundary_candidate": 1
+    },
+    "PR147_native_signature_candidates_found": 0,
+    "native_against_frozen_selected_title_directions_not_accuracy": {
+      "parsed_has_fewer_words": 786,
+      "parsed_has_more_words": 2184,
+      "equal_word_count": 30
+    },
+    "semantic_truth_labels_assigned": 0
+  },
+  "parser": {
+    "primary_oracle_frozen_before_final_outputs": true,
+    "phases": [
+      {
+        "label": "baseline",
+        "binary_sha256": "d2e82b9f7706ef85da913b7914f2b0b6f76794379339c0ef2d6c685abda30ba7",
+        "primary_cases": {
+          "cases": 47,
+          "passed": 0,
+          "assertions": 123,
+          "assertions_passed": 54,
+          "groups": {
+            "network_title_word": {
+              "cases": 1,
+              "passed": 0,
+              "assertions": 3,
+              "assertions_passed": 1
+            },
+            "audio_title_word": {
+              "cases": 2,
+              "passed": 0,
+              "assertions": 7,
+              "assertions_passed": 3
+            },
+            "language_title_word": {
+              "cases": 7,
+              "passed": 0,
+              "assertions": 20,
+              "assertions_passed": 6
+            },
+            "edition_title_word": {
+              "cases": 3,
+              "passed": 0,
+              "assertions": 10,
+              "assertions_passed": 3
+            },
+            "channel_title_word": {
+              "cases": 1,
+              "passed": 0,
+              "assertions": 3,
+              "assertions_passed": 1
+            },
+            "hyphenated_year_title_as_group": {
+              "cases": 7,
+              "passed": 0,
+              "assertions": 21,
+              "assertions_passed": 7
+            },
+            "publisher_domain_title_boundary": {
+              "cases": 26,
+              "passed": 0,
+              "assertions": 59,
+              "assertions_passed": 33
+            }
+          }
+        },
+        "preservation_cases": {
+          "cases": 3,
+          "passed": 3
+        }
+      },
+      {
+        "label": "after",
+        "binary_sha256": "896796ab45b7875041a44d8fc114925066d8ee9b5cf7022d6b772b9c9555d342",
+        "primary_cases": {
+          "cases": 47,
+          "passed": 47,
+          "assertions": 123,
+          "assertions_passed": 123,
+          "groups": {
+            "network_title_word": {
+              "cases": 1,
+              "passed": 1,
+              "assertions": 3,
+              "assertions_passed": 3
+            },
+            "audio_title_word": {
+              "cases": 2,
+              "passed": 2,
+              "assertions": 7,
+              "assertions_passed": 7
+            },
+            "language_title_word": {
+              "cases": 7,
+              "passed": 7,
+              "assertions": 20,
+              "assertions_passed": 20
+            },
+            "edition_title_word": {
+              "cases": 3,
+              "passed": 3,
+              "assertions": 10,
+              "assertions_passed": 10
+            },
+            "channel_title_word": {
+              "cases": 1,
+              "passed": 1,
+              "assertions": 3,
+              "assertions_passed": 3
+            },
+            "hyphenated_year_title_as_group": {
+              "cases": 7,
+              "passed": 7,
+              "assertions": 21,
+              "assertions_passed": 21
+            },
+            "publisher_domain_title_boundary": {
+              "cases": 26,
+              "passed": 26,
+              "assertions": 59,
+              "assertions_passed": 59
+            }
+          }
+        },
+        "preservation_cases": {
+          "cases": 3,
+          "passed": 3
+        }
+      }
+    ],
+    "all_rows": {
+      "rows": 3000,
+      "all_before_after_http200": true,
+      "changed_rows": 242,
+      "unchanged_rows": 2758,
+      "changed_fields": {
+        "title": 231,
+        "languages": 41,
+        "audio": 7,
+        "network": 9,
+        "group": 20,
+        "edition": 3,
+        "episodes": 1,
+        "channels": 4,
+        "path_layers": 7,
+        "3d": 1,
+        "path_title_candidates": 4
+      },
+      "wordcount_mismatches_against_frozen_selected_title": {
+        "baseline": 2970,
+        "after": 2770
+      },
+      "agreement_is_not_identity_accuracy": true
+    },
+    "preservation_field_assertions_each_phase": 6,
+    "additional_release_language_boundary_controls": {
+      "cases": 4,
+      "passed": 4
+    },
+    "all_changed_parser_objects_reviewed": true,
+    "reviewed_debug_vs_final_release_changed_objects": 0,
+    "residual": "Existing Spanish Cap prefix reparse can still truncate a title at se; not claimed fixed. Digital suffix examples are posthoc and excluded from primary oracle denominator."
+  },
+  "matcher": {
+    "scope": "Frozen before any after-release fixture runs. Exact original replay_request options are known and preserved. Controlled primary/public-metadata catalogs isolate code behavior; no production-recall claim. Anime assertions verify exact IMDb identity while allowing only endpoints belonging to it. Temporal assertions require safe abstention for future-series identity without episode proof, and preserve verified S0/adjacentday dates, explicit year override, unknown behavior and ordinary dates. Each mode is simulated locally; historical API runtime mode is unknown.",
+    "expectations_sha256": "8d3282811c18b510ffdfbb5da04d1b8994c17e50a4c5eb7301c2b980c47b6e14",
+    "baseline_binary_sha256": "d2e82b9f7706ef85da913b7914f2b0b6f76794379339c0ef2d6c685abda30ba7",
+    "after_binary_sha256": "896796ab45b7875041a44d8fc114925066d8ee9b5cf7022d6b772b9c9555d342",
+    "unique_actual_source_inputs": 60,
+    "summary": {
+      "true": {
+        "preservation_control": {
+          "assertions": 3,
+          "before_pass": 3,
+          "after_pass": 3
+        },
+        "private_actual_identity": {
+          "assertions": 10,
+          "before_pass": 10,
+          "after_pass": 10
+        },
+        "private_actual_safety": {
+          "assertions": 50,
+          "before_pass": 50,
+          "after_pass": 50
+        },
+        "synthetic_single_season_control": {
+          "assertions": 5,
+          "before_pass": 5,
+          "after_pass": 5
+        },
+        "temporal_control": {
+          "assertions": 10,
+          "before_pass": 7,
+          "after_pass": 10
+        }
+      },
+      "false": {
+        "preservation_control": {
+          "assertions": 3,
+          "before_pass": 3,
+          "after_pass": 3
+        },
+        "private_actual_identity": {
+          "assertions": 10,
+          "before_pass": 0,
+          "after_pass": 10
+        },
+        "private_actual_safety": {
+          "assertions": 50,
+          "before_pass": 0,
+          "after_pass": 50
+        },
+        "synthetic_single_season_control": {
+          "assertions": 5,
+          "before_pass": 2,
+          "after_pass": 5
+        },
+        "temporal_control": {
+          "assertions": 10,
+          "before_pass": 7,
+          "after_pass": 10
+        }
+      }
+    },
+    "totals": {
+      "assertions": 156,
+      "before_pass": 87,
+      "after_pass": 156
+    },
+    "all_owned_children_exited": true,
+    "after_failures": []
+  },
+  "validation": {
+    "rust_workspace_passed": 548,
+    "regex_auditor_passed": 5,
+    "python_passed": 99,
+    "compiler_warnings_denied": true,
+    "cargo_locked": true,
+    "all_targets_check_passed": true,
+    "optimized_release_build_passed": true,
+    "docker_and_arm64": "PR CI"
+  },
+  "private_artifact_fingerprints": {
+    "candidates.json": "b31697fab4fa5930f585aa7b056f0f0607044d4f01657a11630d5a0d3bdd2884",
+    "excluded-inputs.json": "76ef679e83c6992d6d9df1c984e8ada1dc2635bd7b4cfe02774c6bd27f44df5a",
+    "parser-confirmed-cases.json": "3ac6c0e113e3d074a53b173e414a6f33e05bdaeed6a972e840017acfc83b531d",
+    "parser-preservation-cases.json": "e108efd36458aaf087a214fb9a8a9bde62ae196d84abb0af66cdd866e275d9b7",
+    "matcher-expected-cases.json": "8d3282811c18b510ffdfbb5da04d1b8994c17e50a4c5eb7301c2b980c47b6e14",
+    "parser-baseline.json": "e58e18d03c8087a4d65b3af723ce86507ccde5a0c43668fec51cccbd23aac69d",
+    "parser-after.json": "34c0df4a1e22bf836967d130410b3ffbd73d02f8a5d3e667b3bcdd5da0438597",
+    "parser-replay-private.json": "fe6b3fac9ba3ad7d7443dc36a65ab75d2eec40c96ec7c3aba0906c7d524fc958",
+    "matcher-local-before-after-report.json": "07ba140dcd8e16d2938f1482c5d017fce1efbf295c611aadeadb449f29c87643"
+  },
+  "limits": [
+    "This is a conditional matched-name discrepancy cohort, not a production precision/recall or accuracy estimate.",
+    "Every row is mechanically analyzed; independent semantic truth labels are limited to justified regression cohorts.",
+    "Controlled matcher catalogs isolate code behavior; original runtime modes and full production metadata/rules cannot be reconstructed.",
+    "Wordcount agreement with the frozen selected alias is not evidence of correct identity.",
+    "Rolling history retention can create internal gaps despite zero cursor expiration.",
+    "Historical matcher_context is absent; new rows record actual strict mode and semantic revision, old rows remain null.",
+    "Historical V/Garo identity substitutions and Devil May Cry truncation were not re-proven on current controlled catalogs and are not claimed fixed; explicit-season crosswalks and legacy broad compact-AniDB exceptions retain their existing scope."
+  ]
+}
