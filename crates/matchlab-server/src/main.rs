@@ -1149,6 +1149,7 @@ fn diagnose_with_policy(
         && (1..=99).contains(&local)
     {
         let name=name.to_owned();
+        let part_marker=candidate.get("marker").and_then(Value::as_str)==Some("P");
         if let Some(imdb)=exact_anime_identity(&db,&name)?
             && let Some(base)=anime_title::season_from_title(&db,&imdb,&name)
                 .map_err(|e|e.to_string())?
@@ -1178,7 +1179,7 @@ fn diagnose_with_policy(
                         // P2 is a part marker, not an episode. Clear only a
                         // bogus P-number episode when nothing independently
                         // marks an episode in the same release.
-                        if candidate.get("marker").and_then(Value::as_str)==Some("P")
+                        if part_marker
                             && parsed_episode==Some(local)
                         {
                             parsed.insert("episodes".into(),json!([]));
