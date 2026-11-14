@@ -37,7 +37,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{env, path::PathBuf, sync::{Arc,Mutex,OnceLock}, time::{Instant,Duration}, collections::HashMap};
+use std::{env, path::PathBuf, sync::{Arc,Mutex,OnceLock,atomic::{AtomicBool,Ordering}}, time::{Instant,Duration}, collections::HashMap};
 use tokio::sync::Semaphore;
 
 
@@ -63,6 +63,7 @@ struct AppState {
     history:Arc<PathBuf>,
     match_slots:Arc<Semaphore>,
     index_phase:Arc<Mutex<IndexPhase>>,
+    history_ready:Arc<AtomicBool>,
 }
 
 /// Index creation can take minutes on a populated volume. It must never
@@ -2129,6 +2130,12 @@ async fn dashboard_history_request(State(state):State<AppState>,Query(q):Query<H
     if q.status.as_deref().is_some_and(|s|!matches!(s,"matched"|"unmatched"|"error")){
         return (StatusCode::BAD_REQUEST,Json(json!({"error":"invalid status filter"})));
     }
+    if !state.history_ready.load(Ordering::Acquire){
+        return (StatusCode::SERVICE_UNAVAILABLE,Json(json!({
+            "status":"initializing",
+            "error":"History and statistics migration is running in the background"
+        })));
+    }
     let result=tokio::task::spawn_blocking(move||
         dashboard_history::history(&state.history,q.limit.unwrap_or(25),q.offset.unwrap_or(0),q.status.as_deref())).await;
     match result {
@@ -2139,6 +2146,12 @@ async fn dashboard_history_request(State(state):State<AppState>,Query(q):Query<H
 }
 async fn dashboard_stats_request(State(state):State<AppState>)
     -> (StatusCode,Json<Value>){
+    if !state.history_ready.load(Ordering::Acquire){
+        return (StatusCode::SERVICE_UNAVAILABLE,Json(json!({
+            "status":"initializing",
+            "error":"History and statistics migration is running in the background"
+        })));
+    }
     let result=tokio::task::spawn_blocking(move||dashboard_history::stats(&state.history)).await;
     match result {
         Ok(Ok(v))=>(StatusCode::OK,Json(v)),
@@ -2510,6 +2523,7 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         tracing::info!("downloaded metadata refresh completed: imdb={imdb} anime_links={links} episode_maps={mappings} aliases={aliases}");
         return Ok(());
     }
+    let startup_started=Instant::now();
     let strict_raw=env::var("MATCHLAB_STRICT_MODE").ok();
     let strict=parse_strict_match_mode(strict_raw.as_deref())?;
     let _=STRICT_MATCH_MODE.set(strict);
@@ -2624,40 +2638,12 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
     }
     tracing::info!(max_matches,"MatchLab match concurrency configured");
     let history_db=env::var("MATCHLAB_HISTORY_DB").unwrap_or_else(|_|"/data/history.sqlite3".into());
-    // Backfill existing 14-day statistics before the retention worker drops raw rows.
-    let history_ready=match dashboard_history::initialize(std::path::Path::new(&history_db)) {
-        Ok(())=>true,
-        Err(error)=>{
-            // Keep matching available, but never delete un-migrated history:
-            // those rows may be needed to rebuild the 14-day aggregates later.
-            tracing::error!(%error,"history/statistics initialization failed; retention disabled");
-            false
-        }
-    };
-    // Only prune after statistics were safely backfilled. On failure the
-    // history is left untouched so the migration can be retried at restart.
-    if history_ready {
-        let history_path=PathBuf::from(&history_db);
-        tokio::spawn(async move {
-            loop {
-                let path=history_path.clone();
-                match tokio::task::spawn_blocking(move||dashboard_history::prune(&path)).await {
-                    Ok(Ok(count)) if count>0 =>
-                        tracing::info!(deleted=count,"expired request history removed"),
-                    Ok(Ok(_)) => (),
-                    Ok(Err(error)) =>
-                        tracing::debug!(%error,"request history cleanup failed"),
-                    Err(error) =>
-                        tracing::debug!(%error,"history cleanup task failed"),
-                }
-                tokio::time::sleep(Duration::from_secs(300)).await;
-            }
-        });
-    }
-    if history_ready {
-        community_learning::start(PathBuf::from(&history_db),PathBuf::from(&db));
-        local_learning::start(PathBuf::from(&history_db),PathBuf::from(&db));
-    }
+    // Never run historical SQLite migrations (including ML queue counters)
+    // before binding HTTP. A large history volume must not delay /parse,
+    // /dash or /health/live. The bounded history writer buffers observations
+    // while a dedicated worker migrates the schema.
+    let history_ready=Arc::new(AtomicBool::new(false));
+    dashboard_history::defer_writes_until(history_ready.clone());
     // A pre-existing volume may need a fresh Tantivy schema generation.
     // Start this in the blocking pool only after all service configuration is
     // validated. /health/live and the dashboard remain reachable throughout.
@@ -2666,29 +2652,101 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         let startup_target=PathBuf::from(&db);
         let startup_index_state=index_state.clone();
         tokio::spawn(async move{
+            let started=Instant::now();
             let warmup=tokio::task::spawn_blocking(move||->Result<(),String>{
                 let conn=Connection::open_with_flags(
                     &startup_target,OpenFlags::SQLITE_OPEN_READ_ONLY)
                     .map_err(|e|e.to_string())?;
+                tracing::info!(existing_index=tantivy_search::index_ready(&conn),
+                    "startup Tantivy search generation check");
                 tantivy_search::warmup(&conn)
             }).await;
             match warmup{
                 Ok(Ok(()))=>{
                     set_index_phase(&startup_index_state,IndexPhase::Ready);
-                    tracing::info!("startup Tantivy indexing completed");
+                    tracing::info!(elapsed_ms=started.elapsed().as_millis(),
+                        "startup Tantivy indexing completed");
                 },
                 Ok(Err(error))=>{
                     set_index_phase(&startup_index_state,IndexPhase::Failed(error.clone()));
-                    tracing::error!(%error,"startup Tantivy indexing failed");
+                    tracing::error!(%error,elapsed_ms=started.elapsed().as_millis(),
+                        "startup Tantivy indexing failed");
                 },
                 Err(error)=>{
                     set_index_phase(&startup_index_state,
                         IndexPhase::Failed(error.to_string()));
-                    tracing::error!(%error,"startup Tantivy worker failed");
+                    tracing::error!(%error,elapsed_ms=started.elapsed().as_millis(),
+                        "startup Tantivy worker failed");
                 }
             }
         });
     }
+    // History migration and ML are best-effort background services, NEVER
+    // prerequisites for HTTP listening or metadata-backed matching. In
+    // particular, do not let an ML SQLite backlog or model replay contend
+    // with the first Tantivy search warmup.
+    let background_history=PathBuf::from(&history_db);
+    let background_metadata=PathBuf::from(&db);
+    let background_index=index_state.clone();
+    let background_history_ready=history_ready.clone();
+    tokio::spawn(async move{
+        let started=Instant::now();
+        let mut failures=0u64;
+        loop {
+            let path=background_history.clone();
+            match tokio::task::spawn_blocking(move||dashboard_history::initialize(&path)).await {
+                Ok(Ok(()))=>break,
+                Ok(Err(error))=>{
+                    failures+=1;
+                    if failures==1||failures%10==0{
+                        tracing::warn!(%error,failures,
+                            "history migration deferred; API and matching remain available");
+                    }
+                },
+                Err(error)=>{
+                    failures+=1;
+                    if failures==1||failures%10==0{
+                        tracing::warn!(%error,failures,
+                            "history migration worker failed; will retry independently");
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+        // Publish only after SQLite's single write transaction commits. The
+        // history writer may now drain its bounded in-memory backlog.
+        background_history_ready.store(true,Ordering::Release);
+        tracing::info!(elapsed_ms=started.elapsed().as_millis(),
+            "history/statistics migration completed in background");
+        let prune_path=background_history.clone();
+        tokio::spawn(async move{
+            loop {
+                let path=prune_path.clone();
+                match tokio::task::spawn_blocking(move||dashboard_history::prune(&path)).await {
+                    Ok(Ok(count)) if count>0 =>
+                        tracing::info!(deleted=count,"expired request history removed"),
+                    Ok(Ok(_))=>(),
+                    Ok(Err(error))=>
+                        tracing::debug!(%error,"request history cleanup failed"),
+                    Err(error)=>
+                        tracing::debug!(%error,"history cleanup task failed"),
+                }
+                tokio::time::sleep(Duration::from_secs(300)).await;
+            }
+        });
+        if local_learning::active(){
+            if index_phase(&background_index)!=IndexPhase::Ready{
+                tracing::info!("offline ML initialization deferred until search index is ready");
+            }
+            while index_phase(&background_index)!=IndexPhase::Ready{
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            community_learning::start(background_history.clone(),background_metadata.clone());
+            local_learning::start(background_history,background_metadata);
+            tracing::info!(elapsed_ms=started.elapsed().as_millis(),
+                "offline ML workers started after HTTP, history and search index");
+        }
+    });
     let app = Router::new()
         .route("/",get(dashboard_redirect))
         .route("/dash",get(dashboard))
@@ -2712,8 +2770,9 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         .route("/api/dashboard/diagnose",post(dashboard_diagnose_request))
         .with_state(AppState{db:Arc::new(PathBuf::from(db)),history:Arc::new(PathBuf::from(history_db)),
             match_slots:Arc::new(Semaphore::new(max_matches)),
-            index_phase:index_state});
-    tracing::info!("Rust API listening on {host}");
+            index_phase:index_state,history_ready});
+    tracing::info!(elapsed_ms=startup_started.elapsed().as_millis(),
+        "Rust API listening on {host} (ML and history migration deferred)");
     axum::serve(listener,app).await?;
     Ok(())
 }
@@ -4330,6 +4389,7 @@ mod tests {
             db:Arc::new(path.clone()),history:Arc::new(history.clone()),
             match_slots:Arc::new(Semaphore::new(2)),
             index_phase:Arc::new(Mutex::new(IndexPhase::Ready)),
+            history_ready:Arc::new(AtomicBool::new(true)),
         };
         // Dashboard diagnosis keeps all candidate rankings, even without
         // release metadata, without weakening the public /match contract.
@@ -4388,6 +4448,7 @@ mod tests {
             history:Arc::new(PathBuf::from("/nonexistent/matchlab-history-test.sqlite3")),
             match_slots:Arc::new(Semaphore::new(2)),
             index_phase:Arc::new(Mutex::new(IndexPhase::Indexing)),
+            history_ready:Arc::new(AtomicBool::new(false)),
         };
         let (status,Json(live))=liveness().await;
         assert_eq!(status,StatusCode::OK);
