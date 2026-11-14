@@ -1793,10 +1793,15 @@ fn diagnose_with_policy(
                         [&imdb_id],|row|row.get::<_,i64>(0))
                         .map_err(|e|e.to_string())? != 0;
                     if has_anime {
-                        let canonical_title=imdb.iter().any(|candidate|
-                            candidate.imdb_id==imdb_id
-                            && imdb_matcher::clean_title(&candidate.title)==anime_resolve_key)
-                            && anime_subfolder_title.is_none();
+                        // The resolved local anime S/P marker now contains
+                        // an absolute IMDb season. Use its proven season
+                        // crosswalk directly, never re-apply the named-part
+                        // local offset inside anime_title::resolve_range.
+                        let canonical_title=parsed.get("anime_local_season_resolved").is_some()
+                            || (imdb.iter().any(|candidate|
+                                candidate.imdb_id==imdb_id
+                                && imdb_matcher::clean_title(&candidate.title)==anime_resolve_key)
+                                && anime_subfolder_title.is_none());
                         let mapped=mapped_season_episode_range(
                             &db,&imdb_id,anime_resolve_title,season,1,end,canonical_title)?;
                         // Keep the exact missing/ambiguous-map diagnostics
