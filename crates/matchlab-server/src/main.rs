@@ -685,6 +685,7 @@ fn movie_collection_year_range(parsed:&serde_json::Map<String,Value>)->Option<(i
 #[derive(Clone,Copy)]
 struct ImdbIdentityGate<'a>{
     policy:MatchPolicy,
+    strict:bool,
     year:Option<i32>,
     has_season:bool,
     has_quality:bool,
@@ -700,13 +701,13 @@ fn filter_request_imdb_candidates(
         // A box-set year window is contextual evidence for a yearless
         // individual film, not the production year of every film in the pack.
         // Strict has already verified the full title/alias before this gate.
-        let in_collection_range=strict_match_mode() && gate.year.is_none()
+        let in_collection_range=gate.strict && gate.year.is_none()
             && gate.collection_year_range.is_some_and(|(start,end)|
                 (start..=end).contains(&candidate.year));
         // Apply the same hard constraint after any supplementary candidate
         // promotion, including verified anime episode recovery. This also
         // covers dashboard diagnostics, not only the public API gate.
-        imdb_matcher::year_eligible(strict_match_mode(),gate.year,candidate.year)
+        imdb_matcher::year_eligible(gate.strict,gate.year,candidate.year)
             && (!matches!(gate.policy,MatchPolicy::PublicApi)
             ||year_signal_eligible(
                 gate.year,candidate.year,gate.has_season,
@@ -1149,7 +1150,7 @@ fn diagnose_with_policy(
             || exact_anime_identity(&db,title)?.is_some(),
     };
     let gate=ImdbIdentityGate{
-        policy,year,has_season:series&&!seasons.is_empty(),
+        policy,strict:strict_match_mode(),year,has_season:series&&!seasons.is_empty(),
         has_quality:parsed_quality,
         collection_year_range:if year.is_none()&&!series{
             movie_collection_year_range(parsed)
@@ -2884,7 +2885,7 @@ mod tests {
         let parsed=matchlab_parser::parse_title(
             "Monster/The.Ed.Gein.Story/E02.mkv",false).unwrap();
         let gate=ImdbIdentityGate{
-            policy:MatchPolicy::PublicApi,year:Some(2004),
+            policy:MatchPolicy::PublicApi,strict:false,year:Some(2004),
             has_season:false,has_quality:false,collection_year_range:None,season_range_end:None,
             verified_anime_range:None,verified_absolute_episode:None,
         };
@@ -2900,7 +2901,7 @@ mod tests {
         let parsed=matchlab_parser::parse_title(
             "The.Ed.Gein.Story/Monster/S02/E02.mkv",false).unwrap();
         let gate=ImdbIdentityGate{
-            policy:MatchPolicy::PublicApi,year:None,
+            policy:MatchPolicy::PublicApi,strict:false,year:None,
             has_season:true,has_quality:false,collection_year_range:None,season_range_end:Some(2),
             verified_anime_range:None,verified_absolute_episode:None,
         };
@@ -5245,7 +5246,7 @@ mod tests {
                 .is_ok_and(|max|max>=9))
             .map(|candidate|candidate.imdb_id.clone()).collect::<Vec<_>>();
         let gate=ImdbIdentityGate{
-            policy:MatchPolicy::DashboardDiagnostic,
+            policy:MatchPolicy::DashboardDiagnostic,strict:false,
             year:None,has_season:true,has_quality:true,
             collection_year_range:None,season_range_end:Some(9),verified_anime_range:None,
             verified_absolute_episode:None,
