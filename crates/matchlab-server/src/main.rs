@@ -973,25 +973,58 @@ fn diagnose_with_policy(
              v.get("start").and_then(Value::as_i64),
              v.get("end").and_then(Value::as_i64))) {
             let candidate_title=candidate_title.to_owned();
-            // Existing IMDb crosswalk validation wins when it can prove
-            // this range. Only fall back to the independent AniDB lookup
-            // if the legacy path cannot establish a candidate.
+            let season_hint=hint.and_then(|v|v.get("season_hint"))
+                .and_then(Value::as_i64).filter(|s|(1..=120).contains(s));
+            // The ordinary unmarked anime batch has no season: the
+            // AniDB absolute crosswalk remains authoritative. A literal
+            // S2 next to the batch is different evidence. An absolute
+            // conversion is valid only if its ENTIRE mapped interval
+            // belongs to that explicitly advertised season.
             verified_anime_range_imdb=verified_unmarked_anime_range_imdb(
                 &db,&candidate_title,start,end)?;
-            if verified_anime_range_imdb.is_none(){
-                verified_anidb_range=anidb_matcher::match_absolute_range(
-                    &db,&candidate_title,start,end)?;
-            }
-            if verified_anidb_range.is_some() || verified_anime_range_imdb.is_some(){
+            let absolute_agrees_with_season=if let (Some(season),Some(imdb))=(
+                season_hint,verified_anime_range_imdb.as_deref())
+            {
+                let mapped=mapped_absolute_range(&db,imdb,start,end)?;
+                mapped["complete"]==true
+                    && mapped["start_season"].as_i64()==Some(season)
+                    && mapped["end_season"].as_i64()==Some(season)
+            }else{false};
+            if let Some(season)=season_hint
+                && !absolute_agrees_with_season {
+                // A verified absolute anime episode 01..24 could belong
+                // to S03, but "S2 (01-24)" must never publish S03. Treat
+                // these as a season-relative batch, then let the existing
+                // season crosswalk and IMDb episode bounds prove endpoints.
+                // Preserve the candidate in /parse for diagnostics; never
+                // manufacture ASIDs or a different season as a fallback.
+                verified_anime_range_imdb=None;
                 if let Some(parsed)=parsed_value.as_object_mut(){
                     parsed.insert("title".into(),json!(candidate_title));
-                    parsed.insert("episodes".into(),json!([]));
-                    parsed.insert("seasons".into(),json!([]));
+                    parsed.insert("seasons".into(),json!([season]));
+                    parsed.insert("episodes".into(),json!([start]));
                     parsed.insert("episode_start".into(),json!(start));
                     parsed.insert("episode_end".into(),json!(end));
                     parsed.insert("episode_count".into(),json!(end-start+1));
-                    parsed.insert("episode_range_numbering".into(),json!("absolute"));
-                    parsed.insert("anime_title_verified".into(),json!(true));
+                    parsed.insert("episode_range_numbering".into(),json!("season"));
+                }
+            }else{
+                if season_hint.is_none() && verified_anime_range_imdb.is_none(){
+                    verified_anidb_range=anidb_matcher::match_absolute_range(
+                        &db,&candidate_title,start,end)?;
+                }
+                if verified_anidb_range.is_some()
+                    || verified_anime_range_imdb.is_some() {
+                    if let Some(parsed)=parsed_value.as_object_mut(){
+                        parsed.insert("title".into(),json!(candidate_title));
+                        parsed.insert("episodes".into(),json!([]));
+                        parsed.insert("seasons".into(),json!([]));
+                        parsed.insert("episode_start".into(),json!(start));
+                        parsed.insert("episode_end".into(),json!(end));
+                        parsed.insert("episode_count".into(),json!(end-start+1));
+                        parsed.insert("episode_range_numbering".into(),json!("absolute"));
+                        parsed.insert("anime_title_verified".into(),json!(true));
+                    }
                 }
             }
         }
@@ -1001,6 +1034,7 @@ fn diagnose_with_policy(
     // candidate, suppress that inference rather than publishing guessed
     // coordinates for unrelated movies or ordinary TV titles.
     if verified_anidb_range.is_none() && verified_anime_range_imdb.is_none()
+        && !parsed_value.contains_key("episode_start")
         && parsed_value.get("anime_episode_range_candidate").is_some()
         && let Some(parsed)=parsed_value.as_object_mut(){
         parsed.insert("episodes".into(),json!([]));
