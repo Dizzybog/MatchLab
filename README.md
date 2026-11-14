@@ -93,6 +93,8 @@ Title matching preserves word boundaries in addition to Tantivy's compact normal
 
 **Movie collections:** A parent folder such as `Harry Potter (2001-2012)/` is a range, not an individual release year. For `Harry Potter (2001-2012)/Harry Potter 1 (2001)`, strict matching uses the child's exact **2001**. For `Harry Potter (2001-2012)/Harry Potter and the Sorcerer's Stone`, no single year is inferred; an exact film title with an IMDb year **within 2001–2012** may satisfy the public match eligibility gate. An out-of-range or unmatched title does not gain an identity from the collection label.
 
+**Blu-ray folder layouts:** For `Harry Potter and the Sorcerer's Stone/STREAM/0000.m2ts` (or `.../BDMV/STREAM/00000.m2ts`), the technical directory and numeric stream filename cannot become IMDb identities or fake episodes. The matcher inherits the individual film's full title from its parent. In strict mode this verified disc structure permits a yearless **unambiguous exact IMDb movie title** to pass the public release-evidence gate. If the exact title belongs to multiple IMDb works and no release year is available, the result stays unmatched instead of guessing; a production year still requires exact equality. Ordinary yearless bare filenames retain their existing public eligibility rules.
+
 **Strict exact-title matching is enabled by default:** MatchLab compares
 complete IMDb and exact AniDB aliases in the same ranked candidate set.
 An unambiguous exact AniDB title can identify a named anime season/part even
