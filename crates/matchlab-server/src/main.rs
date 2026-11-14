@@ -686,14 +686,18 @@ fn filter_request_imdb_candidates(
     db:&Connection,hits:Vec<imdb_matcher::Match>,gate:ImdbIdentityGate<'_>,
 )->Vec<imdb_matcher::Match>{
     let mut filtered=hits.into_iter().filter(|candidate|{
-        !matches!(gate.policy,MatchPolicy::PublicApi)
+        // Apply the same hard constraint after any supplementary candidate
+        // promotion, including verified anime episode recovery. This also
+        // covers dashboard diagnostics, not only the public API gate.
+        (!strict_match_mode() || gate.year.is_none_or(|y|candidate.year==y))
+            && (!matches!(gate.policy,MatchPolicy::PublicApi)
             ||year_signal_eligible(
                 gate.year,candidate.year,gate.has_season,
                 !candidate.anime_ids.is_empty()
                     ||gate.verified_anime_range==Some(candidate.imdb_id.as_str())
                     ||gate.verified_absolute_episode==Some(candidate.imdb_id.as_str()),
                 gate.has_quality,
-            )
+            ))
     }).collect::<Vec<_>>();
     // An explicit season range is stricter than the season-1 tolerance
     // used for provisional title discovery. No range -> no SQL at all.
