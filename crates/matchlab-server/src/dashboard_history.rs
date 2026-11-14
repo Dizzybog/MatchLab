@@ -5,8 +5,8 @@ use sha2::{Digest,Sha256};
 use serde_json::{json, Value};
 use std::{
     path::{Path,PathBuf},
-    sync::{mpsc::{sync_channel,SyncSender,TrySendError},OnceLock,
-           atomic::{AtomicUsize,Ordering}},
+    sync::{Arc,mpsc::{sync_channel,SyncSender,TrySendError},OnceLock,
+           atomic::{AtomicBool,AtomicUsize,Ordering}},
     time::Duration,
 };
 
@@ -313,6 +313,15 @@ const HISTORY_QUEUE_SIZE:usize=4096;
 static HISTORY_QUEUE:OnceLock<Option<SyncSender<HistoryEvent>>>=OnceLock::new();
 static HISTORY_DROPPED:AtomicUsize=AtomicUsize::new(0);
 
+// During server startup the history schema is migrated on a separate
+// blocking worker. Keep completed match diagnostics in the existing bounded
+// queue until that transaction has committed; do not race migration or
+// block an HTTP request while waiting for SQLite.
+static HISTORY_STARTUP_GATE:OnceLock<Arc<AtomicBool>>=OnceLock::new();
+pub fn defer_writes_until(ready:Arc<AtomicBool>){
+    let _=HISTORY_STARTUP_GATE.set(ready);
+}
+
 /// Hand the completed diagnostic to one bounded background writer. A full
 /// queue drops only telemetry, never the verified SID/ASID response. The
 /// writer serializes history transactions and cannot block Tokio or matching
@@ -330,6 +339,11 @@ pub fn record_async(
                 // bounded queue and lost telemetry under sustained load.
                 let mut connection:Option<(PathBuf,Connection)>=None;
                 while let Ok(first)=rx.recv(){
+                    if let Some(ready)=HISTORY_STARTUP_GATE.get(){
+                        while !ready.load(Ordering::Acquire){
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                    }
                     let mut batch=vec![first];
                     while batch.len()<HISTORY_BATCH_SIZE {
                         match rx.try_recv() {
