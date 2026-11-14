@@ -50,21 +50,23 @@ pub fn qualified(raw:&str)->Option<(&'static str,Vec<String>)>{
     if title.is_empty(){return None;}
     let lower=title.to_lowercase();
     for (code,aliases) in COUNTRIES {
-        let mut ordered=aliases.to_vec();
-        ordered.sort_by_key(|s|std::cmp::Reverse(s.len()));
-        for alias in ordered {
-            let marker=format!(" {alias}");
-            if !lower.ends_with(&marker){continue;}
-            let prefix=&title[..title.len()-marker.len()];
-            if prefix.trim().is_empty(){continue;}
-            let mut seen=HashSet::new();
-            let mut out=Vec::new();
-            for variant in std::iter::once(*code).chain(aliases.iter().copied()){
-                let key=clean_title(&format!("{prefix} {variant}"));
-                if !key.is_empty()&&seen.insert(key.clone()){out.push(key);}
-            }
-            return Some((*code,out));
+        // Match and strip in the SAME string: Unicode lowercasing can
+        // change UTF-8 length (UK -> uk). Offsets into `lower` cannot be
+        // applied to the original title without cutting a code point.
+        // Select the longest suffix without sorting/allocating each table.
+        let alias=aliases.iter().copied().filter(|alias|
+            lower.strip_suffix(alias).is_some_and(|prefix|prefix.ends_with(' ')))
+            .max_by_key(|alias|alias.len());
+        let Some(alias)=alias else{continue;};
+        let prefix=lower.strip_suffix(alias).expect("matched country suffix").trim_end();
+        if prefix.is_empty(){continue;}
+        let mut seen=HashSet::new();
+        let mut out=Vec::new();
+        for variant in std::iter::once(*code).chain(aliases.iter().copied()){
+            let key=clean_title(&format!("{prefix} {variant}"));
+            if !key.is_empty()&&seen.insert(key.clone()){out.push(key);}
         }
+        return Some((*code,out));
     }
     None
 }
@@ -87,4 +89,13 @@ mod tests{
     }
     #[test]fn ignores_language_tags(){assert!(candidates("The Voice MULTI S03E01").is_empty());}
     #[test]fn nordic(){assert!(candidates("The Voice Norge S01E01").contains(&"thevoiceno".to_string()));}
+    #[test]fn unicode_lowercase_length_changes_preserve_country_prefix(){
+        for (raw,expected) in [
+            ("The Voice UK S01E01","The Voice UK S01E01"),
+            ("The Voice KR S01E01","The Voice KR S01E01"),
+            ("The Voice South Korea S01E01","The Voice South Korea S01E01"),
+        ] {
+            assert_eq!(qualified(raw),qualified(expected),"{raw}");
+        }
+    }
 }

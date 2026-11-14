@@ -28,7 +28,8 @@ pub fn title_word_count(input:&str)->usize{
         if ch.is_alphanumeric(){
             if !in_word{count+=1;}
             in_word=true;
-        }else if ch!='\'' && ch!='’'{
+        }else if ch!='\'' && ch!='’'
+            && !unicode_normalization::char::is_combining_mark(ch){
             in_word=false;
         }
     }
@@ -74,6 +75,9 @@ mod tests{
         assert_eq!(title_word_count("The Lord of the Rings"),5);
         assert_eq!(title_word_count("Rock and Roll"),3);
         assert_eq!(title_word_count("BLEACH 千年血戦篇"),2);
+        assert_eq!(title_word_count("Amélie"),1);
+        assert_eq!(title_word_count("Ame\u{301}lie"),1);
+        assert_eq!(title_word_count("Pokémon"),title_word_count("Poke\u{301}mon"));
         assert_eq!(title_word_count("..."),0);
     }
 }

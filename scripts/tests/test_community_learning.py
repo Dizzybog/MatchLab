@@ -123,6 +123,12 @@ class CommunityTests(unittest.TestCase):
         corrupted["body"]+="x"*20000
         self.assertIsNone(cl.validate_comment(corrupted,LATEST,lambda *_:True))
 
+    def test_malformed_unicode_and_nested_json_are_rejected(self):
+        self.assertFalse(cl.allowed_title("Example.\ud800.1080p"))
+        body = MARKER + "\n" + "[" * 2000 + "]" * 2000
+        self.assertIsNone(cl.validate_comment({"body": body}, LATEST,
+                                              lambda *_: True))
+
     def test_current_source_replay_clears_fixed_parser_field_hypotheses(self):
         row=make_report("Example.1080p.x265",["field_missing_codec",
             "field_missing_resolution"])

@@ -49,7 +49,12 @@ FEATURES = sorted({"status:matched", "status:unmatched", "status:error",
 
 
 def allowed_title(title):
-    if not isinstance(title, str) or not (1 <= len(title.encode("utf-8")) <= 240):
+    if not isinstance(title, str):
+        return False
+    try:
+        if not (1 <= len(title.encode("utf-8")) <= 240):
+            return False
+    except UnicodeError:
         return False
     if any(c in title for c in "/\\@\r\n\0") or any(ord(c) < 32 for c in title):
         return False
@@ -147,7 +152,12 @@ def validate_comment(comment, current_sha, is_ancestor=git_ancestor):
     if not isinstance(comment, dict):
         return None
     body = comment.get("body")
-    if not isinstance(body, str) or len(body.encode("utf-8")) > 16384:
+    if not isinstance(body, str):
+        return None
+    try:
+        if len(body.encode("utf-8")) > 16384:
+            return None
+    except UnicodeError:
         return None
     marker = next((m for m in (MARKER, "<!-- matchlab-community-batch-v3 -->")
                    if body.startswith(m + "\n")), None)
@@ -156,7 +166,7 @@ def validate_comment(comment, current_sha, is_ancestor=git_ancestor):
     protocol = 3 if "v3" in marker else 2
     try:
         batch = json.loads(body[len(marker) + 1:])
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         return None
     fields = {"protocol","learning_epoch","build_sha","source","batch_id",
               "created_unix","verified","reports"}

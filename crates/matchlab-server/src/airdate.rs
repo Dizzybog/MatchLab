@@ -2,7 +2,7 @@
 //! The cache is separate from the atomically replaced IMDb metadata database.
 use rusqlite::{params, Connection};
 use serde_json::Value;
-use std::{path::{Path,PathBuf},time::{SystemTime,UNIX_EPOCH,Duration}};
+use std::{io::Read,path::{Path,PathBuf},time::{SystemTime,UNIX_EPOCH,Duration}};
 
 const TTL:i64=7*24*3600;
 const MAX_BYTES:usize=16*1024*1024;
@@ -79,16 +79,24 @@ fn normalize_date(s:&str)->Option<&str>{
     if parts.len()==3&&parts[0].len()==4&&parts[1].len()==2&&parts[2].len()==2
         &&parts.iter().all(|p|p.bytes().all(|c|c.is_ascii_digit())){Some(date)}else{None}
 }
+fn read_response(body:impl Read)->Result<Vec<u8>,String>{
+    // Content-Length may be absent or inaccurate. Bound the actual stream
+    // before allocating the full payload, retaining one byte to detect excess.
+    let mut bytes=Vec::new();
+    body.take(MAX_BYTES as u64+1).read_to_end(&mut bytes)
+        .map_err(|e|e.to_string())?;
+    if bytes.len()>MAX_BYTES{return Err("Cinemeta response too large".into());}
+    Ok(bytes)
+}
 fn fetch(id:&str)->Result<Vec<(String,i64,i64)>,String>{
     if !id.starts_with("tt")||!id[2..].bytes().all(|c|c.is_ascii_digit()){return Err("invalid IMDb ID".into());}
     let url=format!("https://v3-cinemeta.strem.io/meta/series/{id}.json");
-    let client=reqwest::blocking::Client::builder().timeout(Duration::from_secs(8))
+    let client=reqwest::blocking::Client::builder().https_only(true).timeout(Duration::from_secs(8))
         .build().map_err(|e|e.to_string())?;
     let response=client.get(url).send().map_err(|e|e.to_string())?
         .error_for_status().map_err(|e|e.to_string())?;
     if response.content_length().is_some_and(|n|n>MAX_BYTES as u64){return Err("Cinemeta response too large".into());}
-    let bytes=response.bytes().map_err(|e|e.to_string())?;
-    if bytes.len()>MAX_BYTES{return Err("Cinemeta response too large".into());}
+    let bytes=read_response(response)?;
     let json:Value=serde_json::from_slice(&bytes).map_err(|e|e.to_string())?;
     let videos=json.pointer("/meta/videos").and_then(Value::as_array)
         .ok_or("Cinemeta response missing meta.videos")?;
@@ -139,6 +147,19 @@ pub fn resolve(metadata:&Path,id:&str,date:&str)->Result<Option<(i64,i64,String)
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn response_limit_applies_without_content_length(){
+        let mut body=std::io::repeat(b' ');
+        assert_eq!(read_response(&mut body).unwrap_err(),"Cinemeta response too large");
+        let boundary=std::io::repeat(b' ').take(MAX_BYTES as u64);
+        assert_eq!(read_response(boundary).unwrap().len(),MAX_BYTES);
+    }
+    #[test]
+    fn oversized_response_stops_reading_after_one_excess_byte(){
+        let mut body=std::io::Cursor::new(vec![b' ';MAX_BYTES+2]);
+        assert!(read_response(&mut body).is_err());
+        assert_eq!(body.position(),MAX_BYTES as u64+1);
+    }
     #[test]
     fn airdate_lookup_uses_primary_key_after_legacy_index_removal(){
         let folder=std::env::temp_dir().join(format!(

@@ -76,7 +76,8 @@ fn resolve_range_inner(
     db:&Connection,imdb:&str,title:&str,season:i64,start:i64,end:i64,
     force_local:bool,
 )->rusqlite::Result<Vec<Option<episode_crosswalk::Episode>>>{
-    if season<=0||start<=0||end<start{return Ok(Vec::new());}
+    if !(1..=9_999).contains(&season)||!(1..=99_999).contains(&start)
+        ||!(start..=99_999).contains(&end){return Ok(Vec::new());}
     // Preserve very large interval behavior without allocating an unbounded
     // batch context. Ordinary packs use the optimized shared-snapshot path.
     if end-start>=1_000 {
@@ -189,7 +190,8 @@ fn resolve_range_inner(
         let mut locals=BTreeSet::new();
         for (_,_,range_start,range_end) in &rows {
             let local=if *range_start>1{
-                episode+range_start.max(&1)-1
+                let Some(local)=episode.checked_add(range_start-1) else{continue;};
+                local
             }else{episode};
             if local>=(*range_start).max(1)
                 &&(*range_end<=0||local<=*range_end){locals.insert(local);}
@@ -198,7 +200,8 @@ fn resolve_range_inner(
         let local=*locals.iter().next().unwrap();
         let coordinates:BTreeSet<_>=rows.iter().filter(|(_,_,s,e)|
             local>=(*s).max(1)&&(*e<=0||local<=*e))
-            .map(|(tv,offset,_,_)|(*tv,local+offset)).collect();
+            .filter_map(|(tv,offset,_,_)|
+                local.checked_add(*offset).map(|episode|(*tv,episode))).collect();
         if coordinates.len()!=1{continue;}
         let (tv,ep)=*coordinates.iter().next().unwrap();
         if episode_crosswalk::canonical_asid(&target.id,local).is_none()
@@ -458,8 +461,7 @@ mod title_only_season_tests {
 mod named_part_range_tests {
     use super::*;
 
-    #[test]
-    fn named_part_batch_keeps_verified_season_and_rejects_out_of_range(){
+    fn fixture()->Connection{
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE titles(
             imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,
@@ -485,6 +487,12 @@ mod named_part_range_tests {
             INSERT INTO episode_map VALUES
                 ('100','700',1,1,1,3,0,''),
                 ('200','700',1,2,1,3,0,'');").unwrap();
+        db
+    }
+
+    #[test]
+    fn named_part_batch_keeps_verified_season_and_rejects_out_of_range(){
+        let db=fixture();
         let base=resolve_range(&db,"tt0000001","Part One",1,1,3).unwrap();
         let sequel=resolve_range(&db,"tt0000001","Part Two",1,1,3).unwrap();
         for (number,episode) in (1..=3).zip(base){
@@ -503,5 +511,28 @@ mod named_part_range_tests {
         let single=resolve(&db,"tt0000001","Part Two",1,2).unwrap().unwrap();
         assert_eq!((single.season,single.episode,single.anidb_id.as_str()),
             (2,2,"200"));
+    }
+
+    #[test]
+    fn named_part_rejects_overflowing_metadata_coordinates(){
+        let db=fixture();
+        db.execute("UPDATE episode_map SET offset=?1 WHERE anidb_id='200'",
+            [i64::MAX]).unwrap();
+        assert!(resolve_local_part_range(&db,"tt0000001","Part One",2,1,2)
+            .unwrap().iter().all(Option::is_none));
+        db.execute("UPDATE episode_map SET offset=0,start=?1,end=0
+            WHERE anidb_id='200'",[i64::MAX]).unwrap();
+        assert!(resolve_local_part_range(&db,"tt0000001","Part One",2,2,2)
+            .unwrap().iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn invalid_named_part_ranges_are_rejected_before_metadata_queries(){
+        let db=Connection::open_in_memory().unwrap();
+        for (season,start,end) in [(1,1,i64::MAX),(1,100_000,100_000),
+            (10_000,1,1),(1,0,1)]{
+            assert!(resolve_range(&db,"tt0000001","Part One",season,start,end)
+                .unwrap().is_empty());
+        }
     }
 }

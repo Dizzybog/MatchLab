@@ -71,6 +71,7 @@ fn resolve(db:&rusqlite::Connection,req:Request)->Result<Value,String>{
     }))
 }
 async fn respond(state:AppState,request:ResolveRequest)->(StatusCode,Json<Value>){
+    if !crate::matching_available(&state){return crate::indexing_response();}
     let req=match validated(request){
         Ok(v)=>v,
         Err(error)=>return (StatusCode::BAD_REQUEST,Json(json!({"error":error}))),
@@ -101,6 +102,28 @@ pub async fn post_resolve(State(state):State<AppState>,Json(req):Json<ResolveReq
 mod tests{
     use super::*;
     use rusqlite::Connection;
+
+    #[tokio::test]
+    async fn unavailable_metadata_returns_retryable_response_before_waiting_for_a_slot(){
+        use std::sync::{Arc,Mutex,atomic::AtomicBool};
+        for phase in [crate::IndexPhase::WaitingForMetadata,crate::IndexPhase::Indexing,
+            crate::IndexPhase::Failed("metadata unavailable".into())]{
+            let state=AppState{
+                db:Arc::new("/nonexistent/matchlab-episode-metadata.sqlite3".into()),
+                history:Arc::new("/nonexistent/matchlab-episode-history.sqlite3".into()),
+                match_slots:Arc::new(tokio::sync::Semaphore::new(0)),
+                index_phase:Arc::new(Mutex::new(phase)),
+                history_ready:Arc::new(AtomicBool::new(false)),
+            };
+            let (status,Json(body))=tokio::time::timeout(
+                std::time::Duration::from_secs(1),respond(state,ResolveRequest{
+                    imdb_id:Some("tt1234567".into()),anidb_id:None,
+                    season:Some(1),episode:1,
+                })).await.expect("readiness does not wait for a match slot");
+            assert_eq!(status,StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(body["status"],"indexing");
+        }
+    }
 
     #[test]
     fn validates_both_id_directions_and_coordinates(){

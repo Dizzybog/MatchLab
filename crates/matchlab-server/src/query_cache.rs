@@ -27,6 +27,29 @@ pub struct QueryCache<T> {
     max_entries:usize,
     ttl:Duration,
 }
+
+// Keep a key's lock registered while any computation or waiter still owns it.
+// Removing it when the first computation finishes lets a new request create a
+// second lock alongside waiters retrying an error or an uncacheable result.
+struct Flight<'a,T> {
+    cache:&'a QueryCache<T>,
+    key:String,
+    lock:Arc<Mutex<()>>,
+}
+impl<T> Drop for Flight<'_,T> {
+    fn drop(&mut self){
+        if let Ok(mut inner)=self.cache.inner.lock(){
+            // The registry and this request are the final two owners. The
+            // cache mutex prevents a new waiter from joining during removal.
+            if Arc::strong_count(&self.lock)==2
+                && inner.flights.get(&self.key)
+                    .is_some_and(|lock|Arc::ptr_eq(lock,&self.lock))
+            {
+                inner.flights.remove(&self.key);
+            }
+        }
+    }
+}
 impl<T:Clone> QueryCache<T> {
     pub fn new(max_entries:usize,ttl:Duration)->Self{
         Self{inner:Mutex::new(Inner{
@@ -57,8 +80,9 @@ impl<T:Clone> QueryCache<T> {
         };
         // Clone the payload after releasing the global mutex.
         if let Some(value)=cached{return Ok((*value).clone());}
-        let flight=flight.expect("cache miss has a single-flight lock");
-        let _guard=flight.lock().map_err(|e|e.to_string())?;
+        let flight=Flight{cache:self,key:key.clone(),
+            lock:flight.expect("cache miss has a single-flight lock")};
+        let _guard=flight.lock.lock().map_err(|e|e.to_string())?;
         // Another request may have populated this entry while we waited.
         let cached={
             let inner=self.inner.lock().map_err(|e|e.to_string())?;
@@ -104,7 +128,6 @@ impl<T:Clone> QueryCache<T> {
                     inner.eviction=live.into_iter().map(|(_,key,seq)|(key,seq)).collect();
                 }
             }
-            inner.flights.remove(&key);
         }
         result
     }
@@ -171,6 +194,61 @@ mod tests{
         }
         for job in jobs{assert_eq!(job.join().unwrap(),42);}
         assert_eq!(n.load(Ordering::SeqCst),1);
+    }
+
+    #[test]
+    fn waiters_keep_their_flight_registered_after_uncacheable_results(){
+        use std::sync::mpsc;
+        // Cover errors, explicitly uncacheable payloads, disabled storage,
+        // and results that expire before the next waiter acquires the lock.
+        for (fail,cacheable,capacity,ttl) in [
+            (true,true,8,Duration::from_secs(60)),
+            (false,false,8,Duration::from_secs(60)),
+            (false,true,0,Duration::from_secs(60)),
+            (false,true,8,Duration::ZERO),
+        ] {
+            let cache=Arc::new(QueryCache::<usize>::new(capacity,ttl));
+            let (first_entered,first_ready)=mpsc::channel();
+            let (release_first,first_release)=mpsc::channel();
+            let first_cache=cache.clone();
+            let first=std::thread::spawn(move||first_cache.get_or_compute(
+                "same".into(),||{
+                    first_entered.send(()).unwrap();
+                    first_release.recv().unwrap();
+                    if fail{Err("transient failure".into())}else{Ok(1)}
+                },|_|cacheable));
+            first_ready.recv_timeout(Duration::from_secs(5)).unwrap();
+            let (second_entered,second_ready)=mpsc::channel();
+            let (release_second,second_release)=mpsc::channel();
+            let second_cache=cache.clone();
+            let second=std::thread::spawn(move||second_cache.get_or_compute(
+                "same".into(),||{
+                    second_entered.send(()).unwrap();
+                    second_release.recv().unwrap();
+                    Ok(2)
+                },|_|cacheable));
+            let deadline=Instant::now()+Duration::from_secs(5);
+            // Wait until the second request has joined this exact flight.
+            loop {
+                let joined=cache.inner.lock().unwrap().flights.get("same")
+                    .is_some_and(|lock|Arc::strong_count(lock)>=3);
+                if joined{break;}
+                assert!(Instant::now()<deadline,"second request did not join flight");
+                std::thread::yield_now();
+            }
+            release_first.send(()).unwrap();
+            assert_eq!(first.join().unwrap().is_err(),fail);
+            second_ready.recv_timeout(Duration::from_secs(5)).unwrap();
+            // A later arrival must find the lock held by the second request,
+            // rather than create another concurrently executing flight.
+            let registered=cache.inner.lock().unwrap().flights.get("same")
+                .is_some_and(|lock|lock.try_lock().is_err());
+            release_second.send(()).unwrap();
+            assert_eq!(second.join().unwrap().unwrap(),2);
+            assert!(registered,"running waiter lost its registered flight");
+            assert!(cache.inner.lock().unwrap().flights.is_empty(),
+                "the final request must release the flight registry entry");
+        }
     }
 
     #[test]

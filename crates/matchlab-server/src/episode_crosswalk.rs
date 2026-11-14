@@ -158,7 +158,9 @@ fn explicit_pairs(map:&str)->Vec<(i64,i64)>{
     pairs
 }
 pub fn resolve_season(db:&Connection,imdb:&str,season:i64,episode:i64)->rusqlite::Result<Option<Episode>>{
-    if season<=0||episode<=0{return Ok(None);}
+    if !(1..=9_999).contains(&season)||!(1..=99_999).contains(&episode){
+        return Ok(None);
+    }
     let links=links(db,imdb)?;
     let maps=mappings(db,&links,false)?;
     let splits=split_index(&links,&maps);
@@ -170,7 +172,8 @@ pub fn resolve_season(db:&Connection,imdb:&str,season:i64,episode:i64)->rusqlite
 pub fn resolve_season_range(
     db:&Connection,imdb:&str,season:i64,start:i64,end:i64,
 )->rusqlite::Result<Vec<Option<Episode>>>{
-    if season<=0||start<=0||end<start||end-start>=1_000{return Ok(Vec::new());}
+    if !(1..=9_999).contains(&season)||start<=0||end<start
+        ||end>99_999||end-start>=1_000{return Ok(Vec::new());}
     let links=links(db,imdb)?;
     let maps=mappings(db,&links,false)?;
     let splits=split_index(&links,&maps);
@@ -178,45 +181,44 @@ pub fn resolve_season_range(
         resolve_season_preloaded(imdb,season,episode,&links,&maps,&splits)).collect())
 }
 
-// Preserve exactly the first TWO entries of the legacy STABLE sort:
-// descending (offset,start), then ascending AniDB ID. Duplicate entries
-// retain insertion order. Only the runner-up can make the top match
-// ambiguous in the original algorithm. Keep both in constant-size state,
-// without cloning every candidate or allocating a Vec per episode.
+// Retain one strongest coordinate and whether another distinct coordinate
+// has the same (offset,start) evidence. Duplicate links or map rows must not
+// hide a conflicting third candidate behind an identical runner-up. This
+// stays constant-size without allocating or cloning candidates per episode.
 #[derive(Clone,Copy)]
 struct SeasonWinner<'a> {
     offset:i64,start:i64,anidb:&'a str,anime_episode:i64,
 }
-fn season_precedes(a:SeasonWinner<'_>,b:SeasonWinner<'_>)->bool{
-    (a.offset,a.start)>(b.offset,b.start)
-        ||((a.offset,a.start)==(b.offset,b.start) && a.anidb<b.anidb)
-}
 fn consider_season<'a>(
-    best:&mut Option<SeasonWinner<'a>>,runner:&mut Option<SeasonWinner<'a>>,
+    best:&mut Option<SeasonWinner<'a>>,ambiguous:&mut bool,
     offset:i64,start:i64,anidb:&'a str,anime_episode:i64,
 ){
     if canonical_asid(anidb,anime_episode).is_none(){return;}
     let candidate=SeasonWinner{offset,start,anidb,anime_episode};
     match *best {
-        None=>*best=Some(candidate),
-        Some(previous) if season_precedes(candidate,previous)=>{
-            *runner=Some(previous);
+        None=>{
             *best=Some(candidate);
+            *ambiguous=false;
         },
-        Some(_)=>{
-            if runner.is_none_or(|old|season_precedes(candidate,old)){
-                *runner=Some(candidate);
+        Some(previous) if (offset,start)>(previous.offset,previous.start)=>{
+            *best=Some(candidate);
+            *ambiguous=false;
+        },
+        Some(previous) if (offset,start)==(previous.offset,previous.start)=>{
+            if (anidb,anime_episode)!=(previous.anidb,previous.anime_episode){
+                *ambiguous=true;
             }
         },
+        _=>{},
     }
 }
 fn resolve_season_preloaded(
     imdb:&str,season:i64,episode:i64,_links:&[Link],_maps:&[Mapping],
     splits:&SplitIndex<'_>,
 )->Option<Episode>{
-    if season<=0||episode<=0{return None;}
+    if !(1..=9_999).contains(&season)||!(1..=99_999).contains(&episode){return None;}
     let mut best:Option<SeasonWinner<'_>>=None;
-    let mut runner:Option<SeasonWinner<'_>>=None;
+    let mut ambiguous=false;
     for indexed in &splits.links {
         let link=indexed.link;
         for (&m,&is_split) in indexed.mappings.iter().zip(&indexed.split) {
@@ -225,28 +227,27 @@ fn resolve_season_preloaded(
             if !is_split&&!m.explicit.is_empty(){
                 for &(ani,tv) in &m.explicit{
                     if tv==episode{
-                        consider_season(&mut best,&mut runner,
+                        consider_season(&mut best,&mut ambiguous,
                             m.offset,m.start,&link.anidb,ani);
                     }
                 }
                 continue;
             }
-            let ani=if is_split{episode+m.start.max(1)-1}else{episode-m.offset};
+            let ani=if is_split{episode.checked_add(m.start.max(1)-1)}
+                else{episode.checked_sub(m.offset)};
+            let Some(ani)=ani else{continue};
             if ani<m.start.max(1)||(m.end>0&&ani>m.end){continue;}
-            consider_season(&mut best,&mut runner,
+            consider_season(&mut best,&mut ambiguous,
                 m.offset,m.start,&link.anidb,ani);
         }
     }
+    if ambiguous{return None;}
     let best=best?;
-    if runner.is_some_and(|second|
-        second.offset==best.offset&&second.start==best.start
-        &&(second.anidb!=best.anidb
-            ||second.anime_episode!=best.anime_episode)){return None;}
     Some(Episode{imdb_id:imdb.into(),season,episode,
         anidb_id:best.anidb.to_owned(),anidb_episode:best.anime_episode})
 }
 pub fn resolve_absolute(db:&Connection,imdb:&str,episode:i64)->rusqlite::Result<Option<Episode>>{
-    if episode<=0{return Ok(None);}
+    if !(1..=99_999).contains(&episode){return Ok(None);}
     let links=links(db,imdb)?;
     let maps=mappings(db,&links,true)?;
     let splits=split_index(&links,&maps);
@@ -260,7 +261,7 @@ pub fn resolve_absolute(db:&Connection,imdb:&str,episode:i64)->rusqlite::Result<
 pub fn resolve_absolute_endpoints(
     db:&Connection,imdb:&str,start:i64,end:i64,
 )->rusqlite::Result<(Option<Episode>,Option<Episode>)>{
-    if start<=0 || end<start || end-start>=10_000 {
+    if start<=0 || end<start || end>99_999 || end-start>=10_000 {
         return Ok((None,None));
     }
     let links=links(db,imdb)?;
@@ -278,7 +279,7 @@ pub fn resolve_absolute_endpoints(
 pub fn resolve_absolute_range(
     db:&Connection,imdb:&str,start:i64,end:i64,
 )->rusqlite::Result<Vec<Option<Episode>>>{
-    if start<=0||end<start||end-start>9_999{return Ok(Vec::new());}
+    if start<=0||end<start||end>99_999||end-start>9_999{return Ok(Vec::new());}
     let links=links(db,imdb)?;
     let maps=mappings(db,&links,true)?;
     let splits=split_index(&links,&maps);
@@ -332,7 +333,7 @@ fn resolve_absolute_preloaded(
         let link=indexed.link;
         // Computed once per crosswalk snapshot: preserve first absolute
         // mapping row, duplicate links and source-row traversal order.
-        let local=episode-indexed.absolute_offset;
+        let Some(local)=episode.checked_sub(indexed.absolute_offset) else{continue};
         if local<=0||indexed.first_absolute_end
             .is_some_and(|end|end>0&&local>end){continue;}
         for (&m,&is_split) in indexed.mappings.iter().zip(&indexed.split){
@@ -354,7 +355,9 @@ fn resolve_absolute_preloaded(
             // ownership. The old evidence tiers (3/2/1) stay unchanged.
             if !link.direct && (m.start<=0||m.end<=0){continue;}
             let season=if is_split{link.trakt}else{m.tv_season};
-            let tv=if is_split{local-m.start.max(1)+1}else{local+m.offset};
+            let tv=if is_split{Some(local-m.start.max(1)+1)}
+                else{local.checked_add(m.offset)};
+            let Some(tv)=tv else{continue};
             if season>0&&tv>0{
                 let strength=if m.start>0&&m.end>0{2}else{1};
                 consider_absolute(&mut best,&mut ambiguous,
@@ -414,7 +417,7 @@ pub fn resolve_anidb(
                             (ani==episode).then_some(tv)).collect()
                     }else if episode>=m.start.max(1) &&
                         (m.end<=0||episode<=m.end){
-                        vec![episode+m.offset]
+                        episode.checked_add(m.offset).into_iter().collect()
                     }else{Vec::new()}
                 };
                 for tv_episode in ep_candidates{
@@ -442,7 +445,7 @@ pub fn resolve_anidb(
 mod tests{
     use super::*;
     #[test]
-    fn streaming_winners_match_original_sort_and_dedup_for_1000_fixtures(){
+    fn streaming_winners_match_full_candidate_reference_for_1000_fixtures(){
         let ids=["100","101","102","bad","0","123"];
         let mut state=0x18f3a11c_u64;
         let mut pick=|n:u64|{
@@ -451,9 +454,9 @@ mod tests{
             state%n
         };
         for _case in 0..1000 {
-            let mut old_season:Vec<(i64,i64,String,i64)>=Vec::new();
+            let mut season_reference:Vec<(i64,i64,String,i64)>=Vec::new();
             let mut best_season=None;
-            let mut runner_season=None;
+            let mut ambiguous_season=false;
             let mut old_absolute=std::collections::BTreeMap::<(String,i64,i64,i64),u8>::new();
             let mut best_absolute=None;
             let mut ambiguous_absolute=false;
@@ -465,8 +468,8 @@ mod tests{
                 let season=pick(10_100) as i64;
                 let episode=pick(105_000) as i64;
                 let strength=(pick(3)+1) as u8;
-                old_season.push((offset,start,id.into(),ani));
-                consider_season(&mut best_season,&mut runner_season,
+                season_reference.push((offset,start,id.into(),ani));
+                consider_season(&mut best_season,&mut ambiguous_season,
                     offset,start,id,ani);
                 old_absolute.entry((id.into(),ani,season,episode))
                     .and_modify(|seen|*seen=(*seen).max(strength))
@@ -474,27 +477,17 @@ mod tests{
                 consider_absolute(&mut best_absolute,&mut ambiguous_absolute,
                     id,ani,season,episode,strength);
             }
-            // The old season resolver filtered invalid ASIDs, sorted by
-            // descending (offset,start), and rejected a different runner-up
-            // tied at the strongest rank.
-            old_season.retain(|(_,_,id,ani)|canonical_asid(id,*ani).is_some());
-            old_season.sort_by(|a,b|b.0.cmp(&a.0)
-                .then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
-            let expected_season=old_season.first().and_then(|first|{
-                if old_season.get(1).is_some_and(|runner|
-                    runner.0==first.0&&runner.1==first.1
-                    &&(runner.2!=first.2||runner.3!=first.3)){
-                    None
-                }else{Some((first.2.clone(),first.3))}
-            });
-            let actual_season=best_season.and_then(|best:SeasonWinner<'_>|{
-                if runner_season.is_some_and(|runner:SeasonWinner<'_>|
-                    runner.offset==best.offset&&runner.start==best.start
-                    &&(runner.anidb!=best.anidb
-                        ||runner.anime_episode!=best.anime_episode)){
-                    None
-                }else{Some((best.anidb.to_owned(),best.anime_episode))}
-            });
+            // Compare streaming ambiguity detection to an independent full
+            // candidate set, including duplicates at the strongest rank.
+            season_reference.retain(|(_,_,id,ani)|canonical_asid(id,*ani).is_some());
+            let max=season_reference.iter().map(|r|(r.0,r.1)).max();
+            let top=season_reference.into_iter().filter(|r|Some((r.0,r.1))==max)
+                .map(|r|(r.2,r.3)).collect::<BTreeSet<_>>();
+            let expected_season=if top.len()==1{top.into_iter().next()}else{None};
+            let actual_season=if ambiguous_season{None}else{
+                best_season.map(|best:SeasonWinner<'_>|
+                    (best.anidb.to_owned(),best.anime_episode))
+            };
             assert_eq!(actual_season,expected_season);
 
             // The old absolute resolver merged identical keys using their
@@ -517,6 +510,97 @@ mod tests{
             };
             assert_eq!(actual_absolute,expected_absolute);
         }
+    }
+
+    #[test]
+    fn duplicate_mapping_rows_cannot_hide_ambiguous_season_identity(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO anime_series_map VALUES('tt1234567','100','700',0);
+            INSERT INTO episode_map VALUES('100','700',1,1,1,12,0,'');
+            INSERT INTO episode_map VALUES('100','700',1,1,1,12,0,'');").unwrap();
+        assert_eq!(resolve_season(&db,"tt1234567",1,3).unwrap()
+            .unwrap().anidb_id,"100","identical duplicates are harmless");
+        db.execute("INSERT INTO episode_map VALUES('200','700',1,1,1,12,0,'')",[])
+            .unwrap();
+        assert!(resolve_season(&db,"tt1234567",1,3).unwrap().is_none(),
+            "a distinct tied identity remains ambiguous behind duplicate map rows");
+        assert!(resolve_season_range(&db,"tt1234567",1,1,3).unwrap()
+            .iter().all(Option::is_none));
+        assert!(resolve_anidb(&db,"100",3).unwrap().is_empty(),
+            "reverse resolution must agree with ambiguous forward resolution");
+    }
+
+    #[test]
+    fn duplicate_explicit_pairs_cannot_hide_a_different_anidb_episode(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO anime_series_map VALUES('tt1234567','100','700',0);
+            INSERT INTO episode_map VALUES('100','700',1,1,1,12,0,'1-1;1-1;2-1');")
+            .unwrap();
+        assert!(resolve_season(&db,"tt1234567",1,1).unwrap().is_none());
+    }
+
+    #[test]
+    fn stronger_season_evidence_clears_only_weaker_ambiguity(){
+        let mut best=None;
+        let mut ambiguous=false;
+        for (offset,id) in [(0,"100"),(0,"200"),(1,"300"),(0,"100")]{
+            consider_season(&mut best,&mut ambiguous,offset,1,id,3);
+        }
+        assert!(!ambiguous);
+        assert_eq!(best.unwrap().anidb,"300");
+        consider_season(&mut best,&mut ambiguous,1,1,"400",3);
+        assert!(ambiguous);
+        consider_season(&mut best,&mut ambiguous,1,1,"300",3);
+        assert!(ambiguous,"a duplicate never clears equal-strength ambiguity");
+    }
+
+    #[test]
+    fn malformed_offsets_are_rejected_without_arithmetic_overflow(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO anime_series_map VALUES('tt1234567','100','700',0);
+            INSERT INTO episode_map VALUES
+                ('100','700',1,-1,1,12,-9223372036854775808,''),
+                ('100','700',1,1,1,12,-9223372036854775808,'');")
+            .unwrap();
+        assert!(resolve_season(&db,"tt1234567",1,3).unwrap().is_none());
+        assert!(resolve_absolute(&db,"tt1234567",3).unwrap().is_none());
+        db.execute("DELETE FROM episode_map WHERE tvdb_season=-1",[]).unwrap();
+        db.execute("UPDATE episode_map SET offset=9223372036854775807",[]).unwrap();
+        assert!(resolve_absolute(&db,"tt1234567",3).unwrap().is_none());
+        assert!(resolve_anidb(&db,"100",3).unwrap().is_empty());
+    }
+
+    #[test]
+    fn invalid_public_coordinates_skip_crosswalk_reads(){
+        let db=Connection::open_in_memory().unwrap();
+        for (season,episode) in [(10_000,1),(1,100_000),(i64::MAX,i64::MAX)]{
+            assert!(resolve_season(&db,"tt1234567",season,episode).unwrap().is_none());
+        }
+        assert!(resolve_absolute(&db,"tt1234567",100_000).unwrap().is_none());
+        assert!(resolve_season_range(&db,"tt1234567",1,99_999,100_000)
+            .unwrap().is_empty());
+        assert!(resolve_absolute_range(&db,"tt1234567",99_999,100_000)
+            .unwrap().is_empty());
+        assert_eq!(resolve_absolute_endpoints(&db,"tt1234567",99_999,100_000)
+            .unwrap(),(None,None));
     }
 
     #[test]

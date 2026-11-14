@@ -150,7 +150,7 @@ pub(crate) fn semantic_words(raw:&str)->Vec<String>{
     use unicode_normalization::{UnicodeNormalization,char::is_combining_mark};
     let folded=raw.to_lowercase()
         .replace('æ',"ae").replace('ø',"o").replace('œ',"oe")
-        .replace('ß',"ss").replace("'", "");
+        .replace('ß',"ss").replace(['\'','’'], "");
     let folded=folded.nfkd().filter(|c|!is_combining_mark(*c))
         .collect::<String>();
     folded.split(|c:char|!c.is_alphanumeric())
@@ -1122,6 +1122,35 @@ pub fn prefer_verified_episode_identity(
 }
 #[cfg(test)]
 mod tests{
+
+    #[test]
+    fn strict_matches_equivalent_unicode_apostrophes_and_decomposed_accents(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('tt0000001','JoJo''s Bizarre Adventure','jojosbizarreadventure',
+                    2012,'series','US',1,0,'tvSeries'),
+                ('tt0000002','Amélie','amelie',2001,'movie','FR',1,0,'movie'),
+                ('tt0000003','V','v',1983,'series','US',1,0,'tvMiniSeries');")
+            .unwrap();
+        for (title,year,series,expected) in [
+            ("JoJo’s Bizarre Adventure",2012,true,"tt0000001"),
+            ("Ame\u{301}lie",2001,false,"tt0000002"),
+            ("V",1983,true,"tt0000003"),
+        ] {
+            let release=format!("{title}.{year}.1080p");
+            let hits=search_inner_mode(&db,title,Some(year),series,0,
+                &release,false,5,false,true).unwrap().0;
+            assert_eq!(hits.len(),1,"{title}: {hits:?}");
+            assert_eq!(hits[0].imdb_id,expected);
+        }
+        // Word separators still distinguish separate names in strict mode.
+        assert_ne!(semantic_words("JoJo s"),semantic_words("JoJo’s"));
+    }
 
     /// Strict mode ranks all exact IMDb and AniDB identities together.
     /// A uniquely linked named anime part can beat a same-name unrelated

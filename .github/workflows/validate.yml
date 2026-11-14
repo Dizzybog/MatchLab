@@ -14,11 +14,11 @@ jobs:
       - name: Test community learning security and stale-data gates
         run: python3 -m unittest discover -s scripts/tests -v
       - name: Test native Rust backend
-        run: RUSTFLAGS="-D warnings" cargo test --workspace
+        run: RUSTFLAGS="-D warnings" cargo test --workspace --locked
       - name: Verify native community regex auditor
-        run: RUSTFLAGS="-D warnings" cargo test -p matchlab-parser --example audit_community_regex
+        run: RUSTFLAGS="-D warnings" cargo test -p matchlab-parser --example audit_community_regex --locked
       - name: Check all Rust targets, including parser benchmarks
-        run: RUSTFLAGS="-D warnings" cargo check --workspace --all-targets
+        run: RUSTFLAGS="-D warnings" cargo check --workspace --all-targets --locked
       - name: Build lightweight production Docker image with native Rust ML
         run: docker build -t matchlab:test .
       - name: Verify native online training and prediction

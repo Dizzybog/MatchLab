@@ -9,7 +9,7 @@ use sha2::{Digest,Sha256};
 use std::collections::{BTreeMap,BTreeSet};
 use std::sync::{OnceLock,RwLock,atomic::{AtomicU64,Ordering}};
 
-const EPOCH:u32=1;
+const EPOCH:u32=2; // Revalidate historical range labels with mixed-pack guards.
 
 const MIN_OBSERVATIONS:i64=8;
 const MIN_IDENTITIES:i64=4;
@@ -69,9 +69,15 @@ fn expected(name:&str)->Option<Expected>{
             ||!(1..=120).contains(&s)||e1<=0||e2<=e1||e2-e1>32 {
             return None;
         }
-        // Reject mixed packs, multiple SxxEyy tokens or a second range.
-        if re.find_iter(name).count()!=1
-            ||crate::tv_learning::explicit_coordinates(name).is_some(){
+        // The ordinary-TV detector deliberately rejects all ranges, so it
+        // cannot prove that a range has no additional coordinates. Count
+        // full coordinate markers independently, without consuming their
+        // trailing separator (which can start the next marker).
+        static MARKERS:OnceLock<Regex>=OnceLock::new();
+        let markers=MARKERS.get_or_init(||Regex::new(
+            r"(?i)(?:^|[._ -])(?:s[0-9]{1,3}[._ -]*e[0-9]{1,5}|[0-9]{1,3}x[0-9]{1,5}|season[._ -]+[0-9]{1,3}[._ -]+episode[._ -]+[0-9]{1,5})"
+        ).expect("bounded corrective coordinate marker guard"));
+        if markers.find_iter(name).take(2).count()!=1{
             return None;
         }
         return Some(Expected{family:"sxe_range",season:s,
@@ -591,6 +597,36 @@ mod tests {
             "episode_start":3,"episode_end":5,"episode_count":3})),"aligned");
         assert!(expected("Example.Show.S01E02.S02E03").is_none());
         assert!(expected("Example.Show.S01E04-E03").is_none());
+    }
+    #[test]
+    fn mixed_coordinate_packs_cannot_become_single_range_training_labels(){
+        for name in [
+            "Example.Show.S01E01-E02.S02E03",
+            "Example.Show.S02E03.S01E01-E02",
+            "Example.Show.S01E01-E02.S02E03-E04",
+            "Example.Show.S01E01-E02.2x03",
+            "Example.Show.2x03.S01E01-E02",
+            "Example.Show.S01E01-E02.Season.2.Episode.3",
+        ]{
+            assert!(expected(name).is_none(),"ambiguous pack must be review-only: {name}");
+        }
+        let e=expected("Example.Show.S01E01-E02.1080p.WEB-DL").unwrap();
+        assert_eq!(e.episodes,vec![1,2]);
+    }
+    #[test]
+    fn mixed_pack_evidence_from_previous_epoch_is_retired(){
+        let db=Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        db.execute("INSERT INTO ml_corrective_observations
+            (example_hash,identity_hash,family,error_class,release_name,
+             source_build,observed_at)
+            VALUES('mixed','work','sxe_range','under',?1,'old-parser:1',1)",
+            ["Example.Show.S01E01-E02.S02E03"]).unwrap();
+        assert_eq!(revalidate_previous_build(&db).unwrap(),0);
+        let remaining:i64=db.query_row(
+            "SELECT COUNT(*) FROM ml_corrective_observations",[],
+            |row|row.get(0)).unwrap();
+        assert_eq!(remaining,0);
     }
     #[test]
     fn saved_evidence_is_relabelled_from_fresh_parser_not_trusted_as_old_truth(){
