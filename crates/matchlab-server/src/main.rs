@@ -4804,6 +4804,65 @@ mod tests {
     }
 
     #[test]
+    fn bluray_stream_file_uses_movie_folder_not_stream_or_numeric_leaf(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+            year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
+            INSERT INTO titles VALUES
+                ('tt0241527','Harry Potter and the Sorcer''s Stone',
+                    'harrypotterandthesorcerersstone',2001,'movie','US',1,0,'movie'),
+                ('tt3333333','Stream','stream',2024,'movie','US',1,0,'movie'),
+                ('tt4444444','0000','0000',2000,'movie','US',1,0,'movie');
+            INSERT INTO imdb_ratings VALUES
+                ('tt0241527',5),('tt3333333',10000000),('tt4444444',10000000);")
+            .unwrap();
+        for path in [
+            "Harry Potter and the Sorcerer's Stone/stream/0000.m2ts",
+            "Harry Potter and the Sorcerer's Stone/BDMV/STREAM/00000.m2ts",
+            "Harry Potter (2001-2012)/Harry Potter and the Sorcerer's Stone/BDMV/STREAM/00000.m2ts",
+        ]{
+            let parsed=matchlab_parser::parse_title(path,false).unwrap();
+            assert_eq!(parsed["title"],"Harry Potter and the Sorcerer's Stone",
+                "{path}: {parsed:?}");
+            assert!(parsed.get("year").is_none(),"{path}: {parsed:?}");
+            assert!(matchlab_parser::bluray_movie_stream_path(path));
+            let gate=ImdbIdentityGate{
+                policy:MatchPolicy::PublicApi,strict:true,year:None,
+                has_season:false,has_quality:false,
+                collection_year_range:movie_collection_year_range(&parsed),
+                verified_bluray_stream:true,season_range_end:None,
+                verified_anime_range:None,verified_absolute_episode:None,
+            };
+            let found=bottom_up_imdb_path_match(&db,&parsed,None,false,0,
+                false,false,|hits|filter_request_imdb_candidates(&db,hits,gate))
+                .unwrap().unwrap_or_else(||panic!("failed disc movie: {path}"));
+            assert_eq!(found.0,"Harry Potter and the Sorcerer's Stone");
+            assert_eq!(found.1[0].imdb_id,"tt0241527",
+                "{path} must not match STREAM or 0000 despite more votes");
+        }
+        let path="Harry Potter and the Sorcerer's Stone/stream/0000.m2ts";
+        let parsed=matchlab_parser::parse_title(path,false).unwrap();
+        let gate=ImdbIdentityGate{
+            policy:MatchPolicy::PublicApi,strict:true,year:None,
+            has_season:false,has_quality:false,collection_year_range:None,
+            verified_bluray_stream:true,season_range_end:None,
+            verified_anime_range:None,verified_absolute_episode:None,
+        };
+        db.execute("INSERT INTO titles VALUES
+            ('tt5555555','Harry Potter and the Sorcer''s Stone',
+             'harrypotterandthesorcerersstone',2002,'movie','US',0,1,'movie')",[])
+            .unwrap();
+        assert!(bottom_up_imdb_path_match(&db,&parsed,None,false,0,
+            false,false,|hits|filter_request_imdb_candidates(&db,hits,gate))
+            .unwrap().is_none(),
+            "without a production year, shared-title remakes must remain ambiguous");
+    }
+
+    #[test]
     fn strict_named_film_in_year_range_pack_matches_without_inventing_a_film_year(){
         let path="Harry Potter (2001-2012)/Harry Potter and the Sorcerer's Stone";
         let parsed=matchlab_parser::parse_title(path,false).unwrap();
