@@ -2578,7 +2578,7 @@ static PACK_SEASON_SUFFIX_RE: Lazy<Regex> = Lazy::new(|| {
 // prove a corresponding global season / episode. Keep original coordinates.
 static LOCAL_ANIME_PART_MARKER_RE:Lazy<regex::Regex>=Lazy::new(||{
     regex::Regex::new(
-        r"(?i)(?:^|[ ._-])(?P<kind>[sp])0*(?P<n>[1-9][0-9]?)(?:$|[ ._\[(]|e[0-9])"
+        r"(?i)(?:^|[ ._-])(?P<kind>[sp])0*(?P<n>[1-9][0-9]?)(?:e(?P<ep>[0-9]{1,4})|$|[ ._\[(])"
     ).expect("valid bounded anime S/P marker")
 });
 fn local_anime_part_candidate(raw:&str)->Option<Value>{
@@ -2601,8 +2601,9 @@ fn local_anime_part_candidate(raw:&str)->Option<Value>{
         if title.is_empty(){continue;}
         let local=caps.name("n")?.as_str().parse::<i64>().ok()?;
         let marker=caps.name("kind")?.as_str().to_ascii_uppercase();
+        let episode=caps.name("ep").and_then(|m|m.as_str().parse::<i64>().ok());
         return Some(json!({"title":title,"local":local,
-            "marker":marker,"verified":false}));
+            "marker":marker,"episode":episode,"verified":false}));
     }
     None
 }
