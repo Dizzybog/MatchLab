@@ -1591,7 +1591,8 @@ fn diagnose_with_policy(
             anime_identity(&db,anime_resolve_title).map_err(|e|e.to_string())?
                 .map(|id|{
                     let inferred=if seasons.is_empty()
-                        && !parsed.contains_key("anime_local_part_unresolved") {
+                        && !parsed.contains_key("anime_local_part_unresolved")
+                        && !parsed.contains_key("anime_local_part_range_unresolved") {
                         anime_title::season_from_title(&db,&id,anime_resolve_title).ok().flatten()
                     } else {None};
                     json!({"imdb_id":id,"season":seasons.first().copied().or(inferred),
