@@ -736,6 +736,8 @@ fn filter_request_imdb_candidates(
         // promotion, including verified anime episode recovery. This also
         // covers dashboard diagnostics, not only the public API gate.
         imdb_matcher::year_eligible(gate.strict,gate.year,candidate.year)
+            && (gate.collection_year_range.is_none() ||
+                !matches!(candidate.media_type.as_str(),"tvSeries"|"tvMiniSeries"))
             && (!matches!(gate.policy,MatchPolicy::PublicApi)
             ||year_signal_eligible(
                 gate.year,candidate.year,gate.has_season,
@@ -1172,7 +1174,7 @@ fn diagnose_with_policy(
             || parsed.contains_key("episode_start") => true,
         // A release with an explicit production year and no episode/season
         // coordinates is a movie candidate, even if an anime alias exists.
-        None if year.is_some() => false,
+        None if year.is_some() || parsed.contains_key("collection_year_range") => false,
         None => anime_title::season_from_any_exact_title(&db,title)
             .map_err(|e|e.to_string())?.is_some()
             || exact_anime_identity(&db,title)?.is_some(),
@@ -1181,7 +1183,12 @@ fn diagnose_with_policy(
         policy,strict:strict_match_mode(),year,has_season:series&&!seasons.is_empty(),
         has_quality:parsed_quality,
         collection_year_range:if year.is_none()&&!series{
-            movie_collection_year_range(parsed)
+            parsed.get("collection_year_range").and_then(Value::as_array)
+                .and_then(|range|match range.as_slice(){
+                    [start,end]=>Some((start.as_i64()? as i32,end.as_i64()? as i32)),
+                    _=>None,
+                })
+                .or_else(||movie_collection_year_range(parsed))
         }else{None},
         verified_bluray_stream:!series
             &&matchlab_parser::bluray_movie_stream_path(&req.title),
@@ -1980,7 +1987,7 @@ static TORRENT_MATCH_CACHE:OnceLock<query_cache::QueryCache<Diagnostic>>=OnceLoc
 // A semantic matcher change must invalidate old persistent ML match results,
 // even when metadata.sqlite3, learned regex rules and the strict-mode flag
 // are unchanged. Bump this revision when altering title/year eligibility.
-const MATCHER_SEMANTIC_REVISION:&str="title-word-boundaries-strict-year-collection-v1";
+const MATCHER_SEMANTIC_REVISION:&str="title-word-boundaries-strict-year-collection-protection-v2";
 fn scoped_match_generation(metadata:&str,strict:bool)->String{
     format!("{metadata}:matcher={MATCHER_SEMANTIC_REVISION}:strict={strict}")
 }
