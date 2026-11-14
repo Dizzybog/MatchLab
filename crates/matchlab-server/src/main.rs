@@ -670,6 +670,16 @@ fn verified_anime_subfolder_title(
     Ok(None)
 }
 
+/// A collection window belongs to a parent directory and is not a single
+/// film production year. Use the closest matching ancestor for a yearless
+/// movie release while leaving its actual production year unspecified.
+fn movie_collection_year_range(parsed:&serde_json::Map<String,Value>)->Option<(i32,i32)>{
+    let layers=parsed.get("path_layers")?.as_array()?;
+    layers.iter().take(layers.len().saturating_sub(1)).rev()
+        .filter_map(|layer|layer.get("raw").and_then(Value::as_str))
+        .find_map(matchlab_parser::collection_year_span)
+}
+
 /// Use identical production gates for both a filename and each parent directory.
 /// A candidate rejected later must not prevent the search from climbing.
 #[derive(Clone,Copy)]
@@ -678,6 +688,7 @@ struct ImdbIdentityGate<'a>{
     year:Option<i32>,
     has_season:bool,
     has_quality:bool,
+    collection_year_range:Option<(i32,i32)>,
     season_range_end:Option<i64>,
     verified_anime_range:Option<&'a str>,
     verified_absolute_episode:Option<&'a str>,
@@ -686,6 +697,12 @@ fn filter_request_imdb_candidates(
     db:&Connection,hits:Vec<imdb_matcher::Match>,gate:ImdbIdentityGate<'_>,
 )->Vec<imdb_matcher::Match>{
     let mut filtered=hits.into_iter().filter(|candidate|{
+        // A box-set year window is contextual evidence for a yearless
+        // individual film, not the production year of every film in the pack.
+        // Strict has already verified the full title/alias before this gate.
+        let in_collection_range=strict_match_mode() && gate.year.is_none()
+            && gate.collection_year_range.is_some_and(|(start,end)|
+                (start..=end).contains(&candidate.year));
         // Apply the same hard constraint after any supplementary candidate
         // promotion, including verified anime episode recovery. This also
         // covers dashboard diagnostics, not only the public API gate.
@@ -697,7 +714,7 @@ fn filter_request_imdb_candidates(
                     ||gate.verified_anime_range==Some(candidate.imdb_id.as_str())
                     ||gate.verified_absolute_episode==Some(candidate.imdb_id.as_str()),
                 gate.has_quality,
-            ))
+            ) || in_collection_range)
     }).collect::<Vec<_>>();
     // An explicit season range is stricter than the season-1 tolerance
     // used for provisional title discovery. No range -> no SQL at all.
@@ -1134,6 +1151,9 @@ fn diagnose_with_policy(
     let gate=ImdbIdentityGate{
         policy,year,has_season:series&&!seasons.is_empty(),
         has_quality:parsed_quality,
+        collection_year_range:if year.is_none()&&!series{
+            movie_collection_year_range(parsed)
+        }else{None},
         season_range_end:season_range.map(|(_,end)|end),
         verified_anime_range:verified_anime_range_imdb.as_deref(),
         verified_absolute_episode:verified_absolute_episode_imdb.as_deref(),
@@ -2865,7 +2885,7 @@ mod tests {
             "Monster/The.Ed.Gein.Story/E02.mkv",false).unwrap();
         let gate=ImdbIdentityGate{
             policy:MatchPolicy::PublicApi,year:Some(2004),
-            has_season:false,has_quality:false,season_range_end:None,
+            has_season:false,has_quality:false,collection_year_range:None,season_range_end:None,
             verified_anime_range:None,verified_absolute_episode:None,
         };
         let recovered=bottom_up_imdb_path_match(
@@ -2881,7 +2901,7 @@ mod tests {
             "The.Ed.Gein.Story/Monster/S02/E02.mkv",false).unwrap();
         let gate=ImdbIdentityGate{
             policy:MatchPolicy::PublicApi,year:None,
-            has_season:true,has_quality:false,season_range_end:Some(2),
+            has_season:true,has_quality:false,collection_year_range:None,season_range_end:Some(2),
             verified_anime_range:None,verified_absolute_episode:None,
         };
         let recovered=bottom_up_imdb_path_match(
@@ -5227,7 +5247,7 @@ mod tests {
         let gate=ImdbIdentityGate{
             policy:MatchPolicy::DashboardDiagnostic,
             year:None,has_season:true,has_quality:true,
-            season_range_end:Some(9),verified_anime_range:None,
+            collection_year_range:None,season_range_end:Some(9),verified_anime_range:None,
             verified_absolute_episode:None,
         };
         let actual=filter_request_imdb_candidates(&db,hits,gate)
