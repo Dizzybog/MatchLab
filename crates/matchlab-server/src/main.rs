@@ -522,6 +522,76 @@ fn verified_ordinary_imdb_episode_range(
     })))
 }
 
+/// A release year equal to a show's *first* year, coupled with an exact
+/// full-season episode batch, identifies its first IMDb season even if a
+/// historical AniDB snapshot lacks any episode crosswalk. This is a strictly
+/// IMDb-only fallback: it never publishes guessed AniDB identifiers.
+fn verified_first_year_anime_imdb_batch(
+    db:&Connection,winner:&Value,parsed:&serde_json::Map<String,Value>,
+    candidates:&[Candidate],
+)->Result<Option<Value>,String>{
+    if winner["category"]!="series" || winner.get("episode_range").is_some()
+        || winner["episode"].as_i64().is_some()
+        || winner.pointer("/anime/asid").and_then(Value::as_str).is_some()
+        || parsed.get("special_episode").is_some()
+        || parsed.get("anime_local_part_unresolved").is_some()
+        || parsed.get("anime_named_part_season_hint").is_some()
+    {return Ok(None);}
+    let Some(hint)=parsed.get("anime_episode_range_candidate") else {
+        return Ok(None);
+    };
+    let (Some(title),Some(start),Some(end),Some(year),Some(imdb))=(
+        hint["title"].as_str(),hint["start"].as_i64(),hint["end"].as_i64(),
+        parsed.get("year").and_then(Value::as_i64),
+        winner["imdb_id"].as_str()
+    )else{return Ok(None)};
+    if hint["numbering"]!="absolute" || hint["season_hint"].as_i64().is_some()
+        || start!=1 || !(2..=99).contains(&end)
+        || !(1900..=2100).contains(&year)
+        || winner["year"].as_i64()!=Some(year)
+        || !metadata_import::valid_imdb_id(imdb)
+        || imdb_matcher::clean_title(title)
+            !=imdb_matcher::clean_title(winner["matched_title"].as_str().unwrap_or(""))
+    {return Ok(None);}
+    // A same-name 1997 series must never acquire a 2016 batch merely
+    // because both titles normalize to "Berserk".
+    let unique_year_id=candidates.iter().filter(|c|
+        c.year as i64==year && c.media_type=="tvSeries"
+        && imdb_matcher::clean_title(&c.matched_title)
+            ==imdb_matcher::clean_title(title)
+    ).map(|c|c.imdb_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if unique_year_id.len()!=1 || !unique_year_id.contains(imdb) {
+        return Ok(None);
+    }
+    // Only full S01 packs are eligible. Crosswalk fragments must remain
+    // unresolved instead of being overwritten by an unrelated IMDb count.
+    let exact_first_season:Option<(i64,i64)>=db.query_row(
+        "SELECT episode_count,max_episode FROM season_episodes
+          WHERE imdb_id=?1 AND season=1",
+        [imdb],|row|Ok((row.get(0)?,row.get(1)?))
+    ).optional().map_err(|e|e.to_string())?;
+    if exact_first_season!=Some((end,end)){return Ok(None);}
+    let linked:i64=db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM anime_series_map WHERE imdb_id=?1)
+          OR EXISTS(SELECT 1 FROM anime_ids
+                    WHERE group_id=?1 AND type='anidb')",
+        [imdb],|row|row.get(0)
+    ).map_err(|e|e.to_string())?;
+    if linked==0{return Ok(None);}
+    let crosswalk=mapped_absolute_range(db,imdb,start,end)?;
+    if crosswalk["unmapped_count"].as_i64()!=Some(end)
+        ||crosswalk["segments"].as_array().is_none_or(|rows|!rows.is_empty())
+    {return Ok(None);}
+    Ok(Some(json!({
+        "start_season":1,"start_episode":1,
+        "end_season":1,"end_episode":end,
+        "requested_episode_start":1,"requested_episode_end":end,
+        "complete":true,"segments":[],"unmapped_count":0,
+        "source":"verified_imdb_first_year_complete_anime_batch"
+    })))
+}
+
 /// Validate each episode in a season-labeled anime batch against the
 /// AniDB/TVDB crosswalk. A partial mapping never produces guessed endpoints.
 fn mapped_season_episode_range(
@@ -2496,6 +2566,20 @@ fn diagnose_with_policy(
                 winner["anime"]=Value::Null;
             }
         }
+    }
+    if let Some(winner)=selected.as_mut()
+        && let Some(range)=verified_first_year_anime_imdb_batch(
+            &db,winner,parsed,&imdb)?
+    {
+        let imdb_id=winner["imdb_id"].as_str().unwrap_or_default().to_owned();
+        winner["season"]=json!(1);
+        winner["episode"]=json!(1);
+        winner["season_end"]=json!(1);
+        winner["episode_end"]=range["end_episode"].clone();
+        winner["sid"]=json!(format!("{imdb_id}:1:1"));
+        winner["episode_range"]=range;
+        winner["anime"]=Value::Null;
+        winner["coordinate_fallback"]=json!("verified_imdb_first_year_full_anime_batch");
     }
     if let Some(winner)=selected.as_mut(){
         enrich_selected_anime_episode(&db,winner)?;
