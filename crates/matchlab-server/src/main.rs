@@ -6518,6 +6518,18 @@ mod tests {
 
     #[test]
     fn frieren_absolute_episode_33_uses_complete_imdb_season_bounds(){
+        // Exercise the exact submitted filename, including fansub prefix
+        // and CRC suffix, instead of only constructing a parsed fixture.
+        let release="[Kirinashi] Sousou no Frieren - 33 [2322F691].mkv";
+        let parsed_release=matchlab_parser::parse_title(release,false).unwrap();
+        assert_eq!(parsed_release["anime_episode_candidate"]["episode"],33,
+            "absolute anime hint was lost: {parsed_release:?}");
+        assert_eq!(parsed_release["anime_episode_candidate"]["numbering"],"absolute");
+        assert_eq!(
+            imdb_matcher::clean_title(parsed_release["anime_episode_candidate"]["title"]
+                .as_str().unwrap_or("")),
+            imdb_matcher::clean_title("Sousou no Frieren")
+        );
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE season_episodes(
                 imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
