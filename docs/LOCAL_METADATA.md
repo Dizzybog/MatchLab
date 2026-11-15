@@ -67,6 +67,48 @@ those timings alone do not establish an overall speedup. Validate full-catalog
 import times, peak memory, and p95/p99 match latency on production-scale data
 before quantifying performance gains.
 
+## Generic anime episode crosswalk inference
+
+**This is data-driven, not a list of per-anime titles.** During every successful
+metadata refresh, MatchLab combines Anime-Lists numbering semantics, animeApi
+AniDB/IMDb identity links and IMDb's imported `season_episodes` bounds to
+materialize **finite episode-map rows once**, before the live snapshot is
+published. No additional API key, request-time web service, or hot-path SQLite
+search is required.
+
+Only two safe patterns are eligible:
+
+- **Separate AniDB works per IMDb season:** A unique AniDB ID directly linked
+  to that IMDb identity has an open-ended Anime-Lists
+  `defaulttvdbseason=N` rule. If the corresponding IMDb season contains
+  consecutive episode numbers (the imported count equals the maximum), the
+  default row is bounded to that season's observed episodes. A similarly
+  named AniDB work discovered *only* through the shared TVDB family cannot
+  claim the IMDb identity by inference.
+- **One AniDB work across IMDb seasons:** A single directly linked AniDB ID
+  explicitly uses `defaulttvdbseason=a` (absolute numbering). MatchLab
+  computes each known IMDb season's cumulative episode start/end and builds
+  finite absolute-to-season offsets, stopping at gaps, incomplete counts,
+  existing explicit rows or competing AniDB season ownership. A merely
+  open-ended `defaulttvdbseason=1` does **not** imply that the AniDB work
+  owns all later seasons.
+
+Explicit and finite upstream Anime-Lists mappings, and curated corrections,
+have priority; incomplete or conflicting evidence is never silently completed.
+The inferred ranges use the ordinary bidirectional
+`/episode/resolve` and `/match` crosswalk, with no title-specific runtime
+conditions. This covers **any anime with sufficient evidence**, not just the
+test examples. Some source gaps still need curated overrides or stronger
+upstream AniDB episode-count evidence. In particular, IMDb season counts
+**alone** cannot prove which AniDB work owns a particular season.
+
+The metadata build logs `generic Anime-Lists crosswalk inference completed`
+with the number of generated rows and ambiguous groups; it records the count
+under `metadata_state/animelists_inferred`. The metadata fingerprint includes
+the generic inference revision, so upgrading an old image schedules a full
+refresh. The importer also applies these rules after a manual
+`import-animelists` command.
+
 ## Bundled Anime-Lists mapping corrections
 
 The production Rust binary includes `data/anime-list.override.xml`. Every full metadata refresh imports the regular Anime-Lists feed first, then **replaces** `episode_map` rows for each AniDB ID listed in the bundled exceptions. It also updates any existing `anime_series_map` TVDB family references while preserving IMDb links. The ordinary episode crosswalk uses the resulting combined SQLite tables; there is no runtime override lookup or extra network request.
