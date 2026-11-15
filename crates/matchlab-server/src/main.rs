@@ -3639,6 +3639,8 @@ mod tests {
                 ('tt9100006','Old School Days','oldschooldays',1995,'movie','US',1,0,'movie'),
                 ('tt9100007','Lonely Giants','lonelygiants',2019,'movie','US',1,0,'movie'),
                 ('tt9100008','Детектив 11','11',2007,'movie','RU',0,3,'movie'),
+                ('tt9100011','拿命.Example','example',2002,'movie','CN',0,3,'movie'),
+                ('tt9100012','Пример Example','example',2015,'movie','RU',0,3,'movie'),
                 ('tt9100009','Twin Remake','twinremake',1998,'series','US',1,0,'tvSeries'),
                 ('tt9100010','Twin Remake','twinremake',1998,'movie','US',1,0,'movie');
             INSERT INTO seasons VALUES('tt9100001',1),('tt9100003',1),('tt9100004',1),
@@ -3683,6 +3685,11 @@ mod tests {
             "1.1 Интро (2020) WEBRip 1080p"] {
             assert!(winner(release).is_none(),"{release} must not match");
         }
+        // A mixed-script alias needs its non-Latin words in the release.
+        assert!(winner("Example.2002.720p.WEB.x264-GRP").is_none(),
+            "a Latin fragment is not the mixed-script alias");
+        let mixed=winner("Пример Example (2015) WEBRip 1080p").expect("written alias");
+        assert_eq!(mixed["imdb_id"],"tt9100012","{mixed}");
         // One year of tolerance, and two for a unique complete title.
         for release in ["Raging.2008.720p.WEB.x264-GRP",
             "Lonely.Giants.2021.720p.WEBRip.x264-GRP"] {

@@ -198,6 +198,16 @@ pub(crate) fn numeric_key_lost_title_words(key:&str,title:&str)->bool{
     !key.is_empty() && key.bytes().all(|b|b.is_ascii_digit())
         && title.chars().any(char::is_alphabetic)
 }
+/// Greek, Cyrillic, CJK and other scripts that the compact ASCII key drops.
+/// Accented Latin letters are folded by the key and are not affected.
+fn is_non_latin_letter(c:char)->bool{
+    c.is_alphabetic() && c>='\u{0370}' && !('\u{1E00}'..='\u{1EFF}').contains(&c)
+}
+fn non_latin_alias_words_in_release(alias:&str,release_text:&str)->bool{
+    semantic_words(alias).iter()
+        .filter(|word|word.chars().any(is_non_latin_letter))
+        .all(|word|release_text.contains(word.as_str()))
+}
 fn complete_title_alias(row:&Aka,key:&str,words:&[String],word_count:usize)->bool{
     row.clean==key && semantic_words(&row.title).as_slice()==words
         &&crate::title_normalization::title_word_count(&row.title)==word_count
@@ -829,6 +839,13 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     // translated alias is not title evidence: require the same Unicode words.
     if numeric_key_lost_title_words(&key,title){
         rows.retain(|row|semantic_words(&row.title)==semantic_release);
+    }
+    // The same folding makes a Latin fragment equal to a mixed-script alias
+    // ("COM" vs "拿命.COM"). Broad matching may use such an alias only when
+    // its non-Latin words are actually written in the release.
+    if !strict {
+        let release_text=semantic_full_release.join(" ");
+        rows.retain(|row|non_latin_alias_words_in_release(&row.title,&release_text));
     }
     let rows=if strict {
         rows.into_iter().filter(|row|year_eligible(true,year,row.year))

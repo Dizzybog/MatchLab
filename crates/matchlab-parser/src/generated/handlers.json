@@ -3359,7 +3359,7 @@
         "remove": true
       },
       "kind": "regex",
-      "pattern": "(?<![xh])\\b264\\b|\\b265\\b",
+      "pattern": "(?<![xh])(?<![xh][ ._-])(?<![xh][ ._-][ ._-])\\b26[45]\\b",
       "flags": 2,
       "transform": "array(integer)"
     },

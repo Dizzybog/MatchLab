@@ -1934,6 +1934,61 @@ fn strip_non_english_parens(input: &str) -> String {
     out
 }
 
+/// Technical numbers of a dated release are not coordinates. Each rule
+/// requires the exact parsed value and its unlabelled source token, so an
+/// explicit `E2004` / `S16E09` / `16x09` is never touched.
+fn drop_technical_number_coordinates(
+    raw:&str,result:&mut Map<String,Value>,
+)->Result<(),ParseError>{
+    static FILE_SIZE:Lazy<regex::Regex>=Lazy::new(||regex::Regex::new(
+        r"[\[(]([0-9]{1,2})\.([0-9]{1,3})[\])]").expect("valid bracketed size"));
+    static ASPECT:Lazy<regex::Regex>=Lazy::new(||regex::Regex::new(
+        r"(?i)(?:^|[^0-9a-z])16x9(?:$|[^0-9a-z])").expect("valid aspect ratio"));
+    let ints=|value:Option<&Value>|value.and_then(Value::as_array)
+        .map(|items|items.iter().filter_map(Value::as_i64).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let seasons=ints(result.get("seasons"));
+    let episodes=ints(result.get("episodes"));
+    let has_year=result.get("year").and_then(Value::as_i64).is_some();
+    let range=result.contains_key("episode_start");
+    let mut clear_season=false;
+    let mut clear_episode=false;
+    if let ([season],[episode])=(seasons.as_slice(),episodes.as_slice()) {
+        // "[16x9]" is the picture format, "[1.46]" a file size in GB.
+        if (*season,*episode)==(16,9) && ASPECT.is_match(raw) {
+            clear_season=true;
+            clear_episode=true;
+        } else if has_year && !range
+            && !EXPLICIT_EPISODE_SHAPE_RE.is_match(raw)
+                .map_err(|e|ParseError::Regex(e.to_string()))?
+            && FILE_SIZE.captures_iter(raw).any(|caps|
+                caps[1].parse::<i64>().ok()==Some(*season)
+                    && caps[2].parse::<i64>().ok()==Some(*episode))
+        {
+            clear_season=true;
+            clear_episode=true;
+        }
+    }
+    if seasons.is_empty() && has_year && !range
+        && let [episode]=episodes.as_slice()
+        && ((1900..=2100).contains(episode) || matches!(*episode,264|265))
+    {
+        // A second year or a bare codec number next to the production
+        // year. A labelled episode ("E2004", "Ep 264") stays.
+        let labelled=Regex::new(&format!(
+            r"(?i)(?:^|[^a-z0-9])(?:e|ep|episode|cap|серия)[ ._#-]*0*{episode}(?:$|[^0-9])"))
+            .map_err(|e|ParseError::Regex(e.to_string()))?
+            .is_match(raw).map_err(|e|ParseError::Regex(e.to_string()))?;
+        if !labelled {clear_episode=true;}
+    }
+    if clear_season {result.insert("seasons".into(),json!([]));}
+    if clear_episode {
+        result.insert("episodes".into(),json!([]));
+        result.remove("anime_episode_candidate");
+    }
+    Ok(())
+}
+
 /// Explicit absolute anime episode range, e.g. E768-E1064 or EP768-EP1064.
 /// Keep the endpoints rather than allocating hundreds of episode numbers.
 fn absolute_episode_range(raw: &str) -> Option<(i64,i64)> {
@@ -3391,6 +3446,7 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
             set_title_from_release_prefix(release,offset,translate_languages,&mut result)?;
         }
     }
+    drop_technical_number_coordinates(raw,&mut result)?;
     // A repeated numeric work name followed by a broadcast date (20-20)
     // is not bare S20E20 notation. Only remove coordinates equal to that
     // identity number, and keep independently explicit episode markers.

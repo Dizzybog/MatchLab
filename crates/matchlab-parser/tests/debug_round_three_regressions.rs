@@ -128,3 +128,37 @@ fn sample_files_inherit_the_release_title() {
     let own=parse_title("Sample.2019.1080p.WEB",false).unwrap();
     assert_eq!(own["title"],"Sample","{own:?}");
 }
+
+#[test]
+fn technical_numbers_of_a_dated_release_are_not_coordinates() {
+    for raw in [
+        // A repeated or second year.
+        "Example Reunion (2012) [DvdRip 2012] avi",
+        "Example Pentalogy (2003 to 2017)[1080p - BDRip]",
+        // A file size in GB and the picture format.
+        "Example.1958.dvdrip_[1.46]_[grp].avi",
+        "Example (1995) [dvd] [ntsc] [16x9 proper]",
+        // A bare codec number.
+        "example.-1969.1080p.-web-dl.-aac-2.0.-h.-264-grp",
+        "The.Example.Christmas.2012 DVDrip 264 AAC-GRP",
+        "example.-1974.-720p.-blu-ray.-hq.x-265.10bit-grp",
+    ] {
+        let parsed=parse_title(raw,false).unwrap();
+        assert_eq!(parsed["seasons"],json!([]),"{raw}: {parsed:?}");
+        assert_eq!(parsed["episodes"],json!([]),"{raw}: {parsed:?}");
+        assert!(parsed.get("year").is_some(),"{raw}: {parsed:?}");
+    }
+    // Labelled or undated coordinates of the same shapes are preserved.
+    for (raw,seasons,episodes) in [
+        ("[group][EXAMPLE][264][1280x720]",vec![],vec![264]),
+        ("The Example [2.14] The Carpet.avi",vec![2],vec![14]),
+        ("Example.E2004.Title.480p",vec![],vec![2004]),
+        ("Example 2019 E1999 1080p",vec![],vec![1999]),
+        ("Example 16x09 720p",vec![16],vec![9]),
+        ("Example.2x265.720p",vec![2],vec![265]),
+    ] {
+        let parsed=parse_title(raw,false).unwrap();
+        assert_eq!(parsed["seasons"],json!(seasons),"{raw}: {parsed:?}");
+        assert_eq!(parsed["episodes"],json!(episodes),"{raw}: {parsed:?}");
+    }
+}
