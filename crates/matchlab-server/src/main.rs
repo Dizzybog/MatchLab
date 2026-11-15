@@ -781,12 +781,39 @@ fn verified_unmapped_anime_absolute_episode(
     let mapped_target=episode_crosswalk::resolve_season(db,imdb,season,episode)
         .map_err(|e|e.to_string())?;
     if let Some(ref target)=mapped_target {
-        // Never add an unrelated local AniDB part's ASID to an absolute
-        // episode inferred from IMDb season lengths.
-        if target.anidb_episode!=absolute
-            || winner["anime_ids"]["anidb"].as_str()
-                !=Some(target.anidb_id.as_str())
-        {return Ok(None);}
+        let original_anidb=winner["anime_ids"]["anidb"].as_str();
+        if original_anidb==Some(target.anidb_id.as_str()) {
+            // Same AniDB work: never reinterpret its explicit local episode
+            // 43 as the release's absolute episode 145.
+            if target.anidb_episode!=absolute{return Ok(None);}
+        }else {
+            // Different AniDB work: a true season-specific, finite source
+            // crosswalk may identify the correct local episode. A weak
+            // open-ended default or same-TVDB association is not enough.
+            let bounded:i64=db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM episode_map m
+                    JOIN anime_series_map l ON l.tvdb_id=m.tvdb_id
+                    WHERE l.imdb_id=?1 AND l.tvdb_id<>'' AND m.tvdb_id<>''
+                      AND m.anidb_id=?2 AND m.anidb_season>0
+                      AND m.tvdb_season=?3
+                      AND ((m.end>=m.start AND m.start>0)
+                        OR TRIM(m.map)<>''))",
+                rusqlite::params![imdb,&target.anidb_id,season],
+                |row|row.get(0)
+            ).map_err(|e|e.to_string())?;
+            if bounded==0{return Ok(None);}
+            // Verify the reverse direction too: the local AniDB identity
+            // must map back to exactly this IMDb season and episode.
+            let reverse=episode_crosswalk::resolve_anidb(
+                db,&target.anidb_id,target.anidb_episode)
+                .map_err(|e|e.to_string())?;
+            if !reverse.iter().any(|row|
+                row.imdb_id==imdb && row.season==season
+                && row.episode==episode
+                && row.anidb_id==target.anidb_id
+                && row.anidb_episode==target.anidb_episode)
+            {return Ok(None);}
+        }
     }else if mapped_season_exists!=0{
         return Ok(None);
     }
@@ -6830,6 +6857,74 @@ mod tests {
             "sid_start":"tt7441658:3:43","sid_end":"tt7441658:3:43",
             "asid_start":null,"asid_end":null
         }));
+    }
+
+    #[test]
+    fn black_clover_absolute_145_can_map_to_separate_verified_anidb_season(){
+        // Synthetic split-series fixture: AniDB ID 12665 claims a weak
+        // whole-series S01 map, while a DIFFERENT independently mapped
+        // AniDB work supplies a bounded S03 episode 43. In this layout
+        // episode 145 is NOT episode 145 of AniDB 12665.
+        let parsed=matchlab_parser::parse_title(
+            "[EMBER] Black Clover - 145.mkv",false).unwrap();
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE season_episodes(
+                imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(
+                anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO season_episodes VALUES
+                ('tt7441658',1,51,51),('tt7441658',2,51,51),
+                ('tt7441658',3,52,52),('tt7441658',4,16,16);
+            INSERT INTO anime_series_map VALUES
+                ('tt7441658','12665','331753',0),
+                ('tt7441658','20002','331753',0);
+            INSERT INTO episode_map VALUES
+                ('12665','331753',1,-1,1,0,0,''),
+                ('12665','331753',1,1,1,0,0,''),
+                ('20002','331753',1,3,1,52,0,'');").unwrap();
+        let original=episode_crosswalk::resolve_absolute(&db,"tt7441658",145)
+            .unwrap().unwrap();
+        assert_eq!((original.anidb_id.as_str(),original.season,original.episode),
+            ("12665",1,145));
+        let season_id=episode_crosswalk::resolve_season(&db,"tt7441658",3,43)
+            .unwrap().unwrap();
+        assert_eq!((season_id.anidb_id.as_str(),season_id.anidb_episode),
+            ("20002",43));
+        let mut winner=json!({
+            "imdb_id":"tt7441658","category":"series","title":"Black Clover",
+            "matched_title":"Black Clover","anime_ids":{"anidb":"12665"},
+            "season":1,"episode":145,
+            "anime":{"anidb_id":"12665","episode":145,"asid":"12665:145"},
+            "sid":"tt7441658:1:145"
+        });
+        reconcile_series_coordinates(&db,&mut winner,&parsed).unwrap();
+        assert_eq!(winner["coordinate_fallback"],"repaired_imdb_absolute_anime");
+        assert_eq!(winner["anime"]["anidb_id"],"20002");
+        assert_eq!(winner["anime"]["episode"],43);
+        assert_eq!(public_match_response(Some(winner)),json!({
+            "sid_start":"tt7441658:3:43","sid_end":"tt7441658:3:43",
+            "asid_start":"20002:43","asid_end":"20002:43"
+        }));
+        // More than one distinct finite season work makes the source
+        // ambiguous; never pick the first ID.
+        db.execute("INSERT INTO anime_series_map VALUES
+            ('tt7441658','20003','331753',0)",[]).unwrap();
+        db.execute("INSERT INTO episode_map VALUES
+            ('20003','331753',1,3,1,52,0,'')",[]).unwrap();
+        let mut ambiguous=json!({
+            "imdb_id":"tt7441658","category":"series","title":"Black Clover",
+            "matched_title":"Black Clover","anime_ids":{"anidb":"12665"},
+            "season":1,"episode":145,
+            "anime":{"anidb_id":"12665","episode":145,"asid":"12665:145"}
+        });
+        reconcile_series_coordinates(&db,&mut ambiguous,&parsed).unwrap();
+        assert!(ambiguous["episode"].is_null(),
+            "ambiguous season mapping must not fabricate coordinates");
+        assert!(ambiguous.pointer("/anime/asid").and_then(Value::as_str).is_none());
     }
 
     #[test]
