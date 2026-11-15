@@ -1,5 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <anime-list>
+  <!-- Frieren (2026) is a NEW AniDB work. The original 2023 run
+       is AniDB 17617 (IMDb S01, 28 episodes), while the 2026 sequel
+       is AniDB 18886 (IMDb S02, 10 episodes). A release numbered
+       absolutely as "Sousou no Frieren - 33" is therefore IMDb
+       S02E05 / AniDB 18886 episode 5, NOT AniDB 17617 episode 33.
+       Keep the separate 2027 third season (AniDB 19977) untouched. -->
+  <anime anidbid="18886" tvdbid="424536" imdbid="tt22248376" defaulttvdbseason="2">
+    <name>Sousou no Frieren (2026)</name>
+    <mapping-list>
+      <mapping anidbseason="1" tvdbseason="2" start="1" end="10" offset="0"/>
+    </mapping-list>
+  </anime>
+
   <!-- Black Clover (2017): AniDB 12665 is one 170-episode work.
        TheTVDB aired order splits the same run into S01:1-51, S02:52-102,
        S03:103-154 and S04:155-170. The upstream open-ended S01 default
