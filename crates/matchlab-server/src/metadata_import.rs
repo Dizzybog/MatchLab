@@ -627,9 +627,10 @@ pub(crate) fn infer_implicit_animelists_crosswalks(
     let families={
         let mut stmt=tx.prepare("SELECT DISTINCT imdb_id,tvdb_id
             FROM anime_series_map WHERE tvdb_id<>'' ORDER BY imdb_id,tvdb_id")?;
-        stmt.query_map([],|row|Ok((
+        let rows=stmt.query_map([],|row|Ok((
             row.get::<_,String>(0)?,row.get::<_,String>(1)?
-        )))?.collect::<rusqlite::Result<Vec<_>>>()?
+        )))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     let mut updated=0u64;
     let mut ambiguous=0u64;
@@ -637,17 +638,18 @@ pub(crate) fn infer_implicit_animelists_crosswalks(
         let direct:BTreeSet<String>={
             let mut stmt=tx.prepare("SELECT DISTINCT anidb_id FROM anime_series_map
                 WHERE imdb_id=?1 AND tvdb_id=?2")?;
-            stmt.query_map(params![&imdb,&tvdb],|r|r.get(0))?
-                .collect::<rusqlite::Result<_>>()?
+            let rows=stmt.query_map(params![&imdb,&tvdb],|r|r.get(0))?;
+            rows.collect::<rusqlite::Result<BTreeSet<_>>>()?
         };
         let seasons:BTreeMap<i64,(i64,i64)>={
             let mut stmt=tx.prepare("SELECT season,episode_count,max_episode
                 FROM season_episodes WHERE imdb_id=?1 AND season>0
                 ORDER BY season")?;
-            stmt.query_map([&imdb],|r|Ok((
+            let rows=stmt.query_map([&imdb],|r|Ok((
                 r.get::<_,i64>(0)?,(
                     r.get::<_,i64>(1)?,r.get::<_,i64>(2)?)
-            )))?.collect::<rusqlite::Result<_>>()?
+            )))?;
+            rows.collect::<rusqlite::Result<BTreeMap<_,_>>>()?
         };
         if direct.is_empty()||seasons.is_empty(){continue;}
         // This table preserves original upstream source rows; only a weak
@@ -655,14 +657,15 @@ pub(crate) fn infer_implicit_animelists_crosswalks(
         let maps:Vec<(String,i64,i64,i64,i64,String)>={
             let mut stmt=tx.prepare("SELECT anidb_id,tvdb_season,start,end,offset,map
                 FROM episode_map WHERE tvdb_id=?1 AND anidb_season=1")?;
-            stmt.query_map([&tvdb],|r|Ok((
+            let rows=stmt.query_map([&tvdb],|r|Ok((
                 r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?
-            )))?.collect::<rusqlite::Result<_>>()?
+            )))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         // For an absolute AniDB work, derive coordinates only through a
         // contiguous prefix of IMDb seasons with no gaps or unknown bounds.
         let absolute_id=if direct.len()==1 {
-            let id=direct.first().unwrap();
+            let id=direct.iter().next().unwrap();
             let abs=maps.iter().filter(|(aid,s,start,end,offset,map)|
                 aid==id && *s==-1 && *start<=1 && *end<=0
                 && *offset==0 && map.trim().is_empty()).count();
