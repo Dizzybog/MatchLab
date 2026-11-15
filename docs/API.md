@@ -6,6 +6,17 @@ Detailed endpoint behavior, anime and episode mappings, airdate matching, range 
 
 The API listens on port **8765**.
 
+| Endpoint | Purpose |
+| --- | --- |
+| `GET/POST /match` | Match a release to IMDb and optional AniDB episodes |
+| `GET/POST /parse` | Extract release fields, including normalized ISO `date`, without matching |
+| `GET/POST /alias` | Look up alternate titles and related IDs |
+| `GET/POST /episode/resolve` | Convert verified IMDb and AniDB episode coordinates |
+| `POST /debug/match` | Inspect matching with the same strict checks as `/match` |
+| `POST /api/dashboard/diagnose` | Explore title-only matches without production API eligibility checks |
+| `GET /health` | Check whether matching is ready |
+| `GET /dash` | Open the dashboard (also accepts the legacy `/` redirect) |
+
 ### Check status
 
 ```bash
