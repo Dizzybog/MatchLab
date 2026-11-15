@@ -651,12 +651,14 @@ fn verified_unmapped_anime_absolute_episode(
     if !(exact_title && linked_anime)
         && exact_anime_identity(db,title)?.as_deref()!=Some(imdb)
     {return Ok(None);}
-    // A local "Alicization - 33" must not reuse the parent series' global
-    // episode offset. Canonical IMDb series titles are not named sub-parts.
+    // An exact translated anime title must be proven to name the first
+    // AniDB part of this IMDb series. Unknown named parts are not safe to
+    // reinterpret as whole-series absolute numbering (Alicization etc.).
+    // The canonical IMDb title already identifies the overall series.
     if imdb_matcher::clean_title(winner["title"].as_str().unwrap_or(""))
             !=imdb_matcher::clean_title(title)
         && anime_title::season_from_title(db,imdb,title)
-            .map_err(|e|e.to_string())?.is_some_and(|season|season>1)
+            .map_err(|e|e.to_string())?!=Some(1)
     {return Ok(None);}
     if episode_crosswalk::resolve_absolute(db,imdb,absolute)
         .map_err(|e|e.to_string())?.is_some(){return Ok(None);}
