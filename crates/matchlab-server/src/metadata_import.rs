@@ -621,6 +621,8 @@ pub(crate) fn infer_implicit_animelists_crosswalks(
     // are grouped by (IMDb,TVDB), not by every torrent episode.
     db.execute_batch("CREATE INDEX IF NOT EXISTS anime_series_by_imdb_tvdb
         ON anime_series_map(imdb_id,tvdb_id);
+        CREATE INDEX IF NOT EXISTS anime_inference_by_tvdb
+        ON anime_series_map(tvdb_id,imdb_id);
         CREATE INDEX IF NOT EXISTS episode_inference_by_tvdb
         ON episode_map(tvdb_id,anidb_season,tvdb_season);")?;
     let tx=db.transaction()?;
@@ -635,6 +637,13 @@ pub(crate) fn infer_implicit_animelists_crosswalks(
     let mut updated=0u64;
     let mut ambiguous=0u64;
     for (imdb,tvdb) in families{
+        // Two different IMDb title IDs may share a TVDB family even if
+        // their AniDB works have the same aliases. No arithmetic can
+        // establish which IMDb episode ordering applies to that family.
+        let imdb_owners:i64=tx.query_row(
+            "SELECT COUNT(DISTINCT imdb_id) FROM anime_series_map
+             WHERE tvdb_id=?1",[&tvdb],|r|r.get(0))?;
+        if imdb_owners!=1 {ambiguous+=1;continue;}
         let direct:BTreeSet<String>={
             let mut stmt=tx.prepare("SELECT DISTINCT anidb_id FROM anime_series_map
                 WHERE imdb_id=?1 AND tvdb_id=?2")?;
@@ -664,7 +673,11 @@ pub(crate) fn infer_implicit_animelists_crosswalks(
         };
         // For an absolute AniDB work, derive coordinates only through a
         // contiguous prefix of IMDb seasons with no gaps or unknown bounds.
-        let absolute_id=if direct.len()==1 {
+        let split_or_cour:i64=tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM anime_series_map
+             WHERE imdb_id=?1 AND tvdb_id=?2 AND trakt_season<>0)",
+            params![&imdb,&tvdb],|row|row.get(0))?;
+        let absolute_id=if direct.len()==1 && split_or_cour==0 {
             let id=direct.iter().next().unwrap();
             let abs=maps.iter().filter(|(aid,s,start,end,offset,map)|
                 aid==id && *s==-1 && *start<=1 && *end<=0
@@ -891,7 +904,21 @@ mod tests {
             INSERT INTO anime_series_map VALUES('tt5555555','1101','904',0);
             INSERT INTO season_episodes VALUES
                 ('tt5555555',1,11,12),('tt5555555',2,10,10);
-            INSERT INTO episode_map VALUES('1101','904',1,-1,1,0,0,'');")
+            INSERT INTO episode_map VALUES('1101','904',1,-1,1,0,0,'');
+            -- Shared TVDB family belongs to two different IMDb series:
+            -- never rewrite a source-wide mapping for either identity.
+            INSERT INTO anime_series_map VALUES
+                ('tt6666666','1201','905',0),
+                ('tt7777777','1201','905',0);
+            INSERT INTO season_episodes VALUES
+                ('tt6666666',1,12,12),('tt7777777',1,24,24);
+            INSERT INTO episode_map VALUES('1201','905',1,1,0,0,0,'');
+            -- Explicit Trakt cours are not safe absolute season arithmetic.
+            INSERT INTO anime_series_map VALUES
+                ('tt8888888','1301','906',2);
+            INSERT INTO season_episodes VALUES
+                ('tt8888888',1,12,12),('tt8888888',2,12,12);
+            INSERT INTO episode_map VALUES('1301','906',1,-1,1,0,0,'');")
             .unwrap();
         drop(db);
         assert_eq!(infer_implicit_animelists_crosswalks(&path).unwrap(),6);
@@ -921,6 +948,15 @@ mod tests {
             &db,"tt4444444",2,5).unwrap().is_none());
         assert!(episode_crosswalk::resolve_season(
             &db,"tt5555555",2,5).unwrap().is_none());
+        assert!(episode_crosswalk::resolve_season(
+            &db,"tt6666666",1,13).unwrap().is_some(),
+            "upstream default is untouched for a shared IMDb/TVDB family");
+        assert!(episode_crosswalk::resolve_season(
+            &db,"tt8888888",2,5).unwrap().is_none(),
+            "Trakt split markers block absolute season derivation");
+        let shared_end:i64=db.query_row("SELECT end FROM episode_map
+            WHERE anidb_id='1201' AND tvdb_season=1",[],|r|r.get(0)).unwrap();
+        assert_eq!(shared_end,0,"multi-IMDb family must not be changed");
         let inferred:i64=db.query_row(
             "SELECT row_count FROM metadata_state WHERE source='animelists_inferred'",
             [],|row|row.get(0)).unwrap();
