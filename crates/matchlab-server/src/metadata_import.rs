@@ -702,6 +702,69 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bundled_frieren_second_anidb_work_maps_s02e05_to_local_ep05(){
+        use crate::episode_crosswalk;
+        let folder=std::env::temp_dir().join(format!(
+            "matchlab-frieren-override-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&folder).unwrap();
+        let path=folder.join("metadata.sqlite3");
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE episode_map(
+                anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,
+                tvdb_season INTEGER,start INTEGER,end INTEGER,
+                offset INTEGER,map TEXT);
+            CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER,
+                PRIMARY KEY(imdb_id,anidb_id,tvdb_id,trakt_season));
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE metadata_state(
+                source TEXT PRIMARY KEY,updated_at TEXT,row_count INTEGER);
+            INSERT INTO anime_series_map VALUES
+                ('tt22248376','17617','424536',0);
+            -- First AniDB series ends at 28 despite the weak upstream
+            -- open-ended S01 default. Later AniDB work 18886 has its own
+            -- LOCAL episode numbering and must never publish 17617:33.
+            INSERT INTO episode_map VALUES
+                ('17617','424536',1,1,0,0,0,''),
+                ('18886','424536',1,2,0,0,0,''),
+                -- Third season exists in 2027 but has no verified S03
+                -- episode bounds yet. Its indirect open row cannot
+                -- become evidence for an arbitrary season-three episode.
+                ('19977','424536',1,3,0,0,0,'');").unwrap();
+        drop(db);
+        apply_bundled_animelists_overrides(&path).unwrap();
+        let db=Connection::open(&path).unwrap();
+        for ep in [1,5,10] {
+            let mapped=episode_crosswalk::resolve_season(
+                &db,"tt22248376",2,ep).unwrap().unwrap();
+            assert_eq!((mapped.anidb_id.as_str(),mapped.anidb_episode),
+                ("18886",ep),"IMDb season two E{ep}");
+            let reverse=episode_crosswalk::resolve_anidb(&db,"18886",ep)
+                .unwrap();
+            assert!(reverse.iter().any(|m|
+                m.imdb_id=="tt22248376"&&m.season==2&&m.episode==ep));
+        }
+        assert!(episode_crosswalk::resolve_season(
+            &db,"tt22248376",2,11).unwrap().is_none());
+        assert!(episode_crosswalk::resolve_season(
+            &db,"tt22248376",3,1).unwrap().is_none(),
+            "unbounded indirectly linked 2027 sequel is insufficient");
+        let rows:i64=db.query_row("SELECT COUNT(*) FROM episode_map
+            WHERE anidb_id='18886' AND tvdb_season=2
+                AND start=1 AND end=10 AND offset=0",[],
+            |r|r.get(0)).unwrap();
+        assert_eq!(rows,1,"replace stale S02 open row with finite map");
+        let direct:i64=db.query_row("SELECT COUNT(*) FROM anime_series_map
+            WHERE imdb_id='tt22248376' AND anidb_id='18886'
+                AND tvdb_id='424536'",[],|r|r.get(0)).unwrap();
+        assert_eq!(direct,1,"the second AniDB work has the same IMDb identity");
+        drop(db);
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
     fn bundled_black_clover_override_maps_all_four_imdb_seasons_bidirectionally(){
         use crate::episode_crosswalk;
         let folder=std::env::temp_dir().join(format!(
