@@ -600,9 +600,11 @@ fn complete_imdb_absolute_episode(
         if season!=next_season || count!=max || max<=0
             || !valid_sid_coordinate(season,max){return Ok(None);}
         if remaining<=max {
-            // S01 has a separate, established fallback. Only a later season
-            // needs conversion from whole-series absolute numbering.
-            return Ok((season>1).then_some((season,remaining)));
+            // Only the direct S01 -> S02 transition is eligible without an
+            // absolute AniDB crosswalk. Far-later anime seasons can use
+            // different offsets and must retain the existing fail-closed
+            // policy (e.g. Dragon Ball Super episode 80).
+            return Ok((season==2).then_some((season,remaining)));
         }
         remaining-=max;
         next_season+=1;
@@ -6536,6 +6538,10 @@ mod tests {
             assert_eq!(complete_imdb_absolute_episode(
                 &db,"tt22248376",absolute).unwrap(),expected);
         }
+        db.execute("INSERT INTO season_episodes VALUES('tt22248376',3,12,12)",[])
+            .unwrap();
+        assert_eq!(complete_imdb_absolute_episode(&db,"tt22248376",39)
+            .unwrap(),None,"later seasons require an absolute anime crosswalk");
         let mut winner=json!({
             "imdb_id":"tt22248376","category":"series","title":"Sousou no Frieren",
             "matched_title":"Sousou no Frieren","anime_ids":{"anidb":"12345"},
