@@ -396,7 +396,8 @@ pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>
 /// entire catalog on every ordinary image upgrade or restart.
 pub(crate) fn bundled_animelists_override_marker()->String{
     let mut hash=0xcbf29ce484222325u64;
-    for byte in include_bytes!("../../../data/anime-list.override.xml"){
+    for byte in include_bytes!("../../../data/anime-list.override.xml")
+        .iter().chain(b"generic-implicit-animelists-v1") {
         hash=(hash^u64::from(*byte)).wrapping_mul(0x100000001b3);
     }
     format!("animelists_override_{hash:016x}")
@@ -597,6 +598,151 @@ fn import_animelists_reader<R:std::io::BufRead>(
     Ok(count)
 }
 
+/// Materialize conservative, generic Anime-Lists default-numbering rules at
+/// metadata refresh, never in the hot matching path. Explicit and finite
+/// upstream/override rows always take precedence.
+///
+/// Two independently supported cases:
+/// - Unique, directly IMDb-linked AniDB work + a weak season-specific default
+///   => bound that SAME default to observed, contiguous IMDb episode coverage.
+/// - A unique directly linked AniDB work with defaulttvdbseason="a" (stored
+///   as tvdb_season=-1) => split its absolute ordinal across consecutive,
+///   complete IMDb seasons only where no competing per-season mapping exists.
+///
+/// A missing AniDB↔IMDb link, an indirect sibling, incomplete IMDb counts,
+/// conflicting TVDB season ownership or a partial/explicit mapping are NOT
+/// grounds for fabricating a mapping. Never infer an AniDB ID from text.
+pub(crate) fn infer_implicit_animelists_crosswalks(
+    db_path:&Path,
+)->Result<u64,Box<dyn Error>>{
+    use std::collections::{BTreeMap,BTreeSet};
+    let mut db=Connection::open(db_path)?;
+    // These indices pay for themselves during a full import. Queries below
+    // are grouped by (IMDb,TVDB), not by every torrent episode.
+    db.execute_batch("CREATE INDEX IF NOT EXISTS anime_series_by_imdb_tvdb
+        ON anime_series_map(imdb_id,tvdb_id);
+        CREATE INDEX IF NOT EXISTS anime_inference_by_tvdb
+        ON anime_series_map(tvdb_id,imdb_id);
+        CREATE INDEX IF NOT EXISTS episode_inference_by_tvdb
+        ON episode_map(tvdb_id,anidb_season,tvdb_season);")?;
+    let tx=db.transaction()?;
+    let families={
+        let mut stmt=tx.prepare("SELECT DISTINCT imdb_id,tvdb_id
+            FROM anime_series_map WHERE tvdb_id<>'' ORDER BY imdb_id,tvdb_id")?;
+        let rows=stmt.query_map([],|row|Ok((
+            row.get::<_,String>(0)?,row.get::<_,String>(1)?
+        )))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut updated=0u64;
+    let mut ambiguous=0u64;
+    for (imdb,tvdb) in families{
+        // Two different IMDb title IDs may share a TVDB family even if
+        // their AniDB works have the same aliases. No arithmetic can
+        // establish which IMDb episode ordering applies to that family.
+        let imdb_owners:i64=tx.query_row(
+            "SELECT COUNT(DISTINCT imdb_id) FROM anime_series_map
+             WHERE tvdb_id=?1",[&tvdb],|r|r.get(0))?;
+        if imdb_owners!=1 {ambiguous+=1;continue;}
+        let direct:BTreeSet<String>={
+            let mut stmt=tx.prepare("SELECT DISTINCT anidb_id FROM anime_series_map
+                WHERE imdb_id=?1 AND tvdb_id=?2")?;
+            let rows=stmt.query_map(params![&imdb,&tvdb],|r|r.get(0))?;
+            rows.collect::<rusqlite::Result<BTreeSet<_>>>()?
+        };
+        let seasons:BTreeMap<i64,(i64,i64)>={
+            let mut stmt=tx.prepare("SELECT season,episode_count,max_episode
+                FROM season_episodes WHERE imdb_id=?1 AND season>0
+                ORDER BY season")?;
+            let rows=stmt.query_map([&imdb],|r|Ok((
+                r.get::<_,i64>(0)?,(
+                    r.get::<_,i64>(1)?,r.get::<_,i64>(2)?)
+            )))?;
+            rows.collect::<rusqlite::Result<BTreeMap<_,_>>>()?
+        };
+        if direct.is_empty()||seasons.is_empty(){continue;}
+        // This table preserves original upstream source rows; only a weak
+        // open-ended default is eligible for conversion into a finite row.
+        let maps:Vec<(String,i64,i64,i64,i64,String)>={
+            let mut stmt=tx.prepare("SELECT anidb_id,tvdb_season,start,end,offset,map
+                FROM episode_map WHERE tvdb_id=?1 AND anidb_season=1")?;
+            let rows=stmt.query_map([&tvdb],|r|Ok((
+                r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?
+            )))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        // For an absolute AniDB work, derive coordinates only through a
+        // contiguous prefix of IMDb seasons with no gaps or unknown bounds.
+        let split_or_cour:i64=tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM anime_series_map
+             WHERE imdb_id=?1 AND tvdb_id=?2
+               AND trakt_season NOT IN (0,1))",
+            params![&imdb,&tvdb],|row|row.get(0))?;
+        let absolute_id=if direct.len()==1 && split_or_cour==0 {
+            let id=direct.iter().next().unwrap();
+            let abs=maps.iter().filter(|(aid,s,start,end,offset,map)|
+                aid==id && *s==-1 && *start<=1 && *end<=0
+                && *offset==0 && map.trim().is_empty()).count();
+            (abs==1).then_some(id.as_str())
+        }else{None};
+        let (mut next_season,mut absolute_start)=(1i64,1i64);
+        for (season,(count,max)) in seasons{
+            let complete=count==max && max>0 && max<=99_999;
+            let continuous=season==next_season && complete;
+            // Never let a missing or outlier IMDb season shift every later
+            // AniDB absolute episode. The season-local direct fallback may
+            // still work independently when the first season has gaps.
+            let current_start=if continuous{Some(absolute_start)}else{None};
+            if continuous {
+                absolute_start=absolute_start.saturating_add(max);
+                next_season+=1;
+            }else{
+                next_season=-99_999;
+            }
+            if !complete{continue;}
+            let owners:Vec<_>=maps.iter()
+                .filter(|(_,s,_,_,_,_)|*s==season).collect();
+            if owners.len()==1{
+                let (aid,_,start,end,offset,map)=owners[0];
+                // A defaulttvdbseason="N" indicates a LOCAL AniDB part.
+                // Only a direct animeApi/Anime-Lists IMDb link proves that
+                // this AniDB work belongs to the selected IMDb title.
+                if direct.contains(aid)&& *start<=1 && *end<=0 && *offset==0
+                    && map.trim().is_empty() && max<=99_999
+                {
+                    updated+=tx.execute("UPDATE episode_map SET start=1,end=?3
+                        WHERE anidb_id=?1 AND tvdb_id=?2 AND anidb_season=1
+                          AND tvdb_season=?4 AND start=?5 AND end=?6
+                          AND offset=0 AND TRIM(map)=''",
+                        params![aid,&tvdb,max,season,start,end])? as u64;
+                }
+            }else if owners.len()>1{
+                ambiguous+=1;
+            }else if let (Some(aid),Some(first))=(absolute_id,current_start){
+                // Absolute source metadata explicitly says this AniDB work
+                // spans TVDB seasons. There must be NO competing source
+                // ownership for this TVDB season, even an unbounded sibling.
+                let Some(last)=first.checked_add(max-1)else{continue};
+                if first<=0 || last>99_999{continue;}
+                // Crosswalk rows are authored in AniDB ordinal coordinates.
+                // Example: 2023 S2E5 with preceding season of 28 episodes:
+                // AniDB E33, TVDB S2E5, offset -28.
+                updated+=tx.execute("INSERT INTO episode_map(
+                    anidb_id,tvdb_id,anidb_season,tvdb_season,start,end,offset,map)
+                    VALUES(?1,?2,1,?3,?4,?5,?6,'')",
+                    params![aid,&tvdb,season,first,last,1-first])? as u64;
+            }
+        }
+    }
+    let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
+    tx.execute("INSERT OR REPLACE INTO metadata_state VALUES(
+        'animelists_inferred',?1,?2)",params![now,updated])?;
+    tx.commit()?;
+    tracing::info!(updated,ambiguous,
+        "generic Anime-Lists crosswalk inference completed");
+    Ok(updated)
+}
+
 /// Build all metadata in a disposable database, validate each required dataset,
 /// then atomically replace the live SQLite file only after success.
 /// Inputs are local files so callers can download and verify sources independently.
@@ -638,6 +784,8 @@ pub fn refresh_from_files_with_ratings(
         // A malformed override fails the entire staging refresh.
         let overrides=apply_bundled_animelists_overrides(&stage)?;
         tracing::info!(overrides,"metadata refresh: applied bundled Anime-Lists mapping exceptions");
+        let inferred=infer_implicit_animelists_crosswalks(&stage)?;
+        tracing::info!(inferred,"metadata refresh: generically bounded implicit anime episode mappings");
         tracing::info!("metadata refresh: importing AniDB titles");
         let aliases=import_anidb_titles(&stage,anidb_titles)?;
         if imdb==0||links==0||episodes_count==0||aliases==0{
@@ -700,6 +848,249 @@ pub fn refresh_from_files_with_ratings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generic_inference_resolves_absolute_and_season_local_anime_without_exceptions(){
+        use crate::episode_crosswalk;
+        let folder=std::env::temp_dir().join(format!(
+            "matchlab-generic-crosswalk-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&folder).unwrap();
+        let path=folder.join("metadata.sqlite3");
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE episode_map(
+                anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,
+                tvdb_season INTEGER,start INTEGER,end INTEGER,
+                offset INTEGER,map TEXT);
+            CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER,
+                PRIMARY KEY(imdb_id,anidb_id,tvdb_id,trakt_season));
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE metadata_state(
+                source TEXT PRIMARY KEY,updated_at TEXT,row_count INTEGER);
+            -- One AniDB work explicitly uses absolute numbering across
+            -- several IMDb/TVDB seasons, not a hardcoded title exception.
+            INSERT INTO anime_series_map VALUES('tt1111111','701','900',1);
+            INSERT INTO season_episodes VALUES
+                ('tt1111111',1,12,12),('tt1111111',2,10,10),
+                ('tt1111111',3,2,2);
+            INSERT INTO episode_map VALUES('701','900',1,-1,1,0,0,'');
+            -- Separately linked AniDB parts have their own local E01.
+            INSERT INTO anime_series_map VALUES
+                ('tt2222222','801','901',0),
+                ('tt2222222','802','901',0);
+            INSERT INTO season_episodes VALUES
+                ('tt2222222',1,28,28),('tt2222222',2,10,10);
+            INSERT INTO episode_map VALUES
+                ('801','901',1,1,0,0,0,''),
+                ('802','901',1,2,0,0,0,'');
+            -- A same-TVDB family sequel which has NO IMDb link must not
+            -- acquire the original IMDb identity from a weak default.
+            INSERT INTO anime_series_map VALUES('tt3333333','901','902',0);
+            INSERT INTO season_episodes VALUES
+                ('tt3333333',1,12,12),('tt3333333',2,12,12);
+            INSERT INTO episode_map VALUES
+                ('901','902',1,1,0,0,0,''),
+                ('999','902',1,2,0,0,0,'');
+            -- A partial explicit S02 map must not be extended to E10.
+            INSERT INTO anime_series_map VALUES('tt4444444','1001','903',0);
+            INSERT INTO season_episodes VALUES
+                ('tt4444444',1,12,12),('tt4444444',2,10,10);
+            INSERT INTO episode_map VALUES
+                ('1001','903',1,2,1,4,0,'');
+            -- No guessing across an IMDb season with missing episode data.
+            INSERT INTO anime_series_map VALUES('tt5555555','1101','904',0);
+            INSERT INTO season_episodes VALUES
+                ('tt5555555',1,11,12),('tt5555555',2,10,10);
+            INSERT INTO episode_map VALUES('1101','904',1,-1,1,0,0,'');
+            -- Shared TVDB family belongs to two different IMDb series:
+            -- never rewrite a source-wide mapping for either identity.
+            INSERT INTO anime_series_map VALUES
+                ('tt6666666','1201','905',0),
+                ('tt7777777','1201','905',0);
+            INSERT INTO season_episodes VALUES
+                ('tt6666666',1,12,12),('tt7777777',1,24,24);
+            INSERT INTO episode_map VALUES('1201','905',1,1,0,0,0,'');
+            -- Explicit Trakt cours are not safe absolute season arithmetic.
+            INSERT INTO anime_series_map VALUES
+                ('tt8888888','1301','906',2);
+            INSERT INTO season_episodes VALUES
+                ('tt8888888',1,12,12),('tt8888888',2,12,12);
+            INSERT INTO episode_map VALUES('1301','906',1,-1,1,0,0,'');")
+            .unwrap();
+        drop(db);
+        assert_eq!(infer_implicit_animelists_crosswalks(&path).unwrap(),6);
+        let db=Connection::open(&path).unwrap();
+        for (s,e,absolute) in
+            [(1,1,1),(1,12,12),(2,1,13),(2,5,17),
+             (2,10,22),(3,1,23),(3,2,24)] {
+            let row=episode_crosswalk::resolve_season(
+                &db,"tt1111111",s,e).unwrap().unwrap();
+            assert_eq!((row.anidb_id.as_str(),row.anidb_episode),
+                ("701",absolute));
+            let back=episode_crosswalk::resolve_anidb(&db,"701",absolute)
+                .unwrap();
+            assert_eq!((back[0].season,back[0].episode),(s,e));
+        }
+        let local=episode_crosswalk::resolve_season(
+            &db,"tt2222222",2,5).unwrap().unwrap();
+        assert_eq!((local.anidb_id.as_str(),local.anidb_episode),
+            ("802",5));
+        let back=episode_crosswalk::resolve_anidb(&db,"802",5).unwrap();
+        assert_eq!((back[0].season,back[0].episode),(2,5));
+        assert!(episode_crosswalk::resolve_season(
+            &db,"tt2222222",2,11).unwrap().is_none());
+        assert!(episode_crosswalk::resolve_season(
+            &db,"tt3333333",2,5).unwrap().is_none());
+        assert!(episode_crosswalk::resolve_season(
+            &db,"tt4444444",2,5).unwrap().is_none());
+        assert!(episode_crosswalk::resolve_season(
+            &db,"tt5555555",2,5).unwrap().is_none());
+        assert!(episode_crosswalk::resolve_season(
+            &db,"tt6666666",1,13).unwrap().is_some(),
+            "upstream default is untouched for a shared IMDb/TVDB family");
+        assert!(episode_crosswalk::resolve_season(
+            &db,"tt8888888",2,5).unwrap().is_none(),
+            "Trakt split markers block absolute season derivation");
+        let shared_end:i64=db.query_row("SELECT end FROM episode_map
+            WHERE anidb_id='1201' AND tvdb_season=1",[],|r|r.get(0)).unwrap();
+        assert_eq!(shared_end,0,"multi-IMDb family must not be changed");
+        let inferred:i64=db.query_row(
+            "SELECT row_count FROM metadata_state WHERE source='animelists_inferred'",
+            [],|row|row.get(0)).unwrap();
+        assert_eq!(inferred,6);
+        drop(db);
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn bundled_frieren_second_anidb_work_maps_s02e05_to_local_ep05(){
+        use crate::episode_crosswalk;
+        let folder=std::env::temp_dir().join(format!(
+            "matchlab-frieren-override-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&folder).unwrap();
+        let path=folder.join("metadata.sqlite3");
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE episode_map(
+                anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,
+                tvdb_season INTEGER,start INTEGER,end INTEGER,
+                offset INTEGER,map TEXT);
+            CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER,
+                PRIMARY KEY(imdb_id,anidb_id,tvdb_id,trakt_season));
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE metadata_state(
+                source TEXT PRIMARY KEY,updated_at TEXT,row_count INTEGER);
+            INSERT INTO anime_series_map VALUES
+                ('tt22248376','17617','424536',0);
+            -- First AniDB series ends at 28 despite the weak upstream
+            -- open-ended S01 default. Later AniDB work 18886 has its own
+            -- LOCAL episode numbering and must never publish 17617:33.
+            INSERT INTO episode_map VALUES
+                ('17617','424536',1,1,0,0,0,''),
+                ('18886','424536',1,2,0,0,0,''),
+                -- Third season exists in 2027 but has no verified S03
+                -- episode bounds yet. Its indirect open row cannot
+                -- become evidence for an arbitrary season-three episode.
+                ('19977','424536',1,3,0,0,0,'');").unwrap();
+        drop(db);
+        apply_bundled_animelists_overrides(&path).unwrap();
+        let db=Connection::open(&path).unwrap();
+        for ep in [1,5,10] {
+            let mapped=episode_crosswalk::resolve_season(
+                &db,"tt22248376",2,ep).unwrap().unwrap();
+            assert_eq!((mapped.anidb_id.as_str(),mapped.anidb_episode),
+                ("18886",ep),"IMDb season two E{ep}");
+            let reverse=episode_crosswalk::resolve_anidb(&db,"18886",ep)
+                .unwrap();
+            assert!(reverse.iter().any(|m|
+                m.imdb_id=="tt22248376"&&m.season==2&&m.episode==ep));
+        }
+        assert!(episode_crosswalk::resolve_season(
+            &db,"tt22248376",2,11).unwrap().is_none());
+        assert!(episode_crosswalk::resolve_season(
+            &db,"tt22248376",3,1).unwrap().is_none(),
+            "unbounded indirectly linked 2027 sequel is insufficient");
+        let rows:i64=db.query_row("SELECT COUNT(*) FROM episode_map
+            WHERE anidb_id='18886' AND tvdb_season=2
+                AND start=1 AND end=10 AND offset=0",[],
+            |r|r.get(0)).unwrap();
+        assert_eq!(rows,1,"replace stale S02 open row with finite map");
+        let direct:i64=db.query_row("SELECT COUNT(*) FROM anime_series_map
+            WHERE imdb_id='tt22248376' AND anidb_id='18886'
+                AND tvdb_id='424536'",[],|r|r.get(0)).unwrap();
+        assert_eq!(direct,1,"the second AniDB work has the same IMDb identity");
+        drop(db);
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn bundled_black_clover_override_maps_all_four_imdb_seasons_bidirectionally(){
+        use crate::episode_crosswalk;
+        let folder=std::env::temp_dir().join(format!(
+            "matchlab-black-clover-override-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&folder).unwrap();
+        let path=folder.join("metadata.sqlite3");
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE episode_map(
+                anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,
+                tvdb_season INTEGER,start INTEGER,end INTEGER,
+                offset INTEGER,map TEXT);
+            CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER,
+                PRIMARY KEY(imdb_id,anidb_id,tvdb_id,trakt_season));
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE metadata_state(
+                source TEXT PRIMARY KEY,updated_at TEXT,row_count INTEGER);
+            INSERT INTO anime_series_map VALUES
+                ('tt7441658','12665','331753',0);
+            INSERT INTO episode_map VALUES
+                ('12665','331753',1,1,0,0,0,''),
+                ('12665','331753',0,0,2,16,9,'1-2;'),
+                -- The real 2026 sequel shares TVDB 331753, but its
+                -- open-ended S02 default must NEVER claim 2018 S02E01.
+                ('19433','331753',1,2,0,0,0,'');")
+            .unwrap();
+        drop(db);
+        apply_bundled_animelists_overrides(&path).unwrap();
+        let db=Connection::open(&path).unwrap();
+        for (season,episode,absolute) in [
+            (1,1,1),(1,51,51),(2,1,52),(2,51,102),
+            (3,1,103),(3,43,145),(3,52,154),(4,1,155),(4,16,170)
+        ]{
+            let from_imdb=episode_crosswalk::resolve_season(
+                &db,"tt7441658",season,episode).unwrap().unwrap();
+            assert_eq!((from_imdb.anidb_id.as_str(),
+                from_imdb.anidb_episode),("12665",absolute),
+                "S{season:02}E{episode:02}");
+            let from_absolute=episode_crosswalk::resolve_absolute(
+                &db,"tt7441658",absolute).unwrap().unwrap();
+            assert_eq!((from_absolute.season,from_absolute.episode),
+                (season,episode),"absolute episode {absolute}");
+            let back=episode_crosswalk::resolve_anidb(&db,"12665",absolute)
+                .unwrap();
+            assert_eq!(back.len(),1);
+            assert_eq!((back[0].season,back[0].episode),(season,episode));
+        }
+        assert!(episode_crosswalk::resolve_season(&db,"tt7441658",3,53)
+            .unwrap().is_none());
+        assert!(episode_crosswalk::resolve_absolute(&db,"tt7441658",171)
+            .unwrap().is_none());
+        let source_count:i64=db.query_row(
+            "SELECT COUNT(*) FROM episode_map WHERE anidb_id='12665'
+                AND anidb_season=1 AND tvdb_season BETWEEN 1 AND 4",[],
+            |row|row.get(0)).unwrap();
+        assert_eq!(source_count,4,"the stale open S01 row must be replaced");
+        drop(db);
+        fs::remove_dir_all(folder).unwrap();
+    }
     #[test]
     fn full_refresh_publishes_all_required_indexes_after_aggregation(){
         let folder=std::env::temp_dir().join(format!(
@@ -834,7 +1225,10 @@ mod tests {
         assert_eq!(rows,2,"one absolute row and one S17 mapping");
         let distinct:i64=db.query_row("SELECT COUNT(DISTINCT anidb_id)
             FROM episode_map WHERE anidb_id<>'2369'",[],|r|r.get(0)).unwrap();
-        assert_eq!(distinct,27,"every bundled exception must enter episode_map");
+        let expected=include_str!("../../../data/anime-list.override.xml")
+            .matches("<anime anidbid=").count() as i64;
+        assert_eq!(distinct,expected,
+            "every bundled exception must enter episode_map");
         let stale:i64=db.query_row("SELECT COUNT(*) FROM episode_map
             WHERE anidb_id='15449' AND tvdb_id='99999'",[],|r|r.get(0)).unwrap();
         assert_eq!(stale,0,"old conflicting mapping must be replaced");
