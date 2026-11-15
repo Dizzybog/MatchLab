@@ -236,7 +236,7 @@ environment:
   MATCHLAB_COMMUNITY_GITHUB_TOKEN: ${MATCHLAB_COMMUNITY_GITHUB_TOKEN}
 ```
 
-Store the token in a private `.env` file or secret store, **never in a committed Compose file**. For a complete step-by-step token creation and Docker Compose setup, follow [the README sharing guide](../README.md#share-improvements-with-the-community-optional).
+Store the token in a private `.env` file or secret store, **never in a committed Compose file**. For a complete step-by-step token creation and Docker Compose setup, follow [the community sharing setup guide](COMMUNITY_SHARING_SETUP.md).
 
 Use a **fine-grained PAT** restricted to `Dizzybog/MatchLab` with `Issues: Read and write` when the upstream repository is available in your token's repository selector (for example as its owner). External contributors who cannot select upstream may use a **classic PAT** with the `public_repo` scope, but it permits wider access across public repositories; set an expiration and revoke when no longer needed. `repo` (private-repository scope), Contents write, PR write and Actions write are not required.
 
