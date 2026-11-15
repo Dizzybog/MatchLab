@@ -2881,11 +2881,12 @@ static DASH_ANIME_EPISODE_RE: Lazy<Regex> = Lazy::new(|| {
 // first technical tag: "[Group] Title 12 [CRC].mkv", "Title_07_(HD.720p)",
 // "Title!-05.mp4". Sequel numbers are unpadded single digits ("Title 2"),
 // so require two to four digits, and never a number followed by a year.
+// Dotted scene names ("show.0202.720p") and dated releases are excluded.
 static TAGGED_ANIME_EPISODE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(concat!(
         // Space/underscore separated: two to four digits. Glued with a
         // hyphen: exactly two, so product codes ("ABCD-985") are excluded.
-        r"(?i)^(.+?)(?:[ ._]+(0[0-9]{1,3}|[1-9][0-9]{1,3})|(?<=[\p{Ll}!?])-(0[0-9]|[1-9][0-9]))(?:v[0-9])?",
+        r"(?i)^(.+?)(?:[ _]+(0[0-9]{1,3}|[1-9][0-9]{1,3})|(?<=[\p{Ll}!?])-(0[0-9]|[1-9][0-9]))(?:v[0-9])?",
         r"(?=[ ._]*[\[(](?!(?:19|20)[0-9]{2}[)\]])",
         r"|[ ._]+(?:(?:480|540|576|720|1080|2160)p|vostfr|vosta|hd|sd|bd|web|dvd|raw)(?:$|[^a-z0-9])",
         r"|[ ._]*(?:[ .](?:mkv|mp4|avi|m4v|webm|ts))?$)"
@@ -2947,6 +2948,7 @@ fn unmarked_single_anime_episode_candidate(
     // A generic handler may already have guessed the bare episode. Retain
     // the verified-absolute hint so a parent "Season 14" cannot turn
     // "Bleach - 295" into invalid season-relative episode 295.
+    let mut tagged=false;
     let caps = if let Some(caps) = DASH_ANIME_EPISODE_RE.captures(raw)
         .map_err(|e| ParseError::Regex(e.to_string()))? {
         caps
@@ -2956,8 +2958,10 @@ fn unmarked_single_anime_episode_candidate(
     } else if result.get("episodes").and_then(Value::as_array)
         .is_none_or(|episodes|episodes.is_empty())
         && result.get("year").is_none()
+        && result.get("date").is_none()
         && let Some(caps) = TAGGED_ANIME_EPISODE_RE.captures(raw)
             .map_err(|e| ParseError::Regex(e.to_string()))? {
+        tagged=true;
         caps
     } else { return Ok(None); };
     let (Some(prefix),Some(number)) = (caps.get(1), caps.get(2).or(caps.get(3))) else {
@@ -2987,7 +2991,8 @@ fn unmarked_single_anime_episode_candidate(
     // it ("Title - Arc 20 [tags]"): the matcher needs the exact AniDB alias.
     let spaced=name.replace('_'," ");
     let unbracketed=spaced.rsplit(']').next().unwrap_or(&spaced).trim();
-    if let Some(rest)=unbracketed.strip_prefix(title.as_str())
+    if tagged
+        && let Some(rest)=unbracketed.strip_prefix(title.as_str())
         && let Some(part)=rest.strip_prefix(" - ")
         && part.chars().filter(|c|c.is_alphabetic()).count()>=3
         && !part.contains(['[','(','/'])

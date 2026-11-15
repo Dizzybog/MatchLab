@@ -224,6 +224,13 @@ fn resolve_season_preloaded(
         for (&m,&is_split) in indexed.mappings.iter().zip(&indexed.split) {
             if is_split&&link.trakt!=season{continue;}
             if !is_split&&m.tv_season!=season{continue;}
+            // An AniDB work discovered only as a TVDB-family sibling
+            // cannot claim arbitrary episodes with an open-ended default.
+            // Bounded/explicit sibling mappings remain eligible, and a
+            // directly linked work keeps its existing mapping policy.
+            // Mirror resolve_absolute_preloaded's existing source guard.
+            if !link.direct && m.explicit.is_empty()
+                && (m.start<=0 || m.end<=0) {continue;}
             if !is_split&&!m.explicit.is_empty(){
                 for &(ani,tv) in &m.explicit{
                     if tv==episode{

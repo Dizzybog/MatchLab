@@ -1,0 +1,57 @@
+{
+  "schema": "matchlab-anidb-discrepancy-v1",
+  "capture_date_utc": "2026-11-15",
+  "baseline_commit": "a8d8f66",
+  "sample": {
+    "rows": 136215,
+    "unique_request_strings": 141661,
+    "anidb_related_unique_request_strings": 12723,
+    "interpretation": "Rolling bounded-history sample. Discrepancy labels are heuristics, not correctness labels."
+  },
+  "local_replay": {
+    "strict_mode": false,
+    "metadata_sources": 7,
+    "anidb_related": {
+      "inputs": 12723,
+      "changed": 293,
+      "gained_episode": 261,
+      "range_end_changed": 10,
+      "episode_or_season_changed": 10,
+      "imdb_identity_changed": 6,
+      "asid_only": 2,
+      "gained_match": 1,
+      "lost_coordinate": 3
+    },
+    "classes_baseline_to_change": {
+      "consistent": [10956, 11204],
+      "title_ends_with_number_no_candidate": [276, 82],
+      "range_parsed_no_end_selected": [259, 196],
+      "episode_parsed_no_sid_episode_unblocked": [185, 131],
+      "sid_episode_without_asid": [577, 580],
+      "episode_parsed_blocked_by_known_bounds": [362, 364],
+      "unmatched": [223, 222],
+      "season_parsed_none_selected": [36, 36],
+      "season_differs": [18, 17]
+    },
+    "non_anidb_random_sample": {"inputs": 20000, "changed": 21}
+  },
+  "parser_replay": {
+    "inputs": 141661,
+    "changed": 438,
+    "changed_fields": {
+      "anime_episode_candidate": 406,
+      "anime_episode_range_candidate": 33,
+      "episodes": 23,
+      "episode_start": 4,
+      "episode_end": 4,
+      "episode_count": 4,
+      "episode_range_numbering": 4,
+      "episode_title": 1
+    }
+  },
+  "validation": {
+    "rust_tests_passed": 573,
+    "python_tests_passed": 99,
+    "fixture_test_fails_on_baseline": true
+  }
+}

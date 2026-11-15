@@ -43,6 +43,8 @@ fn sequel_numbers_years_and_product_codes_are_not_tagged_episodes() {
         "Example Runner 2049 [1080p]",      // year-like title number
         "EXMP-985",                         // product code
         "Example 12 BluRay 1080p",          // no bracket or fansub tag
+        "example.show.0202.720p-grp.mkv",   // dotted scene name
+        "Example Go 2019 06 10 720p HDTV",  // dated release
     ] {
         let parsed=parse_title(raw,false).unwrap();
         assert!(parsed.get("anime_episode_candidate").is_none(),"{raw}: {parsed:?}");
