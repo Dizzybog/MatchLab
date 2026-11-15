@@ -897,7 +897,10 @@ mod tests {
         assert_eq!(rows,2,"one absolute row and one S17 mapping");
         let distinct:i64=db.query_row("SELECT COUNT(DISTINCT anidb_id)
             FROM episode_map WHERE anidb_id<>'2369'",[],|r|r.get(0)).unwrap();
-        assert_eq!(distinct,27,"every bundled exception must enter episode_map");
+        let expected=include_str!("../../../data/anime-list.override.xml")
+            .matches("<anime anidbid=").count() as i64;
+        assert_eq!(distinct,expected,
+            "every bundled exception must enter episode_map");
         let stale:i64=db.query_row("SELECT COUNT(*) FROM episode_map
             WHERE anidb_id='15449' AND tvdb_id='99999'",[],|r|r.get(0)).unwrap();
         assert_eq!(stale,0,"old conflicting mapping must be replaced");
