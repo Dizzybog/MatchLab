@@ -708,10 +708,18 @@ fn verified_unmapped_anime_absolute_episode(
             WHERE l.imdb_id=?1 AND m.anidb_season>0 AND m.tvdb_season=?2)",
         rusqlite::params![imdb,season],|row|row.get(0)
     ).map_err(|e|e.to_string())?;
-    if mapped_season_exists!=0
-        && episode_crosswalk::resolve_season(db,imdb,season,episode)
-            .map_err(|e|e.to_string())?.is_none()
-    {return Ok(None);}
+    let mapped_target=episode_crosswalk::resolve_season(db,imdb,season,episode)
+        .map_err(|e|e.to_string())?;
+    if let Some(ref target)=mapped_target {
+        // Never add an unrelated local AniDB part's ASID to an absolute
+        // episode inferred from IMDb season lengths.
+        if target.anidb_episode!=absolute
+            || winner["anime_ids"]["anidb"].as_str()
+                !=Some(target.anidb_id.as_str())
+        {return Ok(None);}
+    }else if mapped_season_exists!=0{
+        return Ok(None);
+    }
     Ok(Some((season,episode)))
 }
 
@@ -6770,6 +6778,14 @@ mod tests {
             &db,&winner,parsed.as_object().unwrap(),false).unwrap(),Some((3,43)));
         db.execute("UPDATE season_episodes SET episode_count=50
             WHERE imdb_id='tt7441658' AND season=2",[]).unwrap();
+        assert_eq!(verified_unmapped_anime_absolute_episode(
+            &db,&winner,parsed.as_object().unwrap(),false).unwrap(),None);
+        db.execute("UPDATE season_episodes SET episode_count=51
+            WHERE imdb_id='tt7441658' AND season=2",[]).unwrap();
+        // A target-season crosswalk that resolves to a *different* AniDB
+        // absolute episode is not corroboration for release episode 145.
+        db.execute("INSERT INTO episode_map VALUES
+            ('12665','331753',1,3,1,52,0,'')",[]).unwrap();
         assert_eq!(verified_unmapped_anime_absolute_episode(
             &db,&winner,parsed.as_object().unwrap(),false).unwrap(),None);
     }
