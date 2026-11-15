@@ -600,11 +600,10 @@ fn complete_imdb_absolute_episode(
         if season!=next_season || count!=max || max<=0
             || !valid_sid_coordinate(season,max){return Ok(None);}
         if remaining<=max {
-            // Only the direct S01 -> S02 transition is eligible without an
-            // absolute AniDB crosswalk. Far-later anime seasons can use
-            // different offsets and must retain the existing fail-closed
-            // policy (e.g. Dragon Ball Super episode 80).
-            return Ok((season==2).then_some((season,remaining)));
+            // Never guess within S01: this helper is only for converting
+            // whole-series absolute coordinates into a later IMDb season.
+            // Source and title evidence is checked by the caller.
+            return Ok((season>1).then_some((season,remaining)));
         }
         remaining-=max;
         next_season+=1;
@@ -618,6 +617,7 @@ fn complete_imdb_absolute_episode(
 /// no contradictory AniDB crosswalk evidence.
 fn verified_unmapped_anime_absolute_episode(
     db:&Connection,winner:&Value,parsed:&serde_json::Map<String,Value>,
+    allow_invalid_absolute_crosswalk:bool,
 )->Result<Option<(i64,i64)>,String>{
     if winner["episode"].as_i64().is_some()
         || winner["season"].as_i64().is_some_and(|season|season>1)
@@ -628,6 +628,11 @@ fn verified_unmapped_anime_absolute_episode(
         || parsed.contains_key("anime_local_part_range_unresolved")
         || parsed.contains_key("anime_named_part_season_hint")
         || parsed.contains_key("special_episode")
+        // A fansub release group is an independent structural signal that
+        // the number is an absolute anime episode, not an unnamed local part.
+        // Do not reinterpret bare "Dragon Ball Super - 80 WEB-DL".
+        || !parsed.get("group").and_then(Value::as_str)
+            .is_some_and(|group|!group.trim().is_empty())
     {return Ok(None);}
     let Some(hint)=parsed.get("anime_episode_candidate") else{return Ok(None)};
     if hint["numbering"]!="absolute" || hint["path_part"]==true {
@@ -662,8 +667,17 @@ fn verified_unmapped_anime_absolute_episode(
         && anime_title::season_from_title(db,imdb,title)
             .map_err(|e|e.to_string())?!=Some(1)
     {return Ok(None);}
-    if episode_crosswalk::resolve_absolute(db,imdb,absolute)
-        .map_err(|e|e.to_string())?.is_some(){return Ok(None);}
+    if let Some(existing)=episode_crosswalk::resolve_absolute(db,imdb,absolute)
+        .map_err(|e|e.to_string())? {
+        // Only repair a crosswalk already proven impossible by IMDb season
+        // bounds. Preserve every valid AniDB/TVDB absolute mapping.
+        if !allow_invalid_absolute_crosswalk
+            || existing.season!=1 || existing.episode!=absolute
+            || season_episode_end(db,imdb,existing.season)?
+                .is_none_or(|max|existing.episode<=max)
+            || winner["anime_ids"]["anidb"].as_str()!=Some(existing.anidb_id.as_str())
+        {return Ok(None);}
+    }
     let Some((season,episode))=complete_imdb_absolute_episode(db,imdb,absolute)?
         else{return Ok(None)};
     // If the target IMDb season has an AniDB map, it must positively resolve
@@ -716,14 +730,46 @@ fn reconcile_series_coordinates(
         && season_episode_end(db,winner["imdb_id"].as_str().unwrap_or_default(),mapped_season)?
             .is_some_and(|last|mapped_episode>last)
     {
-        winner["season"]=Value::Null;
-        winner["episode"]=Value::Null;
-        winner["season_end"]=Value::Null;
-        winner["episode_end"]=Value::Null;
-        winner["anime"]=Value::Null;
-        winner["sid"]=winner["imdb_id"].clone();
-        winner["coordinate_fallback_blocked"]=json!("anime_crosswalk_exceeds_known_imdb_bounds");
-        return Ok(());
+        // The AniDB identity and absolute episode may still be valid even
+        // when its open-ended crosswalk falsely assigns S01E145. Repair
+        // *only* when IMDb supplies complete preceding-season bounds, the
+        // source is an exact fansub release and the original ASID matches
+        // the parsed absolute coordinate. Never publish that stale ASID
+        // as proof of the newly inferred IMDb coordinate.
+        let raw_absolute=parsed.get("anime_episode_candidate")
+            .and_then(|candidate|candidate["episode"].as_i64());
+        let identified=winner.pointer("/anime/anidb_id").and_then(Value::as_str);
+        let expected_asid=identified.and_then(|id|raw_absolute
+            .and_then(|absolute|episode_crosswalk::canonical_asid(id,absolute)));
+        let original_asid=winner.pointer("/anime/asid").and_then(Value::as_str);
+        let repaired=if season==Some(1) && episode==raw_absolute
+            && expected_asid.as_deref()==original_asid
+            && identified==winner["anime_ids"]["anidb"].as_str(){
+            let mut unverified=winner.clone();
+            unverified["season"]=Value::Null;
+            unverified["episode"]=Value::Null;
+            unverified["anime"]=Value::Null;
+            verified_unmapped_anime_absolute_episode(
+                db,&unverified,parsed,true)?
+        }else{None};
+        if let Some((fixed_season,fixed_episode))=repaired {
+            season=Some(fixed_season);
+            episode=Some(fixed_episode);
+            winner["season"]=json!(fixed_season);
+            winner["episode"]=json!(fixed_episode);
+            winner["anime"]=Value::Null;
+            winner["coordinate_fallback"]=json!("repaired_imdb_absolute_anime");
+            winner["rejected_crosswalk"]=json!("anime_crosswalk_exceeds_known_imdb_bounds");
+        }else{
+            winner["season"]=Value::Null;
+            winner["episode"]=Value::Null;
+            winner["season_end"]=Value::Null;
+            winner["episode_end"]=Value::Null;
+            winner["anime"]=Value::Null;
+            winner["sid"]=winner["imdb_id"].clone();
+            winner["coordinate_fallback_blocked"]=json!("anime_crosswalk_exceeds_known_imdb_bounds");
+            return Ok(());
+        }
     }
     // An ASID alone can be independently verified without proving the
     // matching IMDb season/episode. Only an established pair is final.
@@ -732,7 +778,7 @@ fn reconcile_series_coordinates(
         && season.is_some() && episode.is_some();
     if !verified_crosswalk {
         if let Some((mapped_season,mapped_episode))=
-            verified_unmapped_anime_absolute_episode(db,winner,parsed)?{
+            verified_unmapped_anime_absolute_episode(db,winner,parsed,false)?{
             season=Some(mapped_season);
             episode=Some(mapped_episode);
             winner["coordinate_fallback"]=json!("complete_imdb_absolute_anime");
@@ -787,7 +833,8 @@ fn reconcile_series_coordinates(
         (Some(s),Some(e))=>json!(format!("{imdb}:{s}:{e}")),
         _=>json!(imdb),
     };
-    if winner["coordinate_fallback"]=="complete_imdb_absolute_anime"{
+    if winner["coordinate_fallback"]=="complete_imdb_absolute_anime"
+        || winner["coordinate_fallback"]=="repaired_imdb_absolute_anime"{
         // Preserve a verified ASID when an IMDb-season crosswalk exists.
         // Otherwise keep ASID null; never invent an AniDB episode number.
         enrich_selected_anime_episode(db,winner)?;
@@ -6553,14 +6600,15 @@ mod tests {
         db.execute("INSERT INTO season_episodes VALUES('tt22248376',3,12,12)",[])
             .unwrap();
         assert_eq!(complete_imdb_absolute_episode(&db,"tt22248376",39)
-            .unwrap(),None,"later seasons require an absolute anime crosswalk");
+            .unwrap(),Some((3,1)),"all seasons use the same verified bounds");
         let mut winner=json!({
             "imdb_id":"tt22248376","category":"series","title":"Sousou no Frieren",
             "matched_title":"Sousou no Frieren","anime_ids":{"anidb":"12345"},
             "season":1,"episode":null,"anime":null,"sid":"tt22248376"
         });
         let parsed=json!({
-            "title":"Sousou no Frieren","seasons":[],"episodes":[33],
+            "title":"Sousou no Frieren","group":"Kirinashi",
+            "seasons":[],"episodes":[33],
             "anime_episode_candidate":{
                 "title":"Sousou no Frieren","episode":33,
                 "numbering":"absolute","verified":false}
@@ -6608,21 +6656,104 @@ mod tests {
             "season":null,"episode":null
         });
         let parsed=json!({
-            "seasons":[],"episodes":[33],
+            "group":"Kirinashi","seasons":[],"episodes":[33],
             "anime_episode_candidate":{"title":"Sousou no Frieren",
                 "episode":33,"numbering":"absolute"}
         });
         assert_eq!(verified_unmapped_anime_absolute_episode(
-            &db,&winner,parsed.as_object().unwrap()).unwrap(),None,
+            &db,&winner,parsed.as_object().unwrap(),false).unwrap(),None,
             "an incomplete season-2 crosswalk must not be bypassed");
         let mut explicit=parsed.clone();
         explicit["seasons"]=json!([2]);
         assert_eq!(verified_unmapped_anime_absolute_episode(
-            &db,&winner,explicit.as_object().unwrap()).unwrap(),None);
+            &db,&winner,explicit.as_object().unwrap(),false).unwrap(),None);
         let mut named=parsed.clone();
         named["anime_named_part_season_hint"]=json!(2);
         assert_eq!(verified_unmapped_anime_absolute_episode(
-            &db,&winner,named.as_object().unwrap()).unwrap(),None);
+            &db,&winner,named.as_object().unwrap(),false).unwrap(),None);
+    }
+
+    #[test]
+    fn black_clover_absolute_145_repairs_invalid_open_ended_s01_crosswalk(){
+        let parsed=matchlab_parser::parse_title(
+            "[EMBER] Black Clover - 145.mkv",false).unwrap();
+        assert_eq!(parsed["title"],"Black Clover");
+        assert_eq!(parsed["group"],"EMBER");
+        assert_eq!(parsed["anime_episode_candidate"]["episode"],145);
+        assert_eq!(parsed["anime_episode_candidate"]["numbering"],"absolute");
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE season_episodes(
+                imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(
+                anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO season_episodes VALUES
+                ('tt7441658',1,51,51),('tt7441658',2,51,51),
+                ('tt7441658',3,52,52),('tt7441658',4,16,16);
+            INSERT INTO anime_series_map VALUES('tt7441658','12665','331753',0);
+            INSERT INTO episode_map VALUES('12665','331753',1,-1,1,0,0,'');
+            INSERT INTO episode_map VALUES('12665','331753',1,1,1,0,0,'');")
+            .unwrap();
+        let original=episode_crosswalk::resolve_absolute(&db,"tt7441658",145)
+            .unwrap().expect("source data has an open-ended season-1 alias");
+        assert_eq!((original.season,original.episode),(1,145));
+        assert_eq!(complete_imdb_absolute_episode(
+            &db,"tt7441658",145).unwrap(),Some((3,43)));
+        let mut winner=json!({
+            "imdb_id":"tt7441658","category":"series","title":"Black Clover",
+            "matched_title":"Black Clover","anime_ids":{"anidb":"12665"},
+            "season":1,"episode":145,
+            "anime":{"anidb_id":"12665","episode":145,"asid":"12665:145"},
+            "sid":"tt7441658:1:145"
+        });
+        reconcile_series_coordinates(&db,&mut winner,parsed.as_object().unwrap())
+            .unwrap();
+        assert_eq!(winner["season"],3);
+        assert_eq!(winner["episode"],43);
+        assert_eq!(winner["sid"],"tt7441658:3:43");
+        assert_eq!(winner["coordinate_fallback"],"repaired_imdb_absolute_anime");
+        assert!(winner.pointer("/anime/asid").and_then(Value::as_str).is_none());
+        assert_eq!(public_match_response(Some(winner)),json!({
+            "sid_start":"tt7441658:3:43","sid_end":"tt7441658:3:43",
+            "asid_start":null,"asid_end":null
+        }));
+    }
+
+    #[test]
+    fn absolute_anime_fallback_requires_a_group_and_complete_season_counts(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE season_episodes(
+                imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(
+                anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO season_episodes VALUES
+                ('tt7441658',1,51,51),('tt7441658',2,51,51),
+                ('tt7441658',3,52,52);
+            INSERT INTO anime_series_map VALUES('tt7441658','12665','331753',0);")
+            .unwrap();
+        let winner=json!({"imdb_id":"tt7441658","title":"Black Clover",
+            "matched_title":"Black Clover","anime_ids":{"anidb":"12665"},
+            "season":null,"episode":null});
+        let mut parsed=json!({"seasons":[],"episodes":[145],
+            "anime_episode_candidate":{"title":"Black Clover",
+            "episode":145,"numbering":"absolute"}});
+        assert_eq!(verified_unmapped_anime_absolute_episode(
+            &db,&winner,parsed.as_object().unwrap(),false).unwrap(),None,
+            "bare ungrouped episode has insufficient independent evidence");
+        parsed["group"]=json!("EMBER");
+        assert_eq!(verified_unmapped_anime_absolute_episode(
+            &db,&winner,parsed.as_object().unwrap(),false).unwrap(),Some((3,43)));
+        db.execute("UPDATE season_episodes SET episode_count=50
+            WHERE imdb_id='tt7441658' AND season=2",[]).unwrap();
+        assert_eq!(verified_unmapped_anime_absolute_episode(
+            &db,&winner,parsed.as_object().unwrap(),false).unwrap(),None);
     }
 
     #[test]
