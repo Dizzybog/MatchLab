@@ -289,6 +289,55 @@ pub fn resolve_episode_from_exact_part_title(
     Ok(mapped.filter(|m|m.season==inferred_season))
 }
 
+/// Resolve "<first part title> Part N - EE". The base title must be an exact
+/// alias of ONE AniDB work that begins a TVDB season (offset 0); part N is
+/// the N-th AniDB work of this IMDb series in that same season, ordered by
+/// its episode offset. The episode is local to the part ("Part 2 - 05") or
+/// continues the season's numbering ("Part 2 - 25" when part two is 13..25).
+/// Part lengths come from the next part's offset or IMDb's season bound;
+/// without a bound nothing is published.
+pub fn resolve_numbered_part(
+    db:&Connection,imdb:&str,base_title:&str,part:i64,episode:i64,
+)->rusqlite::Result<Option<episode_crosswalk::Episode>>{
+    if !(2..=9).contains(&part)||!(1..=9_999).contains(&episode){return Ok(None);}
+    let key=imdb_matcher::clean_title(base_title);
+    let ids=aliases(db,imdb,base_title)?.into_iter()
+        .filter_map(|(id,alias)|(alias==key).then_some(id))
+        .collect::<BTreeSet<_>>();
+    if ids.len()!=1{return Ok(None);}
+    let first=ids.iter().next().expect("unique AniDB alias");
+    let Some(season)=unique_mapped_season(db,first)? else{return Ok(None)};
+    if !begins_tvdb_season(db,first,season)?{return Ok(None);}
+    let mut stmt=db.prepare("SELECT DISTINCT m.anidb_id,m.offset FROM episode_map base
+        JOIN episode_map m ON m.tvdb_id=base.tvdb_id AND m.tvdb_season=base.tvdb_season
+        JOIN anime_series_map linked ON linked.anidb_id=m.anidb_id
+        WHERE base.anidb_id=?1 AND base.tvdb_season=?2 AND base.tvdb_id<>''
+          AND m.anidb_season>0 AND m.map='' AND linked.imdb_id=?3
+        ORDER BY m.offset,m.anidb_id")?;
+    let parts=stmt.query_map(params![first,season,imdb],|row|
+        Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    // Every part needs its own distinct, increasing offset.
+    if parts.first().is_none_or(|(id,offset)|id!=first||*offset!=0)
+        || parts.windows(2).any(|pair|pair[0].1>=pair[1].1){return Ok(None);}
+    let Some((anidb,offset))=parts.get((part-1) as usize) else{return Ok(None)};
+    let season_end:Option<i64>=db.query_row(
+        "SELECT MAX(max_episode) FROM season_episodes WHERE imdb_id=?1 AND season=?2",
+        params![imdb,season],|row|row.get(0)).optional()?.flatten();
+    let end=match parts.get(part as usize){
+        Some((_,next))=>*next,
+        None=>match season_end{Some(end)=>end,None=>return Ok(None)},
+    };
+    let length=end-offset;
+    if length<=0{return Ok(None);}
+    let (tv,local)=if episode<=length{(episode+offset,episode)}
+        else if episode>*offset && episode<=end{(episode,episode-offset)}
+        else{return Ok(None)};
+    if season_end.is_some_and(|max|tv>max){return Ok(None);}
+    Ok(Some(episode_crosswalk::Episode{imdb_id:imdb.to_owned(),season,episode:tv,
+        anidb_id:anidb.clone(),anidb_episode:local}))
+}
+
 /// Independently verified local S/P coordinates for a named AniDB work.
 /// They are never derived from arithmetic alone: the established part
 /// crosswalk supplies the real IMDb and AniDB episode IDs.
