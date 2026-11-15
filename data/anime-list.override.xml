@@ -1,5 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <anime-list>
+  <!-- Black Clover (2017): AniDB 12665 is one 170-episode work.
+       TheTVDB aired order splits the same run into S01:1-51, S02:52-102,
+       S03:103-154 and S04:155-170. The upstream open-ended S01 default
+       falsely interprets AniDB episode 145 as IMDb S01E145.
+       Keep the separate 2026 sequel (AniDB 19433) untouched. -->
+  <anime anidbid="12665" tvdbid="331753" defaulttvdbseason="a">
+    <name>Black Clover (2017)</name>
+    <mapping-list>
+      <mapping anidbseason="1" tvdbseason="1" start="1" end="51" offset="0"/>
+      <mapping anidbseason="1" tvdbseason="2" start="52" end="102" offset="-51"/>
+      <mapping anidbseason="1" tvdbseason="3" start="103" end="154" offset="-102"/>
+      <mapping anidbseason="1" tvdbseason="4" start="155" end="170" offset="-154"/>
+      <mapping anidbseason="0" tvdbseason="0" start="2" end="16" offset="9">;1-2;</mapping>
+    </mapping-list>
+  </anime>
+
   <anime anidbid="2908" tvdbid="72858" defaulttvdbseason="a">
     <name>Monster Farm: Enbanseki no Himitsu</name>
     <mapping-list>
