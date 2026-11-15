@@ -581,6 +581,104 @@ fn mapped_season_episode_range(
         "complete":missing==0,"source":"anime_season_crosswalk"}))
 }
 
+/// A conservative SID-only fallback for anime with incomplete AniDB crosswalks.
+/// Every preceding IMDb season must contain episodes numbered 1..N with no
+/// gaps, so the absolute index has a unique, bounded season coordinate.
+fn complete_imdb_absolute_episode(
+    db:&Connection,imdb:&str,absolute:i64,
+)->Result<Option<(i64,i64)>,String>{
+    if !(2..=99_999).contains(&absolute){return Ok(None);}
+    let mut stmt=db.prepare("SELECT season,episode_count,max_episode
+        FROM season_episodes WHERE imdb_id=?1 AND season>0 ORDER BY season")
+        .map_err(|e|e.to_string())?;
+    let rows=stmt.query_map([imdb],|row|Ok((
+        row.get::<_,i64>(0)?,row.get::<_,i64>(1)?,row.get::<_,i64>(2)?
+    ))).map_err(|e|e.to_string())?;
+    let (mut next_season,mut remaining)=(1i64,absolute);
+    for row in rows {
+        let (season,count,max)=row.map_err(|e|e.to_string())?;
+        if season!=next_season || count!=max || max<=0
+            || !valid_sid_coordinate(season,max){return Ok(None);}
+        if remaining<=max {
+            // S01 has a separate, established fallback. Only a later season
+            // needs conversion from whole-series absolute numbering.
+            return Ok((season>1).then_some((season,remaining)));
+        }
+        remaining-=max;
+        next_season+=1;
+    }
+    Ok(None)
+}
+
+/// Do not turn ordinary "Title - 33" releases or named sequel-local episode
+/// numbers into IMDb coordinates. Require an explicit absolute-anime hint,
+/// a unique exact anime/IMDb title identity, complete season metadata and
+/// no contradictory AniDB crosswalk evidence.
+fn verified_unmapped_anime_absolute_episode(
+    db:&Connection,winner:&Value,parsed:&serde_json::Map<String,Value>,
+)->Result<Option<(i64,i64)>,String>{
+    if winner["episode"].as_i64().is_some()
+        || winner["season"].as_i64().is_some_and(|season|season>1)
+        || winner.pointer("/anime/asid").and_then(Value::as_str).is_some()
+        || parsed.get("seasons").and_then(Value::as_array).is_some_and(|s|!s.is_empty())
+        || parsed.contains_key("episode_start")
+        || parsed.contains_key("anime_local_part_unresolved")
+        || parsed.contains_key("anime_local_part_range_unresolved")
+        || parsed.contains_key("anime_named_part_season_hint")
+        || parsed.contains_key("special_episode")
+    {return Ok(None);}
+    let Some(hint)=parsed.get("anime_episode_candidate") else{return Ok(None)};
+    if hint["numbering"]!="absolute" || hint["path_part"]==true {
+        return Ok(None);
+    }
+    let (Some(title),Some(absolute),Some(imdb))=(
+        hint["title"].as_str(),hint["episode"].as_i64(),winner["imdb_id"].as_str()
+    )else{return Ok(None)};
+    if !(1..=99_999).contains(&absolute)
+        || parsed.get("episodes").and_then(Value::as_array)
+            .is_some_and(|episodes|episodes.len()>1
+                || episodes.first().is_some_and(|ep|ep.as_i64()!=Some(absolute)))
+    {return Ok(None);}
+    let exact_title=imdb_matcher::clean_title(title)
+        ==imdb_matcher::clean_title(winner["matched_title"].as_str().unwrap_or(""))
+        && imdb_matcher::semantic_words(title)
+            ==imdb_matcher::semantic_words(winner["matched_title"].as_str().unwrap_or(""))
+        && title_normalization::title_word_count(title)
+            ==title_normalization::title_word_count(
+                winner["matched_title"].as_str().unwrap_or(""));
+    let linked_anime=winner["anime_ids"].as_object()
+        .is_some_and(|ids|!ids.is_empty());
+    if !(exact_title && linked_anime)
+        && exact_anime_identity(db,title)?.as_deref()!=Some(imdb)
+    {return Ok(None);}
+    // A local "Alicization - 33" must not reuse the parent series' global
+    // episode offset. Canonical IMDb series titles are not named sub-parts.
+    if imdb_matcher::clean_title(winner["title"].as_str().unwrap_or(""))
+            !=imdb_matcher::clean_title(title)
+        && anime_title::season_from_title(db,imdb,title)
+            .map_err(|e|e.to_string())?.is_some_and(|season|season>1)
+    {return Ok(None);}
+    if episode_crosswalk::resolve_absolute(db,imdb,absolute)
+        .map_err(|e|e.to_string())?.is_some(){return Ok(None);}
+    let Some((season,episode))=complete_imdb_absolute_episode(db,imdb,absolute)?
+        else{return Ok(None)};
+    // If the target IMDb season has an AniDB map, it must positively resolve
+    // this episode. A partial, ambiguous or contradictory map is not a
+    // license to infer an unverified coordinate.
+    let mapped_season_exists:i64=db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM anime_series_map l
+            JOIN episode_map m ON m.anidb_id=l.anidb_id
+                OR (l.tvdb_id<>'' AND m.tvdb_id=l.tvdb_id)
+            WHERE l.imdb_id=?1 AND m.anidb_season>0 AND m.tvdb_season=?2)",
+        rusqlite::params![imdb,season],|row|row.get(0)
+    ).map_err(|e|e.to_string())?;
+    if mapped_season_exists!=0
+        && episode_crosswalk::resolve_season(db,imdb,season,episode)
+            .map_err(|e|e.to_string())?.is_none()
+    {return Ok(None);}
+    Ok(Some((season,episode)))
+}
+
 /// Reconcile a selected IMDb series with explicit single-release coordinates.
 /// Only verified crosswalks may reinterpret an SxxEyy token. A missing
 /// AniDB mapping must not delete an otherwise parsed IMDb episode.
@@ -629,6 +727,12 @@ fn reconcile_series_coordinates(
         .and_then(Value::as_str).is_some()
         && season.is_some() && episode.is_some();
     if !verified_crosswalk {
+        if let Some((mapped_season,mapped_episode))=
+            verified_unmapped_anime_absolute_episode(db,winner,parsed)?{
+            season=Some(mapped_season);
+            episode=Some(mapped_episode);
+            winner["coordinate_fallback"]=json!("complete_imdb_absolute_anime");
+        }
         if season.is_none(){season=parsed_season;}
         let imdb=winner["imdb_id"].as_str().unwrap_or_default().to_owned();
         let has_anime=winner["anime_ids"].as_object()
@@ -679,6 +783,11 @@ fn reconcile_series_coordinates(
         (Some(s),Some(e))=>json!(format!("{imdb}:{s}:{e}")),
         _=>json!(imdb),
     };
+    if winner["coordinate_fallback"]=="complete_imdb_absolute_anime"{
+        // Preserve a verified ASID when an IMDb-season crosswalk exists.
+        // Otherwise keep ASID null; never invent an AniDB episode number.
+        enrich_selected_anime_episode(db,winner)?;
+    }
     Ok(())
 }
 
@@ -6401,6 +6510,99 @@ mod tests {
             std::fs::remove_file(&path).unwrap();
             std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
         }
+    }
+
+    #[test]
+    fn frieren_absolute_episode_33_uses_complete_imdb_season_bounds(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE season_episodes(
+                imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(
+                anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO season_episodes VALUES
+                ('tt22248376',1,28,28),('tt22248376',2,10,10);
+            INSERT INTO anime_series_map VALUES('tt22248376','12345','424536',0);")
+            .unwrap();
+        for (absolute,expected) in [
+            (28,None),(29,Some((2,1))),(33,Some((2,5))),
+            (38,Some((2,10))),(39,None),
+        ]{
+            assert_eq!(complete_imdb_absolute_episode(
+                &db,"tt22248376",absolute).unwrap(),expected);
+        }
+        let mut winner=json!({
+            "imdb_id":"tt22248376","category":"series","title":"Sousou no Frieren",
+            "matched_title":"Sousou no Frieren","anime_ids":{"anidb":"12345"},
+            "season":1,"episode":null,"anime":null,"sid":"tt22248376"
+        });
+        let parsed=json!({
+            "title":"Sousou no Frieren","seasons":[],"episodes":[33],
+            "anime_episode_candidate":{
+                "title":"Sousou no Frieren","episode":33,
+                "numbering":"absolute","verified":false}
+        });
+        reconcile_series_coordinates(&db,&mut winner,parsed.as_object().unwrap())
+            .unwrap();
+        assert_eq!(winner["season"],2);
+        assert_eq!(winner["episode"],5);
+        assert_eq!(winner["sid"],"tt22248376:2:5");
+        assert_eq!(winner["coordinate_fallback"],"complete_imdb_absolute_anime");
+        assert!(winner.pointer("/anime/asid").and_then(Value::as_str).is_none());
+        assert_eq!(public_match_response(Some(winner))["sid_start"],"tt22248376:2:5");
+        // Missing numbers, stale counts and absent IMDb target episodes
+        // must not produce a synthetic coordinate.
+        db.execute("UPDATE season_episodes SET episode_count=27
+            WHERE imdb_id='tt22248376' AND season=1",[]).unwrap();
+        assert_eq!(complete_imdb_absolute_episode(
+            &db,"tt22248376",33).unwrap(),None);
+        db.execute("UPDATE season_episodes SET episode_count=28
+            WHERE imdb_id='tt22248376' AND season=1",[]).unwrap();
+        db.execute("DELETE FROM season_episodes WHERE season=2",[]).unwrap();
+        assert_eq!(complete_imdb_absolute_episode(
+            &db,"tt22248376",33).unwrap(),None);
+    }
+
+    #[test]
+    fn absolute_anime_imdb_fallback_respects_explicit_seasons_and_partial_crosswalks(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE season_episodes(
+                imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(
+                anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO season_episodes VALUES
+                ('tt22248376',1,28,28),('tt22248376',2,10,10);
+            INSERT INTO anime_series_map VALUES('tt22248376','12345','424536',0);
+            INSERT INTO episode_map VALUES('12345','424536',1,2,1,4,0,'');")
+            .unwrap();
+        let winner=json!({
+            "imdb_id":"tt22248376","category":"series","title":"Sousou no Frieren",
+            "matched_title":"Sousou no Frieren","anime_ids":{"anidb":"12345"},
+            "season":null,"episode":null
+        });
+        let parsed=json!({
+            "seasons":[],"episodes":[33],
+            "anime_episode_candidate":{"title":"Sousou no Frieren",
+                "episode":33,"numbering":"absolute"}
+        });
+        assert_eq!(verified_unmapped_anime_absolute_episode(
+            &db,&winner,parsed.as_object().unwrap()).unwrap(),None,
+            "an incomplete season-2 crosswalk must not be bypassed");
+        let mut explicit=parsed.clone();
+        explicit["seasons"]=json!([2]);
+        assert_eq!(verified_unmapped_anime_absolute_episode(
+            &db,&winner,explicit.as_object().unwrap()).unwrap(),None);
+        let mut named=parsed.clone();
+        named["anime_named_part_season_hint"]=json!(2);
+        assert_eq!(verified_unmapped_anime_absolute_episode(
+            &db,&winner,named.as_object().unwrap()).unwrap(),None);
     }
 
     #[test]
