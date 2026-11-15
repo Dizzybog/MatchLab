@@ -700,6 +700,66 @@ pub fn refresh_from_files_with_ratings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_black_clover_override_maps_all_four_imdb_seasons_bidirectionally(){
+        use crate::episode_crosswalk;
+        let folder=std::env::temp_dir().join(format!(
+            "matchlab-black-clover-override-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&folder).unwrap();
+        let path=folder.join("metadata.sqlite3");
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE episode_map(
+                anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,
+                tvdb_season INTEGER,start INTEGER,end INTEGER,
+                offset INTEGER,map TEXT);
+            CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER,
+                PRIMARY KEY(imdb_id,anidb_id,tvdb_id,trakt_season));
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE metadata_state(
+                source TEXT PRIMARY KEY,updated_at TEXT,row_count INTEGER);
+            INSERT INTO anime_series_map VALUES
+                ('tt7441658','12665','331753',0);
+            INSERT INTO episode_map VALUES
+                ('12665','331753',1,1,0,0,0,''),
+                ('12665','331753',0,0,2,16,9,'1-2;');")
+            .unwrap();
+        drop(db);
+        apply_bundled_animelists_overrides(&path).unwrap();
+        let db=Connection::open(&path).unwrap();
+        for (season,episode,absolute) in [
+            (1,1,1),(1,51,51),(2,1,52),(2,51,102),
+            (3,1,103),(3,43,145),(3,52,154),(4,1,155),(4,16,170)
+        ]{
+            let from_imdb=episode_crosswalk::resolve_season(
+                &db,"tt7441658",season,episode).unwrap().unwrap();
+            assert_eq!((from_imdb.anidb_id.as_str(),
+                from_imdb.anidb_episode),("12665",absolute),
+                "S{season:02}E{episode:02}");
+            let from_absolute=episode_crosswalk::resolve_absolute(
+                &db,"tt7441658",absolute).unwrap().unwrap();
+            assert_eq!((from_absolute.season,from_absolute.episode),
+                (season,episode),"absolute episode {absolute}");
+            let back=episode_crosswalk::resolve_anidb(&db,"12665",absolute)
+                .unwrap();
+            assert_eq!(back.len(),1);
+            assert_eq!((back[0].season,back[0].episode),(season,episode));
+        }
+        assert!(episode_crosswalk::resolve_season(&db,"tt7441658",3,53)
+            .unwrap().is_none());
+        assert!(episode_crosswalk::resolve_absolute(&db,"tt7441658",171)
+            .unwrap().is_none());
+        let source_count:i64=db.query_row(
+            "SELECT COUNT(*) FROM episode_map WHERE anidb_id='12665'
+                AND anidb_season=1 AND tvdb_season BETWEEN 1 AND 4",[],
+            |row|row.get(0)).unwrap();
+        assert_eq!(source_count,4,"the stale open S01 row must be replaced");
+        drop(db);
+        fs::remove_dir_all(folder).unwrap();
+    }
     #[test]
     fn full_refresh_publishes_all_required_indexes_after_aggregation(){
         let folder=std::env::temp_dir().join(format!(
