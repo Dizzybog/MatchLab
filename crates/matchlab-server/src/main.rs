@@ -677,6 +677,24 @@ fn verified_unmapped_anime_absolute_episode(
                 .is_none_or(|max|existing.episode<=max)
             || winner["anime_ids"]["anidb"].as_str()!=Some(existing.anidb_id.as_str())
         {return Ok(None);}
+        // Anime-Lists' open-ended defaulttvdbseason=1 is a weak, unbounded
+        // ownership hint, not proof that all absolute episodes belong to
+        // IMDb S01. A finite or explicit S01 map is higher-quality evidence
+        // and must never be overridden by arithmetic.
+        let weak_default_only:i64=db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM anime_series_map l
+                 JOIN episode_map m ON m.anidb_id=l.anidb_id
+                   AND (l.tvdb_id='' OR m.tvdb_id=l.tvdb_id)
+                 WHERE l.imdb_id=?1 AND m.anidb_id=?2
+                   AND m.anidb_season>0 AND m.tvdb_season=1
+                   AND m.start<=1 AND m.end<=0 AND m.offset=0
+                   AND TRIM(m.map)='')
+              AND NOT EXISTS(SELECT 1 FROM episode_map m
+                 WHERE m.anidb_id=?2 AND m.tvdb_season=1
+                   AND (m.end>0 OR TRIM(m.map)<>''))",
+            rusqlite::params![imdb,&existing.anidb_id],|row|row.get(0)
+        ).map_err(|e|e.to_string())?;
+        if weak_default_only==0{return Ok(None);}
     }
     let Some((season,episode))=complete_imdb_absolute_episode(db,imdb,absolute)?
         else{return Ok(None)};
@@ -6754,6 +6772,35 @@ mod tests {
             WHERE imdb_id='tt7441658' AND season=2",[]).unwrap();
         assert_eq!(verified_unmapped_anime_absolute_episode(
             &db,&winner,parsed.as_object().unwrap(),false).unwrap(),None);
+    }
+
+    #[test]
+    fn finite_anime_crosswalk_must_not_be_repaired_by_imdb_season_arithmetic(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE season_episodes(
+                imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(
+                anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO season_episodes VALUES
+                ('tt7441658',1,51,51),('tt7441658',2,51,51),
+                ('tt7441658',3,52,52);
+            INSERT INTO anime_series_map VALUES('tt7441658','12665','331753',0);
+            INSERT INTO episode_map VALUES
+                ('12665','331753',1,-1,1,0,0,''),
+                ('12665','331753',1,1,1,0,0,''),
+                ('12665','331753',1,1,100,170,0,'');").unwrap();
+        let parsed=matchlab_parser::parse_title("[EMBER] Black Clover - 145.mkv",false)
+            .unwrap();
+        let winner=json!({"imdb_id":"tt7441658","category":"series",
+            "title":"Black Clover","matched_title":"Black Clover",
+            "anime_ids":{"anidb":"12665"},"season":null,"episode":null});
+        assert_eq!(verified_unmapped_anime_absolute_episode(
+            &db,&winner,&parsed,false).unwrap(),None,
+            "bounded crosswalk cannot be bypassed");
     }
 
     #[test]
