@@ -597,6 +597,134 @@ fn import_animelists_reader<R:std::io::BufRead>(
     Ok(count)
 }
 
+/// Materialize conservative, generic Anime-Lists default-numbering rules at
+/// metadata refresh, never in the hot matching path. Explicit and finite
+/// upstream/override rows always take precedence.
+///
+/// Two independently supported cases:
+/// - Unique, directly IMDb-linked AniDB work + a weak season-specific default
+///   => bound that SAME default to observed, contiguous IMDb episode coverage.
+/// - A unique directly linked AniDB work with defaulttvdbseason="a" (stored
+///   as tvdb_season=-1) => split its absolute ordinal across consecutive,
+///   complete IMDb seasons only where no competing per-season mapping exists.
+///
+/// A missing AniDB↔IMDb link, an indirect sibling, incomplete IMDb counts,
+/// conflicting TVDB season ownership or a partial/explicit mapping are NOT
+/// grounds for fabricating a mapping. Never infer an AniDB ID from text.
+pub(crate) fn infer_implicit_animelists_crosswalks(
+    db_path:&Path,
+)->Result<u64,Box<dyn Error>>{
+    use std::collections::{BTreeMap,BTreeSet};
+    let mut db=Connection::open(db_path)?;
+    // These indices pay for themselves during a full import. Queries below
+    // are grouped by (IMDb,TVDB), not by every torrent episode.
+    db.execute_batch("CREATE INDEX IF NOT EXISTS anime_series_by_imdb_tvdb
+        ON anime_series_map(imdb_id,tvdb_id);
+        CREATE INDEX IF NOT EXISTS episode_inference_by_tvdb
+        ON episode_map(tvdb_id,anidb_season,tvdb_season);")?;
+    let tx=db.transaction()?;
+    let families={
+        let mut stmt=tx.prepare("SELECT DISTINCT imdb_id,tvdb_id
+            FROM anime_series_map WHERE tvdb_id<>'' ORDER BY imdb_id,tvdb_id")?;
+        stmt.query_map([],|row|Ok((
+            row.get::<_,String>(0)?,row.get::<_,String>(1)?
+        )))?.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut updated=0u64;
+    let mut ambiguous=0u64;
+    for (imdb,tvdb) in families{
+        let direct:BTreeSet<String>={
+            let mut stmt=tx.prepare("SELECT DISTINCT anidb_id FROM anime_series_map
+                WHERE imdb_id=?1 AND tvdb_id=?2")?;
+            stmt.query_map(params![&imdb,&tvdb],|r|r.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        let seasons:BTreeMap<i64,(i64,i64)>={
+            let mut stmt=tx.prepare("SELECT season,episode_count,max_episode
+                FROM season_episodes WHERE imdb_id=?1 AND season>0
+                ORDER BY season")?;
+            stmt.query_map([&imdb],|r|Ok((
+                r.get::<_,i64>(0)?,(
+                    r.get::<_,i64>(1)?,r.get::<_,i64>(2)?)
+            )))?.collect::<rusqlite::Result<_>>()?
+        };
+        if direct.is_empty()||seasons.is_empty(){continue;}
+        // This table preserves original upstream source rows; only a weak
+        // open-ended default is eligible for conversion into a finite row.
+        let maps:Vec<(String,i64,i64,i64,i64,String)>={
+            let mut stmt=tx.prepare("SELECT anidb_id,tvdb_season,start,end,offset,map
+                FROM episode_map WHERE tvdb_id=?1 AND anidb_season=1")?;
+            stmt.query_map([&tvdb],|r|Ok((
+                r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?
+            )))?.collect::<rusqlite::Result<_>>()?
+        };
+        // For an absolute AniDB work, derive coordinates only through a
+        // contiguous prefix of IMDb seasons with no gaps or unknown bounds.
+        let absolute_id=if direct.len()==1 {
+            let id=direct.first().unwrap();
+            let abs=maps.iter().filter(|(aid,s,start,end,offset,map)|
+                aid==id && *s==-1 && *start<=1 && *end<=0
+                && *offset==0 && map.trim().is_empty()).count();
+            (abs==1).then_some(id.as_str())
+        }else{None};
+        let (mut next_season,mut absolute_start)=(1i64,1i64);
+        for (season,(count,max)) in seasons{
+            let complete=count==max && max>0 && max<=99_999;
+            let continuous=season==next_season && complete;
+            // Never let a missing or outlier IMDb season shift every later
+            // AniDB absolute episode. The season-local direct fallback may
+            // still work independently when the first season has gaps.
+            let current_start=if continuous{Some(absolute_start)}else{None};
+            if continuous {
+                absolute_start=absolute_start.saturating_add(max);
+                next_season+=1;
+            }else{
+                next_season=-99_999;
+            }
+            if !complete{continue;}
+            let owners:Vec<_>=maps.iter()
+                .filter(|(_,s,_,_,_,_)|*s==season).collect();
+            if owners.len()==1{
+                let (aid,_,start,end,offset,map)=owners[0];
+                // A defaulttvdbseason="N" indicates a LOCAL AniDB part.
+                // Only a direct animeApi/Anime-Lists IMDb link proves that
+                // this AniDB work belongs to the selected IMDb title.
+                if direct.contains(aid)&& *start<=1 && *end<=0 && *offset==0
+                    && map.trim().is_empty() && max<=99_999
+                {
+                    updated+=tx.execute("UPDATE episode_map SET start=1,end=?3
+                        WHERE anidb_id=?1 AND tvdb_id=?2 AND anidb_season=1
+                          AND tvdb_season=?4 AND start=?5 AND end=?6
+                          AND offset=0 AND TRIM(map)=''",
+                        params![aid,&tvdb,max,season,start,end])? as u64;
+                }
+            }else if owners.len()>1{
+                ambiguous+=1;
+            }else if let (Some(aid),Some(first))=(absolute_id,current_start){
+                // Absolute source metadata explicitly says this AniDB work
+                // spans TVDB seasons. There must be NO competing source
+                // ownership for this TVDB season, even an unbounded sibling.
+                let Some(last)=first.checked_add(max-1)else{continue};
+                if first<=0 || last>99_999{continue;}
+                // Crosswalk rows are authored in AniDB ordinal coordinates.
+                // Example: 2023 S2E5 with preceding season of 28 episodes:
+                // AniDB E33, TVDB S2E5, offset -28.
+                updated+=tx.execute("INSERT INTO episode_map(
+                    anidb_id,tvdb_id,anidb_season,tvdb_season,start,end,offset,map)
+                    VALUES(?1,?2,1,?3,?4,?5,?6,'')",
+                    params![aid,&tvdb,season,first,last,1-first])? as u64;
+            }
+        }
+    }
+    let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
+    tx.execute("INSERT OR REPLACE INTO metadata_state VALUES(
+        'animelists_inferred',?1,?2)",params![now,updated])?;
+    tx.commit()?;
+    tracing::info!(updated,ambiguous,
+        "generic Anime-Lists crosswalk inference completed");
+    Ok(updated)
+}
+
 /// Build all metadata in a disposable database, validate each required dataset,
 /// then atomically replace the live SQLite file only after success.
 /// Inputs are local files so callers can download and verify sources independently.
@@ -638,6 +766,8 @@ pub fn refresh_from_files_with_ratings(
         // A malformed override fails the entire staging refresh.
         let overrides=apply_bundled_animelists_overrides(&stage)?;
         tracing::info!(overrides,"metadata refresh: applied bundled Anime-Lists mapping exceptions");
+        let inferred=infer_implicit_animelists_crosswalks(&stage)?;
+        tracing::info!(inferred,"metadata refresh: generically bounded implicit anime episode mappings");
         tracing::info!("metadata refresh: importing AniDB titles");
         let aliases=import_anidb_titles(&stage,anidb_titles)?;
         if imdb==0||links==0||episodes_count==0||aliases==0{
