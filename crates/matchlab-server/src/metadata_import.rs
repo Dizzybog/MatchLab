@@ -675,7 +675,8 @@ pub(crate) fn infer_implicit_animelists_crosswalks(
         // contiguous prefix of IMDb seasons with no gaps or unknown bounds.
         let split_or_cour:i64=tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM anime_series_map
-             WHERE imdb_id=?1 AND tvdb_id=?2 AND trakt_season<>0)",
+             WHERE imdb_id=?1 AND tvdb_id=?2
+               AND trakt_season NOT IN (0,1))",
             params![&imdb,&tvdb],|row|row.get(0))?;
         let absolute_id=if direct.len()==1 && split_or_cour==0 {
             let id=direct.iter().next().unwrap();
@@ -872,7 +873,7 @@ mod tests {
                 source TEXT PRIMARY KEY,updated_at TEXT,row_count INTEGER);
             -- One AniDB work explicitly uses absolute numbering across
             -- several IMDb/TVDB seasons, not a hardcoded title exception.
-            INSERT INTO anime_series_map VALUES('tt1111111','701','900',0);
+            INSERT INTO anime_series_map VALUES('tt1111111','701','900',1);
             INSERT INTO season_episodes VALUES
                 ('tt1111111',1,12,12),('tt1111111',2,10,10),
                 ('tt1111111',3,2,2);
