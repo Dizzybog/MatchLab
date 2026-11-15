@@ -396,7 +396,8 @@ pub fn import_animelists(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error>>
 /// entire catalog on every ordinary image upgrade or restart.
 pub(crate) fn bundled_animelists_override_marker()->String{
     let mut hash=0xcbf29ce484222325u64;
-    for byte in include_bytes!("../../../data/anime-list.override.xml"){
+    for byte in include_bytes!("../../../data/anime-list.override.xml")
+        .iter().chain(b"generic-implicit-animelists-v1") {
         hash=(hash^u64::from(*byte)).wrapping_mul(0x100000001b3);
     }
     format!("animelists_override_{hash:016x}")
@@ -890,7 +891,7 @@ mod tests {
             INSERT INTO episode_map VALUES('1101','904',1,-1,1,0,0,'');")
             .unwrap();
         drop(db);
-        assert_eq!(infer_implicit_animelists_crosswalks(&path).unwrap(),5);
+        assert_eq!(infer_implicit_animelists_crosswalks(&path).unwrap(),6);
         let db=Connection::open(&path).unwrap();
         for (s,e,absolute) in
             [(1,1,1),(1,12,12),(2,1,13),(2,5,17),
@@ -920,7 +921,7 @@ mod tests {
         let inferred:i64=db.query_row(
             "SELECT row_count FROM metadata_state WHERE source='animelists_inferred'",
             [],|row|row.get(0)).unwrap();
-        assert_eq!(inferred,5);
+        assert_eq!(inferred,6);
         drop(db);
         fs::remove_dir_all(folder).unwrap();
     }
