@@ -1567,8 +1567,13 @@ fn diagnose_with_policy(
         None if airdate_only || !seasons.is_empty() || !episodes.is_empty()
             || parsed.contains_key("episode_start") => true,
         // A release with an explicit production year and no episode/season
-        // coordinates is a movie candidate, even if an anime alias exists.
-        None if year.is_some() || parsed.contains_key("collection_year_range") => false,
+        // coordinates is a movie candidate, even if an anime alias exists,
+        // unless that exact year identifies a complete series title and no
+        // same-name film of that period ("Trigun (1998)" vs the 2010 film).
+        None if parsed.contains_key("collection_year_range") => false,
+        None if let Some(requested)=year =>
+            imdb_matcher::year_identifies_series_title(&db,title,requested)
+                .map_err(|e|e.to_string())?,
         None => anime_title::season_from_any_exact_title(&db,title)
             .map_err(|e|e.to_string())?.is_some()
             || exact_anime_identity(&db,title)?.is_some(),
@@ -1862,8 +1867,23 @@ fn diagnose_with_policy(
                         }
                     }
                 }
+                // The ranked winner already agrees with the release year
+                // and IMDb knows the requested episode. A same-name anime
+                // from another decade must not replace it merely because it
+                // has a crosswalk ("Peacemaker (2022) S01E04" vs the 2003 anime).
+                let year_protects_top=year.is_some_and(|requested|
+                    imdb.first().is_some_and(|top|top.year>0
+                        && (i64::from(top.year)-i64::from(requested)).abs()<=1
+                        && seasons.first().is_none_or(|season|
+                            season_episode_end(&db,&top.imdb_id,*season)
+                                .ok().flatten()
+                                .is_some_and(|max|max>=requested_end))));
                 if let Some(index)=canonical {chosen_index=index;}else{
                     for (index,candidate) in imdb.iter().enumerate(){
+                        if year_protects_top && index>0
+                            && year.is_some_and(|requested|
+                                (i64::from(candidate.year)-i64::from(requested)).abs()>1)
+                        {continue;}
                         if seasons.is_empty()&&!unmarked_crosswalk_identity_eligible(
                             imdb.first(),candidate,title,
                             &anime_episode_evidence.eligible_exact_ids){continue;}
@@ -2456,7 +2476,7 @@ static TORRENT_MATCH_CACHE:OnceLock<query_cache::QueryCache<Diagnostic>>=OnceLoc
 // A semantic matcher change must invalidate old persistent ML match results,
 // even when metadata.sqlite3, learned regex rules and the strict-mode flag
 // are unchanged. Bump this revision when altering title/year eligibility.
-const MATCHER_SEMANTIC_REVISION:&str="complete-title-precedence-and-metadata-boundaries-v5";
+const MATCHER_SEMANTIC_REVISION:&str="year-identity-and-release-group-boundaries-v6";
 fn scoped_match_generation(metadata:&str,strict:bool)->String{
     format!("{metadata}:matcher={MATCHER_SEMANTIC_REVISION}:strict={strict}")
 }
@@ -3587,6 +3607,96 @@ mod tests {
         let leaf=bottom_up_imdb_path_match(&db,&parsed,None,true,1,true,true,|hits|hits)
             .unwrap().expect("leaf named release must win");
         assert_eq!(leaf.1[0].imdb_id,"ttgein");
+    }
+
+    #[test]
+    fn release_year_selects_identity_over_same_name_films_and_anime(){
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-year-identity-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES
+                ('tt9100001','Gunslinger Saga','gunslingersaga',1998,'series','JP',1,0,'tvSeries'),
+                ('tt9100002','Gunslinger Saga','gunslingersaga',2010,'movie','JP',1,0,'movie'),
+                ('tt9100003','Peace Keeper','peacekeeper',2022,'series','US',1,0,'tvSeries'),
+                ('tt9100004','Peace Keeper','peacekeeper',2003,'series','JP',1,0,'tvSeries'),
+                ('tt9100005','Raging','raging',2007,'movie','US',1,0,'movie'),
+                ('tt9100006','Old School Days','oldschooldays',1995,'movie','US',1,0,'movie'),
+                ('tt9100007','Lonely Giants','lonelygiants',2019,'movie','US',1,0,'movie'),
+                ('tt9100008','Детектив 11','11',2007,'movie','RU',0,3,'movie'),
+                ('tt9100011','拿命.Example','example',2002,'movie','CN',0,3,'movie'),
+                ('tt9100012','Пример Example','example',2015,'movie','RU',0,3,'movie'),
+                ('tt9100009','Twin Remake','twinremake',1998,'series','US',1,0,'tvSeries'),
+                ('tt9100010','Twin Remake','twinremake',1998,'movie','US',1,0,'movie');
+            INSERT INTO seasons VALUES('tt9100001',1),('tt9100003',1),('tt9100004',1),
+                ('tt9100009',1);
+            INSERT INTO season_episodes VALUES('tt9100001',1,26,26),
+                ('tt9100003',1,8,8),('tt9100004',1,24,24),('tt9100009',1,10,10);
+            INSERT INTO imdb_ratings VALUES('tt9100001',1000),('tt9100002',90000),
+                ('tt9100003',1000),('tt9100004',90000),('tt9100009',90000),
+                ('tt9100010',10);
+            INSERT INTO anime_series_map VALUES('tt9100001','531','gunanidb',0),
+                ('tt9100004','532','peaceanidb',0);
+            INSERT INTO anidb_titles VALUES
+                ('531','Gunslinger Saga','gunslingersaga','main','en'),
+                ('532','Peace Keeper','peacekeeper','main','en');
+            INSERT INTO episode_map VALUES('531','gunanidb',1,1,1,26,0,''),
+                ('532','peaceanidb',1,1,1,24,0,'');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        let winner=|release:&str|diagnose(&path,&MatchRequest{
+            title:release.into(),year:None,series:None}).unwrap().selected;
+        // A year without coordinates used to exclude every series, so the
+        // 1998 anime lost to an unrelated 2010 film alias.
+        for release in ["Gunslinger Saga (1998) [BD 1080p]",
+            "[Group] Gunslinger Saga (1998) [BDRip 1080p] Complete"] {
+            let selected=winner(release).expect("year-identified series");
+            assert_eq!(selected["imdb_id"],"tt9100001","{release}: {selected}");
+        }
+        let film=winner("Gunslinger.Saga.2010.1080p.BluRay.x264").expect("film year");
+        assert_eq!(film["imdb_id"],"tt9100002","{film}");
+        // A same-year film with the same complete title keeps film priority.
+        let twin=winner("Twin.Remake.1998.1080p.BluRay.x264").expect("same-year film");
+        assert_eq!(twin["imdb_id"],"tt9100010","{twin}");
+        // The ranked 2022 series has the requested episode; the 2003 anime
+        // crosswalk is not a reason to replace it.
+        let series=winner("Peace.Keeper.2022.S01E04.720p.WEB.x264").expect("2022 series");
+        assert_eq!(series["sid"],"tt9100003:1:4","{series}");
+        let anime=winner("Peace.Keeper.2003.S01E04.720p.WEB.x264").expect("2003 anime");
+        assert_eq!(anime["imdb_id"],"tt9100004","{anime}");
+        // Films from another period and number-only key collisions abstain.
+        for release in ["Raging.Sharks.2005.720p.WEB.x264-GRP",
+            "Old.School.Days.1958.720p.BluRay.x264-GRP",
+            "1.1 Интро (2020) WEBRip 1080p"] {
+            assert!(winner(release).is_none(),"{release} must not match");
+        }
+        // A mixed-script alias needs its non-Latin words in the release.
+        assert!(winner("Example.2002.720p.WEB.x264-GRP").is_none(),
+            "a Latin fragment is not the mixed-script alias");
+        let mixed=winner("Пример Example (2015) WEBRip 1080p").expect("written alias");
+        assert_eq!(mixed["imdb_id"],"tt9100012","{mixed}");
+        // One year of tolerance, and two for a unique complete title.
+        for release in ["Raging.2008.720p.WEB.x264-GRP",
+            "Lonely.Giants.2021.720p.WEBRip.x264-GRP"] {
+            assert!(winner(release).is_some(),"{release} still matches");
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
     }
 
     #[test]

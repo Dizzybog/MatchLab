@@ -1,0 +1,142 @@
+{
+  "schema": "matchlab-production-debug-round-three-v1",
+  "capture_date_utc": "2026-11-15",
+  "baseline_commit": "f25e0df",
+  "sample": {
+    "rows": 60235,
+    "unique_request_strings": 59255,
+    "policy": "public_api",
+    "strict_mode": false,
+    "semantic_revision": "complete-title-precedence-and-metadata-boundaries-v5",
+    "interpretation": "Rolling bounded-history sample. Cohort labels are heuristics, not correctness labels."
+  },
+  "parser_replay": {
+    "inputs": 59255,
+    "changed": 311,
+    "changed_fields": {
+      "title": 119,
+      "seasons": 66,
+      "episodes": 105,
+      "path_title_candidates": 66,
+      "languages": 7,
+      "episode_title": 1,
+      "anime_episode_candidate": 1,
+      "site": 12,
+      "anime_episode_range_candidate": 1,
+      "resolution": 10
+    },
+    "known_side_effect": "6 season packs tagged NxRus lose the ru language"
+  },
+  "matcher": {
+    "captured_cohorts_replayed": false,
+    "reason": "no local metadata index",
+    "fixture_test_fails_on_baseline": true
+  },
+  "validation": {
+    "rust_tests_passed": 555,
+    "python_tests_passed": 99
+  },
+  "cohorts_first_1000": {
+    "A_disc_quality_without_imdb": {
+      "rows": 1000,
+      "latin_title_no_alias": 655,
+      "cyrillic_title_no_alias": 162,
+      "other_non_latin_no_alias": 85,
+      "exact_alias_year_ok_series_excluded_by_year_rule": 27,
+      "exact_alias_year_ok_bogus_coordinates": 32,
+      "exact_alias_year_ok_bogus_coordinates_cleared_by_parser_change": 18,
+      "exact_alias_year_more_than_one_away": 22,
+      "exact_alias_no_release_year": 16,
+      "partial_alias_only": 1
+    },
+    "B_year_more_than_one_away": {
+      "rows": 1000,
+      "film_shorter_or_different_title": 336,
+      "film_same_title_two_years": 51,
+      "film_same_title_more_than_two_years": 186,
+      "series_later_season_year": 222,
+      "series_same_title_first_or_no_season": 100,
+      "series_shorter_or_different_title": 65,
+      "numeric_or_non_latin_key": 40
+    },
+    "C_unique_title_unique_imdb": {
+      "rows": 1000,
+      "exact_title_year_ok_or_absent": 934,
+      "exact_title_year_more_than_one_away": 20,
+      "selected_shorter_title": 29,
+      "other": 17
+    },
+    "D_coordinates_differ": {
+      "rows": 1000,
+      "season_pack_gains_first_episode": 512,
+      "episode_only_gains_season": 300,
+      "airdate_resolved": 72,
+      "bare_anime_title_expanded": 62,
+      "coordinates_dropped": 34,
+      "absolute_episode_remapped": 15,
+      "other": 5
+    },
+    "E_title_word_count_differs": {
+      "rows": 1000,
+      "selected_shorter": 658,
+      "selected_longer": 120,
+      "same_key_different_word_split": 122,
+      "different_words": 98,
+      "numeric_or_non_latin_key": 2
+    }
+  },
+  "full_categories": {
+    "interpretation": "Every unique request string of the capture that fits a category. Rule counts are rows whose recorded selection the rule would no longer accept; they were not replayed through the corrected matcher.",
+    "A_disc_quality_without_imdb": {
+      "rows": 1001,
+      "parse_changed": 33
+    },
+    "B_year_more_than_one_away": {
+      "rows": 1517,
+      "parse_changed": 78,
+      "film_same_title_more_than_two_years": 282,
+      "series_same_title_first_or_no_season": 156,
+      "series_later_season_year": 360,
+      "film_same_title_two_years": 77,
+      "film_shorter_or_different_title": 447,
+      "numeric_or_non_latin_key": 95,
+      "series_shorter_or_different_title": 100,
+      "rule_film_year_filter_applies": 772,
+      "rule_year_protected_winner_applies": 56,
+      "rule_numeric_key_applies": 95
+    },
+    "C_all_matched_unique_request_strings": {
+      "rows": 48468,
+      "parse_changed": 190,
+      "selected_alias_has_non_latin_words_absent_from_release": 441,
+      "numeric_only_key_with_letters_in_title": 273,
+      "exact_no_year": 23564,
+      "exact_year_ok": 20524,
+      "not_exact_year_ok": 1318,
+      "exact_year_off": 933,
+      "not_exact_no_year": 1545,
+      "not_exact_year_off": 584
+    },
+    "D_coordinates_differ": {
+      "rows": 8280,
+      "parse_changed": 22,
+      "episode_only_gains_season": 3064,
+      "season_pack_gains_first_episode": 3902,
+      "bare_title_expanded": 488,
+      "coordinates_dropped": 347,
+      "airdate_resolved": 250,
+      "absolute_episode_remapped": 195,
+      "other": 34
+    },
+    "E_title_word_count_differs": {
+      "rows": 3136,
+      "parse_changed": 38,
+      "selected_shorter": 2033,
+      "same_key_different_word_split": 414,
+      "selected_longer": 401,
+      "different_words": 281,
+      "numeric_or_non_latin_key": 7,
+      "film_year_more_than_one_away": 479
+    }
+  }
+}

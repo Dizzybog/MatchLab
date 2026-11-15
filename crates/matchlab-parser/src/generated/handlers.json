@@ -411,7 +411,7 @@
         "remove": true
       },
       "kind": "regex",
-      "pattern": "(?:QHD|QuadHD|WQHD|2560(\\d+)?x(\\d+)?1440p?)",
+      "pattern": "(?:(?<![a-z])(?:QHD|QuadHD|WQHD)(?![a-z])|2560(\\d+)?x(\\d+)?1440p?)",
       "flags": 2,
       "transform": "value('1440p')"
     },
@@ -970,7 +970,7 @@
         "remove": true
       },
       "kind": "regex",
-      "pattern": "[^SE][([]?(?!^)(?<!\\d)(?<!Cap)(?<!Cap[. ])((?:19\\d|20[012])\\d)(?!\\d|kbps)[)\\]]?",
+      "pattern": "(?:(?<=[\\p{L}\\p{N}])(?<![SE])|[^\\p{L}\\p{N}])[([]?(?!^)(?<!\\d)(?<!Cap)(?<!Cap[. ])((?:19\\d|20[012])\\d)(?!\\d|kbps)[)\\]]?",
       "flags": 2,
       "transform": "integer"
     },
@@ -2735,7 +2735,7 @@
         "remove": true
       },
       "kind": "regex",
-      "pattern": "t(\\d{1,3})(?:[ex]+|$)",
+      "pattern": "(?<![a-z0-9])t(\\d{1,3})(?:[ex]+|$)",
       "flags": 2,
       "transform": "array(integer)"
     },
@@ -3060,7 +3060,7 @@
         "remove": true
       },
       "kind": "regex",
-      "pattern": "[st]\\d{1,2}[. ]?[xх-]?[. ]?(?:e|x|х|ep|-|\\.)[. ]?(\\d{1,4})(?:[abc]|v0?[1-4]|\\D|$)",
+      "pattern": "[st]\\d{1,2}(?:[. ]?[xх-]?[. ]?(?:e|x|х|ep|-)[. ]?|\\.)(\\d{1,4})(?:[abc]|v0?[1-4]|\\D|$)",
       "flags": 2,
       "transform": "array(integer)"
     },
@@ -3359,7 +3359,7 @@
         "remove": true
       },
       "kind": "regex",
-      "pattern": "(?<![xh])\\b264\\b|\\b265\\b",
+      "pattern": "(?<![xh])(?<![xh][ ._-])(?<![xh][ ._-][ ._-])\\b26[45]\\b",
       "flags": 2,
       "transform": "array(integer)"
     },
