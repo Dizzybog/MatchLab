@@ -6701,6 +6701,52 @@ mod tests {
     }
 
     #[test]
+    fn frieren_absolute_33_resolves_new_anidb_work_episode_five(){
+        const RAW:&str="[Kirinashi] Sousou no Frieren - 33 [2322F691].mkv";
+        let parsed=matchlab_parser::parse_title(RAW,false).unwrap();
+        assert_eq!(parsed["anime_episode_candidate"]["episode"],33);
+        assert_eq!(parsed["anime_episode_candidate"]["numbering"],"absolute");
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE season_episodes(
+                imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(
+                anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO season_episodes VALUES
+                ('tt22248376',1,28,28),('tt22248376',2,10,10);
+            INSERT INTO anime_series_map VALUES
+                ('tt22248376','17617','424536',0),
+                ('tt22248376','18886','424536',0);
+            -- Original 2023 AniDB series has a stale, open-ended
+            -- season-one default. The 2026 sequel is a separate AniDB
+            -- work, with its own locally numbered episodes 1-10.
+            INSERT INTO episode_map VALUES
+                ('17617','424536',1,1,0,0,0,''),
+                ('18886','424536',1,2,1,10,0,'');").unwrap();
+        let mut winner=json!({
+            "imdb_id":"tt22248376","category":"series",
+            "title":"Sousou no Frieren","matched_title":"Sousou no Frieren",
+            "anime_ids":{"anidb":"17617"},"season":1,"episode":33,
+            "anime":{"anidb_id":"17617","episode":33,"asid":"17617:33"},
+            "sid":"tt22248376:1:33"
+        });
+        reconcile_series_coordinates(&db,&mut winner,&parsed).unwrap();
+        assert_eq!(winner["coordinate_fallback"],"repaired_imdb_absolute_anime");
+        assert_eq!((winner["season"].as_i64(),winner["episode"].as_i64()),
+            (Some(2),Some(5)));
+        assert_eq!(winner["anime_ids"]["anidb"],"18886");
+        assert_eq!(winner["anime"]["anidb_id"],"18886");
+        assert_eq!(winner["anime"]["episode"],5);
+        assert_eq!(public_match_response(Some(winner)),json!({
+            "sid_start":"tt22248376:2:5","sid_end":"tt22248376:2:5",
+            "asid_start":"18886:5","asid_end":"18886:5"
+        }));
+    }
+
+    #[test]
     fn frieren_absolute_episode_33_uses_complete_imdb_season_bounds(){
         // Exercise the exact submitted filename, including fansub prefix
         // and CRC suffix, instead of only constructing a parsed fixture.
