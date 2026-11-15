@@ -725,7 +725,10 @@ mod tests {
                 ('tt7441658','12665','331753',0);
             INSERT INTO episode_map VALUES
                 ('12665','331753',1,1,0,0,0,''),
-                ('12665','331753',0,0,2,16,9,'1-2;');")
+                ('12665','331753',0,0,2,16,9,'1-2;'),
+                -- The real 2026 sequel shares TVDB 331753, but its
+                -- open-ended S02 default must NEVER claim 2018 S02E01.
+                ('19433','331753',1,2,0,0,0,'');")
             .unwrap();
         drop(db);
         apply_bundled_animelists_overrides(&path).unwrap();
