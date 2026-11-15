@@ -3314,7 +3314,9 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
             std::path::Path::new(&args[2]),std::path::Path::new(&args[3]))?;
         let overrides=metadata_import::apply_bundled_animelists_overrides(
             std::path::Path::new(&args[2]))?;
-        tracing::info!("Anime-Lists mappings imported: {count}, bundled overrides: {overrides}");
+        let inferred=metadata_import::infer_implicit_animelists_crosswalks(
+            std::path::Path::new(&args[2]))?;
+        tracing::info!("Anime-Lists mappings imported: {count}, bundled overrides: {overrides}, generic inferred: {inferred}");
         return Ok(());
     }
     if args.get(1).is_some_and(|arg|arg=="refresh-metadata") {
