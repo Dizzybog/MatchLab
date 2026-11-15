@@ -6727,7 +6727,7 @@ mod tests {
             "anime":{"anidb_id":"12665","episode":145,"asid":"12665:145"},
             "sid":"tt7441658:1:145"
         });
-        reconcile_series_coordinates(&db,&mut winner,parsed.as_object().unwrap())
+        reconcile_series_coordinates(&db,&mut winner,&parsed)
             .unwrap();
         assert_eq!(winner["season"],3);
         assert_eq!(winner["episode"],43);
