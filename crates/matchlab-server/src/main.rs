@@ -6840,6 +6840,125 @@ mod tests {
     }
 
     #[test]
+    fn hanako_second_season_fansub_maps_exact_hyphenated_title_to_episode(){
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-hanako-s2-{stamp}.sqlite3"));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,
+                clean_title TEXT,year INTEGER,category TEXT,region TEXT,
+                original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            INSERT INTO titles VALUES
+                ('tt10777610','Toilet-bound Hanako-kun','toiletboundhanakokun',
+                    2020,'series','',1,0,'tvSeries'),
+                ('tt10777610','Jibaku Shounen Hanako-kun','jibakushounenhanakokun',
+                    2020,'series','',0,1,'tvSeries');
+            INSERT INTO seasons VALUES('tt10777610',2);
+            INSERT INTO season_episodes VALUES
+                ('tt10777610',1,12,12),('tt10777610',2,24,24);
+            INSERT INTO anime_series_map VALUES
+                ('tt10777610','100','368364',0),
+                ('tt10777610','101','368364',0);
+            INSERT INTO anime_ids VALUES('tt10777610','anidb','100');
+            INSERT INTO anidb_titles VALUES
+                ('100','Jibaku Shounen Hanako-kun','jibakushounenhanakokun','main','en'),
+                ('101','Jibaku Shounen Hanako-kun 2','jibakushounenhanokokun2','main','en');
+            UPDATE anidb_titles SET clean_title='jibakushounenhanakokun2'
+                WHERE anidb_id='101';
+            INSERT INTO episode_map VALUES
+                ('100','368364',1,1,1,12,0,''),
+                ('101','368364',1,2,1,12,0,'');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        let raw="[Erai-raws] Jibaku Shounen Hanako-kun 2 - 12 [720p CR WEB-DL AVC AAC][MultiSub][B63D35A4].mkv";
+        let result=diagnose(&path,&MatchRequest{
+            title:raw.into(),year:None,series:None}).unwrap();
+        assert_eq!(result.parsed["anime_season_episode_candidate"]["title"],
+            "Jibaku Shounen Hanako-kun","{:?}",result.parsed);
+        let winner=result.selected.expect("exact named sequel IMDb identity");
+        assert_eq!(winner["imdb_id"],"tt10777610");
+        assert_eq!(winner["season"],2,"{winner:?}");
+        assert_eq!(winner["episode"],12,"{winner:?}");
+        assert_eq!(public_match_response(Some(winner)),json!({
+            "sid_start":"tt10777610:2:12","sid_end":"tt10777610:2:12",
+            "asid_start":"101:12","asid_end":"101:12"
+        }));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
+    fn berserk_2016_bd_range_uses_first_year_full_imdb_season_when_anime_map_absent(){
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-berserk-bd-{stamp}.sqlite3"));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,
+                clean_title TEXT,year INTEGER,category TEXT,region TEXT,
+                original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            INSERT INTO titles VALUES
+                ('tt5847454','Berserk','berserk',2016,'series','',1,0,'tvSeries'),
+                ('tt0318871','Berserk','berserk',1997,'series','',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt5847454',2),('tt0318871',1);
+            INSERT INTO season_episodes VALUES
+                ('tt5847454',1,12,12),('tt5847454',2,12,12),
+                ('tt0318871',1,25,25);
+            INSERT INTO anime_series_map VALUES
+                ('tt5847454','2400','307111',0),
+                ('tt0318871','2401','73752',0);
+            INSERT INTO anime_ids VALUES('tt5847454','anidb','2400');
+            INSERT INTO anidb_titles VALUES
+                ('2400','Berserk','berserk','main','en'),
+                ('2401','Berserk','berserk','main','en');
+            INSERT INTO episode_map VALUES
+                ('2400','307111',1,-1,1,0,0,''),
+                ('2401','73752',1,1,1,25,0,'');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        let release="Berserk 2016 BD 01-12";
+        let result=diagnose(&path,&MatchRequest{
+            title:release.into(),year:None,series:None}).unwrap();
+        let winner=result.selected.expect("2016 IMDb series title");
+        assert_eq!(winner["imdb_id"],"tt5847454","{winner:?}");
+        assert_eq!(public_match_response(Some(winner)),json!({
+            "sid_start":"tt5847454:1:1","sid_end":"tt5847454:1:12",
+            "asid_start":null,"asid_end":null
+        }));
+        // Without release year, the two identically named anime series
+        // must not be coerced into the 2016 full-season range.
+        let ambiguous=diagnose(&path,&MatchRequest{
+            title:"Berserk BD 01-12".into(),year:None,series:None}).unwrap();
+        let ambiguous_public=public_match_response(ambiguous.selected);
+        assert_ne!(ambiguous_public["sid_end"],"tt5847454:1:12");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
+    }
+
+    #[test]
     fn series_coordinate_contract_preserves_single_episode_and_season(){
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE season_episodes(
