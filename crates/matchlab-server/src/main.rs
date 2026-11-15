@@ -793,96 +793,6 @@ fn verified_unmapped_anime_absolute_episode(
     Ok(Some((season,episode)))
 }
 
-/// Reverse a proven, contiguous IMDb season coordinate into an absolute
-/// episode ordinal. This is deliberately stricter than an ordinary IMDb
-/// episode bounds lookup: missing seasons, gaps and anomalous counts are
-/// insufficient evidence for AniDB absolute numbering.
-fn complete_imdb_episode_absolute(
-    db:&Connection,imdb:&str,season:i64,episode:i64,
-)->Result<Option<i64>,String>{
-    if !(2..=9_999).contains(&season)||!(1..=99_999).contains(&episode){
-        return Ok(None);
-    }
-    let mut stmt=db.prepare("SELECT season,episode_count,max_episode FROM
-        season_episodes WHERE imdb_id=?1 AND season<=?2 ORDER BY season")
-        .map_err(|e|e.to_string())?;
-    let rows=stmt.query_map(rusqlite::params![imdb,season],|row|Ok((
-        row.get::<_,i64>(0)?,row.get::<_,i64>(1)?,row.get::<_,i64>(2)?
-    ))).map_err(|e|e.to_string())?;
-    let (mut next,mut offset)=(1i64,0i64);
-    for row in rows{
-        let (found,count,max)=row.map_err(|e|e.to_string())?;
-        if found!=next || count!=max || max<=0
-            || !valid_sid_coordinate(found,max){return Ok(None);}
-        if found==season{
-            if episode>max{return Ok(None);}
-            return Ok(offset.checked_add(episode)
-                .filter(|absolute|(1..=99_999).contains(absolute)));
-        }
-        let Some(next_offset)=offset.checked_add(count)else{return Ok(None)};
-        if next_offset>99_999{return Ok(None);}
-        offset=next_offset;
-        next+=1;
-    }
-    Ok(None)
-}
-
-/// Recover the original absolute AniDB episode only for a repaired,
-/// demonstrably impossible default S01 mapping. This is not a general
-/// IMDb season arithmetic -> AniDB identity rule: single-work anime and
-/// multi-work split cours must not be conflated.
-fn corroborated_repaired_anidb_ordinal(
-    db:&Connection,imdb:&str,season:i64,episode:i64,
-    anidb_id:&str,raw_absolute:i64,
-)->Result<Option<String>,String>{
-    let Some(asid)=episode_crosswalk::canonical_asid(anidb_id,raw_absolute)
-        else{return Ok(None)};
-    // Bidirectional proof: the corrected IMDb coordinate must round-trip
-    // back to exactly the absolute episode reported by the torrent and
-    // the original (invalid) AniDB crosswalk.
-    if complete_imdb_episode_absolute(db,imdb,season,episode)?
-        !=Some(raw_absolute)
-        || complete_imdb_absolute_episode(db,imdb,raw_absolute)?
-            !=Some((season,episode))
-    {return Ok(None);}
-    let Some(original)=episode_crosswalk::resolve_absolute(db,imdb,raw_absolute)
-        .map_err(|e|e.to_string())? else{return Ok(None)};
-    if original.anidb_id!=anidb_id ||original.anidb_episode!=raw_absolute
-        ||original.season!=1 ||original.episode!=raw_absolute
-        ||season_episode_end(db,imdb,1)?
-            .is_none_or(|end|raw_absolute<=end)
-    {return Ok(None);}
-    // Exactly ONE directly linked AniDB work and TVDB family may use the
-    // absolute ordinal across these IMDb seasons. Anime with separate
-    // AniDB works per cour/season must keep ASID null unless a real
-    // episode crosswalk verifies the requested local coordinate.
-    let mut stmt=db.prepare(
-        "SELECT DISTINCT anidb_id,tvdb_id FROM anime_series_map
-         WHERE imdb_id=?1 ORDER BY anidb_id,tvdb_id LIMIT 2")
-         .map_err(|e|e.to_string())?;
-    let links=stmt.query_map([imdb],|row|Ok((
-        row.get::<_,String>(0)?,row.get::<_,String>(1)?
-    ))).map_err(|e|e.to_string())?
-        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;
-    if links.len()!=1 ||links[0].0!=anidb_id {return Ok(None);}
-    // The only positive-season map for this work must be an open-ended
-    // default S01 row; any finite, explicit or later-season mapping is
-    // more authoritative and cannot be bypassed by an ordinal guess.
-    let weak_only:i64=db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM episode_map
-            WHERE anidb_id=?1 AND tvdb_id=?2 AND anidb_season>0
-            AND tvdb_season=1 AND start<=1 AND end<=0 AND offset=0
-            AND TRIM(map)='')
-         AND NOT EXISTS(SELECT 1 FROM episode_map
-            WHERE anidb_id=?1 AND anidb_season>0 AND tvdb_season>0
-            AND (tvdb_season<>1 OR start>1 OR end>0 OR offset<>0
-                 OR TRIM(map)<>''))",
-        rusqlite::params![anidb_id,&links[0].1],|row|row.get(0)
-    ).map_err(|e|e.to_string())?;
-    if weak_only==0 {return Ok(None);}
-    Ok(Some(asid))
-}
-
 /// Reconcile a selected IMDb series with explicit single-release coordinates.
 /// Only verified crosswalks may reinterpret an SxxEyy token. A missing
 /// AniDB mapping must not delete an otherwise parsed IMDb episode.
@@ -905,10 +815,6 @@ fn reconcile_series_coordinates(
         .filter(|e|*e>0 && valid_sid_coordinate(1,*e));
     let mut season=winner["season"].as_i64();
     let mut episode=winner["episode"].as_i64();
-    // Keep the original verified AniDB *identity and absolute number*
-    // only while repairing an impossible S01 coordinate. Nothing is
-    // published until the corrected IMDb coordinate corroborates both.
-    let mut repaired_anidb:Option<(String,i64)>=None;
     // An open-ended anime part offset is not proof of an IMDb episode
     // beyond that season's imported maximum. Check the final pair here
     // so neither the anime-priority nor IMDb fallback lane can publish it.
@@ -943,8 +849,6 @@ fn reconcile_series_coordinates(
                 db,&unverified,parsed,true)?
         }else{None};
         if let Some((fixed_season,fixed_episode))=repaired {
-            repaired_anidb=identified.zip(raw_absolute)
-                .map(|(id,absolute)|(id.to_owned(),absolute));
             season=Some(fixed_season);
             episode=Some(fixed_episode);
             winner["season"]=json!(fixed_season);
@@ -1027,24 +931,9 @@ fn reconcile_series_coordinates(
     };
     if winner["coordinate_fallback"]=="complete_imdb_absolute_anime"
         || winner["coordinate_fallback"]=="repaired_imdb_absolute_anime"{
-        // A real target-season crosswalk remains authoritative.
+        // Preserve a verified ASID when an IMDb-season crosswalk exists.
+        // Otherwise keep ASID null; never invent an AniDB episode number.
         enrich_selected_anime_episode(db,winner)?;
-        // A demonstrably invalid open-ended S01 mapping can still carry
-        // the correct absolute AniDB episode. Recover it only when the
-        // reverse IMDb-season calculation, original source episode, unique
-        // AniDB identity, and weak source map ALL agree.
-        if winner.pointer("/anime/asid").and_then(Value::as_str).is_none()
-            && winner["coordinate_fallback"]=="repaired_imdb_absolute_anime"
-            && let (Some(s),Some(e),Some((aid,absolute)))=(
-                season,episode,repaired_anidb)
-            && let Some(asid)=corroborated_repaired_anidb_ordinal(
-                db,imdb,s,e,&aid,absolute)?
-        {
-            winner["anime"]=json!({"anidb_id":aid,
-                "episode":absolute,"asid":asid});
-            winner["asid_mapping_source"]=json!(
-                "corroborated_repaired_absolute_ordinal");
-        }
     }
     Ok(())
 }
@@ -2857,7 +2746,7 @@ static TORRENT_MATCH_CACHE:OnceLock<query_cache::QueryCache<Diagnostic>>=OnceLoc
 // A semantic matcher change must invalidate old persistent ML match results,
 // even when metadata.sqlite3, learned regex rules and the strict-mode flag
 // are unchanged. Bump this revision when altering title/year eligibility.
-const MATCHER_SEMANTIC_REVISION:&str="year-identity-and-release-group-boundaries-v7-asid-repair";
+const MATCHER_SEMANTIC_REVISION:&str="year-identity-and-release-group-boundaries-v6";
 fn scoped_match_generation(metadata:&str,strict:bool)->String{
     format!("{metadata}:matcher={MATCHER_SEMANTIC_REVISION}:strict={strict}")
 }
@@ -6936,58 +6825,11 @@ mod tests {
         assert_eq!(winner["episode"],43);
         assert_eq!(winner["sid"],"tt7441658:3:43");
         assert_eq!(winner["coordinate_fallback"],"repaired_imdb_absolute_anime");
-        assert_eq!(winner["anime"]["anidb_id"],"12665");
-        assert_eq!(winner["anime"]["episode"],145);
-        assert_eq!(winner["anime"]["asid"],"12665:145");
-        assert_eq!(winner["asid_mapping_source"],
-            "corroborated_repaired_absolute_ordinal");
+        assert!(winner.pointer("/anime/asid").and_then(Value::as_str).is_none());
         assert_eq!(public_match_response(Some(winner)),json!({
             "sid_start":"tt7441658:3:43","sid_end":"tt7441658:3:43",
-            "asid_start":"12665:145","asid_end":"12665:145"
+            "asid_start":null,"asid_end":null
         }));
-    }
-
-    #[test]
-    fn black_clover_anidb_reverse_ordinal_is_rejected_without_unique_evidence(){
-        let db=Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE season_episodes(
-                imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
-            CREATE TABLE anime_series_map(
-                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
-            CREATE TABLE episode_map(
-                anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER,
-                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
-            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
-            INSERT INTO season_episodes VALUES
-                ('tt7441658',1,51,51),('tt7441658',2,51,51),
-                ('tt7441658',3,52,52);
-            INSERT INTO anime_series_map VALUES('tt7441658','12665','331753',0);
-            INSERT INTO episode_map VALUES
-                ('12665','331753',1,-1,1,0,0,''),
-                ('12665','331753',1,1,1,0,0,'');").unwrap();
-        let reverse=|s,e,abs,aid|corroborated_repaired_anidb_ordinal(
-            &db,"tt7441658",s,e,aid,abs).unwrap();
-        assert_eq!(reverse(3,43,145,"12665").as_deref(),Some("12665:145"));
-        assert_eq!(reverse(3,43,144,"12665"),None,
-            "wrong absolute episode must not be silently accepted");
-        assert_eq!(reverse(3,44,145,"12665"),None);
-        assert_eq!(reverse(3,43,145,"99999"),None,
-            "unrelated AniDB identity must not borrow the IMDb episode");
-        db.execute("INSERT INTO anime_series_map VALUES
-            ('tt7441658','99999','331753',0)",[]).unwrap();
-        assert_eq!(reverse(3,43,145,"12665"),None,
-            "multiple linked AniDB works require an actual episode map");
-        db.execute("DELETE FROM anime_series_map WHERE anidb_id='99999'",[])
-            .unwrap();
-        db.execute("INSERT INTO episode_map VALUES
-            ('12665','331753',1,3,1,0,0,'')",[]).unwrap();
-        assert_eq!(reverse(3,43,145,"12665"),None,
-            "named season or cours cannot use global episode arithmetic");
-        db.execute("DELETE FROM episode_map WHERE tvdb_season=3",[]).unwrap();
-        db.execute("UPDATE season_episodes SET episode_count=50
-            WHERE imdb_id='tt7441658' AND season=1",[]).unwrap();
-        assert_eq!(reverse(3,43,145,"12665"),None,
-            "incomplete IMDb season coverage cannot prove an AniDB episode");
     }
 
     #[test]
