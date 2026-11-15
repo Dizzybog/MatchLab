@@ -6825,6 +6825,21 @@ mod tests {
     }
 
     #[test]
+    fn hanako_sequel_and_berserk_bd_filenames_preserve_episode_hints(){
+        let hanako="[Erai-raws] Jibaku Shounen Hanako-kun 2 - 12 [720p CR WEB-DL AVC AAC][MultiSub][B63D35A4].mkv";
+        let h=matchlab_parser::parse_title(hanako,false).unwrap();
+        assert_eq!(h["anime_season_episode_candidate"]["title"],
+            "Jibaku Shounen Hanako-kun","Hanako: {h:?}");
+        assert_eq!(h["anime_season_episode_candidate"]["season"],2,"{h:?}");
+        assert_eq!(h["anime_season_episode_candidate"]["episode"],12,"{h:?}");
+        let b=matchlab_parser::parse_title("Berserk 2016 BD 01-12",false).unwrap();
+        assert_eq!(b["anime_episode_range_candidate"]["start"],1,"{b:?}");
+        assert_eq!(b["anime_episode_range_candidate"]["end"],12,"{b:?}");
+        assert_eq!(b["anime_episode_range_candidate"]["title"],"Berserk",
+            "BD and production year must not pollute candidate title: {b:?}");
+    }
+
+    #[test]
     fn series_coordinate_contract_preserves_single_episode_and_season(){
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE season_episodes(
