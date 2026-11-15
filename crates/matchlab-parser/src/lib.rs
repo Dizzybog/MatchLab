@@ -2127,13 +2127,16 @@ fn fansub_season_dash_episode_candidate(
     if name.chars().filter(|ch| ch.is_alphabetic()).count() < 4 {
         return Ok(None);
     }
-    let title = engine_parse(name, translate_languages)?
-        .get("title").and_then(Value::as_str).unwrap_or(name).trim().to_owned();
-    if title.chars().filter(|ch| ch.is_alphabetic()).count() < 4 {
-        return Ok(None);
-    }
-    Ok(Some(json!({"title": title,"season": season,"episode": episode,
-        "verified": false})))
+    // The bracketed release group and trailing "N - EE" coordinates
+    // delimit the entire series title. Running the generic title parser
+    // again here can misclassify a legitimate trailing "-kun" as a release
+    // group and silently strip it (Jibaku Shounen Hanako-kun 2 - 12).
+    // Keep the complete bounded prefix for the exact AniDB alias lookup.
+    // Metadata matching, not this parser hint, remains authoritative.
+    let _ = translate_languages;
+    let title=name.to_owned();
+    Ok(Some(json!({"title":title,"season":season,"episode":episode,
+        "verified":false})))
 }
 
 // Some common release conventions are more specific than the generic upstream
