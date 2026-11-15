@@ -1986,7 +1986,16 @@ fn unmarked_anime_episode_candidate(
         let (Some(start_token),Some(end_token))=(caps.get(1),caps.get(2))else{continue;};
         let (Ok(start),Ok(end))=(start_token.as_str().parse::<i64>(),
             end_token.as_str().parse::<i64>()) else{continue;};
-        if start==0 || end<=start || end-start>=MAX_NEW_EPISODE_RANGE {continue;}
+        // A degenerate batch such as "(24-24)" names one episode. Keep it
+        // as an unverified candidate instead of leaving it in the title.
+        if start==0 || end<start || end-start>=MAX_NEW_EPISODE_RANGE {continue;}
+        // Only an enclosed "(24-24)" / "[24-24]" is a one-episode batch; a
+        // bare "13 - 13" is a numbered title followed by its episode.
+        if start==end {
+            let enclosed=raw[..start_token.start()].ends_with(['(','['])
+                && raw[end_token.end()..].starts_with([')',']']);
+            if !enclosed {continue;}
+        }
         // Release years and technical dimensions are not anime episodes.
         if (1900..=2100).contains(&start)|| (1900..=2100).contains(&end)
             || [480,720,1080,1440,2160,4320].contains(&start)
@@ -3272,6 +3281,20 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
             // The generic parser may have consumed the final endpoint as a
             // standalone episode. Do not expose a contradictory episode 400
             // while the unverified candidate actually describes 320..400.
+            // The generic handlers can leave an unmarked batch inside the
+            // title ("Clevatess (24-24)"). Drop only a purely numeric and
+            // punctuation remainder after the candidate's own title.
+            if let Some(clean)=candidate.get("title").and_then(Value::as_str)
+                && let Some(current)=result.get("title").and_then(Value::as_str)
+                && current!=clean
+                && current.strip_prefix(clean).is_some_and(|rest|
+                    rest.trim_start().starts_with(['(','['])
+                    && rest.chars().all(|c|c.is_ascii_digit()||c.is_whitespace()
+                        ||matches!(c,'('|')'|'['|']'|'-'|'~'|'–'|'—'|'～'|'.'|'_')))
+            {
+                let clean=clean.to_owned();
+                result.insert("title".into(),json!(clean));
+            }
             result.insert("anime_episode_range_candidate".into(), candidate);
             result.insert("episodes".into(),json!([]));
         }
@@ -3500,7 +3523,8 @@ pub fn generic_path_title(title:&str)->bool{
         "downloads","download","archive","library","complete",
         "extras","special","specials","ova","oav","oad","omake","ncop","nced",
         "webisode","webisodes","bonus","bonus episodes","picture drama",
-        "recap special","ona special","one shot","sp","subtitles"
+        "recap special","ona special","one shot","sp","subtitles",
+        "sample","samples"
     ].contains(&lowercase.as_str())
 }
 

@@ -157,6 +157,47 @@ pub(crate) fn semantic_words(raw:&str)->Vec<String>{
         .filter(|word|!word.is_empty() && *word!="and")
         .map(str::to_owned).collect()
 }
+/// A release with a production year but no season/episode is normally a
+/// film. It is a series only when a COMPLETE series title (IMDb alias, or an
+/// exact AniDB alias of an IMDb series) has exactly that start year and no
+/// film with the same complete title was produced within one year of it.
+/// "Trigun (1998)" is the 1998 series, not the 2010 film "Trigun".
+pub(crate) fn year_identifies_series_title(
+    db:&Connection,title:&str,year:i32,
+)->rusqlite::Result<bool>{
+    let key=clean_title(title);
+    if key.is_empty()||year<=0{return Ok(false);}
+    let words=semantic_words(title);
+    let count=crate::title_normalization::title_word_count(title);
+    let exact_rows=exact(db,&key)?.into_iter()
+        .filter(|row|complete_title_alias(row,&key,&words,count))
+        .collect::<Vec<_>>();
+    if exact_rows.iter().any(|row|!is_series(&row.media_type)
+        && row.year>0 && (row.year-year).abs()<=1){
+        return Ok(false);
+    }
+    if exact_rows.iter().any(|row|is_series(&row.media_type)&&row.year==year){
+        return Ok(true);
+    }
+    let ids=crate::tantivy_search::anime_aliases_exact(db,title)
+        .map_err(index_error)?.into_iter().map(|alias|alias.imdb_id)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter().collect::<Vec<_>>();
+    if ids.is_empty(){return Ok(false);}
+    let linked=crate::tantivy_search::titles_by_ids(db,&ids).map_err(index_error)?;
+    // Several anime identities share the alias: the year must select one.
+    let matching=linked.iter()
+        .filter(|row|is_series(&row.media_type)&&row.year==year)
+        .map(|row|row.imdb_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    Ok(matching.len()==1)
+}
+/// True when the compact ASCII key is only digits although the title has
+/// letters, i.e. folding discarded all of its non-Latin words.
+pub(crate) fn numeric_key_lost_title_words(key:&str,title:&str)->bool{
+    !key.is_empty() && key.bytes().all(|b|b.is_ascii_digit())
+        && title.chars().any(char::is_alphabetic)
+}
 fn complete_title_alias(row:&Aka,key:&str,words:&[String],word_count:usize)->bool{
     row.clean==key && semantic_words(&row.title).as_slice()==words
         &&crate::title_normalization::title_word_count(&row.title)==word_count
@@ -782,6 +823,13 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     // constraint, not merely a sorting signal. Apply it before any expensive
     // season/crosswalk checks; unknown IMDb years (0) cannot satisfy it.
     // Non-strict retains its existing year-distance ranking unchanged.
+    // A non-Latin title whose compact ASCII key keeps only digits
+    // ("1.1 Интро" -> "11", "悬疑…[全26集]" -> "26") has lost every
+    // identity word. A number-only key collision with an unrelated
+    // translated alias is not title evidence: require the same Unicode words.
+    if numeric_key_lost_title_words(&key,title){
+        rows.retain(|row|semantic_words(&row.title)==semantic_release);
+    }
     let rows=if strict {
         rows.into_iter().filter(|row|year_eligible(true,year,row.year))
             .collect()
@@ -1084,6 +1132,20 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
         let score=(fit,rank(&best,year,duplicates.contains(&best.clean),country,votes));
         output.push((score,Match{imdb_id:id,title:best.title.clone(),year:best.year,
             category:best.category,matched_title:best.title,anime_ids:ids,media_type:best.media_type}));
+    }
+    // Broad matching ranks an explicit film year instead of requiring it.
+    // A different film is still not the release: a partial title must be
+    // within one year, and a complete title may differ by two years only
+    // when it is the single complete-title identity (festival vs. release).
+    // Strict mode already requires exact equality; series are unaffected
+    // because their release year is often a later season's air year.
+    if !strict && !series && let Some(requested)=year {
+        let complete=output.iter().filter(|((fit,_),_)|fit.tier==0).count();
+        output.retain(|((fit,_),hit)|{
+            if hit.year<=0 {return fit.tier==0;}
+            let distance=(i64::from(hit.year)-i64::from(requested)).abs();
+            distance<=1 || (fit.tier==0 && distance==2 && complete==1)
+        });
     }
     output.sort_by(|a,b|a.0.cmp(&b.0));
     Ok((output.into_iter().take(limit).map(|(_,m)|m).collect(),exact_only))
@@ -1641,8 +1703,13 @@ mod tests{
         }
         let (broad,_) = search_inner_mode(&db,"The Island",Some(2023),false,0,
             "The.Island.2023",false,20,false,false).unwrap();
-        assert_eq!(broad.len(),2,"non-strict keeps wrong-year candidates as lower-ranked fallbacks");
+        assert_eq!(broad.len(),1,
+            "non-strict no longer keeps a film from another decade as a fallback");
         assert_eq!(broad[0].imdb_id,"tt9002023");
+        let (near,_) = search_inner_mode(&db,"The Island",Some(2024),false,0,
+            "The.Island.2024",false,20,false,false).unwrap();
+        assert_eq!(near.iter().map(|hit|hit.imdb_id.as_str()).collect::<Vec<_>>(),
+            vec!["tt9002023"],"a one-year difference is still tolerated");
     }
 
     #[test]
@@ -1760,8 +1827,8 @@ mod tests{
         let (quick,exact_only)=search_inner(&db,"Star Force",Some(2025),false,0,
             "Star.Force.2025",false,20,false).unwrap();
         assert!(exact_only);
-        assert_eq!(quick.len(),1);
-        assert_eq!(quick[0].imdb_id,"ttold");
+        assert!(quick.is_empty(),
+            "an exact title fifteen years from the release year is not the film");
         // Mirrors the production /match year gate: rejected exact results
         // must never prevent a shorter, word-boundary-safe newer candidate.
         let valid=search_validated(&db,"Star Force",Some(2025),false,0,

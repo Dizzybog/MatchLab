@@ -1,0 +1,86 @@
+{
+  "schema": "matchlab-production-debug-round-three-v1",
+  "capture_date_utc": "2026-11-15",
+  "baseline_commit": "f25e0df",
+  "sample": {
+    "rows": 60235,
+    "unique_request_strings": 59255,
+    "policy": "public_api",
+    "strict_mode": false,
+    "semantic_revision": "complete-title-precedence-and-metadata-boundaries-v5",
+    "interpretation": "Rolling bounded-history sample. Cohort labels are heuristics, not correctness labels."
+  },
+  "cohorts": {
+    "A_disc_quality_without_imdb": {
+      "rows": 1000,
+      "latin_title_no_alias": 655,
+      "cyrillic_title_no_alias": 162,
+      "other_non_latin_no_alias": 85,
+      "exact_alias_year_ok_series_excluded_by_year_rule": 27,
+      "exact_alias_year_ok_bogus_coordinates": 32,
+      "exact_alias_year_ok_bogus_coordinates_cleared_by_parser_change": 18,
+      "exact_alias_year_more_than_one_away": 22,
+      "exact_alias_no_release_year": 16,
+      "partial_alias_only": 1
+    },
+    "B_year_more_than_one_away": {
+      "rows": 1000,
+      "film_shorter_or_different_title": 336,
+      "film_same_title_two_years": 51,
+      "film_same_title_more_than_two_years": 186,
+      "series_later_season_year": 222,
+      "series_same_title_first_or_no_season": 100,
+      "series_shorter_or_different_title": 65,
+      "numeric_or_non_latin_key": 40
+    },
+    "C_unique_title_unique_imdb": {
+      "rows": 1000,
+      "exact_title_year_ok_or_absent": 934,
+      "exact_title_year_more_than_one_away": 20,
+      "selected_shorter_title": 29,
+      "other": 17
+    },
+    "D_coordinates_differ": {
+      "rows": 1000,
+      "season_pack_gains_first_episode": 512,
+      "episode_only_gains_season": 300,
+      "airdate_resolved": 72,
+      "bare_anime_title_expanded": 62,
+      "coordinates_dropped": 34,
+      "absolute_episode_remapped": 15,
+      "other": 5
+    },
+    "E_title_word_count_differs": {
+      "rows": 1000,
+      "selected_shorter": 658,
+      "selected_longer": 120,
+      "same_key_different_word_split": 122,
+      "different_words": 98,
+      "numeric_or_non_latin_key": 2
+    }
+  },
+  "parser_replay": {
+    "inputs": 59255,
+    "changed": 244,
+    "changed_fields": {
+      "title": 119,
+      "path_title_candidates": 66,
+      "seasons": 47,
+      "episodes": 38,
+      "site": 12,
+      "resolution": 10,
+      "languages": 7,
+      "anime_episode_range_candidate": 1
+    },
+    "known_side_effect": "6 season packs tagged NxRus lose the ru language"
+  },
+  "matcher": {
+    "captured_cohorts_replayed": false,
+    "reason": "no local metadata index",
+    "fixture_test_fails_on_baseline": true
+  },
+  "validation": {
+    "rust_tests_passed": 555,
+    "python_tests_passed": 99
+  }
+}
