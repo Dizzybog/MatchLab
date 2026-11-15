@@ -6795,12 +6795,17 @@ mod tests {
                 ('12665','331753',1,1,100,170,0,'');").unwrap();
         let parsed=matchlab_parser::parse_title("[EMBER] Black Clover - 145.mkv",false)
             .unwrap();
-        let winner=json!({"imdb_id":"tt7441658","category":"series",
+        let mut winner=json!({"imdb_id":"tt7441658","category":"series",
             "title":"Black Clover","matched_title":"Black Clover",
-            "anime_ids":{"anidb":"12665"},"season":null,"episode":null});
-        assert_eq!(verified_unmapped_anime_absolute_episode(
-            &db,&winner,&parsed,false).unwrap(),None,
-            "bounded crosswalk cannot be bypassed");
+            "anime_ids":{"anidb":"12665"},"season":1,"episode":145,
+            "anime":{"anidb_id":"12665","episode":145,"asid":"12665:145"},
+            "sid":"tt7441658:1:145"});
+        reconcile_series_coordinates(&db,&mut winner,&parsed).unwrap();
+        assert!(winner["season"].is_null(),
+            "finite crosswalk cannot be overridden by season arithmetic");
+        assert!(winner["episode"].is_null());
+        assert_eq!(winner["coordinate_fallback_blocked"],
+            "anime_crosswalk_exceeds_known_imdb_bounds");
     }
 
     #[test]
