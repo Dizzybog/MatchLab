@@ -8,16 +8,34 @@ use serde::Serialize;
 
 pub use crate::title_normalization::clean_title;
 
-#[derive(Clone,Debug)]
+#[derive(Debug)]
 struct Aka {
     imdb_id:String, title:String, clean:String, year:i32, category:String,
     region:Option<String>, ordering:i32, media_type:String,
+    // The ranker compares one alias's Unicode words in up to a dozen
+    // places per request. Normalize each title at most once.
+    words:std::cell::OnceCell<Vec<String>>,
+}
+impl Aka {
+    fn words(&self)->&[String]{
+        self.words.get_or_init(||semantic_words(&self.title))
+    }
+}
+// A copy starts with an empty cache: `Aka{title:..,..row.clone()}` must
+// never carry the previous title's words.
+impl Clone for Aka {
+    fn clone(&self)->Self{
+        Self{imdb_id:self.imdb_id.clone(),title:self.title.clone(),
+            clean:self.clean.clone(),year:self.year,category:self.category.clone(),
+            region:self.region.clone(),ordering:self.ordering,
+            media_type:self.media_type.clone(),words:Default::default()}
+    }
 }
 impl From<crate::tantivy_search::TitleAlias> for Aka {
     fn from(a:crate::tantivy_search::TitleAlias)->Self{
         Self{imdb_id:a.imdb_id,title:a.title,clean:a.clean,year:a.year,
             category:a.category,region:a.region,ordering:a.ordering,
-            media_type:a.media_type}
+            media_type:a.media_type,words:Default::default()}
     }
 }
 fn index_error(error:String)->rusqlite::Error{
@@ -203,13 +221,14 @@ pub(crate) fn numeric_key_lost_title_words(key:&str,title:&str)->bool{
 fn is_non_latin_letter(c:char)->bool{
     c.is_alphabetic() && c>='\u{0370}' && !('\u{1E00}'..='\u{1EFF}').contains(&c)
 }
-fn non_latin_alias_words_in_release(alias:&str,release_text:&str)->bool{
-    semantic_words(alias).iter()
+fn non_latin_alias_words_in_release(row:&Aka,release_text:&str)->bool{
+    // Nearly every alias is plain ASCII and has no such words to check.
+    row.title.is_ascii() || row.words().iter()
         .filter(|word|word.chars().any(is_non_latin_letter))
         .all(|word|release_text.contains(word.as_str()))
 }
 fn complete_title_alias(row:&Aka,key:&str,words:&[String],word_count:usize)->bool{
-    row.clean==key && semantic_words(&row.title).as_slice()==words
+    row.clean==key && row.words()==words
         &&crate::title_normalization::title_word_count(&row.title)==word_count
 }
 
@@ -275,10 +294,9 @@ fn title_fit(key:&str,words:&[String],release_words:&[String],row:&Aka,
     if row.clean==key{
         // An identical ASCII index key is not necessarily an identical
         // Unicode title. Prefer complete identity to partial prefix/suffix.
-        let computed;
         let full=match cached_alias{
             Some(words)=>words,
-            None=>{computed=semantic_words(&row.title);&computed}
+            None=>row.words()
         };
         if let Some(partial)=semantic_extension(semantic_release,full)
             .or_else(||semantic_extension(full,semantic_release)){
@@ -394,7 +412,7 @@ fn longer_release_title_suffix_keys(release_title:&str)->Vec<String>{
 fn title_in_original_release_fit(
     release_words:&[String],parsed_words:&[String],max_title_words:usize,row:&Aka,
 )->Option<TitleFit>{
-    let title_words=semantic_words(&row.title);
+    let title_words=row.words();
     if title_words.len()<=parsed_words.len()||max_title_words<=parsed_words.len(){
         return None;
     }
@@ -422,7 +440,7 @@ fn title_in_original_release_fit(
 fn title_prefix_in_original_release_fit(
     content:&[String],row:&Aka,
 )->Option<TitleFit>{
-    let title=semantic_words(&row.title);
+    let title=row.words();
     if content.len()<2||title.len()<2{return None;}
     let full=content.starts_with(&title);
     let count=if full{title.len()}else if title.starts_with(content){
@@ -447,7 +465,7 @@ fn title_prefix_in_original_release_fit(
 fn title_suffix_in_original_release_fit(
     content:&[String],row:&Aka,
 )->Option<TitleFit>{
-    let title=semantic_words(&row.title);
+    let title=row.words();
     if content.len()<3||title.len()<2{return None;}
     let mut best=None;
     let start=content.len().saturating_sub(14).max(1);
@@ -480,7 +498,7 @@ fn release_is_imdb_title_suffix_fit(
     content:&[String],row:&Aka,
 )->Option<TitleFit>{
     if content.len()<2{return None;}
-    let candidate=semantic_words(&row.title);
+    let candidate=row.words();
     if candidate.len()<=content.len()||!candidate.ends_with(content){
         return None;
     }
@@ -510,7 +528,7 @@ pub fn has_longer_title_evidence_in_release(
     let candidate=Aka{
         imdb_id:String::new(),title:matched_title.into(),clean:String::new(),
         year:0,category:String::new(),region:None,ordering:0,
-        media_type:String::new(),
+        media_type:String::new(),words:Default::default()
     };
     (!keys.is_empty() && title_in_original_release_fit(
         &release,&parsed,content.len(),&candidate).is_some())
@@ -736,7 +754,7 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     let exact_only=strict || (!force_full && key.len()>=6 && country_qualified.is_none()
         && !semantic_content.is_empty() && semantic_release==semantic_content
         && discovered.iter().any(|row|
-            row.clean==key && semantic_words(&row.title)==semantic_content));
+            row.clean==key && row.words()==semantic_content.as_slice()));
     if !exact_only && key.len()>=4{
         discovered.extend(tantivy_aliases(db,&key,false)?);
         if key.len()>=8{
@@ -838,14 +856,14 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     // identity word. A number-only key collision with an unrelated
     // translated alias is not title evidence: require the same Unicode words.
     if numeric_key_lost_title_words(&key,title){
-        rows.retain(|row|semantic_words(&row.title)==semantic_release);
+        rows.retain(|row|row.words()==semantic_release.as_slice());
     }
     // The same folding makes a Latin fragment equal to a mixed-script alias
     // ("COM" vs "拿命.COM"). Broad matching may use such an alias only when
     // its non-Latin words are actually written in the release.
     if !strict {
         let release_text=semantic_full_release.join(" ");
-        rows.retain(|row|non_latin_alias_words_in_release(&row.title,&release_text));
+        rows.retain(|row|non_latin_alias_words_in_release(row,&release_text));
     }
     let rows=if strict {
         rows.into_iter().filter(|row|year_eligible(true,year,row.year))
@@ -856,7 +874,7 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     // type/season. Avoid letting another alias with the same ASCII key
     // masquerade as a verified complete title; resume full discovery.
     if !strict && exact_only && !eligible_rows.iter().any(|row|
-        row.clean==key && semantic_words(&row.title)==semantic_content){
+        row.clean==key && row.words()==semantic_content.as_slice()){
         return search_inner_mode(db,title,year,series,required_season,
             release_title,_has_episode,limit,true,false);
     }
@@ -979,7 +997,7 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
         }
         // Reuse the Unicode tokenization for the candidate's title-fit
         // evidence and exact-source comparison in this scoring pass.
-        let alias_semantic=semantic_words(&row.title);
+        let alias_semantic=row.words().to_vec();
         let alias_key=(row.imdb_id.clone(),row.title.clone());
         let mut evidence=Vec::new();
         if ordinary_title_matches.contains(&alias_key){
@@ -1050,7 +1068,7 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
             let forms=groups.get(id).unwrap().iter()
                 .filter(|(a,_)|a.ordering==0
                     && a.region.as_deref().unwrap_or("").is_empty())
-                .map(|(a,_)|semantic_words(&a.title)).collect::<Vec<_>>();
+                .map(|(a,_)|a.words().to_vec()).collect::<Vec<_>>();
             if !forms.is_empty(){full_titles.insert(id.clone(),forms);}
         }
         let missing=exact_ids.iter().filter(|id|!full_titles.contains_key(*id))
@@ -1137,8 +1155,14 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
             db.query_row("SELECT num_votes FROM imdb_ratings WHERE imdb_id=?1",[&id],|r|r.get(0))
                 .optional().unwrap_or(None).unwrap_or(0)
         };
-        let (best,fit)=aliases.into_iter().min_by_key(|(r,fit)|
-            (*fit,rank_without_id(r,year,duplicates.contains(&r.clean),country,votes))
+        // Tantivy returns equally ranked aliases of one work in hash order.
+        // Break the remaining tie by IMDb's own alias ordering and then the
+        // text, so the published title is identical on every run.
+        let (best,fit)=aliases.into_iter().min_by(|(a,fit_a),(b,fit_b)|
+            (*fit_a,rank_without_id(a,year,duplicates.contains(&a.clean),country,votes),
+                a.ordering,&a.title)
+            .cmp(&(*fit_b,rank_without_id(b,year,duplicates.contains(&b.clean),country,votes),
+                b.ordering,&b.title))
         ).unwrap();
         let ids=if let Some((_,ids))=prefetched{ids}else{
             let mut ids=BTreeMap::new();
@@ -1992,7 +2016,7 @@ mod tests{
         let candidate=|id:&str,year:i32,region:&str|{
             Aka{imdb_id:id.into(),title:"Example".into(),clean:"example".into(),
                 year,category:"movie".into(),region:Some(region.into()),
-                ordering:0,media_type:"movie".into()}
+                ordering:0,media_type:"movie".into(),words:Default::default()}
         };
         let us_old=candidate("ttus",2018,"US");
         let no_exact=candidate("ttno",2020,"NO");
@@ -2347,7 +2371,7 @@ mod tests{
     fn original_release_partial_title_prefix_requires_real_word_boundary_and_coverage(){
         let row=Aka{imdb_id:"tt1".into(),title:"Monster: The Ed Gein Story".into(),
             clean:"monstertheedgeinstory".into(),year:2025,category:"series".into(),
-            region:None,ordering:0,media_type:"tvSeries".into()};
+            region:None,ordering:0,media_type:"tvSeries".into(),words:Default::default()};
         let parsed=semantic_words("Monster the");
         for original in [
             "Monster.the.ed.gein.s1.e1",
@@ -2385,7 +2409,7 @@ mod tests{
             imdb_id:"ttlong".into(),title:"Monster: The Ed Gein Story".into(),
             clean:"monstertheedgeinstory".into(),year:2025,
             category:"series".into(),region:Some("US".into()),
-            ordering:0,media_type:"tvSeries".into()
+            ordering:0,media_type:"tvSeries".into(),words:Default::default()
         };
         for (raw,complete) in [
             ("Scene.Monster.the.Ed.Gein.S01E01",false),
@@ -2588,7 +2612,7 @@ mod tests{
             imdb_id:"ttgein".into(),title:"Monster: The Ed Gein Story".into(),
             clean:"monstertheedgeinstory".into(),year:2025,
             category:"series".into(),region:Some("US".into()),
-            ordering:0,media_type:"tvSeries".into(),
+            ordering:0,media_type:"tvSeries".into(),words:Default::default()
         };
         for raw in ["The.Ed.Gein.Story.S01E01",
                     "The.Ed.Gein.Story.2025.S01E01",
@@ -2769,7 +2793,7 @@ mod batch_eligibility_tests {
             }
             let row=Aka{imdb_id:id,title:"Example".into(),clean:"example".into(),
                 year:2020,category:"series".into(),region:None,
-                ordering:0,media_type:"tvSeries".into()};
+                ordering:0,media_type:"tvSeries".into(),words:Default::default()};
             rows.push(row.clone());
             // Multiple IMDb AKA rows must not cause duplicate eligibility SQL.
             if index%4==0 {rows.push(row);}

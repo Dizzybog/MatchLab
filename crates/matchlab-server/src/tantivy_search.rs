@@ -3,7 +3,18 @@
 use std::{collections::{HashMap,BTreeSet},fs::File,path::{Path,PathBuf},sync::{RwLock,OnceLock,atomic::{AtomicU64,Ordering}},time::{Duration,SystemTime,UNIX_EPOCH}};
 use crate::query_cache::QueryCache;
 use rusqlite::{Connection,OptionalExtension};
-use tantivy::{collector::DocSetCollector,doc,query::{RegexQuery,TermQuery,TermSetQuery},schema::{Schema,STORED,STRING,Value,IndexRecordOption},Index,IndexReader,ReloadPolicy,Term};
+use tantivy::{collector::DocSetCollector,doc,query::{BooleanQuery,Occur,Query,RegexQuery,TermQuery},schema::{Schema,STORED,STRING,Value,IndexRecordOption},Index,IndexReader,ReloadPolicy,Term};
+
+/// Documents containing any of the exact terms. `TermSetQuery` compiles the
+/// terms into an automaton whose doc set allocates and clears a bit set
+/// over every document of the segment for each query, about a sixth of a
+/// match request's CPU. The lookups here have tens of terms; a union of
+/// their posting lists returns the same documents without that bit set.
+fn term_union(terms:impl IntoIterator<Item=Term>)->BooleanQuery{
+    BooleanQuery::new(terms.into_iter().map(|term|(Occur::Should,
+        Box::new(TermQuery::new(term,IndexRecordOption::Basic)) as Box<dyn Query>))
+        .collect())
+}
 
 #[derive(Clone)]
 struct SearchIndex {
@@ -111,6 +122,8 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
             std::fs::create_dir_all(&stage).map_err(|e|e.to_string())?;
             let staging_index=Index::create_in_dir(&stage,schema).map_err(|e|e.to_string())?;
             let mut writer=staging_index.writer(64_000_000).map_err(|e|e.to_string())?;
+            // Merge once, explicitly, after the bulk load (see below).
+            writer.set_merge_policy(Box::new(tantivy::merge_policy::NoMergePolicy));
             let mut stmt=db.prepare("SELECT imdb_id,title,clean_title,year,category,region,original,ordering,type
                 FROM titles WHERE year>0")
                 .map_err(|e|e.to_string())?;
@@ -239,7 +252,14 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
                 count+=1;
             }
             writer.commit().map_err(|e|e.to_string())?;
-            drop(writer);
+            // Every lookup consults each segment's term dictionary. A bulk
+            // build leaves about twenty segments; the published generation
+            // is immutable, so merge it once into a single segment.
+            let segments=staging_index.searchable_segment_ids().map_err(|e|e.to_string())?;
+            if segments.len()>1 {
+                writer.merge(&segments).wait().map_err(|e|e.to_string())?;
+            }
+            writer.wait_merging_threads().map_err(|e|e.to_string())?;
             drop(staging_index);
             let verify=Index::open_in_dir(&stage).map_err(|e|e.to_string())?;
             let reader=verify.reader().map_err(|e|e.to_string())?;
@@ -423,7 +443,7 @@ pub struct AliasRecord {
 pub enum AliasLookupKind { ImdbId, AnidbId, ExactTitle }
 
 // Rehydrate records once for both single-ID and multi-ID index queries.
-// One TermSetQuery replaces O(N) reader acquisitions for external aliases.
+// One term union replaces O(N) reader acquisitions for external aliases.
 fn alias_records_from_hits(
     search:&SearchIndex,
     reader:&tantivy::Searcher,
@@ -479,7 +499,7 @@ pub fn lookup_aliases(
             reader.search(&q,&DocSetCollector)
         },
         AliasLookupKind::ExactTitle=>{
-            let q=TermSetQuery::new([
+            let q=term_union([
                 Term::from_field_text(search.forward,key),
                 Term::from_field_text(search.anime,key),
             ]);
@@ -503,7 +523,7 @@ pub fn external_ids_by_imdb(
     if ids.is_empty(){return Ok(out);}
     let (search,memory_dir)=open_search(db)?;
     let reader=search.reader.searcher();
-    let query=TermSetQuery::new(ids.iter().map(|id|
+    let query=term_union(ids.iter().map(|id|
         Term::from_field_text(search.id,id)));
     let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
     for addr in hits{
@@ -557,7 +577,7 @@ pub fn aliases_for_imdb_ids(
     if ids.is_empty(){return Ok(Vec::new());}
     let (search,memory_dir)=open_search(db)?;
     let reader=search.reader.searcher();
-    let query=TermSetQuery::new(ids.iter()
+    let query=term_union(ids.iter()
         .map(|id|Term::from_field_text(search.id,id)));
     let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
     let records=alias_records_from_hits(&search,&reader,hits)?;
@@ -655,7 +675,7 @@ fn anime_aliases_uncached(db:&Connection,key:&str,min_prefix:usize)->Result<Vec<
             Term::from_field_text(search.anime,&key[..len]),
             Term::from_field_text(search.anime,&key[key.len()-len..]),
         ]);
-    let query=TermSetQuery::new(terms);
+    let query=term_union(terms);
     let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
     let mut matches=Vec::with_capacity(hits.len());
     let mut seen=std::collections::HashSet::new();
@@ -838,7 +858,7 @@ fn title_aliases_inside_uncached(db:&Connection,key:&str)->Result<Vec<TitleAlias
             Term::from_field_text(search.forward,&key[..len]),
             Term::from_field_text(search.forward,&key[key.len()-len..]),
         ]);
-    let query=TermSetQuery::new(terms);
+    let query=term_union(terms);
     let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
     let mut aliases=Vec::with_capacity(hits.len());
     for addr in hits{
@@ -869,7 +889,7 @@ fn title_aliases_inside_words_uncached(
     if keys.is_empty(){return Ok(Vec::new());}
     let (search,memory_dir)=open_search(db)?;
     let reader=search.reader.searcher();
-    let query=TermSetQuery::new(keys.iter()
+    let query=term_union(keys.iter()
         .map(|key|Term::from_field_text(search.forward,key)));
     let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
     let mut aliases=Vec::with_capacity(hits.len());
@@ -959,7 +979,7 @@ pub fn titles_by_ids(db:&Connection,ids:&[String])->Result<Vec<TitleAlias>,Strin
     // A union of exact IMDb ID postings replaces one query per ID. This
     // includes every title alias for every ID, without an arbitrary TopDocs
     // cutoff or a new title ranking policy.
-    let query=TermSetQuery::new(ids.iter()
+    let query=term_union(ids.iter()
         .map(|id|Term::from_field_text(search.id,id)));
     let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
     let mut aliases=Vec::with_capacity(hits.len());
@@ -1091,7 +1111,7 @@ pub fn title_aliases_inside(db:&Connection,key:&str)->Result<Vec<TitleAlias>,Str
 }
 
 /// Strict matching never enumerates anime prefixes/suffixes. Reuse the
-/// existing exact-title Tantivy TermSetQuery, which checks the IMDb and AniDB
+/// existing exact-title Tantivy term union, which checks the IMDb and AniDB
 /// index fields in one lookup. The prefix-oriented anime cache is not touched.
 pub fn anime_aliases_exact(db:&Connection,raw_title:&str)->Result<Vec<AnimeAlias>,String>{
     let key=crate::title_normalization::clean_title(raw_title);
@@ -1182,7 +1202,7 @@ pub fn duplicate_titles(
     let (search,memory_dir)=open_search(db)?;
     let reader=search.reader.searcher();
     for batch in keys.iter().collect::<Vec<_>>().chunks(128){
-        let query=TermSetQuery::new(batch.iter()
+        let query=term_union(batch.iter()
             .map(|key|Term::from_field_text(search.forward,key)));
         let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
         let mut first=HashMap::<String,String>::new();
@@ -1363,8 +1383,8 @@ mod persistence_tests {
                      "tt0000001".into(),"tt9999999".into()];
         let found=titles_by_ids(&db,&ids).unwrap();
         let expected=ids.iter().collect::<std::collections::BTreeSet<_>>()
-            .into_iter().map(|id|titles_by_ids(&db,&[(*id).clone()]).unwrap())
-            .flatten().map(|r|(r.imdb_id,r.title,r.clean,r.year,r.category,
+            .into_iter().flat_map(|id|titles_by_ids(&db,&[(*id).clone()]).unwrap())
+            .map(|r|(r.imdb_id,r.title,r.clean,r.year,r.category,
                 r.region,r.original,r.ordering,r.media_type))
             .collect::<std::collections::BTreeSet<_>>();
         let actual=found.into_iter().map(|r|(r.imdb_id,r.title,r.clean,r.year,

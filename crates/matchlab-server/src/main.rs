@@ -276,13 +276,58 @@ fn explicit_absolute_episode(raw:&str)->Option<i64>{
     None
 }
 
-fn open_db(path: &PathBuf) -> rusqlite::Result<Connection> {
+/// The published metadata file, identified by everything an atomic
+/// refresh changes. A connection is reused only for the same file.
+#[derive(Clone,PartialEq,Eq,Debug)]
+struct DbFile {path:PathBuf,dev:u64,ino:u64,len:u64,modified:Option<std::time::SystemTime>}
+fn db_file(path:&std::path::Path)->Option<DbFile>{
+    let metadata=std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    let (dev,ino)=(std::os::unix::fs::MetadataExt::dev(&metadata),
+        std::os::unix::fs::MetadataExt::ino(&metadata));
+    #[cfg(not(unix))]
+    let (dev,ino)=(0,0);
+    Some(DbFile{path:path.to_owned(),dev,ino,len:metadata.len(),
+        modified:metadata.modified().ok()})
+}
+thread_local! {
+    // Opening a connection makes SQLite parse the whole schema on its first
+    // statement: about an eighth of a match request's CPU. Tokio reuses its
+    // blocking threads, so each keeps its last read-only connection.
+    static DB_POOL:std::cell::RefCell<Option<(DbFile,Connection)>>=
+        const { std::cell::RefCell::new(None) };
+}
+/// A read-only metadata connection that returns to its thread on drop.
+struct PooledDb {conn:Option<Connection>,file:Option<DbFile>}
+impl std::ops::Deref for PooledDb {
+    type Target=Connection;
+    fn deref(&self)->&Connection{self.conn.as_ref().expect("connection until drop")}
+}
+impl Drop for PooledDb {
+    fn drop(&mut self){
+        if let (Some(conn),Some(file))=(self.conn.take(),self.file.take()){
+            let _=DB_POOL.try_with(|pool|*pool.borrow_mut()=Some((file,conn)));
+        }
+    }
+}
+fn open_db(path: &PathBuf) -> rusqlite::Result<PooledDb> {
+    let file=db_file(path);
+    if let Some(file)=&file
+        && let Some(conn)=DB_POOL.with(|pool|match pool.borrow_mut().take(){
+            Some((cached,conn)) if cached==*file=>Some(conn),
+            _=>None,
+        })
+    {
+        return Ok(PooledDb{conn:Some(conn),file:Some(file.clone())});
+    }
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     conn.create_scalar_function("reverse", 1, rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC | rusqlite::functions::FunctionFlags::SQLITE_UTF8, |ctx| {
         let value: String = ctx.get(0)?;
         Ok(value.chars().rev().collect::<String>())
     })?;
-    Ok(conn)
+    // A file that changed while it was being opened is not reused.
+    let file=file.filter(|before|db_file(path).as_ref()==Some(before));
+    Ok(PooledDb{conn:Some(conn),file})
 }
 
 #[derive(Default)]
