@@ -41,7 +41,7 @@ fn authorized(headers: &HeaderMap) -> Result<(), StatusCode> {
     let Ok(expected) = env::var("MATCHLAB_DEBUG_API_TOKEN") else {
         return Err(StatusCode::NOT_FOUND);
     };
-    if expected.as_bytes().len() < MIN_TOKEN_BYTES {
+    if expected.len() < MIN_TOKEN_BYTES {
         return Err(StatusCode::NOT_FOUND);
     }
     let provided = headers

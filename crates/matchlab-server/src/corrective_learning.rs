@@ -354,7 +354,7 @@ fn review_candidate(db:&Connection,family:&str,
     };
     let mut metrics=ReplayMetrics::default();
     for (name,(old,new)) in names.iter().zip(
-        baseline.into_iter().zip(replay.into_iter())){
+        baseline.into_iter().zip(replay)){
         metrics.checked+=1;
         // Changes outside the two independently validated fields must
         // fail closed, including newly introduced output keys.

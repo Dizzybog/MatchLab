@@ -1955,16 +1955,14 @@ fn drop_technical_number_coordinates(
     let mut clear_episode=false;
     if let ([season],[episode])=(seasons.as_slice(),episodes.as_slice()) {
         // "[16x9]" is the picture format, "[1.46]" a file size in GB.
-        if (*season,*episode)==(16,9) && ASPECT.is_match(raw) {
-            clear_season=true;
-            clear_episode=true;
-        } else if has_year && !range
+        let aspect=(*season,*episode)==(16,9) && ASPECT.is_match(raw);
+        let file_size=!aspect && has_year && !range
             && !EXPLICIT_EPISODE_SHAPE_RE.is_match(raw)
                 .map_err(|e|ParseError::Regex(e.to_string()))?
             && FILE_SIZE.captures_iter(raw).any(|caps|
                 caps[1].parse::<i64>().ok()==Some(*season)
-                    && caps[2].parse::<i64>().ok()==Some(*episode))
-        {
+                    && caps[2].parse::<i64>().ok()==Some(*episode));
+        if aspect || file_size {
             clear_season=true;
             clear_episode=true;
         }
@@ -2065,7 +2063,7 @@ fn unmarked_anime_episode_candidate(
             .trim_end_matches(|c:char|c.is_whitespace()||matches!(c,'.'|'_'|'-'|'('|'['));
         if prefix.is_empty(){continue;}
         let final_word=prefix.split(|c:char|!c.is_ascii_alphanumeric())
-            .filter(|w|!w.is_empty()).last().unwrap_or_default();
+            .rfind(|w|!w.is_empty()).unwrap_or_default();
         if ["season","seasons","saison","sezon","staffel","vol","volume",
             "volumes","part","parts","cour","disc","disk","cd","chapter","chapters",
             "chap"].iter().any(|word|final_word.eq_ignore_ascii_case(word)){
@@ -2371,7 +2369,7 @@ fn fansub_hash_episode(raw: &str, result: &Map<String, Value>)
         }
         let prefix = raw[..marker.start()].trim_end();
         let last_word = prefix.split(|c: char| !c.is_alphabetic())
-            .filter(|word| !word.is_empty()).next_back().unwrap_or_default();
+            .rfind(|word| !word.is_empty()).unwrap_or_default();
         if ["movie", "film", "part", "volume", "vol", "chapter", "season"]
             .iter().any(|word| last_word.eq_ignore_ascii_case(word))
         {
@@ -2835,7 +2833,7 @@ fn patch_half_episode(raw: &str, translate_languages: bool, result: &mut Map<Str
         }
         let last_word = before
             .split(|c: char| !c.is_alphanumeric())
-            .filter(|word| !word.is_empty()).next_back().unwrap_or_default();
+            .rfind(|word| !word.is_empty()).unwrap_or_default();
         if ["imdb","rating","version","v","audio","size","season",
             "sezon","volume","vol","part","chapter","codec","ddp",
             "aac","dts","hdr","bluray","web","webdl","1080p","720p","2160p"]
@@ -4010,13 +4008,6 @@ pub fn parse_title(
     Ok(merged)
 }
 
-pub fn parse_title_context(
-    raw_title: &str,
-    translate_languages: bool,
-) -> Result<ParseContext, ParseError> {
-    engine_parse_context(raw_title, translate_languages)
-}
-
 pub fn parse_many<'a, I>(
     titles: I,
     translate_languages: bool,
@@ -4064,28 +4055,6 @@ where
         .into_iter()
         .map(|item| item.expect("successful worker filled every output slot"))
         .collect())
-}
-
-pub fn clean_title_native(raw_title: &str) -> String {
-    clean_title(raw_title)
-}
-
-pub fn translate_langs_codes(langs: &[String]) -> Vec<String> {
-    langs
-        .iter()
-        .filter_map(|lang| {
-            LANGUAGES_TRANSLATION_TABLE
-                .get(lang.as_str())
-                .map(|value| (*value).to_owned())
-        })
-        .collect()
-}
-
-pub fn languages_translation_table() -> Vec<(String, String)> {
-    LANGUAGES_TRANSLATION_TABLE
-        .iter()
-        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-        .collect()
 }
 
 static HANDLERS_JSON: &str = include_str!("generated/handlers.json");
@@ -4275,19 +4244,6 @@ fn stable_patch_hash(patches:&[HandlerPatch],additions:&[HandlerAddition],
     value.max(1)
 }
 
-/// Backwards-compatible parser source-replacement entry point.
-pub fn install_handler_patches(patches:&[HandlerPatch])->Result<(),ParseError>{
-    install_learned_handler_regex(patches,&[])
-}
-
-/// Compile additions and replacements on the learning worker and publish
-/// one immutable engine. MatchLab, not the learner, extracts all field values.
-pub fn install_learned_handler_regex(
-    patches:&[HandlerPatch],additions:&[HandlerAddition]
-)->Result<(),ParseError>{
-    install_learned_handler_regex_with_corrections(patches,additions,&[])
-}
-
 /// Emergency safety switch: keep local training and replay active while
 /// serving the unchanged native parser. Read only when the background
 /// learning worker attempts to publish a generation.
@@ -4299,6 +4255,8 @@ pub fn learned_regex_publication_enabled()->bool{
     live_regex_allowed(std::env::var("MATCHLAB_ML_LIVE_REGEX_ENABLED")
         .ok().as_deref())
 }
+/// Compile additions and replacements on the learning worker and publish
+/// one immutable engine. MatchLab, not the learner, extracts all field values.
 pub fn install_learned_handler_regex_with_corrections(
     patches:&[HandlerPatch],additions:&[HandlerAddition],
     corrections:&[HandlerCorrection]
@@ -4721,7 +4679,7 @@ mod live_handler_catalog_tests {
             original_pattern:first["pattern"].as_str().unwrap().to_owned(),
             replacement_pattern:"(?=cat).*".to_owned()
         };
-        assert!(install_handler_patches(&[patch]).is_err());
+        assert!(install_learned_handler_regex_with_corrections(&[patch],&[],&[]).is_err());
         assert_eq!(handler_patch_revision(),old);
     }
 }

@@ -431,7 +431,7 @@ fn reserve_space(db:&Connection,marker:&str,new_candidate:bool,
         let evidence:i64=db.query_row("SELECT count(*) FROM learned_regex_evidence",
             [],|r|r.get(0)).map_err(|e|e.to_string())?;
         if candidates+i64::from(new_candidate)<=candidate_limit
-            && evidence+1<=evidence_limit{return Ok(true);}
+            && evidence < evidence_limit{return Ok(true);}
         let victim:Option<String>=db.query_row(
             "SELECT c.marker FROM learned_regex_candidates c
              LEFT JOIN learned_regex_active a ON a.marker=c.marker

@@ -117,7 +117,7 @@ fn matchlab_parser_benches(c: &mut Criterion) {
         b.iter_batched(
             ||(0..512).map(|i|path_corpus[i%path_corpus.len()])
                 .collect::<Vec<_>>(),
-            |batch|black_box(parse_many(batch.into_iter(),false).unwrap()),
+            |batch|black_box(parse_many(batch,false).unwrap()),
             BatchSize::SmallInput);
     });
     group.bench_function("parse_many_512_mixed_paths_sequential",|b|{

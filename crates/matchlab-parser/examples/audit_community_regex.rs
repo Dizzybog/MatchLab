@@ -195,12 +195,10 @@ fn audit_one(item:&Value,fixtures:&[Value],catalog:&[Value],
     }
     let field=item["field"].as_str().unwrap_or("");
     let signal=item["signal"].as_str().unwrap_or("");
-    let synthetic=vec![
-        format!("Example.Show.S01E02.{signal}.WEB-DL"),
+    let synthetic=[format!("Example.Show.S01E02.{signal}.WEB-DL"),
         format!("Another.Film.2025.{signal}.WEB-DL"),
         format!("Different.Show.S02E10.1080p.{signal}.mkv"),
-        format!("Classic.Movie.1999.{signal}.BluRay"),
-    ];
+        format!("Classic.Movie.1999.{signal}.BluRay")];
     let mut titles=fixtures.iter().filter_map(|f|f["title"].as_str())
         .map(str::to_owned).collect::<Vec<_>>();
     let fixture_count=titles.len();

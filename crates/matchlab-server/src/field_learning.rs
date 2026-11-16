@@ -488,7 +488,7 @@ pub fn observe_with_budget(db:&Connection,title:&str,details:&Value,
     // The worker supplies a *fresh canonical parser result*, not the
     // possibly cached or ML-decorated parsed response from request history.
     let selected=&details["selected"];
-    let Some(identity)=observed_identity(&parsed,selected)else{return Ok(labels);};
+    let Some(identity)=observed_identity(parsed,selected)else{return Ok(labels);};
     let Some(object)=parsed.as_object()else{return Ok(labels);};
     let source_build = build();
     for (field, signal) in signals(title) {
