@@ -70,3 +70,40 @@ fn padded_and_subtitled_batches_are_range_candidates_not_episode_lists() {
         assert_eq!(parsed["episodes"],json!([]),"{raw}: {parsed:?}");
     }
 }
+
+#[test]
+fn hyphenated_title_tails_and_bracketed_episodes_keep_the_exact_anime_title() {
+    for (raw,title,episode) in [
+        ("[Group] Example 8-gou - 21 [WebRip 1080p HEVC].mkv","Example 8-gou",21),
+        ("[Group] Example no Shirayuki-hime - 14 [2041EC53].mkv",
+            "Example no Shirayuki-hime",14),
+    ] {
+        assert_eq!(candidate(raw),(title.to_owned(),episode),"{raw}");
+    }
+    for (raw,title,episode) in [
+        ("【Group】★01月新番★[EXAMPLESTARS][14][1080p][简体]","EXAMPLESTARS",14),
+        ("[Group][Example_Gone][11][720P][BIG5].mp4","Example Gone",11),
+    ] {
+        let parsed=parse_title(raw,false).unwrap();
+        let hint=&parsed["anime_episode_candidate"];
+        assert_eq!(hint["title"],title,"{raw}: {parsed:?}");
+        assert_eq!(hint["episode"],episode,"{raw}: {parsed:?}");
+        assert_eq!(hint["bracketed"],true,"{raw}: {parsed:?}");
+        assert_eq!(parsed["episodes"],json!([episode]),"{raw}: {parsed:?}");
+    }
+}
+
+#[test]
+fn a_part_number_before_a_batch_is_not_a_season_dash_episode() {
+    let raw="[Group] Example Tensei - Isekai Honki Part 2 - 01 ~ 12 [1080p][Multiple Subtitle]";
+    let parsed=parse_title(raw,false).unwrap();
+    assert!(parsed.get("anime_season_episode_candidate").is_none(),"{parsed:?}");
+    let hint=&parsed["anime_episode_range_candidate"];
+    assert_eq!(hint["title"],"Example Tensei - Isekai Honki Part 2","{parsed:?}");
+    assert_eq!(hint["start"],1,"{parsed:?}");
+    assert_eq!(hint["end"],12,"{parsed:?}");
+    // A single episode of a numbered season keeps its season-dash hint.
+    let single=parse_title("[Group] Example Hanako-kun 2 - 12 [720p][B63D35A4].mkv",false).unwrap();
+    assert_eq!(single["anime_season_episode_candidate"]["season"],2,"{single:?}");
+    assert_eq!(single["anime_season_episode_candidate"]["episode"],12,"{single:?}");
+}

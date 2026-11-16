@@ -289,6 +289,18 @@ pub fn resolve_episode_from_exact_part_title(
     Ok(mapped.filter(|m|m.season==inferred_season))
 }
 
+/// The single AniDB work of this IMDb series that the title names exactly.
+pub fn exact_alias_work(
+    db:&Connection,imdb:&str,title:&str,
+)->rusqlite::Result<Option<String>>{
+    let key=imdb_matcher::clean_title(title);
+    if key.is_empty(){return Ok(None);}
+    let ids=aliases(db,imdb,title)?.into_iter()
+        .filter_map(|(id,alias)|(alias==key).then_some(id))
+        .collect::<BTreeSet<_>>();
+    Ok(if ids.len()==1{ids.into_iter().next()}else{None})
+}
+
 /// Does an exact numbered alias ("Title 2", "Title Part 2") name IMDb season
 /// `season`? True when its unique AniDB work is mapped to that season, or
 /// when it is a later cour of the previous TVDB season and IMDb ends that
@@ -312,7 +324,7 @@ pub fn numbered_alias_names_season(
 
 /// The cour's positive episode offset inside TVDB season `mapped`, when
 /// IMDb's season of that number ends exactly at this offset.
-fn imdb_split_offset(
+pub(crate) fn imdb_split_offset(
     db:&Connection,imdb:&str,anidb:&str,mapped:i64,
 )->rusqlite::Result<Option<i64>>{
     let offset:Option<i64>=db.query_row("SELECT MIN(offset) FROM episode_map

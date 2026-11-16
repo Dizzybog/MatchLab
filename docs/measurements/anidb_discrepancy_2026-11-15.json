@@ -13,44 +13,76 @@
     "metadata_sources": 7,
     "anidb_related": {
       "inputs": 12723,
-      "changed": 293,
-      "gained_episode": 261,
+      "changed": 470,
+      "gained_episode": 379,
+      "asid_only": 58,
+      "episode_or_season_changed": 14,
       "range_end_changed": 10,
-      "episode_or_season_changed": 10,
       "imdb_identity_changed": 6,
-      "asid_only": 2,
       "gained_match": 1,
-      "lost_coordinate": 3
+      "lost_coordinate": 2
     },
     "classes_baseline_to_change": {
-      "consistent": [10956, 11204],
-      "title_ends_with_number_no_candidate": [276, 82],
-      "range_parsed_no_end_selected": [259, 196],
-      "episode_parsed_no_sid_episode_unblocked": [185, 131],
-      "sid_episode_without_asid": [577, 580],
-      "episode_parsed_blocked_by_known_bounds": [362, 364],
-      "unmatched": [223, 222],
-      "season_parsed_none_selected": [36, 36],
-      "season_differs": [18, 17]
+      "consistent": [
+        10956,
+        11346
+      ],
+      "title_ends_with_number_no_candidate": [
+        276,
+        81
+      ],
+      "range_parsed_no_end_selected": [
+        259,
+        197
+      ],
+      "episode_parsed_no_sid_episode_unblocked": [
+        185,
+        131
+      ],
+      "episode_parsed_blocked_by_known_bounds": [
+        362,
+        246
+      ],
+      "sid_episode_without_asid": [
+        577,
+        540
+      ],
+      "unmatched": [
+        223,
+        222
+      ],
+      "season_parsed_none_selected": [
+        36,
+        27
+      ],
+      "season_differs": [
+        18,
+        33
+      ]
     },
-    "non_anidb_random_sample": {"inputs": 20000, "changed": 21}
+    "non_anidb_random_sample": {
+      "inputs": 20000,
+      "changed": 25
+    }
   },
   "parser_replay": {
     "inputs": 141661,
-    "changed": 438,
+    "changed": 1230,
     "changed_fields": {
-      "anime_episode_candidate": 406,
-      "anime_episode_range_candidate": 33,
-      "episodes": 23,
+      "anime_episode_candidate": 1166,
+      "anime_episode_range_candidate": 65,
+      "episodes": 35,
       "episode_start": 4,
       "episode_end": 4,
       "episode_count": 4,
       "episode_range_numbering": 4,
-      "episode_title": 1
-    }
+      "episode_title": 3,
+      "anime_season_episode_candidate": 3
+    },
+    "lost_coordinate_without_candidate": 0
   },
   "validation": {
-    "rust_tests_passed": 573,
+    "rust_tests_passed": 575,
     "python_tests_passed": 99,
     "fixture_test_fails_on_baseline": true
   }

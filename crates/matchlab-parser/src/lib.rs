@@ -2036,8 +2036,14 @@ fn explicit_season_episode_range(raw: &str) -> Result<Option<(i64,i64,i64)>,Pars
 fn unmarked_anime_episode_candidate(
     raw:&str,translate_languages:bool,
 )->Result<Option<Value>,ParseError>{
-    for candidate in UNMARKED_ANIME_RANGE_RE.captures_iter(raw){
-        let caps=candidate.map_err(|e|ParseError::Regex(e.to_string()))?;
+    // Resume right after a rejected first number, not after the whole
+    // rejected pair: "Part 2 - 01 ~ 12" must still find "01 ~ 12".
+    let mut position=0usize;
+    while position<raw.len()
+        && let Some(caps)=UNMARKED_ANIME_RANGE_RE.captures_from_pos(raw,position)
+            .map_err(|e|ParseError::Regex(e.to_string()))?
+    {
+        position=caps.get(1).map_or(raw.len(),|token|token.end());
         let (Some(start_token),Some(end_token))=(caps.get(1),caps.get(2))else{continue;};
         let (Ok(start),Ok(end))=(start_token.as_str().parse::<i64>(),
             end_token.as_str().parse::<i64>()) else{continue;};
@@ -2113,7 +2119,7 @@ fn unmarked_anime_episode_candidate(
 // Ordinary "01-07" and "26 - 50" anime batches remain unchanged.
 static FANSUB_SEASON_DASH_EPISODE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)^\[[^]\r\n]{2,64}\][ ._]+(.+?)[ ._]+([1-9]|1[0-2])[ ]+-[ ]+(0[1-9]|[1-9][0-9])(?=$|[ ._\[(])"
+        r"(?i)^\[[^]\r\n]{2,64}\][ ._]+(.+?)[ ._]+([1-9]|1[0-2])[ ]+-[ ]+(0[1-9]|[1-9][0-9])(?=$|[ ._\[(])(?![ ]*[~～–-][ ]*[0-9])"
     ).expect("valid fansub season-dash-episode regex")
 });
 fn fansub_season_dash_episode_candidate(
@@ -2934,6 +2940,28 @@ fn local_anime_part_candidate(raw:&str)->Option<Value>{
     None
 }
 
+// East Asian fansub names put every field in its own bracket:
+// "[Group][Title][14][1080p]". The generic handlers already read the number
+// as the episode; mark it as a fansub absolute candidate so the matcher can
+// verify it like "[Group] Title - 14".
+static BRACKETED_ANIME_EPISODE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^(?:[\[【][^\]】\r\n]{1,64}[\]】])[^\[\]]{0,24}\[[^\[\]\r\n]{2,96}\]\[(0?[1-9]|[1-9][0-9]{1,3})(?:v[0-9])?\](?:\[|$)")
+        .expect("valid bracketed anime episode pattern")
+});
+fn bracketed_anime_episode_candidate(raw:&str,result:&Map<String,Value>)->Option<Value>{
+    if result.get("seasons").and_then(Value::as_array).is_some_and(|a|!a.is_empty())
+        || result.contains_key("episode_start"){return None;}
+    let episodes=result.get("episodes").and_then(Value::as_array)?;
+    let [only]=episodes.as_slice() else{return None};
+    let episode=only.as_i64()?;
+    let caps=BRACKETED_ANIME_EPISODE_RE.captures(raw).ok()??;
+    if caps.get(1)?.as_str().parse::<i64>().ok()!=Some(episode){return None;}
+    let title=result.get("title").and_then(Value::as_str)?.trim();
+    if title.chars().filter(|c|c.is_alphabetic()).count()<4{return None;}
+    Some(json!({"title":title,"episode":episode,"numbering":"absolute",
+        "verified":false,"bracketed":true}))
+}
+
 fn unmarked_single_anime_episode_candidate(
     raw: &str, result: &Map<String, Value>, translate_languages: bool,
 ) -> Result<Option<Value>, ParseError> {
@@ -3425,9 +3453,22 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
     }
     patch_half_episode(raw, translate_languages, &mut result)?;
     if !result.contains_key("anime_episode_range_candidate") {
-        if let Some(candidate)=unmarked_single_anime_episode_candidate(
+        if let Some(mut candidate)=unmarked_single_anime_episode_candidate(
             raw,&result,translate_languages
         )? {
+            // The prefix-only parse can read a hyphenated title tail as a
+            // release group ("Kaijuu 8-gou", "Shirayuki-hime"). The complete
+            // release title keeps it; the matcher needs the exact alias.
+            if let Some(full)=result.get("title").and_then(Value::as_str)
+                && let Some(short)=candidate.get("title").and_then(Value::as_str)
+                && let Some(tail)=full.strip_prefix(short)
+                && let Some(word)=tail.strip_prefix('-')
+                && !word.is_empty() && word.chars().all(char::is_alphabetic)
+            {
+                candidate["title"]=json!(full);
+            }
+            result.insert("anime_episode_candidate".into(),candidate);
+        } else if let Some(candidate)=bracketed_anime_episode_candidate(raw,&result) {
             result.insert("anime_episode_candidate".into(),candidate);
         }
     }
