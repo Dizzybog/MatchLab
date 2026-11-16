@@ -1,10 +1,11 @@
 # Collecting title tests
 
-`collect_title_tests.py` reads explicit Rust test assertions without running
-source code or calling MatchLab. It uses Python's standard library only:
+`matchlab-diagnostics collect-title-tests` reads explicit Rust test assertions
+without running source code or calling MatchLab:
 
 ```sh
-python3 scripts/diagnostics/collect_title_tests.py --output-dir /tmp/matchlab-title-audit
+cargo run --release -p matchlab-diagnostics -- collect-title-tests \
+  --output-dir /tmp/matchlab-title-audit
 ```
 
 At the reviewed source revision, its outputs contain:
@@ -31,7 +32,7 @@ Instrumentation belongs in a separate disposable worktree. The collector can
 emit its patch without modifying the selected checkout:
 
 ```sh
-python3 scripts/diagnostics/collect_title_tests.py \
+cargo run --release -p matchlab-diagnostics -- collect-title-tests \
   --output-dir /tmp/matchlab-title-audit \
   --trace-patch /tmp/matchlab-title-audit/trace.patch
 
@@ -42,7 +43,7 @@ MATCHLAB_DIAGNOSTIC_TITLE_TRACE=/tmp/matchlab-title-audit/trace.jsonl \
   RUSTFLAGS='-D warnings' \
   cargo test --manifest-path /tmp/matchlab-title-trace/Cargo.toml --workspace --locked
 
-python3 scripts/diagnostics/collect_title_tests.py \
+cargo run --release -p matchlab-diagnostics -- collect-title-tests \
   --output-dir /tmp/matchlab-title-audit \
   --trace /tmp/matchlab-title-audit/trace.jsonl
 ```
@@ -63,6 +64,6 @@ oversized inputs. Inconsistent baseline variants remain excluded and reported.
 its remaining cases can overlap the separately labeled release-300 cohort.
 
 **Parity data are local observations, not correctness labels.** The corpus marks
-them `local_remote_differential`, which `audit_api.py` reports as reference
+them `local_remote_differential`, which `matchlab-diagnostics audit-api` reports as reference
 agreement separately from source-assertion results. The input inventory is the
 complete executed sample; the restricted static expectations cover a subset.

@@ -503,8 +503,8 @@ fn screen_new(candidates: &[Json], old: &Json) -> (Json, bool) {
 fn all_three_regex_families_survive_github_intake() {
     for candidate in [technical(), tv(), patch()] {
         assert!(valid(&candidate), "{}", text(&candidate));
-        assert_eq!(parsed(&batch(&[candidate.clone()])).unwrap().len(), 1);
-        let (chosen, changed) = screen_new(&[candidate.clone()], &Json::Arr(vec![]));
+        assert_eq!(parsed(&batch(std::slice::from_ref(&candidate))).unwrap().len(), 1);
+        let (chosen, changed) = screen_new(std::slice::from_ref(&candidate), &Json::Arr(vec![]));
         assert!(changed);
         let first = &chosen.as_arr().unwrap()[0];
         assert!(first.field("automatic_activation").is_false());
@@ -597,7 +597,7 @@ fn any_parser_field_can_submit_discovery_for_review_only() {
     for field in ["title", "year", "group", "network", "languages", "seasons", "episodes", "quality", "audio"] {
         let candidate = review_discovery(field, "futuretag");
         assert!(valid(&candidate), "{field}");
-        assert_eq!(parsed(&batch(&[candidate.clone()])).unwrap().len(), 1);
+        assert_eq!(parsed(&batch(std::slice::from_ref(&candidate))).unwrap().len(), 1);
         let (queued, added) = screen_new(&[candidate], &Json::Arr(vec![]));
         assert!(added);
         assert!(queued.as_arr().unwrap()[0].field("automatic_activation").is_false());
@@ -613,8 +613,8 @@ fn any_parser_field_can_submit_discovery_for_review_only() {
 fn verified_title_boundary_proposals_are_review_only_and_private() {
     let candidate = title_boundary();
     assert!(valid(&candidate));
-    assert_eq!(parsed(&batch(&[candidate.clone()])).unwrap().len(), 1);
-    let (queued, changed) = screen_new(&[candidate.clone()], &Json::Arr(vec![]));
+    assert_eq!(parsed(&batch(std::slice::from_ref(&candidate))).unwrap().len(), 1);
+    let (queued, changed) = screen_new(std::slice::from_ref(&candidate), &Json::Arr(vec![]));
     assert!(changed);
     assert!(queued.as_arr().unwrap()[0].field("automatic_activation").is_false());
     for (key, value) in [
@@ -658,7 +658,7 @@ fn offline_historical_backfill_is_review_only() {
     }));
     let catalog = catalog();
     assert!(rules::valid_extended_rule(&old, SHA, &yes, &catalog));
-    assert_eq!(rules::parse_batch(&batch(&[old.clone()]), SHA, &yes, &catalog).unwrap().len(), 1);
+    assert_eq!(rules::parse_batch(&batch(std::slice::from_ref(&old)), SHA, &yes, &catalog).unwrap().len(), 1);
     let (proposal, changed) = screen(&Json::Arr(vec![old.clone()]), &Json::Arr(vec![]), None, &yes, &catalog).unwrap();
     assert!(changed);
     assert!(proposal.as_arr().unwrap()[0].field("automatic_activation").is_false());

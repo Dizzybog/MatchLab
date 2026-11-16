@@ -99,7 +99,7 @@ fn field_families_select_immutable_transform_template() {
         if field == "extension" {
             assert!(op.field("pattern").str_eq(r"(?i)\.mp4$"));
         }
-        let plans = build(&arr(&[rule.clone()]), &handlers, &catalog()).unwrap();
+        let plans = build(&arr(std::slice::from_ref(&rule)), &handlers, &catalog()).unwrap();
         assert_eq!(plans.as_obj().unwrap().keys().collect::<Vec<_>>(), vec![rule.field("fingerprint").as_str().unwrap()]);
     }
 }
@@ -205,7 +205,7 @@ fn source_append_contains_exact_native_template_and_regressions() {
     let (changes, _) = plan(&rule);
     let fixtures = fixtures("audio");
     let audit = eligible(&rule, &changes);
-    let (reviewed_rules, changed) = screen(&arr(&[rule]), &arr(&[]), Some(&arr(&[audit.clone()])), &yes, &catalog()).unwrap();
+    let (reviewed_rules, changed) = screen(&arr(&[rule]), &arr(&[]), Some(&arr(std::slice::from_ref(&audit))), &yes, &catalog()).unwrap();
     assert!(changed);
     let (amended, promoted, summary) = run_apply(&reviewed_rules, &arr(&[audit]), &fixtures).unwrap();
     assert_eq!(promoted.as_arr().unwrap().len(), 2);
@@ -231,7 +231,7 @@ fn tv_source_appends_two_native_handlers_without_reformatting() {
         {"title": "Different.Show.S08E10.WEB", "expected": {"seasons": [8], "episodes": [10]}},
     ]));
     let audit = eligible(&rule, &changes);
-    let (reviewed_rules, accepted) = screen(&arr(&[rule]), &arr(&[]), Some(&arr(&[audit.clone()])), &yes, &catalog()).unwrap();
+    let (reviewed_rules, accepted) = screen(&arr(&[rule]), &arr(&[]), Some(&arr(std::slice::from_ref(&audit))), &yes, &catalog()).unwrap();
     assert!(accepted);
     let (amended, _, summary) = run_apply(&reviewed_rules, &arr(&[audit]), &fixtures).unwrap();
     let rows = Json::parse(&amended).unwrap().field("handlers").as_arr().unwrap().clone();
@@ -314,7 +314,7 @@ fn proposal_of(entry: &Json) -> Json {
 #[test]
 fn single_handler_source_diff_keeps_all_other_json_identical() {
     let (source_text, entry, audit, fixtures) = fixture_candidate();
-    let (amended, tests, summary) = run_apply(&arr(&[entry.clone()]), &arr(&[audit]), &fixtures).unwrap();
+    let (amended, tests, summary) = run_apply(&arr(std::slice::from_ref(&entry)), &arr(&[audit]), &fixtures).unwrap();
     let summary = summary.unwrap();
     let before = Json::parse(&source_text).unwrap().field("handlers").as_arr().unwrap().clone();
     let after = Json::parse(&amended).unwrap().field("handlers").as_arr().unwrap().clone();
@@ -340,7 +340,7 @@ fn without_two_independent_labels_never_writes_source() {
         ("status", json!("needs_independent_evidence")),
     ] {
         let other = with(&audit, key, j(value));
-        let (output, tests, summary) = run_apply(&arr(&[entry.clone()]), &arr(&[other]), &fixtures).unwrap();
+        let (output, tests, summary) = run_apply(&arr(std::slice::from_ref(&entry)), &arr(&[other]), &fixtures).unwrap();
         assert_eq!(output, source_text);
         assert_eq!(tests, arr(&[]));
         assert!(summary.is_none());
@@ -367,7 +367,7 @@ fn invalid_source_original_fails_closed() {
 #[test]
 fn no_new_review_entry_does_not_regenerate_code() {
     let (source_text, entry, audit, fixtures) = fixture_candidate();
-    let result = apply(&arr(&[entry.clone()]), &arr(&[entry]), &arr(&[audit]), &fixtures, &source_text, &arr(&[]), &catalog());
+    let result = apply(&arr(std::slice::from_ref(&entry)), &arr(&[entry]), &arr(&[audit]), &fixtures, &source_text, &arr(&[]), &catalog());
     assert_eq!(result.unwrap(), (source_text, arr(&[]), None));
 }
 
@@ -396,8 +396,8 @@ fn integrated_proposal() -> (String, Json, Json, Json) {
 fn validated_rule_is_reviewed_and_stages_only_verified_source_patch() {
     let (source_text, proposal, audit, fixtures) = integrated_proposal();
     assert!(rules::valid_extended_rule(&proposal, SHA, &yes, &catalog()));
-    let audits = arr(&[audit.clone()]);
-    let (reviewed_rules, changed) = screen(&arr(&[proposal.clone()]), &arr(&[]), Some(&audits), &yes, &catalog()).unwrap();
+    let audits = arr(std::slice::from_ref(&audit));
+    let (reviewed_rules, changed) = screen(&arr(std::slice::from_ref(&proposal)), &arr(&[]), Some(&audits), &yes, &catalog()).unwrap();
     assert!(changed);
     assert_eq!(reviewed_rules.as_arr().unwrap().len(), 1);
     assert!(reviewed_rules.as_arr().unwrap()[0].field("automatic_activation").is_false());
@@ -411,7 +411,7 @@ fn validated_rule_is_reviewed_and_stages_only_verified_source_patch() {
     assert_eq!(after[index].field("pattern"), proposal.field("proposed_regex"));
     // Already-reviewed suggestions and proven no-ops do not open PRs.
     assert_eq!(
-        screen(&arr(&[proposal.clone()]), &reviewed_rules, Some(&audits), &yes, &catalog()).unwrap(),
+        screen(&arr(std::slice::from_ref(&proposal)), &reviewed_rules, Some(&audits), &yes, &catalog()).unwrap(),
         (reviewed_rules.clone(), false)
     );
     let noop = arr(&[with(&audit, "status", Json::from("no_effect"))]);
@@ -616,7 +616,7 @@ fn real_title_only_with_same_batch_and_matching_source_marker() {
     };
     let reports_of = |_: &Json, _: &str| Some(reports.clone());
     let comments = j(json!([[{"id": 1, "created_at": now.to_rfc3339()}, {"id": 2, "created_at": now.to_rfc3339()}]]));
-    let result = evidence::gather(&comments, &arr(&[candidate.clone()]), SHA, now, &rules_of, &reports_of);
+    let result = evidence::gather(&comments, &arr(std::slice::from_ref(&candidate)), SHA, now, &rules_of, &reports_of);
     assert_eq!(result.field(&"a".repeat(64)), &j(json!(["Some.Show.S01E01.Opus.720p"])));
 }
 

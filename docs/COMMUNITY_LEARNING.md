@@ -266,7 +266,7 @@ The trusted GitHub Action:
 
 The trusted default-branch Community Learning workflow runs daily and, only
 **after** it has saved the unprocessed proposal backlog, global fingerprint
-ledger and review artifacts, runs `scripts/community_cleanup.py --apply`.
+ledger and review artifacts, runs `matchlab-community cleanup --apply`.
 This housekeeping does not delete issue discussions or learning evidence.
 Its scope and retention are intentionally conservative:
 
@@ -292,10 +292,11 @@ Its scope and retention are intentionally conservative:
 The repository's existing `contents: write`, `issues: write` and
 `pull-requests: write` Actions permissions cover these operations; community
 **contributors** need only their existing Issues token, not branch permissions.
-The cleanup uses GitHub's REST API via the standard Python library, with no
-extra runtime or network requests during normal torrent matching.
+The cleanup is a subcommand of the same Rust `matchlab-community` executable
+that runs every Community Learning step. It calls GitHub's REST API and adds
+no runtime or network requests to normal torrent matching.
 
-To inspect pending maintenance without changing anything, run the script
+To inspect pending maintenance without changing anything, run `matchlab-community cleanup`
 without `--apply` in an authenticated checkout with `GH_REPO` and
 `GH_TOKEN` set. The planned issue/PR numbers and branch names are printed as
 JSON. To prevent automatic closure of an eligible thread/PR, add the

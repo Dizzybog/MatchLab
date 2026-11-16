@@ -80,29 +80,26 @@ impl GitHub for FakeState {
     }
 
     fn send(&mut self, method: &str, route: &str, _: Option<&Json>, missing_ok: bool) -> Result<Json> {
-        if method == "GET" {
-            if let Some(tag) = route.strip_prefix("/releases/tags/") {
+        if method == "GET"
+            && let Some(tag) = route.strip_prefix("/releases/tags/") {
                 return match self.releases.get(tag) {
                     Some(release) => Ok(release.clone()),
                     None if missing_ok => Ok(Json::Null),
                     None => Err("404".into()),
                 };
             }
-        }
-        if method == "DELETE" {
-            if let Some(number) = route.strip_prefix("/releases/assets/") {
+        if method == "DELETE"
+            && let Some(number) = route.strip_prefix("/releases/assets/") {
                 let number: i64 = number.parse().unwrap();
                 self.deleted.push(number);
                 for release in self.releases.values_mut() {
-                    if let Json::Obj(map) = release {
-                        if let Some(Json::Arr(items)) = map.get_mut("assets") {
+                    if let Json::Obj(map) = release
+                        && let Some(Json::Arr(items)) = map.get_mut("assets") {
                             items.retain(|asset| asset.field("id") != &Json::Int(i128::from(number)));
                         }
-                    }
                 }
                 return Ok(Json::Null);
             }
-        }
         panic!("unexpected {method} {route}");
     }
 
@@ -494,7 +491,7 @@ fn branch_rules_protect_active_and_manual_refs() {
     let old = branch(BRANCH);
     let closed = pull(3, BRANCH, "closed", json!({}));
     assert_eq!(cc::stale_branch(&old, &[open_pull()], REPO, now()), None);
-    assert_eq!(cc::stale_branch(&old, &[closed.clone()], REPO, now()), Some("review-closed"));
+    assert_eq!(cc::stale_branch(&old, std::slice::from_ref(&closed), REPO, now()), Some("review-closed"));
     assert_eq!(cc::stale_branch(&old, &[with(&closed, "closed_at", Json::from(iso(3)))], REPO, now()), None);
     let moved = with(&closed, "head", j(json!({"ref": BRANCH, "sha": "b".repeat(40), "repo": {"full_name": REPO}})));
     assert_eq!(cc::stale_branch(&old, &[moved], REPO, now()), None);

@@ -1,0 +1,20 @@
+[package]
+name = "matchlab-diagnostics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Developer diagnostics for MatchLab: HTTP audits, startup benchmarks and title-test collection."
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+matchlab-community = { path = "../matchlab-community" }
+chrono.workspace = true
+indexmap.workspace = true
+regex = "1.11"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde_json.workspace = true
+sha2 = "0.10"

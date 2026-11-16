@@ -1158,6 +1158,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "matchlab-diagnostics"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "indexmap",
+ "matchlab-community",
+ "regex",
+ "reqwest",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "matchlab-parser"
 version = "0.1.0"
 dependencies = [
