@@ -2036,8 +2036,14 @@ fn explicit_season_episode_range(raw: &str) -> Result<Option<(i64,i64,i64)>,Pars
 fn unmarked_anime_episode_candidate(
     raw:&str,translate_languages:bool,
 )->Result<Option<Value>,ParseError>{
-    for candidate in UNMARKED_ANIME_RANGE_RE.captures_iter(raw){
-        let caps=candidate.map_err(|e|ParseError::Regex(e.to_string()))?;
+    // Resume right after a rejected first number, not after the whole
+    // rejected pair: "Part 2 - 01 ~ 12" must still find "01 ~ 12".
+    let mut position=0usize;
+    while position<raw.len()
+        && let Some(caps)=UNMARKED_ANIME_RANGE_RE.captures_from_pos(raw,position)
+            .map_err(|e|ParseError::Regex(e.to_string()))?
+    {
+        position=caps.get(1).map_or(raw.len(),|token|token.end());
         let (Some(start_token),Some(end_token))=(caps.get(1),caps.get(2))else{continue;};
         let (Ok(start),Ok(end))=(start_token.as_str().parse::<i64>(),
             end_token.as_str().parse::<i64>()) else{continue;};
@@ -2070,11 +2076,17 @@ fn unmarked_anime_episode_candidate(
         let suffix=raw[end_token.end()..].trim_start_matches(|c:char|
             c.is_whitespace()||matches!(c,')'|']'|'.'|'_'|'-'));
         let suffix_lower=suffix.to_ascii_lowercase();
+        // "Title - 0575-0746 - Arc name" continues with a dash-separated
+        // subtitle; the numbers are still the batch, not a title.
+        let dash_subtitle=raw[end_token.end()..].starts_with(" - ")
+            && suffix.chars().next().is_some_and(char::is_alphabetic);
         if !suffix.is_empty()
             && !suffix.starts_with('[') && !suffix.starts_with('(')
             && !["batch","complete","pack","collection","ova","special","1080p",
-                "720p","2160p","480p","web","bd","bdrip","bluray","mkv","mp4"]
+                "720p","2160p","480p","web","bd","bdrip","bluray","mkv","mp4",
+                "dvd","hdtv","tvrip","sdtv","vostfr"]
                 .iter().any(|tag|suffix_lower.starts_with(tag))
+            && !dash_subtitle
             && !suffix.starts_with('+') {continue;}
         // "Title S2 [13-24]" is an *absolute* anime episode pack with
         // season context, not season 2 episodes 13..24. Strip the explicit
@@ -2107,7 +2119,7 @@ fn unmarked_anime_episode_candidate(
 // Ordinary "01-07" and "26 - 50" anime batches remain unchanged.
 static FANSUB_SEASON_DASH_EPISODE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)^\[[^]\r\n]{2,64}\][ ._]+(.+?)[ ._]+([1-9]|1[0-2])[ ]+-[ ]+(0[1-9]|[1-9][0-9])(?=$|[ ._\[(])"
+        r"(?i)^\[[^]\r\n]{2,64}\][ ._]+(.+?)[ ._]+([1-9]|1[0-2])[ ]+-[ ]+(0[1-9]|[1-9][0-9])(?=$|[ ._\[(])(?![ ]*[~～–-][ ]*[0-9])"
     ).expect("valid fansub season-dash-episode regex")
 });
 fn fansub_season_dash_episode_candidate(
@@ -2871,6 +2883,21 @@ static DASH_ANIME_EPISODE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)^(.+?)[ ._]+-[ ._]+(0*[1-9][0-9]{0,4})(?=$|[ ._\[(])")
         .expect("valid dash anime episode pattern")
 });
+// Fansub leaves also write the episode without a dash, directly before the
+// first technical tag: "[Group] Title 12 [CRC].mkv", "Title_07_(HD.720p)",
+// "Title!-05.mp4". Sequel numbers are unpadded single digits ("Title 2"),
+// so require two to four digits, and never a number followed by a year.
+// Dotted scene names ("show.0202.720p") and dated releases are excluded.
+static TAGGED_ANIME_EPISODE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(concat!(
+        // Space/underscore separated: two to four digits. Glued with a
+        // hyphen: exactly two, so product codes ("ABCD-985") are excluded.
+        r"(?i)^(.+?)(?:[ _]+(0[0-9]{1,3}|[1-9][0-9]{1,3})|(?<=[\p{Ll}!?])-(0[0-9]|[1-9][0-9]))(?:v[0-9])?",
+        r"(?=[ ._]*[\[(](?!(?:19|20)[0-9]{2}[)\]])",
+        r"|[ ._]+(?:(?:480|540|576|720|1080|2160)p|vostfr|vosta|hd|sd|bd|web|dvd|raw)(?:$|[^a-z0-9])",
+        r"|[ ._]*(?:[ .](?:mkv|mp4|avi|m4v|webm|ts))?$)"
+    )).expect("valid tagged anime episode pattern")
+});
 static PACK_SEASON_SUFFIX_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)(?:^|[ ._-])s0?([1-9][0-9]?)[ ._-]*$")
         .expect("valid anime pack season suffix")
@@ -2913,6 +2940,28 @@ fn local_anime_part_candidate(raw:&str)->Option<Value>{
     None
 }
 
+// East Asian fansub names put every field in its own bracket:
+// "[Group][Title][14][1080p]". The generic handlers already read the number
+// as the episode; mark it as a fansub absolute candidate so the matcher can
+// verify it like "[Group] Title - 14".
+static BRACKETED_ANIME_EPISODE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^(?:[\[【][^\]】\r\n]{1,64}[\]】])[^\[\]]{0,24}\[[^\[\]\r\n]{2,96}\]\[(0?[1-9]|[1-9][0-9]{1,3})(?:v[0-9])?\](?:\[|$)")
+        .expect("valid bracketed anime episode pattern")
+});
+fn bracketed_anime_episode_candidate(raw:&str,result:&Map<String,Value>)->Option<Value>{
+    if result.get("seasons").and_then(Value::as_array).is_some_and(|a|!a.is_empty())
+        || result.contains_key("episode_start"){return None;}
+    let episodes=result.get("episodes").and_then(Value::as_array)?;
+    let [only]=episodes.as_slice() else{return None};
+    let episode=only.as_i64()?;
+    let caps=BRACKETED_ANIME_EPISODE_RE.captures(raw).ok()??;
+    if caps.get(1)?.as_str().parse::<i64>().ok()!=Some(episode){return None;}
+    let title=result.get("title").and_then(Value::as_str)?.trim();
+    if title.chars().filter(|c|c.is_alphabetic()).count()<4{return None;}
+    Some(json!({"title":title,"episode":episode,"numbering":"absolute",
+        "verified":false,"bracketed":true}))
+}
+
 fn unmarked_single_anime_episode_candidate(
     raw: &str, result: &Map<String, Value>, translate_languages: bool,
 ) -> Result<Option<Value>, ParseError> {
@@ -2927,14 +2976,23 @@ fn unmarked_single_anime_episode_candidate(
     // A generic handler may already have guessed the bare episode. Retain
     // the verified-absolute hint so a parent "Season 14" cannot turn
     // "Bleach - 295" into invalid season-relative episode 295.
+    let mut tagged=false;
     let caps = if let Some(caps) = DASH_ANIME_EPISODE_RE.captures(raw)
         .map_err(|e| ParseError::Regex(e.to_string()))? {
         caps
     } else if let Some(caps) = BARE_ANIME_EPISODE_RE.captures(raw)
         .map_err(|e| ParseError::Regex(e.to_string()))? {
         caps
+    } else if result.get("episodes").and_then(Value::as_array)
+        .is_none_or(|episodes|episodes.is_empty())
+        && result.get("year").is_none()
+        && result.get("date").is_none()
+        && let Some(caps) = TAGGED_ANIME_EPISODE_RE.captures(raw)
+            .map_err(|e| ParseError::Regex(e.to_string()))? {
+        tagged=true;
+        caps
     } else { return Ok(None); };
-    let (Some(prefix),Some(number)) = (caps.get(1), caps.get(2)) else {
+    let (Some(prefix),Some(number)) = (caps.get(1), caps.get(2).or(caps.get(3))) else {
         return Ok(None);
     };
     let Some(episode) = number.as_str().parse::<i64>().ok() else {
@@ -2955,8 +3013,20 @@ fn unmarked_single_anime_episode_candidate(
     }
     // There is no additional regex scan or metadata lookup for ordinary
     // names; parse the prefix only after a cheap trailing-number candidate.
-    let title = engine_parse(name,translate_languages)?
+    let mut title = engine_parse(name,translate_languages)?
         .get("title").and_then(Value::as_str).unwrap_or(name).trim().to_owned();
+    // The generic title stops at " - ". Keep a named arc/part that follows
+    // it ("Title - Arc 20 [tags]"): the matcher needs the exact AniDB alias.
+    let spaced=name.replace('_'," ");
+    let unbracketed=spaced.rsplit(']').next().unwrap_or(&spaced).trim();
+    if tagged
+        && let Some(rest)=unbracketed.strip_prefix(title.as_str())
+        && let Some(part)=rest.strip_prefix(" - ")
+        && part.chars().filter(|c|c.is_alphabetic()).count()>=3
+        && !part.contains(['[','(','/'])
+    {
+        title=unbracketed.to_owned();
+    }
     if title.chars().filter(|c| c.is_alphabetic()).count() < 4 {
         return Ok(None);
     }
@@ -3339,6 +3409,17 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
             // The generic parser may have consumed the final endpoint as a
             // standalone episode. Do not expose a contradictory episode 400
             // while the unverified candidate actually describes 320..400.
+            // The prefix alone can lose a title tail that the complete
+            // release keeps ("Yu-Gi-Oh!" parsed without its tags is "Yu-Gi").
+            let mut candidate=candidate;
+            if let Some(full)=result.get("title").and_then(Value::as_str)
+                && let Some(short)=candidate.get("title").and_then(Value::as_str)
+                && full.len()>short.len() && full.starts_with(short)
+                && !full[short.len()..].chars().any(|c|c.is_ascii_digit())
+                && !full[short.len()..].contains(['(','['])
+            {
+                candidate["title"]=json!(full);
+            }
             // The generic handlers can leave an unmarked batch inside the
             // title ("Clevatess (24-24)"). Drop only a purely numeric and
             // punctuation remainder after the candidate's own title.
@@ -3372,9 +3453,22 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
     }
     patch_half_episode(raw, translate_languages, &mut result)?;
     if !result.contains_key("anime_episode_range_candidate") {
-        if let Some(candidate)=unmarked_single_anime_episode_candidate(
+        if let Some(mut candidate)=unmarked_single_anime_episode_candidate(
             raw,&result,translate_languages
         )? {
+            // The prefix-only parse can read a hyphenated title tail as a
+            // release group ("Kaijuu 8-gou", "Shirayuki-hime"). The complete
+            // release title keeps it; the matcher needs the exact alias.
+            if let Some(full)=result.get("title").and_then(Value::as_str)
+                && let Some(short)=candidate.get("title").and_then(Value::as_str)
+                && let Some(tail)=full.strip_prefix(short)
+                && let Some(word)=tail.strip_prefix('-')
+                && !word.is_empty() && word.chars().all(char::is_alphabetic)
+            {
+                candidate["title"]=json!(full);
+            }
+            result.insert("anime_episode_candidate".into(),candidate);
+        } else if let Some(candidate)=bracketed_anime_episode_candidate(raw,&result) {
             result.insert("anime_episode_candidate".into(),candidate);
         }
     }

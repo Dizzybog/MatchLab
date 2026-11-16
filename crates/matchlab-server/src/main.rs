@@ -416,6 +416,37 @@ fn anime_identity(db:&Connection,title:&str)->rusqlite::Result<Option<String>>{
     Ok(Some(best_imdb.clone()))
 }
 
+/// "Mob Psycho 100" and "Digimon Adventure 02" are complete titles. When
+/// the numbered form is an exact anime alias or an exact IMDb series title,
+/// its trailing number is part of the name, not an episode.
+fn numbered_title_is_work(db:&Connection,full:&str)->Result<bool,String>{
+    if exact_anime_identity(db,full)?.is_some(){return Ok(true);}
+    let key=imdb_matcher::clean_title(full);
+    if key.len()<4{return Ok(false);}
+    let words=imdb_matcher::semantic_words(full);
+    Ok(tantivy_search::title_aliases_exact(db,&key)?.into_iter()
+        .any(|alias|alias.clean==key
+            && matches!(alias.media_type.as_str(),"tvSeries"|"tvMiniSeries")
+            && imdb_matcher::semantic_words(&alias.title)==words))
+}
+
+/// Split "Title Part 2" / "Title (part 2)" / "Title 2nd Cour" style names
+/// into the first part's title and the part number.
+fn numbered_part_title(title:&str)->Option<(&str,i64)>{
+    let trimmed=title.trim().trim_end_matches([')',']']).trim_end();
+    let digit=trimmed.chars().next_back()?.to_digit(10)? as i64;
+    if !(2..=9).contains(&digit){return None;}
+    let head=trimmed[..trimmed.len()-1].trim_end_matches([' ','.','_','-']);
+    let lower=head.to_ascii_lowercase();
+    let word=["part","cour"].into_iter().find(|word|lower.ends_with(word))?;
+    let base=head[..head.len()-word.len()]
+        .trim_end_matches([' ','.','_','-','(','[',':']);
+    // The marker must be its own word and the base a real title.
+    if base.len()==head.len()-word.len()
+        || base.chars().filter(|c|c.is_alphabetic()).count()<4{return None;}
+    Some((base,digit))
+}
+
 /// Return an IMDb identity only when the release title itself is an exact,
 /// unique AniDB alias. This is stricter than the prefix-based fallback used
 /// to rank title candidates and safe for season-pack inference.
@@ -701,8 +732,13 @@ fn verified_unmapped_anime_absolute_episode(
         // A fansub release group is an independent structural signal that
         // the number is an absolute anime episode, not an unnamed local part.
         // Do not reinterpret bare "Dragon Ball Super - 80 WEB-DL".
-        || !parsed.get("group").and_then(Value::as_str)
-            .is_some_and(|group|!group.trim().is_empty())
+        || !(parsed.get("group").and_then(Value::as_str)
+                .is_some_and(|group|!group.trim().is_empty())
+            // "[Group][Title][14]" is the same fansub structure even when
+            // the generic parser does not name the group.
+            || parsed.get("anime_episode_candidate")
+                .and_then(|hint|hint.get("bracketed"))
+                .and_then(Value::as_bool)==Some(true))
     {return Ok(None);}
     let Some(hint)=parsed.get("anime_episode_candidate") else{return Ok(None)};
     if hint["numbering"]!="absolute" || hint["path_part"]==true {
@@ -741,8 +777,10 @@ fn verified_unmapped_anime_absolute_episode(
         .map_err(|e|e.to_string())? {
         // Only repair a crosswalk already proven impossible by IMDb season
         // bounds. Preserve every valid AniDB/TVDB absolute mapping.
+        // The impossible crosswalk can sit in any season: an open-ended
+        // later part also accepts an absolute number it cannot contain.
         if !allow_invalid_absolute_crosswalk
-            || existing.season!=1 || existing.episode!=absolute
+            || existing.anidb_episode!=absolute
             || season_episode_end(db,imdb,existing.season)?
                 .is_none_or(|max|existing.episode<=max)
             || winner["anime_ids"]["anidb"].as_str()!=Some(existing.anidb_id.as_str())
@@ -756,13 +794,13 @@ fn verified_unmapped_anime_absolute_episode(
                  JOIN episode_map m ON m.anidb_id=l.anidb_id
                    AND (l.tvdb_id='' OR m.tvdb_id=l.tvdb_id)
                  WHERE l.imdb_id=?1 AND m.anidb_id=?2
-                   AND m.anidb_season>0 AND m.tvdb_season=1
-                   AND m.start<=1 AND m.end<=0 AND m.offset=0
+                   AND m.anidb_season>0 AND m.tvdb_season=?3
+                   AND m.start<=1 AND m.end<=0
                    AND TRIM(m.map)='')
               AND NOT EXISTS(SELECT 1 FROM episode_map m
-                 WHERE m.anidb_id=?2 AND m.tvdb_season=1
+                 WHERE m.anidb_id=?2 AND m.tvdb_season=?3
                    AND (m.end>0 OR TRIM(m.map)<>''))",
-            rusqlite::params![imdb,&existing.anidb_id],|row|row.get(0)
+            rusqlite::params![imdb,&existing.anidb_id,existing.season],|row|row.get(0)
         ).map_err(|e|e.to_string())?;
         if weak_default_only==0{return Ok(None);}
     }
@@ -781,7 +819,15 @@ fn verified_unmapped_anime_absolute_episode(
     let mapped_target=episode_crosswalk::resolve_season(db,imdb,season,episode)
         .map_err(|e|e.to_string())?;
     if let Some(ref target)=mapped_target {
-        let original_anidb=winner["anime_ids"]["anidb"].as_str();
+        // The release names a work through its title. The IMDb record's
+        // single stored AniDB ID can be any linked work (often the latest
+        // season) and is only the fallback when the alias is not unique.
+        // Optional evidence: an unavailable alias index leaves the
+        // stored ID as the only identification.
+        let named_work=anime_title::exact_alias_work(db,imdb,title)
+            .ok().flatten();
+        let original_anidb=named_work.as_deref()
+            .or(winner["anime_ids"]["anidb"].as_str());
         if original_anidb==Some(target.anidb_id.as_str()) {
             // Same AniDB work: never reinterpret its explicit local episode
             // 43 as the release's absolute episode 145.
@@ -801,7 +847,24 @@ fn verified_unmapped_anime_absolute_episode(
                 rusqlite::params![imdb,&target.anidb_id,season],
                 |row|row.get(0)
             ).map_err(|e|e.to_string())?;
-            if bounded==0{return Ok(None);}
+            // An open-ended default also identifies the season when this
+            // directly linked work is the ONLY one mapped to it and starts
+            // it at episode one; IMDb's complete season counts, checked
+            // above, bound the episode.
+            let sole_season_starter:i64=db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM anime_series_map l
+                        JOIN episode_map m ON m.anidb_id=l.anidb_id
+                        WHERE l.imdb_id=?1 AND l.anidb_id=?2
+                          AND m.anidb_season>0 AND m.tvdb_season=?3
+                          AND m.start<=1 AND m.offset=0 AND TRIM(m.map)='')
+                    AND NOT EXISTS(SELECT 1 FROM anime_series_map l
+                        JOIN episode_map m ON m.anidb_id=l.anidb_id
+                        WHERE l.imdb_id=?1 AND l.anidb_id<>?2
+                          AND m.anidb_season>0 AND m.tvdb_season=?3)",
+                rusqlite::params![imdb,&target.anidb_id,season],
+                |row|row.get(0)
+            ).map_err(|e|e.to_string())?;
+            if bounded==0 && sole_season_starter==0{return Ok(None);}
             // Verify the reverse direction too: the local AniDB identity
             // must map back to exactly this IMDb season and episode.
             let reverse=episode_crosswalk::resolve_anidb(
@@ -818,6 +881,53 @@ fn verified_unmapped_anime_absolute_episode(
         return Ok(None);
     }
     Ok(Some((season,episode)))
+}
+
+/// AniDB counts a broadcast "episode 0" prologue as its episode 1, while
+/// releases and IMDb number the regular episodes from 1. When Anime-Lists
+/// maps exactly that first AniDB episode to a special and the rest with
+/// offset -1, and IMDb's season has exactly the remaining episode count, a
+/// bare fansub number N is the official episode N (AniDB N+1), not AniDB N.
+/// An explicit season, a range, or AniDB's own last number are untouched.
+fn official_numbering_after_prologue(
+    db:&Connection,winner:&mut Value,parsed:&serde_json::Map<String,Value>,
+)->Result<(),String>{
+    let parsed_episodes=numbers(parsed.get("episodes"));
+    let [number]=parsed_episodes.as_slice() else{return Ok(())};
+    let number=*number;
+    if !numbers(parsed.get("seasons")).is_empty()
+        || parsed.contains_key("episode_start")
+        || winner.get("episode_range").is_some_and(|range|!range.is_null())
+        || winner["episode"].as_i64()!=Some(number-1)
+        || winner.pointer("/anime/episode").and_then(Value::as_i64)!=Some(number)
+    {return Ok(());}
+    let (Some(imdb),Some(season),Some(anidb))=(
+        winner["imdb_id"].as_str().map(str::to_owned),winner["season"].as_i64(),
+        winner.pointer("/anime/anidb_id").and_then(Value::as_str).map(str::to_owned),
+    )else{return Ok(())};
+    let regular_end:Option<i64>=db.query_row(
+        "SELECT regular.end FROM episode_map regular
+         JOIN episode_map prologue ON prologue.anidb_id=regular.anidb_id
+         WHERE regular.anidb_id=?1 AND regular.anidb_season=1
+           AND regular.tvdb_season=?2 AND regular.start=2 AND regular.offset=-1
+           AND TRIM(regular.map)='' AND regular.end>2
+           AND prologue.anidb_season=1 AND prologue.tvdb_season=0
+           AND prologue.map LIKE ';1-%' AND prologue.map NOT LIKE ';1-%;%-%'
+           AND (SELECT COUNT(*) FROM episode_map other
+                WHERE other.anidb_id=regular.anidb_id AND other.anidb_season=1)=2",
+        rusqlite::params![anidb,season],|row|row.get(0))
+        .optional().map_err(|e|e.to_string())?;
+    let Some(regular_end)=regular_end else{return Ok(())};
+    let official_count=regular_end-1;
+    if number>official_count
+        || season_episode_end(db,&imdb,season)?!=Some(official_count)
+    {return Ok(());}
+    let Some(asid)=episode_crosswalk::canonical_asid(&anidb,number+1) else{return Ok(())};
+    winner["episode"]=json!(number);
+    winner["sid"]=json!(format!("{imdb}:{season}:{number}"));
+    winner["anime"]=json!({"anidb_id":anidb,"episode":number+1,"asid":asid});
+    winner["coordinate_fallback"]=json!("official_numbering_after_prologue");
+    Ok(())
 }
 
 /// Reconcile a selected IMDb series with explicit single-release coordinates.
@@ -859,14 +969,34 @@ fn reconcile_series_coordinates(
         // source is an exact fansub release and the original ASID matches
         // the parsed absolute coordinate. Never publish that stale ASID
         // as proof of the newly inferred IMDb coordinate.
+        // IMDb can list a later cour of one TVDB season as its own next
+        // season. When this season ends exactly where the cour begins, the
+        // same broadcast episode is the cour-local episode of the next IMDb
+        // season, and the verified ASID is unchanged.
+        let imdb_id=winner["imdb_id"].as_str().unwrap_or_default().to_owned();
+        if let (Some(mapped_season),Some(mapped_episode),Some(anidb),Some(local))=(
+                season,episode,
+                winner.pointer("/anime/anidb_id").and_then(Value::as_str),
+                winner.pointer("/anime/episode").and_then(Value::as_i64))
+            && let Some(offset)=anime_title::imdb_split_offset(
+                db,&imdb_id,anidb,mapped_season).ok().flatten()
+            && mapped_episode-offset==local
+            && season_episode_end(db,&imdb_id,mapped_season+1)?
+                .is_some_and(|last|local<=last)
+        {
+            winner["season"]=json!(mapped_season+1);
+            winner["episode"]=json!(local);
+            winner["sid"]=json!(format!("{imdb_id}:{}:{local}",mapped_season+1));
+            winner["coordinate_fallback"]=json!("imdb_season_split_at_cour");
+            return Ok(());
+        }
         let raw_absolute=parsed.get("anime_episode_candidate")
             .and_then(|candidate|candidate["episode"].as_i64());
         let identified=winner.pointer("/anime/anidb_id").and_then(Value::as_str);
         let expected_asid=identified.and_then(|id|raw_absolute
             .and_then(|absolute|episode_crosswalk::canonical_asid(id,absolute)));
         let original_asid=winner.pointer("/anime/asid").and_then(Value::as_str);
-        let repaired=if season==Some(1) && episode==raw_absolute
-            && expected_asid.as_deref()==original_asid
+        let repaired=if expected_asid.as_deref()==original_asid
             && identified==winner["anime_ids"]["anidb"].as_str(){
             let mut unverified=winner.clone();
             unverified["season"]=Value::Null;
@@ -927,7 +1057,29 @@ fn reconcile_series_coordinates(
                         |row|row.get::<_,i64>(0)
                     ).map_err(|e|e.to_string())? != 0
                 }else{false};
-                if imdb_max.is_some_and(|end|ep>end)||unverified_anime {
+                // "S01E147" on a long-running anime is an absolute number
+                // under a nominal season-one marker. Accept it only when
+                // the absolute crosswalk maps exactly that AniDB episode to
+                // a later season that IMDb knows to contain it.
+                let absolute_marker=if parsed_season==Some(1)
+                    && imdb_max.is_some_and(|end|ep>end) {
+                    episode_crosswalk::resolve_absolute(db,&imdb,ep)
+                        .map_err(|e|e.to_string())?
+                        .filter(|mapped|mapped.anidb_episode==ep && mapped.season>1)
+                }else{None};
+                let absolute_marker=match absolute_marker {
+                    Some(mapped) if season_episode_end(db,&imdb,mapped.season)?
+                        .is_some_and(|end|mapped.episode<=end)=>Some(mapped),
+                    _=>None,
+                };
+                if let Some(mapped)=absolute_marker {
+                    season=Some(mapped.season);
+                    episode=Some(mapped.episode);
+                    winner["anime"]=json!({"anidb_id":mapped.anidb_id,
+                        "episode":mapped.anidb_episode,
+                        "asid":format!("{}:{}",mapped.anidb_id,mapped.anidb_episode)});
+                    winner["coordinate_fallback"]=json!("season_one_marker_is_absolute");
+                }else if imdb_max.is_some_and(|end|ep>end)||unverified_anime {
                     winner["coordinate_fallback_blocked"]=json!(
                         "episode_exceeds_known_bounds_or_unresolved_anime_crosswalk");
                 }else{
@@ -956,12 +1108,16 @@ fn reconcile_series_coordinates(
         (Some(s),Some(e))=>json!(format!("{imdb}:{s}:{e}")),
         _=>json!(imdb),
     };
-    if winner["coordinate_fallback"]=="complete_imdb_absolute_anime"
-        || winner["coordinate_fallback"]=="repaired_imdb_absolute_anime"{
-        // Preserve a verified ASID when an IMDb-season crosswalk exists.
-        // Otherwise keep ASID null; never invent an AniDB episode number.
-        enrich_selected_anime_episode(db,winner)?;
-    }
+    // Preserve a verified ASID when an IMDb-season crosswalk exists for the
+    // final coordinate, whichever lane selected it ("Title S01E21" in a
+    // later cour as much as a repaired absolute number). Otherwise keep
+    // ASID null; never invent an AniDB episode number.
+    let inferred=matches!(winner["coordinate_fallback"].as_str(),
+        Some("complete_imdb_absolute_anime"|"repaired_imdb_absolute_anime"));
+    let enriched=enrich_selected_anime_episode(db,winner);
+    // The enrichment is additive for an already final coordinate: missing
+    // crosswalk tables mean "no ASID", not a failed match.
+    if inferred {enriched?;}
     Ok(())
 }
 
@@ -1305,11 +1461,13 @@ fn verified_unmarked_anime_range_imdb(
 /// already-chosen canonical series. Preserve the normal IMDb ranking.
 fn verified_unmarked_single_anime_imdb(
     db:&Connection,candidate_title:&str,raw_title:&str,
-    year:Option<i32>,episode:i64,
+    year:Option<i32>,episode:i64,numbered_title_is_alias:bool,
 )->Result<Option<String>,String>{
     let key=imdb_matcher::clean_title(candidate_title);
     if key.is_empty() ||(!strict_match_mode()&&key.len()<4)
         ||!(1..=99_999).contains(&episode){return Ok(None);}
+    // A non-Latin title that keeps only digits has lost its identity words.
+    if imdb_matcher::numeric_key_lost_title_words(&key,candidate_title){return Ok(None);}
     let aliases=if strict_match_mode(){
         tantivy_search::anime_aliases_exact(db,candidate_title)?
     }else{tantivy_search::anime_aliases(db,&key,4)?};
@@ -1324,8 +1482,25 @@ fn verified_unmarked_single_anime_imdb(
         .map_err(|e|e.to_string())?;
     let Some(winner)=ranked.first()else{return Ok(None)};
     if !exact_ids.contains(&winner.imdb_id){return Ok(None);}
-    let Some(mapped)=episode_crosswalk::resolve_absolute(db,&winner.imdb_id,episode)
-        .map_err(|e|e.to_string())? else{return Ok(None)};
+    // Several AniDB works of one IMDb series can each claim an absolute
+    // number ("Dragon Ball Kai" 2009 and 2014). The exact alias then names
+    // the part, exactly as it does for the dashed "Title - 07" form.
+    let mapped=match episode_crosswalk::resolve_absolute(db,&winner.imdb_id,episode)
+        .map_err(|e|e.to_string())? {
+        Some(mapped)=>mapped,
+        // "Digimon Adventure 02" is itself a work: its number is not an
+        // episode of "Digimon Adventure", so the part fallback stays off.
+        None if numbered_title_is_alias=>return Ok(None),
+        // A bounded AniDB work that independently proves this episode owns
+        // the ambiguous title (the 2020 "Digimon Adventure:" remake).
+        None if anidb_matcher::match_absolute(db,candidate_title,episode)?.is_some()
+            =>return Ok(None),
+        None=>match anime_title::resolve_episode_from_exact_part_title(
+            db,&winner.imdb_id,candidate_title,episode).map_err(|e|e.to_string())? {
+            Some(mapped)=>mapped,
+            None=>return Ok(None),
+        },
+    };
     if !candidate_has_episode(db,&winner.imdb_id,mapped.season,mapped.episode)?{
         return Ok(None);
     }
@@ -1400,6 +1575,40 @@ fn diagnose_with_policy(
         }
     }
 
+    // "<first part> Part 2 - 01 ~ 12": a batch of a numbered part. Both
+    // endpoints must resolve inside the same AniDB work and IMDb season;
+    // the batch then becomes an ordinary season-relative range of the
+    // first part's title, verified by the existing season crosswalk.
+    if req.series!=Some(false)
+        && let Some(hint)=parsed_value.get("anime_episode_range_candidate")
+        && let (Some(name),Some(start),Some(end))=(
+            hint.get("title").and_then(Value::as_str),
+            hint.get("start").and_then(Value::as_i64),
+            hint.get("end").and_then(Value::as_i64))
+        && end>start
+        && let Some((base,part))=numbered_part_title(name)
+        && let Some(imdb)=exact_anime_identity(&db,base)?
+        && let Some(first)=anime_title::resolve_numbered_part(
+            &db,&imdb,base,part,start).map_err(|e|e.to_string())?
+        && let Some(last)=anime_title::resolve_numbered_part(
+            &db,&imdb,base,part,end).map_err(|e|e.to_string())?
+        && first.season==last.season && first.anidb_id==last.anidb_id
+        && last.episode-first.episode==end-start
+    {
+        let base=base.to_owned();
+        if let Some(parsed)=parsed_value.as_object_mut(){
+            parsed.remove("anime_episode_range_candidate");
+            parsed.insert("title".into(),json!(base));
+            parsed.insert("seasons".into(),json!([first.season]));
+            parsed.insert("episodes".into(),json!([first.episode]));
+            parsed.insert("episode_start".into(),json!(first.episode));
+            parsed.insert("episode_end".into(),json!(last.episode));
+            parsed.insert("episode_count".into(),json!(end-start+1));
+            parsed.insert("episode_range_numbering".into(),json!("season"));
+            parsed.insert("anime_title_verified".into(),json!(true));
+            parsed.insert("anime_numbered_part".into(),json!(part));
+        }
+    }
     // An unmarked range (Title 01-07, (01-25), 01~12) is not authoritative.
     // The parser exposes a tentative title and endpoints, without changing
     // regular release parsing. Use it only when Tantivy finds an exact,
@@ -1588,8 +1797,15 @@ fn diagnose_with_policy(
         let mut verified_title=None;
         if req.series!=Some(false) && (1..=12).contains(&season)
             && (1..=99).contains(&episode) {
-            for candidate_title in [format!("{hint_title} {season}"),hint_title.clone()] {
+            for (suffixed,candidate_title) in [
+                (true,format!("{hint_title} {season}")),(false,hint_title.clone())] {
                 if let Some(imdb)=exact_anime_identity(&db,&candidate_title)? {
+                    // A numbered alias proves the season only when its own
+                    // AniDB work is mapped there. "Title Part 2" can be the
+                    // second cour of season one, not season two.
+                    if suffixed && !anime_title::numbered_alias_names_season(
+                        &db,&imdb,&candidate_title,season)
+                        .map_err(|e|e.to_string())? {continue;}
                     let valid=season_episode_end(&db,&imdb,season)?
                         .is_some_and(|end|episode<=end)
                         || episode_crosswalk::resolve_season(&db,&imdb,season,episode)
@@ -1642,6 +1858,44 @@ fn diagnose_with_policy(
                 parsed.insert("seasons".into(),json!([]));
                 parsed.insert("anime_title_verified".into(),json!(true));
             }
+        }
+    }
+    if let Some((full,short))=parsed_value.get("title").and_then(Value::as_str)
+        .zip(parsed_value.pointer("/anime_episode_candidate/title").and_then(Value::as_str))
+        && full!=short
+        && parsed_value.get("episodes").and_then(Value::as_array).is_none_or(Vec::is_empty)
+        && numbered_title_is_work(&db,full)?
+        && let Some(parsed)=parsed_value.as_object_mut()
+    {
+        parsed.remove("anime_episode_candidate");
+    }
+    // "<first part> Part 2 - 05": the numbered part is a separate AniDB work
+    // inside the same IMDb season. Resolve it from the verified base title
+    // before the generic paths read "Part 2" as a season or drop it.
+    if verified_path_part.is_none() && req.series!=Some(false)
+        && parsed_value.get("anime_episode_range_candidate").is_none()
+        && parsed_value.get("episode_start").is_none()
+        && let Some(hint)=parsed_value.get("anime_episode_candidate")
+        && let (Some(name),Some(episode))=(
+            hint.get("title").and_then(Value::as_str),
+            hint.get("episode").and_then(Value::as_i64))
+        && let Some((base,part))=numbered_part_title(name)
+        && let Some(imdb)=exact_anime_identity(&db,base)?
+        && let Some(mapped)=anime_title::resolve_numbered_part(
+            &db,&imdb,base,part,episode).map_err(|e|e.to_string())?
+    {
+        let name=name.to_owned();
+        verified_path_part=Some(json!({
+            "imdb_id":mapped.imdb_id,"season":mapped.season,
+            "episode":mapped.episode,"anidb_id":mapped.anidb_id,
+            "anidb_episode":mapped.anidb_episode
+        }));
+        if let Some(parsed)=parsed_value.as_object_mut(){
+            parsed.insert("title".into(),json!(name));
+            parsed.insert("episodes".into(),json!([episode]));
+            parsed.insert("seasons".into(),json!([]));
+            parsed.insert("anime_title_verified".into(),json!(true));
+            parsed.insert("anime_numbered_part".into(),json!(part));
         }
     }
     // A named anime part may interpret S2/P2 *locally*. The old episode
@@ -1746,10 +2000,15 @@ fn diagnose_with_policy(
         // Preserve the existing deterministic IMDb-verification decision
         // regardless of whether the new independent AniDB check succeeds.
         // That retains all legacy ranking and anime-priority safeguards.
+        let numbered_title_is_alias=match parsed_value.get("title").and_then(Value::as_str){
+            Some(full) if full!=candidate_title=>numbered_title_is_work(&db,full)?,
+            _=>false,
+        };
         verified_absolute_episode_imdb=verified_unmarked_single_anime_imdb(
             &db,&candidate_title,&req.title,
             req.year.or_else(||parsed_value.get("year")
-                .and_then(Value::as_i64).map(|n|n as i32)),episode)?;
+                .and_then(Value::as_i64).map(|n|n as i32)),episode,
+            numbered_title_is_alias)?;
         // An already verified IMDb winner should not incur another AniDB
         // lookup or be invalidated by a competing anime title alias.
         if verified_absolute_episode_imdb.is_none(){
@@ -2548,6 +2807,24 @@ fn diagnose_with_policy(
             }else if verified_anime_range_imdb.as_ref()
                 .is_none_or(|verified|verified==&imdb_id) {
                 let mut range=mapped_absolute_range(&db,&imdb_id,start,end)?;
+                // Several AniDB works of one IMDb series can each claim the
+                // same absolute numbers ("Baki The Grappler 1-3" vs. its
+                // second series). The verified exact alias names one part;
+                // accept its interval only when every episode is mapped.
+                if range["complete"]!=true
+                    && verified_anime_range_imdb.as_deref()==Some(imdb_id.as_str())
+                    && seasons.is_empty()
+                    && let Some(part_season)=anime_title::season_from_title(
+                        &db,&imdb_id,title).map_err(|e|e.to_string())?
+                {
+                    let named=mapped_season_episode_range(
+                        &db,&imdb_id,title,part_season,start,end,false,true)?;
+                    if named["complete"]==true
+                        && named["start_season"].as_i64()==Some(part_season)
+                        && named["end_season"].as_i64()==Some(part_season) {
+                        range=named;
+                    }
+                }
                 // Only after the authoritative AniDB mapping has no
                 // endpoints may imported IMDb metadata resolve a clearly
                 // marked EP01-24 range for a non-anime show. An explicit
@@ -2704,6 +2981,7 @@ fn diagnose_with_policy(
     }
     if let Some(winner)=selected.as_mut(){
         reconcile_series_coordinates(&db,winner,parsed)?;
+        official_numbering_after_prologue(&db,winner,parsed)?;
     }
     let reason = if rejected_future_airdate&&selected.is_none(){
         "Release date predates the series without a verified episode airdate"
@@ -2726,6 +3004,37 @@ fn diagnose_with_policy(
 /// assigned *after* candidate ranking (for example Cinemeta airdate), so
 /// ensure crosswalk enrichment runs after those steps too. Do not invent an
 /// ASID for non-anime, incomplete ranges, or unverified coordinates.
+/// The season resolver follows Trakt when it lists a later cour as its own
+/// season. IMDb often keeps the cour inside the TVDB season instead
+/// ("Spy x Family" S01 has 25 episodes; its second cour starts at offset
+/// 12). When IMDb's season is known to contain the episode, the directly
+/// linked cour with the greatest positive offset below it owns the episode.
+/// Two cours at that offset, or an episode outside the cour, publish nothing.
+fn later_cour_in_imdb_season(
+    db:&Connection,imdb:&str,season:i64,episode:i64,
+)->Result<Option<episode_crosswalk::Episode>,String>{
+    if !season_episode_end(db,imdb,season)?.is_some_and(|last|episode<=last){
+        return Ok(None);
+    }
+    let mut stmt=db.prepare("SELECT DISTINCT m.anidb_id,m.offset,m.start,m.end
+        FROM anime_series_map l JOIN episode_map m ON m.anidb_id=l.anidb_id
+        WHERE l.imdb_id=?1 AND m.anidb_season>0 AND m.tvdb_season=?2
+          AND TRIM(m.map)='' AND m.offset>0 AND m.offset<?3
+        ORDER BY m.offset DESC LIMIT 2").map_err(|e|e.to_string())?;
+    let cours=stmt.query_map(rusqlite::params![imdb,season,episode],|row|Ok((
+        row.get::<_,String>(0)?,row.get::<_,i64>(1)?,
+        row.get::<_,i64>(2)?,row.get::<_,i64>(3)?)))
+        .map_err(|e|e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;
+    let Some((anidb,offset,start,end))=cours.first() else{return Ok(None)};
+    if cours.get(1).is_some_and(|other|other.1==*offset){return Ok(None);}
+    let local=episode-offset;
+    if local<(*start).max(1) || (*end>0 && local>*end)
+        || episode_crosswalk::canonical_asid(anidb,local).is_none(){return Ok(None);}
+    Ok(Some(episode_crosswalk::Episode{imdb_id:imdb.to_owned(),season,episode,
+        anidb_id:anidb.clone(),anidb_episode:local}))
+}
+
 fn enrich_selected_anime_episode(
     db:&Connection,winner:&mut Value,
 )->Result<(),String>{
@@ -2741,11 +3050,34 @@ fn enrich_selected_anime_episode(
     if !metadata_import::valid_imdb_id(&imdb)
         || !valid_sid_coordinate(season,episode)
         || season<=0||episode<=0{return Ok(());}
-    let Some(mapped)=episode_crosswalk::resolve_season(
-        db,&imdb,season,episode).map_err(|e|e.to_string())?
-        else{return Ok(())};
+    let mapped=match episode_crosswalk::resolve_season(
+        db,&imdb,season,episode).map_err(|e|e.to_string())? {
+        Some(mapped)=>mapped,
+        None=>match later_cour_in_imdb_season(db,&imdb,season,episode)
+            .ok().flatten() {
+            Some(mapped)=>mapped,
+            None=>return Ok(()),
+        },
+    };
     if mapped.imdb_id!=imdb||mapped.season!=season||mapped.episode!=episode{
         return Ok(());
+    }
+    // A coordinate inferred from IMDb season lengths is only described by
+    // the TVDB-based crosswalk when both agree on where the season begins:
+    // the work starts the season (local == episode) or is a later cour with
+    // that positive offset. A work spanning several TVDB seasons with a
+    // negative offset (Gintama's TVDB S03E10 is its absolute 109, while
+    // IMDb S03 is another series) would attach an unrelated ASID.
+    if matches!(winner["coordinate_fallback"].as_str(),
+        Some("complete_imdb_absolute_anime"|"repaired_imdb_absolute_anime")) {
+        let cour_offset=episode-mapped.anidb_episode;
+        let agrees=cour_offset==0 || (cour_offset>0 && db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM episode_map m
+                WHERE m.anidb_id=?1 AND m.anidb_season>0 AND m.tvdb_season=?2
+                  AND m.offset=?3 AND TRIM(m.map)='')",
+            rusqlite::params![&mapped.anidb_id,season,cour_offset],
+            |row|row.get::<_,i64>(0)).map_err(|e|e.to_string())?!=0);
+        if !agrees{return Ok(());}
     }
     winner["anime"]=json!({
         "anidb_id":mapped.anidb_id,
@@ -2773,7 +3105,7 @@ static TORRENT_MATCH_CACHE:OnceLock<query_cache::QueryCache<Diagnostic>>=OnceLoc
 // A semantic matcher change must invalidate old persistent ML match results,
 // even when metadata.sqlite3, learned regex rules and the strict-mode flag
 // are unchanged. Bump this revision when altering title/year eligibility.
-const MATCHER_SEMANTIC_REVISION:&str="year-identity-and-release-group-boundaries-v6";
+const MATCHER_SEMANTIC_REVISION:&str="anidb-parts-and-numbered-titles-v7";
 fn scoped_match_generation(metadata:&str,strict:bool)->String{
     format!("{metadata}:matcher={MATCHER_SEMANTIC_REVISION}:strict={strict}")
 }
@@ -3906,6 +4238,163 @@ mod tests {
         let leaf=bottom_up_imdb_path_match(&db,&parsed,None,true,1,true,true,|hits|hits)
             .unwrap().expect("leaf named release must win");
         assert_eq!(leaf.1[0].imdb_id,"ttgein");
+    }
+
+    #[test]
+    fn anidb_parts_prologues_and_numbered_titles_agree_with_parsed_episodes(){
+        let stamp=std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!(
+            "matchlab-anidb-parts-{}-{stamp}.sqlite3",std::process::id()));
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,
+                anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES
+                ('tt9200001','Orb Saga Z Kai','orbsagazkai',2009,'series','',1,0,'tvSeries'),
+                ('tt9200001','Orb Saga Kai','orbsagakai',2009,'series','JP',0,3,'tvSeries'),
+                ('tt9200002','Orb Saga','orbsaga',1986,'series','',1,0,'tvSeries'),
+                ('tt9200003','Spy Home','spyhome',2022,'series','',1,0,'tvSeries'),
+                ('tt9200004','Cour Split','coursplit',2023,'series','',1,0,'tvSeries'),
+                ('tt9200005','Blade Works','bladeworks',2014,'series','',1,0,'tvSeries'),
+                ('tt9200006','Mob Hero 100','mobhero100',2016,'series','',1,0,'tvSeries'),
+                ('tt9200007','Grappler Tale','grapplertale',2001,'series','',1,0,'tvSeries'),
+                ('tt9200008','Kaiju Unit-gou','kaijuunitgou',2024,'series','',1,0,'tvSeries'),
+                ('tt9200009','Hero School','heroschool',2016,'series','',1,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt9200001',2),('tt9200002',1),('tt9200003',2),
+                ('tt9200004',2),('tt9200005',1),('tt9200006',1),('tt9200007',2),
+                ('tt9200008',2),('tt9200009',2);
+            INSERT INTO anime_ids VALUES('tt9200008','anidb','662');
+            INSERT INTO season_episodes VALUES
+                ('tt9200001',1,98,98),('tt9200001',2,69,69),('tt9200002',1,153,153),
+                ('tt9200003',1,25,25),('tt9200003',2,12,12),
+                ('tt9200004',1,12,12),('tt9200004',2,12,12),
+                ('tt9200005',1,12,12),('tt9200006',1,12,12),
+                ('tt9200007',1,24,24),('tt9200007',2,24,24),
+                ('tt9200008',1,12,12),('tt9200008',2,11,11),
+                ('tt9200009',1,13,13),('tt9200009',2,25,25);
+            INSERT INTO imdb_ratings VALUES('tt9200001',100),('tt9200002',90000),
+                ('tt9200003',100),('tt9200004',100),('tt9200005',100),
+                ('tt9200006',100),('tt9200007',100);
+            INSERT INTO anime_series_map VALUES
+                ('tt9200001','601','tvorb',1),('tt9200001','602','tvorb',2),
+                ('tt9200002','600','tvorig',1),
+                ('tt9200003','611','tvspy',1),('tt9200003','612','tvspy',2),
+                ('tt9200003','613','tvspy',3),
+                ('tt9200004','621','tvcour',1),('tt9200004','622','tvcour',0),
+                ('tt9200005','631','tvblade',1),('tt9200006','641','tvmob',1),
+                ('tt9200007','651','tvgrap',1),('tt9200007','652','tvgrap',2),
+                ('tt9200008','661','tvkaiju',1),('tt9200008','662','tvkaiju',0),
+                ('tt9200009','671','tvhero',1),('tt9200009','672','tvhero',2);
+            INSERT INTO anidb_titles VALUES
+                ('600','Orb Saga','orbsaga','main','en'),
+                ('601','Orb Saga Kai','orbsagakai','main','en'),
+                ('602','Orb Saga Kai (2014)','orbsagakai2014','main','en'),
+                ('611','Spy Home','spyhome','main','en'),
+                ('612','Spy Home Part 2','spyhomepart2','syn','en'),
+                ('613','Spy Home Season 2','spyhomeseason2','official','en'),
+                ('621','Cour Split','coursplit','main','en'),
+                ('622','Cour Split Part 2','coursplitpart2','official','en'),
+                ('631','Blade Works','bladeworks','main','en'),
+                ('641','Mob Hero 100','mobhero100','main','en'),
+                ('651','Grappler Tale','grapplertale','main','en'),
+                ('652','Grappler Tale Tournament','grapplertaletournament','main','en'),
+                ('661','Kaiju Unit Gou','kaijuunitgou','main','en'),
+                ('662','Kaiju Unit Gou (2025)','kaijuunitgou2025','main','en'),
+                ('671','Hero School','heroschool','main','en'),
+                ('672','Hero School (2017)','heroschool2017','main','en');
+            INSERT INTO episode_map VALUES
+                ('600','tvorig',1,1,0,0,0,''),
+                ('601','tvorb',1,1,0,0,0,''),('602','tvorb',1,2,0,0,0,''),
+                ('611','tvspy',1,1,1,12,0,''),('612','tvspy',1,1,1,0,12,''),
+                ('613','tvspy',1,2,0,0,0,''),
+                ('621','tvcour',1,1,1,12,0,''),('622','tvcour',1,1,1,0,12,''),
+                ('631','tvblade',1,0,0,0,0,';1-1;'),('631','tvblade',1,1,2,13,-1,''),
+                ('641','tvmob',1,1,1,12,0,''),
+                ('651','tvgrap',1,1,0,0,0,''),('652','tvgrap',1,2,0,0,0,''),
+                ('661','tvkaiju',1,1,1,12,0,''),('662','tvkaiju',1,2,1,11,0,''),
+                ('671','tvhero',1,1,0,0,0,''),('672','tvhero',1,2,0,0,0,'');").unwrap();
+        tantivy_search::warmup(&db).unwrap();
+        drop(db);
+        let public=|release:&str|public_match_response(diagnose(&path,&MatchRequest{
+            title:release.into(),year:None,series:None}).unwrap().selected);
+        for (release,sid_start,sid_end,asid_start,asid_end) in [
+            // An exact alias whose primary IMDb name is longer is not a
+            // shortened name of the unrelated prefix "Orb Saga"; two AniDB
+            // works of the series make absolute 7 ambiguous, the alias not.
+            ("Orb Saga Kai_07_(HD.720p)",
+                "tt9200001:1:7","tt9200001:1:7","601:7","601:7"),
+            ("[Group] Orb Saga Kai 07 [3EB3C732].mkv",
+                "tt9200001:1:7","tt9200001:1:7","601:7","601:7"),
+            // "Part 2" is the second AniDB work of season one, with local
+            // or season-continuing numbering, never IMDb season two.
+            ("[Group] Spy Home Part 2 - 05 [720p][94588851].mkv",
+                "tt9200003:1:17","tt9200003:1:17","612:5","612:5"),
+            ("[Group] Spy Home Part 2 - 25 [720p][94588851].mkv",
+                "tt9200003:1:25","tt9200003:1:25","612:13","612:13"),
+            // IMDb ends season one exactly where the second cour begins.
+            ("[Group] Cour Split Part 2 - 12 [1080p][3EBCAABA].mkv",
+                "tt9200004:2:12","tt9200004:2:12","622:12","622:12"),
+            // AniDB episode 1 is the broadcast prologue "episode 0".
+            ("[Group] Blade Works - 05 [AF51767D].mkv",
+                "tt9200005:1:5","tt9200005:1:5","631:6","631:6"),
+            ("[Group] Blade Works - 13 [AF51767D].mkv",
+                "tt9200005:1:12","tt9200005:1:12","631:13","631:13"),
+            // The exact alias names the first of two works that both
+            // accept absolute episodes 1..3.
+            ("[Group]Grappler Tale  1-3 Dvd-rip",
+                "tt9200007:1:1","tt9200007:1:3","651:1","651:3"),
+        ] {
+            assert_eq!(public(release),json!({"sid_start":sid_start,"sid_end":sid_end,
+                "asid_start":asid_start,"asid_end":asid_end}),"{release}");
+        }
+        for (release,sid_start,sid_end,asid_start,asid_end) in [
+            // A running number continues into the next season, whose own
+            // AniDB work restarts at 1. The title names the first work even
+            // though the IMDb record stores the second work's AniDB ID.
+            ("[Group] Kaiju Unit-gou - 21 [1080p].mkv",
+                "tt9200008:2:9","tt9200008:2:9",Some("662:9"),Some("662:9")),
+            // The same with open-ended season defaults: the second work is
+            // the only one mapped to season two.
+            ("[Group] Hero School - 20 [720p].mkv",
+                "tt9200009:2:7","tt9200009:2:7",Some("672:7"),Some("672:7")),
+            ("【Group】★新番★[Hero School][20][1080p]",
+                "tt9200009:2:7","tt9200009:2:7",Some("672:7"),Some("672:7")),
+            // A running number across an IMDb season split at the cour.
+            ("[Group] Cour Split - 14 [2041EC53].mkv",
+                "tt9200004:2:2","tt9200004:2:2",Some("622:2"),Some("622:2")),
+            // An explicit episode inside a later cour of the IMDb season.
+            ("Spy Home S01E21 1080p WEB",
+                "tt9200003:1:21","tt9200003:1:21",Some("612:9"),Some("612:9")),
+            // A batch of a numbered part becomes a season-relative range.
+            ("[Group] Spy Home Part 2 - 01 ~ 12 [1080p]",
+                "tt9200003:1:13","tt9200003:1:24",None,None),
+        ] {
+            assert_eq!(public(release),json!({"sid_start":sid_start,"sid_end":sid_end,
+                "asid_start":asid_start,"asid_end":asid_end}),"{release}");
+        }
+        // "Mob Hero 100" is the title; 100 is never episode 100.
+        let numbered=diagnose(&path,&MatchRequest{
+            title:"[Group] Mob Hero 100 (BD 1080P x264 FLAC)".into(),
+            year:None,series:None}).unwrap();
+        assert!(numbered.parsed.get("anime_episode_candidate").is_none(),
+            "{:?}",numbered.parsed);
+        let selected=numbered.selected.expect("numbered title");
+        assert_eq!(selected["imdb_id"],"tt9200006","{selected}");
+        assert_ne!(selected["episode"],100,"{selected}");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
     }
 
     #[test]

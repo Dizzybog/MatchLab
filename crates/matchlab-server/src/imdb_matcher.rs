@@ -1066,7 +1066,14 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
                 }
             }
         }
+        // The penalty separates a shortened AKA from the work that really
+        // carries this name. Without such an owner, an exact alias must not
+        // fall below a mere prefix of the title ("Dragon Ball Kai", whose
+        // primary name is longer, vs. the unrelated prefix "Dragon Ball").
+        let canonical_owner=full_titles.values()
+            .any(|forms|forms.iter().any(|full|full==&semantic_release));
         for id in exact_ids {
+            if !canonical_owner {break;}
             let Some(forms)=full_titles.get(&id)else{continue};
             if forms.iter().any(|full|full==&semantic_release){continue;}
             // The parser can strip an AU/US country suffix and report only
