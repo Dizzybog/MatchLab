@@ -122,6 +122,8 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
             std::fs::create_dir_all(&stage).map_err(|e|e.to_string())?;
             let staging_index=Index::create_in_dir(&stage,schema).map_err(|e|e.to_string())?;
             let mut writer=staging_index.writer(64_000_000).map_err(|e|e.to_string())?;
+            // Merge once, explicitly, after the bulk load (see below).
+            writer.set_merge_policy(Box::new(tantivy::merge_policy::NoMergePolicy));
             let mut stmt=db.prepare("SELECT imdb_id,title,clean_title,year,category,region,original,ordering,type
                 FROM titles WHERE year>0")
                 .map_err(|e|e.to_string())?;
@@ -250,7 +252,14 @@ fn build(db:&Connection,dir:&std::path::Path)->Result<SearchIndex,String>{
                 count+=1;
             }
             writer.commit().map_err(|e|e.to_string())?;
-            drop(writer);
+            // Every lookup consults each segment's term dictionary. A bulk
+            // build leaves about twenty segments; the published generation
+            // is immutable, so merge it once into a single segment.
+            let segments=staging_index.searchable_segment_ids().map_err(|e|e.to_string())?;
+            if segments.len()>1 {
+                writer.merge(&segments).wait().map_err(|e|e.to_string())?;
+            }
+            writer.wait_merging_threads().map_err(|e|e.to_string())?;
             drop(staging_index);
             let verify=Index::open_in_dir(&stage).map_err(|e|e.to_string())?;
             let reader=verify.reader().map_err(|e|e.to_string())?;
