@@ -28,31 +28,32 @@ jobs:
           persist-credentials: true
       - uses: dtolnay/rust-toolchain@stable
       - name: Test intake and historical-version validation
-        run: python3 -m unittest discover -s scripts/tests -v
+        run: cargo test --locked -p matchlab-community
+      # One trusted Rust executable runs every workflow step. It links the
+      # current parser for replay; untrusted Issue text is data, never code.
+      - name: Build Community Learning tooling and current Rust parser
+        run: cargo build --release --locked -p matchlab-community
       - name: Recover today's and historical community issue comments
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          python3 scripts/community_issue_intake.py \
+          target/release/matchlab-community issue-intake \
             --out "$RUNNER_TEMP/community-comments.json"
       - name: Restore durable dedup ledger (including empty or missing first asset)
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: python3 scripts/community_state.py load ledger --path "$RUNNER_TEMP/fingerprints.txt"
-      - name: Build latest Rust parser for safe replay
-        run: cargo build --release -p matchlab-parser --example community_replay
+        run: target/release/matchlab-community state load ledger --path "$RUNNER_TEMP/fingerprints.txt"
       - name: Replay historical reports, dedup globally, train verified-only shadow model
         env:
           LATEST_SHA: ${{ github.sha }}
         run: |
-          python3 scripts/community_learning.py \
+          target/release/matchlab-community learning \
             --comments "$RUNNER_TEMP/community-comments.json" \
             --verified learning/verified.jsonl \
             --sha "$LATEST_SHA" \
-            --parser-bin target/release/examples/community_replay \
             --seen "$RUNNER_TEMP/fingerprints.txt" \
             --seen-output "$RUNNER_TEMP/fingerprints-updated.txt" \
             --review-output "$RUNNER_TEMP/community-review.jsonl" \
@@ -61,7 +62,7 @@ jobs:
         env:
           LATEST_SHA: ${{ github.sha }}
         run: |
-          python3 scripts/community_rule_intake.py \
+          target/release/matchlab-community rule-intake \
             --comments "$RUNNER_TEMP/community-comments.json" \
             --seen "$RUNNER_TEMP/fingerprints-updated.txt" \
             --sha "$LATEST_SHA" \
@@ -71,15 +72,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: python3 scripts/community_state.py load backlog --path "$RUNNER_TEMP/backlog.json"
+        run: target/release/matchlab-community state load backlog --path "$RUNNER_TEMP/backlog.json"
       - name: Restore durable proposal decisions for unchanged parser sources
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: python3 scripts/community_state.py load decisions --path "$RUNNER_TEMP/community-decisions.json"
+        run: target/release/matchlab-community state load decisions --path "$RUNNER_TEMP/community-decisions.json"
       - name: Merge yesterday's proposals with unprocessed historical backlog
         run: |
-          python3 scripts/community_backlog.py prepare \
+          target/release/matchlab-community backlog prepare \
             --state "$RUNNER_TEMP/backlog.json" \
             --candidate-file "$RUNNER_TEMP/community-rule-candidates.json" \
             --seen "$RUNNER_TEMP/fingerprints-final.txt" \
@@ -98,7 +99,7 @@ jobs:
         run: |
           set -euo pipefail
           cp "$RUNNER_TEMP/backlog-prepared.json" "$RUNNER_TEMP/backlog.json"
-          python3 scripts/community_state.py save backlog \
+          target/release/matchlab-community state save backlog \
             --path "$RUNNER_TEMP/backlog.json" --phase prepared
       - name: Replay every proposed native regex family and screen verified source changes
         run: |
@@ -112,14 +113,14 @@ jobs:
           # Select only actual release names associated with each validated
           # rule in the same Issue batch. These are untrusted test inputs:
           # they are NOT proof of a correct IMDb/anime mapping.
-          python3 scripts/community_evidence.py \
+          target/release/matchlab-community evidence \
             --comments "$RUNNER_TEMP/community-comments.json" \
             --candidates "$RUNNER_TEMP/community-daily-review.json" \
             --sha "${GITHUB_SHA}" \
             --out "$RUNNER_TEMP/community-title-cases.json"
           # Reconstruct each proposal from exact immutable native handler
           # transforms, flags and options; ambiguous families remain review-only.
-          python3 scripts/community_regex_plan.py \
+          target/release/matchlab-community regex-plan \
             --candidates "$RUNNER_TEMP/community-daily-review.json" \
             --handlers crates/matchlab-parser/src/generated/handlers.json \
             --out "$RUNNER_TEMP/community-native-plans.json"
@@ -135,7 +136,7 @@ jobs:
             "$RUNNER_TEMP/community-native-plans.json"
           # Only a Rust-confirmed independent gain can stage native source
           # changes. Self-reported issue evidence never grants authority.
-          python3 scripts/review_community_regex.py \
+          target/release/matchlab-community review \
             "$RUNNER_TEMP/community-daily-review.json" \
             learning/community_regex_proposals.json \
             "$RUNNER_TEMP/community-regex-next.json" \
@@ -144,7 +145,7 @@ jobs:
           # All fields use the same exact audited native source plan; two
           # distinct independently labeled fixtures and zero protected
           # regressions are required before staging a HUMAN review PR.
-          python3 scripts/community_apply_verified_regex.py \
+          target/release/matchlab-community apply \
             --before "$RUNNER_TEMP/community-extended-before.json" \
             --after learning/community_regex_proposals.json \
             --audit "$RUNNER_TEMP/community-regex-impact.json" \
@@ -158,7 +159,7 @@ jobs:
           # The reviewer sometimes normalizes an empty array from "[\\n]" to
           # "[]". A whitespace-only diff must NEVER create a no-op PR or
           # consume a community fingerprint from the durable backlog.
-          python3 scripts/community_review_diff.py \
+          target/release/matchlab-community review-diff \
             "$RUNNER_TEMP/community-rules-before.json" \
             learning/community_rules.json \
             "$RUNNER_TEMP/community-extended-before.json" \
@@ -231,37 +232,10 @@ jobs:
           maintainer approval.
           EOF
           # The report contains counters and fingerprints only.
-          python3 - "$RUNNER_TEMP/community-regex-impact.json" \
+          target/release/matchlab-community pr-report \
+            "$RUNNER_TEMP/community-regex-impact.json" \
             "$RUNNER_TEMP/community-promotion-summary.json" \
-            >> "$RUNNER_TEMP/community-pr-body.md" <<'PY'
-          import json,sys
-          with open(sys.argv[1],encoding="utf8") as fh:
-              audits=json.load(fh)
-          with open(sys.argv[2],encoding="utf8") as fh:
-              promotion=json.load(fh)
-          print("\n### Native Rust regex audit")
-          for row in audits:
-              fingerprint=str(row.get("fingerprint",""))[:12]
-              kind=str(row.get("kind","unknown"))
-              status=str(row.get("status","unknown"))
-              gains=int(row.get("verified_improvements",0))
-              synthetic=int(row.get("synthetic_changes",0))
-              regressions=int(row.get("regressions",0))
-              actual=int(row.get("community_title_cases",0))
-              affected=int(row.get("community_title_changes",0))
-              operations=[c.get("operation","?")
-                  for c in row.get("source_changes",[])]
-              reason=str(row.get("reason",""))[:160]
-              print(f"- {fingerprint} ({kind}): {status}; "
-                    f"real cases={actual}, changed={affected}, "
-                    f"verified gains={gains}, synthetic changes={synthetic}, "
-                    f"regressions={regressions}, operations={operations}; "
-                    f"reason={reason}")
-          if promotion:
-              print("\nSource merge proposal: handler "
-                    f"{promotion.get('source_handler_indexes', [])}; "
-                    "trusted fixtures promoted to Rust regression tests.")
-          PY
+            >> "$RUNNER_TEMP/community-pr-body.md"
           gh pr create --repo "$GH_REPO" \
             --base main --head "$branch" \
             --title "feat(parser): review high-evidence community regex" \
@@ -285,57 +259,32 @@ jobs:
       - name: Dedup only rules actually placed into a review PR
         if: env.COMMUNITY_PR_CREATED == 'true'
         run: |
-          python3 - <<'PY'
-          import hashlib, json, os
-          from pathlib import Path
-          temp = Path(os.environ["RUNNER_TEMP"])
-          before = json.loads((temp / "community-rules-before.json").read_text())
-          after = json.loads(Path("learning/community_rules.json").read_text())
-          old_markers = {r["marker"] for r in before}
-          before_extended = json.loads((temp / "community-extended-before.json").read_text())
-          after_extended = json.loads(Path("learning/community_regex_proposals.json").read_text())
-          old_extended = {r["fingerprint"] for r in before_extended}
-          ledger = temp / "fingerprints-final.txt"
-          seen = set(ledger.read_text().splitlines())
-          for rule in after:
-              if rule["marker"] not in old_markers:
-                  seen.add(hashlib.sha256(("community-regex:" + rule["marker"]).encode()).hexdigest())
-          for proposal in after_extended:
-              if proposal["fingerprint"] not in old_extended:
-                  seen.add(proposal["fingerprint"])
-          ledger.write_text("\n".join(sorted(seen)) + ("\n" if seen else ""))
-          PY
+          target/release/matchlab-community accepted \
+            --rules-before "$RUNNER_TEMP/community-rules-before.json" \
+            --rules-after learning/community_rules.json \
+            --extended-before "$RUNNER_TEMP/community-extended-before.json" \
+            --extended-after learning/community_regex_proposals.json \
+            --ledger "$RUNNER_TEMP/fingerprints-final.txt"
       - name: Finalize acknowledged review backlog
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import hashlib,json,os
-          from pathlib import Path
-          temp=Path(os.environ["RUNNER_TEMP"])
-          accepted=[]
-          if os.environ.get("COMMUNITY_PR_CREATED")=="true":
-              before=json.loads((temp/"community-rules-before.json").read_text())
-              after=json.loads(Path("learning/community_rules.json").read_text())
-              old={row["marker"] for row in before}
-              for row in after:
-                  if row["marker"] not in old:
-                      accepted.append(hashlib.sha256(("community-regex:"+row["marker"]).encode()).hexdigest())
-              before=json.loads((temp/"community-extended-before.json").read_text())
-              after=json.loads(Path("learning/community_regex_proposals.json").read_text())
-              old={row["fingerprint"] for row in before}
-              accepted.extend(row["fingerprint"] for row in after if row["fingerprint"] not in old)
-          (temp/"community-backlog-accepted.json").write_text(json.dumps(accepted))
-          PY
-          python3 scripts/community_backlog.py finalize \
+          # Empty unless COMMUNITY_PR_CREATED=true: failed PRs never ack.
+          target/release/matchlab-community accepted \
+            --rules-before "$RUNNER_TEMP/community-rules-before.json" \
+            --rules-after learning/community_rules.json \
+            --extended-before "$RUNNER_TEMP/community-extended-before.json" \
+            --extended-after learning/community_regex_proposals.json \
+            --out "$RUNNER_TEMP/community-backlog-accepted.json"
+          target/release/matchlab-community backlog finalize \
             --state "$RUNNER_TEMP/backlog-prepared.json" \
             --daily "$RUNNER_TEMP/community-daily-review.json" \
             --accepted "$RUNNER_TEMP/community-backlog-accepted.json" \
             --out "$RUNNER_TEMP/backlog-next.json"
           cp "$RUNNER_TEMP/backlog-next.json" "$RUNNER_TEMP/backlog.json"
-          python3 scripts/community_state.py save backlog \
+          target/release/matchlab-community state save backlog \
             --path "$RUNNER_TEMP/backlog.json" --phase final
       - name: Persist dedup ledger as a verified nonempty versioned asset
         env:
@@ -344,7 +293,7 @@ jobs:
         run: |
           set -euo pipefail
           cp "$RUNNER_TEMP/fingerprints-final.txt" "$RUNNER_TEMP/fingerprints.txt"
-          python3 scripts/community_state.py save ledger \
+          target/release/matchlab-community state save ledger \
             --path "$RUNNER_TEMP/fingerprints.txt" --phase ledger
       - name: Persist audited proposal decisions for this immutable parser version
         env:
@@ -352,7 +301,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          python3 scripts/community_decisions.py \
+          target/release/matchlab-community decisions \
             --existing "$RUNNER_TEMP/community-decisions.json" \
             --audit "$RUNNER_TEMP/community-regex-impact.json" \
             --backlog "$RUNNER_TEMP/backlog.json" \
@@ -361,7 +310,7 @@ jobs:
             --parser-src crates/matchlab-parser/src \
             --out "$RUNNER_TEMP/community-decisions-next.json"
           mv "$RUNNER_TEMP/community-decisions-next.json" "$RUNNER_TEMP/community-decisions.json"
-          python3 scripts/community_state.py save decisions \
+          target/release/matchlab-community state save decisions \
             --path "$RUNNER_TEMP/community-decisions.json" --phase final
       - name: Publish bounded review artifact; no automatic model activation
         uses: actions/upload-artifact@v4
@@ -382,4 +331,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: python3 scripts/community_cleanup.py --apply
+        run: target/release/matchlab-community cleanup --apply

@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/matchlab-community",
   "crates/matchlab-parser",
   "crates/matchlab-server",
 ]
