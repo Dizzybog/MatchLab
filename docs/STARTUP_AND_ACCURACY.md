@@ -128,25 +128,25 @@ The final release binary was also replayed through HTTP with the **actual filter
 ## Reproduction
 
 ```bash
-cargo build --release --locked -p matchlab-server
-python3 scripts/diagnostics/benchmark_startup.py \
+cargo build --release --locked -p matchlab-server -p matchlab-diagnostics
+target/release/matchlab-diagnostics benchmark-startup \
   --output-dir /tmp/matchlab-startup
-python3 scripts/diagnostics/benchmark_startup.py \
+target/release/matchlab-diagnostics benchmark-startup \
   --first-request match --sizes 100000 --restarts 5 \
   --output-dir /tmp/matchlab-startup-match-first
-python3 scripts/diagnostics/collect_title_tests.py \
+target/release/matchlab-diagnostics collect-title-tests \
   --output-dir /tmp/matchlab-title-corpus
-python3 scripts/diagnostics/audit_api.py \
+target/release/matchlab-diagnostics audit-api \
   /tmp/matchlab-title-corpus/parser-title-expectations.json \
   --base-url https://MatchLab.notprod.fyi --endpoint /parse \
   --output /tmp/matchlab-parser-api.json
-python3 scripts/diagnostics/audit_api.py \
-  scripts/diagnostics/fixtures/matcher_titles.json \
+target/release/matchlab-diagnostics audit-api \
+  crates/matchlab-diagnostics/fixtures/matcher_titles.json \
   --base-url https://MatchLab.notprod.fyi --endpoint /match \
   --output /tmp/matchlab-matcher-api.json
 ```
 
-See [title test collection](../scripts/diagnostics/TITLE_TEST_COLLECTION.md) for the isolated runtime-trace workflow and conservative extraction limits. The checked-in matcher corpus retains historical source expectations and notes about ambiguous or non-strict cases; its classifications deliberately do not imply universal identity ground truth.
+See [title test collection](../crates/matchlab-diagnostics/TITLE_TEST_COLLECTION.md) for the isolated runtime-trace workflow and conservative extraction limits. The checked-in matcher corpus retains historical source expectations and notes about ambiguous or non-strict cases; its classifications deliberately do not imply universal identity ground truth.
 
 The [machine-readable measurement summary](measurements/startup_accuracy_2026-11-14.json) accompanies this report. Full raw response reports, trace JSONL and process logs were retained as local audit artifacts, not committed as several megabytes of repeated headers and synthetic outputs. No remote restart, configuration change, metadata refresh or deployment was performed.
 

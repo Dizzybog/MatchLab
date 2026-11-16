@@ -106,7 +106,7 @@ parser is a test-backed **PR**, not a production change.
 ## Local checks
 
 ```bash
-python3 -m unittest discover -s scripts/tests -v
+cargo test --locked -p matchlab-community
 RUSTFLAGS="-D warnings" cargo test --workspace --locked
 RUSTFLAGS="-D warnings" cargo check --workspace --all-targets --locked
 ```
