@@ -3712,6 +3712,22 @@ fn normalize_slash_date_format<'a>(
         }else{m.as_str().to_owned()}
     })
 }
+/// A trailing list of two or more social-media hashtags (`#fyp #anime
+/// #showseason3`). Tags are glued keywords, not release fields: a season or
+/// language marker inside one must not become a coordinate.
+static SOCIAL_HASHTAG_TAIL_RE: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r"(?:^|\s)#\p{L}[^\s#]*(?:\s*#\p{L}[^\s#]*)+\s*$").unwrap()
+});
+
+fn strip_social_hashtags(input:&str)->Cow<'_,str>{
+    if !input.contains('#') {return Cow::Borrowed(input);}
+    match SOCIAL_HASHTAG_TAIL_RE.find(input) {
+        Some(tail) if !input[..tail.start()].trim().is_empty()=>
+            Cow::Owned(input[..tail.start()].trim_end().to_owned()),
+        _=>Cow::Borrowed(input),
+    }
+}
+
 fn normalize_slash_dates(input:&str)->Cow<'_,str>{
     if !input.contains('/') {return Cow::Borrowed(input);}
     let year=normalize_slash_date_format(input,&SLASH_YMD_DATE_RE,"YYYY MM DD");
@@ -3860,7 +3876,8 @@ pub fn parse_title(
     raw_title: &str,
     translate_languages: bool,
 ) -> Result<Map<String, Value>, ParseError> {
-    let date_normalized=normalize_slash_dates(raw_title);
+    let untagged=strip_social_hashtags(raw_title);
+    let date_normalized=normalize_slash_dates(&untagged);
     let raw_title=date_normalized.as_ref();
     let components=split_release_path(raw_title);
     let bluray_stream_folder=bluray_stream_folder_index(&components);
