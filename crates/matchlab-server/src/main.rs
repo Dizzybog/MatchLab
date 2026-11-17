@@ -1340,10 +1340,18 @@ fn imdb_numbering(db:&Connection,winner:&Value,parsed:&serde_json::Map<String,Va
         && season_episode_end(db,imdb,parsed_season)?.is_some_and(|last|parsed_episode<=last)
     {return Ok(Some((parsed_season,parsed_episode,true)));}
     if parsed_season.is_some(){return Ok(None);}
+    let anidb=winner.pointer("/anime/anidb_id").and_then(Value::as_str);
+    // The parser marks "One Piece - 1090" as absolute but not the "_ 1090"
+    // spelling. A single parsed episode that equals the ASID's episode on
+    // the series-starting AniDB work is the same absolute evidence.
     let absolute=parsed.get("anime_episode_candidate")
         .filter(|hint|hint["numbering"]=="absolute")
-        .and_then(|hint|hint["episode"].as_i64());
-    let anidb=winner.pointer("/anime/anidb_id").and_then(Value::as_str);
+        .and_then(|hint|hint["episode"].as_i64())
+        .or_else(||match (parsed_episode,anidb){
+            (Some(episode),Some(anidb)) if winner.pointer("/anime/asid").and_then(Value::as_str)
+                ==episode_crosswalk::canonical_asid(anidb,episode).as_deref()=>Some(episode),
+            _=>None,
+        });
     let (Some(absolute),Some(anidb))=(absolute,anidb) else{return Ok(None)};
     if !starts_series(db,anidb)?
         || !single_imdb_season_end(db,imdb)?.is_some_and(|last|absolute<=last)
@@ -8093,10 +8101,12 @@ mod tests {
             "tt26692417","17777",20,5,5),json!({
             "sid_start":"tt26692417:1:5","sid_end":"tt26692417:1:5",
             "asid_start":"17777:5","asid_end":"17777:5"}));
-        assert_eq!(run("[Erai-raws] One Piece - 1100 [1080p].mkv",
-            "tt0388629","69",22,15,1100),json!({
-            "sid_start":"tt0388629:1:1100","sid_end":"tt0388629:1:1100",
-            "asid_start":"69:1100","asid_end":"69:1100"}));
+        for title in ["[Erai-raws] One Piece - 1100 [1080p].mkv",
+            "[Kaerizaki-Fansub]_One_Piece _ 1100_[VOSTFR][HD_1280x720][10Bits].mkv"]{
+            assert_eq!(run(title,"tt0388629","69",22,15,1100),json!({
+                "sid_start":"tt0388629:1:1100","sid_end":"tt0388629:1:1100",
+                "asid_start":"69:1100","asid_end":"69:1100"}),"{title}");
+        }
         assert_eq!(run("[WMSUB&PCSUB][Tokyo Ghoul re][12][GB][1080P].mp4",
             "tt3741634","13499",3,12,12)["sid_start"],"tt3741634:3:12",
             "a later AniDB part never becomes IMDb S1; without an IMDb answer the crosswalk stays");
