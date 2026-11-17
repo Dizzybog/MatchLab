@@ -1013,13 +1013,19 @@ fn reconcile_series_coordinates(
     if winner.pointer("/anime/asid").and_then(Value::as_str).is_some()
         && let (Some(mapped_season),Some(mapped_episode))=(season,episode)
         && mapped_season>0
-        && ((open_default_mapping(db,
+        && (match mapping_coverage(db,
                 winner.pointer("/anime/anidb_id").and_then(Value::as_str).unwrap_or_default(),
-                mapped_season,winner.pointer("/anime/episode").and_then(Value::as_i64))?
-            && (season_episode_end(db,winner["imdb_id"].as_str().unwrap_or_default(),mapped_season)?
-                .is_some_and(|last|mapped_episode>last)
-                || imdb_lacks_remapped_season(db,winner["imdb_id"].as_str().unwrap_or_default(),
-                    mapped_season,None)?))
+                mapped_season,winner.pointer("/anime/episode").and_then(Value::as_i64))? {
+                MappingCoverage::Bounded=>false,
+                MappingCoverage::OpenEnded=>season_episode_end(
+                    db,winner["imdb_id"].as_str().unwrap_or_default(),mapped_season)?
+                    .is_some_and(|last|mapped_episode>last),
+                MappingCoverage::None=>season_episode_end(
+                    db,winner["imdb_id"].as_str().unwrap_or_default(),mapped_season)?
+                    .is_some_and(|last|mapped_episode>last)
+                    || imdb_lacks_remapped_season(db,winner["imdb_id"].as_str().unwrap_or_default(),
+                        mapped_season,None)?,
+            }
             || (parsed_season.is_some_and(|parsed|parsed!=mapped_season)
                 && imdb_lacks_remapped_season(db,winner["imdb_id"].as_str().unwrap_or_default(),
                     mapped_season,parsed_season)?
@@ -1276,14 +1282,18 @@ fn candidate_has_episode(db:&Connection,imdb:&str,season:i64,episode:i64)->Resul
 fn valid_sid_coordinate(season:i64,episode:i64)->bool{
     (0..=9999).contains(&season)&&(0..=99999).contains(&episode)
 }
-/// The coordinate is not really in the mapping: no row of this AniDB work
-/// covers the episode in that season, or only an open default row does
-/// (defaulttvdbseason: start 1, no end, no explicit episode pairs), which
-/// assigns every episode to one season rather than mapping this episode.
-fn open_default_mapping(db:&Connection,anidb:&str,season:i64,anime_episode:Option<i64>)
-    ->Result<bool,String>{
-    let Some(anime_episode)=anime_episode.filter(|episode|*episode>0) else{return Ok(false)};
-    if anidb.is_empty(){return Ok(false);}
+#[derive(Debug,PartialEq)]
+enum MappingCoverage {Bounded,OpenEnded,None}
+
+/// How the Anime-Lists mapping holds this AniDB episode in that season:
+/// a bounded row or explicit episode pairs (the reference), only an
+/// open-ended row (no last episode: the reference unless IMDb lists that
+/// season with fewer episodes, e.g. Black Clover 145 on a S1 default), or
+/// no row at all.
+fn mapping_coverage(db:&Connection,anidb:&str,season:i64,anime_episode:Option<i64>)
+    ->Result<MappingCoverage,String>{
+    let Some(anime_episode)=anime_episode.filter(|episode|*episode>0) else{return Ok(MappingCoverage::Bounded)};
+    if anidb.is_empty(){return Ok(MappingCoverage::Bounded);}
     let rows=db.prepare("SELECT start,end,TRIM(map) FROM episode_map
             WHERE anidb_id=?1 AND anidb_season>0 AND tvdb_season=?2")
         .and_then(|mut stmt|stmt.query_map(rusqlite::params![anidb,season],
@@ -1291,13 +1301,14 @@ fn open_default_mapping(db:&Connection,anidb:&str,season:i64,anime_episode:Optio
             .collect::<rusqlite::Result<Vec<_>>>());
     let rows=match rows {
         Ok(rows)=>rows,
-        Err(rusqlite::Error::SqliteFailure(..))=>return Ok(true),
+        Err(rusqlite::Error::SqliteFailure(..))=>return Ok(MappingCoverage::None),
         Err(error)=>return Err(error.to_string()),
     };
     let covering:Vec<_>=rows.iter().filter(|(start,end,map)|!map.is_empty()
         || (*start<=anime_episode && (*end<=0 || *end>=anime_episode))).collect();
-    // No covering row at all: the coordinate is not from the mapping.
-    Ok(covering.iter().all(|(start,end,map)|map.is_empty()&&*start<=1&&*end<=0))
+    Ok(if covering.is_empty(){MappingCoverage::None}
+        else if covering.iter().any(|(_,end,map)|!map.is_empty()||*end>0){MappingCoverage::Bounded}
+        else{MappingCoverage::OpenEnded})
 }
 
 /// The crosswalk moved the coordinate to a season the IMDb work does not
