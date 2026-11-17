@@ -1237,7 +1237,6 @@ fn valid_sid_coordinate(season:i64,episode:i64)->bool{
 }
 /// A TVDB season from the Anime-Lists crosswalk is an IMDb coordinate only
 /// when IMDb's own season structure can contain it. It is contradicted when
-/// - IMDb's known season count is lower (One Piece: IMDb S1 only, TVDB S22);
 /// - an absolutely numbered AniDB work (Detective Conan 266: TVDB S32 =
 ///   1109-1147) has IMDb seasons that are systematically shorter: this and
 ///   the preceding IMDb season both list fewer episodes than TVDB's
@@ -1255,9 +1254,8 @@ fn crosswalk_season_contradicts_imdb(db:&Connection,imdb:&str,anidb:&str,season:
         Err(rusqlite::Error::QueryReturnedNoRows|rusqlite::Error::SqliteFailure(..))=>Ok(None),
         Err(error)=>Err(error.to_string()),
     };
-    let imdb_seasons=tolerate(db.query_row(
-        "SELECT MAX(max_season) FROM seasons WHERE imdb_id=?1",[imdb],|row|row.get(0)))?;
-    if imdb_seasons.is_some_and(|known|known>0&&known<season){return Ok(true);}
+    // A season beyond IMDb's known count is NOT a contradiction: IMDb
+    // snapshots list newly aired seasons late.
     if anidb.is_empty()||season<2{return Ok(false);}
     let row=db.prepare("SELECT start,offset FROM episode_map
             WHERE anidb_id=?1 AND anidb_season>0 AND tvdb_season=?2")
