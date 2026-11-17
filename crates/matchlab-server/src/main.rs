@@ -1005,8 +1005,11 @@ fn reconcile_series_coordinates(
     if winner.pointer("/anime/asid").and_then(Value::as_str).is_some()
         && let (Some(mapped_season),Some(mapped_episode))=(season,episode)
         && mapped_season>0
-        && season_episode_end(db,winner["imdb_id"].as_str().unwrap_or_default(),mapped_season)?
+        && (season_episode_end(db,winner["imdb_id"].as_str().unwrap_or_default(),mapped_season)?
             .is_some_and(|last|mapped_episode>last)
+            || crosswalk_season_contradicts_imdb(db,winner["imdb_id"].as_str().unwrap_or_default(),
+                winner.pointer("/anime/anidb_id").and_then(Value::as_str).unwrap_or_default(),
+                mapped_season)?)
     {
         // The AniDB identity and absolute episode may still be valid even
         // when its open-ended crosswalk falsely assigns S01E145. Repair
@@ -1059,11 +1062,24 @@ fn reconcile_series_coordinates(
             winner["coordinate_fallback"]=json!("repaired_imdb_absolute_anime");
             winner["rejected_crosswalk"]=json!("anime_crosswalk_exceeds_known_imdb_bounds");
         }else{
+            // The IMDb coordinate is rejected, but an ASID that is the
+            // identified AniDB work plus the parsed absolute episode
+            // (Detective Conan - 1108 → 266:1108) does not depend on the
+            // crosswalk. Keep it; drop any other ASID.
+            let imdb_id=winner["imdb_id"].as_str().unwrap_or_default();
+            let sole_anidb:i64=db.query_row(
+                "SELECT COUNT(DISTINCT anidb_id) FROM anime_series_map WHERE imdb_id=?1",
+                [imdb_id],|row|row.get(0)).unwrap_or(0);
+            let independent=expected_asid.is_some()
+                && expected_asid.as_deref()==original_asid
+                && (winner["anidb_independent_verified"]==true
+                    || (sole_anidb==1
+                        && identified==winner["anime_ids"]["anidb"].as_str()));
             winner["season"]=Value::Null;
             winner["episode"]=Value::Null;
             winner["season_end"]=Value::Null;
             winner["episode_end"]=Value::Null;
-            winner["anime"]=Value::Null;
+            if !independent{winner["anime"]=Value::Null;}
             winner["sid"]=winner["imdb_id"].clone();
             winner["coordinate_fallback_blocked"]=json!("anime_crosswalk_exceeds_known_imdb_bounds");
             return Ok(());
@@ -1219,6 +1235,63 @@ fn candidate_has_episode(db:&Connection,imdb:&str,season:i64,episode:i64)->Resul
 fn valid_sid_coordinate(season:i64,episode:i64)->bool{
     (0..=9999).contains(&season)&&(0..=99999).contains(&episode)
 }
+/// A TVDB season from the Anime-Lists crosswalk is an IMDb coordinate only
+/// when IMDb's own season structure can contain it. It is contradicted when
+/// - IMDb's known season count is lower (One Piece: IMDb S1 only, TVDB S22);
+/// - an absolutely numbered AniDB work (Detective Conan 266: TVDB S32 =
+///   1109-1147) has IMDb seasons that are systematically shorter: this and
+///   the preceding IMDb season both list fewer episodes than TVDB's
+///   (S31: 16 vs 41, S32: 15 vs 39), so IMDb groups episodes differently;
+/// - IMDb already lists more episodes before the season than AniDB's
+///   absolute numbering leaves room for (Hunter x Hunter 2011: IMDb S1 has
+///   148 episodes, TVDB S2 starts at 59).
+/// IMDb listing fewer episodes is not a contradiction: listings are often
+/// incomplete. Missing data is never a contradiction.
+fn crosswalk_season_contradicts_imdb(db:&Connection,imdb:&str,anidb:&str,season:i64)
+    ->Result<bool,String>{
+    if !(1..=9999).contains(&season){return Ok(false);}
+    let tolerate=|result:rusqlite::Result<Option<i64>>|match result {
+        Ok(value)=>Ok(value),
+        Err(rusqlite::Error::QueryReturnedNoRows|rusqlite::Error::SqliteFailure(..))=>Ok(None),
+        Err(error)=>Err(error.to_string()),
+    };
+    let imdb_seasons=tolerate(db.query_row(
+        "SELECT MAX(max_season) FROM seasons WHERE imdb_id=?1",[imdb],|row|row.get(0)))?;
+    if imdb_seasons.is_some_and(|known|known>0&&known<season){return Ok(true);}
+    if anidb.is_empty()||season<2{return Ok(false);}
+    let row=db.prepare("SELECT start,offset FROM episode_map
+            WHERE anidb_id=?1 AND anidb_season>0 AND tvdb_season=?2")
+        .and_then(|mut stmt|stmt.query_map(rusqlite::params![anidb,season],
+            |row|Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>());
+    let rows=match row {
+        Ok(rows)=>rows,
+        Err(rusqlite::Error::SqliteFailure(..))=>return Ok(false),
+        Err(error)=>return Err(error.to_string()),
+    };
+    // Exactly one absolute → season-local row: offset = -(start-1).
+    let [(start,offset)]=rows.as_slice() else{return Ok(false)};
+    if *start<=1||*offset!=1-*start{return Ok(false);}
+    // Systematically shorter IMDb seasons: both this and the preceding
+    // season list fewer episodes than their finite TVDB absolute ranges.
+    let shorter=|tv_season:i64|->Result<bool,String>{
+        let tvdb=tolerate(db.query_row(
+            "SELECT CASE WHEN COUNT(*)=1 AND MIN(end)>0 THEN MIN(end)-MIN(start)+1 END
+                FROM episode_map WHERE anidb_id=?1 AND anidb_season>0 AND tvdb_season=?2",
+            rusqlite::params![anidb,tv_season],|row|row.get(0)))?;
+        let listed=tolerate(db.query_row(
+            "SELECT max_episode FROM season_episodes WHERE imdb_id=?1 AND season=?2",
+            rusqlite::params![imdb,tv_season],|row|row.get(0)))?;
+        Ok(matches!((tvdb,listed),(Some(tvdb),Some(listed)) if listed<tvdb))
+    };
+    if shorter(season)? && shorter(season-1)? {return Ok(true);}
+    let before=tolerate(db.query_row(
+        "SELECT CASE WHEN COUNT(*)=?2-1 THEN SUM(max_episode) END FROM season_episodes
+            WHERE imdb_id=?1 AND season BETWEEN 1 AND ?2-1",
+        rusqlite::params![imdb,season],|row|row.get(0)))?;
+    Ok(before.is_some_and(|listed|listed>*start-1))
+}
+
 fn season_episode_end(db:&Connection,imdb:&str,season:i64)->Result<Option<i64>,String>{
     if !(1..=9999).contains(&season){return Ok(None);}
     match db.query_row("SELECT max_episode FROM season_episodes
@@ -7825,6 +7898,65 @@ mod tests {
         assert!(ids["sid_start"].is_null());
         assert_eq!(ids["asid_start"],"42:4");
     }
+    /// Detective Conan: Anime-Lists splits AniDB 266 into TVDB seasons
+    /// (S31 = 1068-1108, S32 = 1109-1147), but IMDb groups the same episodes
+    /// into much shorter seasons. "Detective Conan - 1120" therefore must
+    /// not become IMDb S32E12; the verified ASID 266:1120 is kept.
+    #[test]
+    fn crosswalk_season_with_a_different_imdb_season_structure_keeps_only_the_asid(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,
+                category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,
+                episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,
+                tvdb_season INTEGER,start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO seasons VALUES('tt0131179',54),('tt2098220',1);
+            INSERT INTO season_episodes VALUES('tt0131179',31,16,16),('tt0131179',32,15,15),
+                ('tt2098220',1,148,148);
+            INSERT INTO anime_series_map VALUES('tt0131179','266','72454',1),
+                ('tt2098220','8550','252322',1);
+            INSERT INTO episode_map VALUES
+                ('266','72454',1,31,1068,1108,-1067,''),
+                ('266','72454',1,32,1109,1147,-1108,''),
+                ('8550','252322',1,1,1,58,0,''),
+                ('8550','252322',1,2,59,136,-58,'');").unwrap();
+        for (title,imdb,anidb,season,episode,absolute) in [
+            ("Detective Conan - 1120","tt0131179","266",32,12,1120),
+            ("[HorribleSubs] Hunter X Hunter - 125 [1080p].mkv","tt2098220","8550",2,67,125),
+        ]{
+            let parsed=matchlab_parser::parse_title(title,false).unwrap();
+            let asid=format!("{anidb}:{absolute}");
+            let mut winner=json!({"imdb_id":imdb,"category":"series",
+                "title":"x","matched_title":"x","anime_ids":{"anidb":anidb},
+                "season":season,"episode":episode,
+                "anime":{"anidb_id":anidb,"episode":absolute,"asid":asid},
+                "sid":format!("{imdb}:{season}:{episode}")});
+            reconcile_series_coordinates(&db,&mut winner,&parsed).unwrap();
+            assert_eq!(winner["coordinate_fallback_blocked"],
+                "anime_crosswalk_exceeds_known_imdb_bounds","{title}: {winner}");
+            assert_eq!(public_match_response(Some(winner)),json!({
+                "sid_start":imdb,"sid_end":imdb,"asid_start":asid,"asid_end":asid}),"{title}");
+        }
+        // An aligned season (equal lengths) is still published.
+        db.execute_batch("UPDATE season_episodes SET max_episode=41 WHERE season=31;
+            UPDATE season_episodes SET max_episode=39 WHERE season=32;").unwrap();
+        let parsed=matchlab_parser::parse_title("Detective Conan - 1120",false).unwrap();
+        let mut aligned=json!({"imdb_id":"tt0131179","category":"series",
+            "title":"x","matched_title":"x","anime_ids":{"anidb":"266"},
+            "season":32,"episode":12,
+            "anime":{"anidb_id":"266","episode":1120,"asid":"266:1120"},
+            "sid":"tt0131179:32:12"});
+        reconcile_series_coordinates(&db,&mut aligned,&parsed).unwrap();
+        assert_eq!(aligned["season"],32);
+        assert_eq!(aligned["episode"],12);
+    }
+
     #[test]
     fn final_anime_coordinates_reject_known_imdb_bounds_without_guessing_a_replacement(){
         let db=Connection::open_in_memory().unwrap();

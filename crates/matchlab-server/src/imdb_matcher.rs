@@ -1154,7 +1154,17 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
         crate::tantivy_search::anime_aliases_exact(db,title).map_err(index_error)?
             .into_iter().map(|alias|alias.imdb_id).collect()
     }else{HashSet::new()};
-    let anidb_rank=|id:&str|i32::from(!anidb_ids.is_empty()&&!anidb_ids.contains(id));
+    // Only when the AniDB-linked work carries the title as its PRIMARY IMDb
+    // title (ordering 0) and a competitor reaches it solely through a
+    // secondary regional alias. Remakes with the same primary title
+    // (Hunter x Hunter 1999/2011, Fruits Basket 2001/2019) keep votes.
+    let primary_hits:HashSet<String>=ranked_groups.iter()
+        .filter(|(best_fit,_,aliases)|aliases.iter()
+            .any(|(row,fit)|fit==best_fit&&row.ordering==0))
+        .map(|(_,id,_)|id.clone()).collect();
+    let anidb_primary=anidb_ids.iter().any(|id|primary_hits.contains(id));
+    let anidb_rank=|id:&str|i32::from(anidb_primary&&!anidb_ids.contains(id)
+        &&!primary_hits.contains(id));
     let mut metadata=if ranked_groups.len()>4 {
         let ids=ranked_groups.iter().map(|(_,id,_)|id.clone()).collect::<Vec<_>>();
         Some(shortlist_metadata(db,&ids)?)
