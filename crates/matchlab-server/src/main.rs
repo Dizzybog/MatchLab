@@ -1082,7 +1082,7 @@ fn reconcile_series_coordinates(
             let imdb_owned=imdb_id.to_owned();
             if let Some((imdb_season,imdb_episode,keep_asid))=
                 imdb_numbering(db,winner,parsed,season,parsed_season,parsed_episode)?{
-                let keep_asid=keep_asid||independent;
+                let keep_asid=keep_asid||(independent&&parsed_season.is_none());
                 winner["season"]=json!(imdb_season);
                 winner["episode"]=json!(imdb_episode);
                 winner["season_end"]=Value::Null;
@@ -1335,10 +1335,15 @@ fn imdb_numbering(db:&Connection,winner:&Value,parsed:&serde_json::Map<String,Va
     season:Option<i64>,parsed_season:Option<i64>,parsed_episode:Option<i64>)
     ->Result<Option<(i64,i64,bool)>,String>{
     let Some(imdb)=winner["imdb_id"].as_str() else{return Ok(None)};
+    // The release's own coordinate also wins when the crosswalk kept the
+    // same season but IMDb's structure rejected it (Detective Conan S32E4:
+    // IMDb S32E4 exists). The TVDB-derived ASID then names a different
+    // episode than IMDb S32E4 may, so it is only kept when the crosswalk
+    // moved to another season (its AniDB-local episode is the release's).
     if let (Some(parsed_season),Some(parsed_episode))=(parsed_season,parsed_episode)
-        && parsed_season>0 && Some(parsed_season)!=season
+        && parsed_season>0
         && season_episode_end(db,imdb,parsed_season)?.is_some_and(|last|parsed_episode<=last)
-    {return Ok(Some((parsed_season,parsed_episode,true)));}
+    {return Ok(Some((parsed_season,parsed_episode,Some(parsed_season)!=season)));}
     if parsed_season.is_some(){return Ok(None);}
     let anidb=winner.pointer("/anime/anidb_id").and_then(Value::as_str);
     // The parser marks "One Piece - 1090" as absolute but not the "_ 1090"
@@ -8041,6 +8046,15 @@ mod tests {
         assert_eq!(public_match_response(Some(hunter)),json!({
             "sid_start":"tt2098220:1:125","sid_end":"tt2098220:1:125",
             "asid_start":"8550:125","asid_end":"8550:125"}));
+        // An explicit release coordinate that IMDb lists is IMDb's own.
+        let parsed=matchlab_parser::parse_title("Detective Conan S32E4",false).unwrap();
+        let mut explicit=json!({"imdb_id":"tt0131179","category":"series",
+            "title":"x","matched_title":"x","anime_ids":{"anidb":"266"},"season":32,"episode":4,
+            "anime":{"anidb_id":"266","episode":1112,"asid":"266:1112"},"sid":"tt0131179:32:4"});
+        reconcile_series_coordinates(&db,&mut explicit,&parsed).unwrap();
+        assert_eq!(public_match_response(Some(explicit)),json!({
+            "sid_start":"tt0131179:32:4","sid_end":"tt0131179:32:4",
+            "asid_start":null,"asid_end":null}));
         // An aligned season (equal lengths) is still published.
         db.execute_batch("UPDATE season_episodes SET max_episode=41 WHERE season=31;
             UPDATE season_episodes SET max_episode=39 WHERE season=32;").unwrap();
