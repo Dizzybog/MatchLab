@@ -1002,15 +1002,28 @@ fn reconcile_series_coordinates(
     // so neither the anime-priority nor IMDb fallback lane can publish it.
     // Unknown bounds retain verified crosswalk coverage. A contradiction
     // with known bounds must not fall through to a guessed raw coordinate.
+    // Maintainer rules: a coordinate the Anime-Lists mapping really holds is
+    // the reference even when IMDb lacks it (One Piece S22E15, Bleach S17).
+    // Only an open default row (defaulttvdbseason without bounds, e.g.
+    // Black Clover S01E145) is not a mapping of that episode: when IMDb
+    // contradicts it, the coordinate is counted instead. A release naming
+    // its own season/episode keeps them when the mapping moved it to a
+    // season IMDb does not list and IMDb lists the release's own (rule 1;
+    // a named part such as JoJo Stone Ocean S01 → IMDb S5 is unaffected).
     if winner.pointer("/anime/asid").and_then(Value::as_str).is_some()
         && let (Some(mapped_season),Some(mapped_episode))=(season,episode)
         && mapped_season>0
-        && (season_episode_end(db,winner["imdb_id"].as_str().unwrap_or_default(),mapped_season)?
-            .is_some_and(|last|mapped_episode>last)
-            || (imdb_lacks_remapped_season(db,winner["imdb_id"].as_str().unwrap_or_default(),
-                mapped_season,parsed_season)?
-                && (parsed_season.is_none()
-                    || imdb_numbering(db,winner,parsed,season,parsed_season,parsed_episode)?.is_some())))
+        && ((open_default_mapping(db,
+                winner.pointer("/anime/anidb_id").and_then(Value::as_str).unwrap_or_default(),
+                mapped_season,winner.pointer("/anime/episode").and_then(Value::as_i64))?
+            && (season_episode_end(db,winner["imdb_id"].as_str().unwrap_or_default(),mapped_season)?
+                .is_some_and(|last|mapped_episode>last)
+                || imdb_lacks_remapped_season(db,winner["imdb_id"].as_str().unwrap_or_default(),
+                    mapped_season,None)?))
+            || (parsed_season.is_some_and(|parsed|parsed!=mapped_season)
+                && imdb_lacks_remapped_season(db,winner["imdb_id"].as_str().unwrap_or_default(),
+                    mapped_season,parsed_season)?
+                && imdb_numbering(db,winner,parsed,season,parsed_season,parsed_episode)?.is_some()))
     {
         // The AniDB identity and absolute episode may still be valid even
         // when its open-ended crosswalk falsely assigns S01E145. Repair
@@ -1263,6 +1276,30 @@ fn candidate_has_episode(db:&Connection,imdb:&str,season:i64,episode:i64)->Resul
 fn valid_sid_coordinate(season:i64,episode:i64)->bool{
     (0..=9999).contains(&season)&&(0..=99999).contains(&episode)
 }
+/// The coordinate is not really in the mapping: no row of this AniDB work
+/// covers the episode in that season, or only an open default row does
+/// (defaulttvdbseason: start 1, no end, no explicit episode pairs), which
+/// assigns every episode to one season rather than mapping this episode.
+fn open_default_mapping(db:&Connection,anidb:&str,season:i64,anime_episode:Option<i64>)
+    ->Result<bool,String>{
+    let Some(anime_episode)=anime_episode.filter(|episode|*episode>0) else{return Ok(false)};
+    if anidb.is_empty(){return Ok(false);}
+    let rows=db.prepare("SELECT start,end,TRIM(map) FROM episode_map
+            WHERE anidb_id=?1 AND anidb_season>0 AND tvdb_season=?2")
+        .and_then(|mut stmt|stmt.query_map(rusqlite::params![anidb,season],
+            |row|Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?,row.get::<_,String>(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>());
+    let rows=match rows {
+        Ok(rows)=>rows,
+        Err(rusqlite::Error::SqliteFailure(..))=>return Ok(true),
+        Err(error)=>return Err(error.to_string()),
+    };
+    let covering:Vec<_>=rows.iter().filter(|(start,end,map)|!map.is_empty()
+        || (*start<=anime_episode && (*end<=0 || *end>=anime_episode))).collect();
+    // No covering row at all: the coordinate is not from the mapping.
+    Ok(covering.iter().all(|(start,end,map)|map.is_empty()&&*start<=1&&*end<=0))
+}
+
 /// The crosswalk moved the coordinate to a season the IMDb work does not
 /// list, while the release itself named another season or none (absolute
 /// numbering). A release that already names that season (a newly aired
@@ -7809,11 +7846,10 @@ mod tests {
             "anime":{"anidb_id":"12665","episode":145,"asid":"12665:145"},
             "sid":"tt7441658:1:145"});
         reconcile_series_coordinates(&db,&mut winner,&parsed).unwrap();
-        // The mapped S1E145 is beyond IMDb's 51-episode S1, so the episode
-        // is counted forward from the last mapped point IMDb contains (S1E1)
-        // by IMDb's episodes per season: 51 + 51 + 43 (maintainer rule 2).
+        // The bounded row 100-170 maps episode 145 to S1E145: the mapping
+        // is the reference even beyond IMDb's 51-episode S1 (maintainer rule).
         assert_eq!(public_match_response(Some(winner)),json!({
-            "sid_start":"tt7441658:3:43","sid_end":"tt7441658:3:43",
+            "sid_start":"tt7441658:1:145","sid_end":"tt7441658:1:145",
             "asid_start":"12665:145","asid_end":"12665:145"}));
     }
 
@@ -8103,12 +8139,11 @@ mod tests {
             ids("tt0131179:32:12","266:1120"));
         assert_eq!(run("Detective Conan S32E4","tt0131179","266",32,4,1112),
             ids("tt0131179:32:4","266:1112"));
-        // S31E41 is beyond IMDb's 16: count on from S31E1 (= 1068).
+        // Mapped coordinates are kept even beyond IMDb's range.
         assert_eq!(run("Detective Conan - 1108","tt0131179","266",31,41,1108),
-            ids("tt0131179:33:10","266:1108"));
-        // IMDb lists Hunter x Hunter (2011) as one season of 148 episodes.
+            ids("tt0131179:31:41","266:1108"));
         assert_eq!(run("[HorribleSubs] Hunter X Hunter - 125 [1080p].mkv",
-            "tt2098220","8550",2,67,125),ids("tt2098220:1:125","8550:125"));
+            "tt2098220","8550",2,67,125),ids("tt2098220:2:67","8550:125"));
         // An unmapped IMDb episode gets its AniDB episode counted.
         assert_eq!(anidb_from_imdb(&db,"tt0131179",33,3).unwrap(),Some(("266".into(),1126)));
         assert_eq!(imdb_from_absolute(&db,"tt0131179","266",1126).unwrap(),Some((33,3)));
@@ -8163,14 +8198,14 @@ mod tests {
         for title in ["[Erai-raws] One Piece - 1100 [1080p].mkv",
             "[Kaerizaki-Fansub]_One_Piece _ 1100_[VOSTFR][HD_1280x720][10Bits].mkv"]{
             assert_eq!(run(title,"tt0388629","69",22,15,1100),json!({
-                "sid_start":"tt0388629:1:1100","sid_end":"tt0388629:1:1100",
+                "sid_start":"tt0388629:22:15","sid_end":"tt0388629:22:15",
                 "asid_start":"69:1100","asid_end":"69:1100"}),"{title}");
         }
         assert_eq!(run("[WMSUB&PCSUB][Tokyo Ghoul re][12][GB][1080P].mp4",
             "tt3741634","13499",3,12,12),json!({
-            "sid_start":"tt3741634","sid_end":"tt3741634",
+            "sid_start":"tt3741634:3:12","sid_end":"tt3741634:3:12",
             "asid_start":"13499:12","asid_end":"13499:12"}),
-            "a later AniDB part never becomes IMDb S1; outside IMDb's range only the IMDb ID");
+            "a later AniDB part never becomes IMDb S1; its mapped S3 is the reference");
         assert_eq!(run("[Group] Kimetsu no Yaiba S05E01 [1080p].mkv",
             "tt9335498","18067",5,1,1)["sid_start"],"tt9335498:5:1",
             "a release naming a season the IMDb snapshot lacks is unchanged");
