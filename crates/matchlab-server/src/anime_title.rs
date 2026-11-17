@@ -507,7 +507,20 @@ pub fn season_from_title(db:&Connection,imdb:&str,title:&str)->rusqlite::Result<
     let unique:BTreeSet<_>=ids.into_iter().map(|(id,_)|id).collect();
     if unique.len()!=1{return Ok(None);}
     let selected=unique.iter().next().unwrap();
-    unique_mapped_season(db,selected)
+    let mapped=unique_mapped_season(db,selected)?;
+    Ok(mapped.filter(|season|!imdb_lacks_season(db,imdb,*season)))
+}
+
+/// The AniDB→TVDB crosswalk numbers a part by its TVDB family. That equals
+/// the IMDb season only when IMDb uses the same numbering (JoJo). A separate
+/// IMDb work for a renamed franchise season (Pokémon Horizons 2023, IMDb
+/// seasons 1-8) sits in TVDB's franchise season 20. When IMDb episode data
+/// exists and has no such season, the mapped season is not an IMDb season.
+fn imdb_lacks_season(db:&Connection,imdb:&str,season:i64)->bool{
+    let known:Option<(i64,i64)>=db.query_row(
+        "SELECT COUNT(*),COALESCE(SUM(season=?2),0) FROM season_episodes WHERE imdb_id=?1",
+        params![imdb,season],|row|Ok((row.get(0)?,row.get(1)?))).ok();
+    matches!(known,Some((rows,matching)) if rows>0&&matching==0)
 }
 
 /// Recognize a title-only anime part only when an exact alias has a unique
@@ -542,7 +555,8 @@ pub fn season_from_any_exact_title(db:&Connection,title:&str)->rusqlite::Result<
     let Some(imdb)=selected_imdb else{return Ok(None)};
     if strict {
         return match selected_anidb{
-            Some(id)=>unique_mapped_season(db,id),
+            Some(id)=>Ok(unique_mapped_season(db,id)?
+                .filter(|season|!imdb_lacks_season(db,imdb,*season))),
             None=>Ok(None),
         };
     }
@@ -569,6 +583,26 @@ mod title_only_season_tests {
         assert_eq!(season_from_any_exact_title(&db,"swordartonline").unwrap(),None);
         db.execute_batch("INSERT INTO episode_map VALUES('101',1,4);").unwrap();
         assert_eq!(season_from_any_exact_title(&db,"swordartonlinealicization").unwrap(),None);
+    }
+
+    #[test]
+    fn mapped_franchise_season_must_exist_in_the_imdb_work() {
+        // Pokémon Horizons: its own IMDb work (seasons 1-2 here), but TVDB
+        // franchise season 20. Season 20 is not a coordinate of that work.
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,clean_title TEXT);
+            CREATE TABLE anime_series_map(anidb_id TEXT,imdb_id TEXT);
+            CREATE TABLE episode_map(anidb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
+            INSERT INTO anidb_titles VALUES('17777','pokemonhorizonstheseries');
+            INSERT INTO anime_series_map VALUES('17777','tt26692417');
+            INSERT INTO episode_map VALUES('17777',1,20);
+            INSERT INTO season_episodes VALUES('tt26692417',1,25,25),('tt26692417',2,20,20);").unwrap();
+        assert_eq!(season_from_title(&db,"tt26692417","Pokemon Horizons The Series").unwrap(),None);
+        // Same numbering on IMDb (JoJo-style): the part's season is kept.
+        db.execute_batch("INSERT INTO season_episodes VALUES('tt26692417',20,25,25);").unwrap();
+        assert_eq!(season_from_title(&db,"tt26692417","Pokemon Horizons The Series").unwrap(),Some(20));
     }
 }
 
