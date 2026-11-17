@@ -574,7 +574,7 @@ fn release_component_for_title<'a>(raw:&'a str,title:&str)->&'a str{
 // every comparison is needless CPU/allocation. Keep the owned-ID rank only
 // for the final cross-identity deterministic tie-break.
 fn rank_without_id(r:&Aka,year:Option<i32>,duplicate:bool,
-    country:Option<&str>,votes:i64)->(i64,i32,i64,i32){
+    country:Option<&str>,anidb:i32,votes:i64)->(i64,i32,i32,i64,i32){
     let distance=year.map_or(0,|y|(i64::from(r.year)-i64::from(y)).abs());
     // Explicit country overrides the default US region only for duplicate
     // aliases. IMDb names its British region GB; torrent markers use UK.
@@ -582,13 +582,13 @@ fn rank_without_id(r:&Aka,year:Option<i32>,duplicate:bool,
     let region=if !duplicate
         || r.region.as_deref()==Some(preferred.unwrap_or("US")){0}else{1};
     let earliest_year=if r.year>0{r.year}else{i32::MAX};
-    (distance,region,-votes,earliest_year)
+    (distance,region,anidb,-votes,earliest_year)
 }
-fn rank(r:&Aka,year:Option<i32>,duplicate:bool,country:Option<&str>,votes:i64)
-    ->(i64,i32,i64,i32,String){
-    let (distance,region,negative_votes,earliest_year)=
-        rank_without_id(r,year,duplicate,country,votes);
-    (distance,region,negative_votes,earliest_year,r.imdb_id.clone())
+fn rank(r:&Aka,year:Option<i32>,duplicate:bool,country:Option<&str>,anidb:i32,votes:i64)
+    ->(i64,i32,i32,i64,i32,String){
+    let (distance,region,anidb,negative_votes,earliest_year)=
+        rank_without_id(r,year,duplicate,country,anidb,votes);
+    (distance,region,anidb,negative_votes,earliest_year,r.imdb_id.clone())
 }
 // For a tied IMDb shortlist, the scalar ranker used one ratings query,
 // one anime_ids query and often one anime_series_map query per identity.
@@ -1144,6 +1144,27 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     // With no release year, every eligible work has zero distance.
     // Region always precedes votes, including season/episode releases.
     // Title fit and verified episode eligibility still outrank both.
+    // An exact, Unicode-verified AniDB title is independent identity
+    // evidence. IMDb lists the current season name of a long-running
+    // franchise as a regional alias of the original work (Pokémon 1997 has
+    // a US "Pokémon Horizons: The Series" alias), while the AniDB title
+    // crosswalks only to the separate 2023 series. Among otherwise tied
+    // works, prefer those the AniDB title maps to before comparing votes.
+    let anidb_ids:HashSet<String>=if series && ranked_groups.len()>1 {
+        crate::tantivy_search::anime_aliases_exact(db,title).map_err(index_error)?
+            .into_iter().map(|alias|alias.imdb_id).collect()
+    }else{HashSet::new()};
+    // Only when the AniDB-linked work carries the title as its PRIMARY IMDb
+    // title (ordering 0) and a competitor reaches it solely through a
+    // secondary regional alias. Remakes with the same primary title
+    // (Hunter x Hunter 1999/2011, Fruits Basket 2001/2019) keep votes.
+    let primary_hits:HashSet<String>=ranked_groups.iter()
+        .filter(|(best_fit,_,aliases)|aliases.iter()
+            .any(|(row,fit)|fit==best_fit&&row.ordering==0))
+        .map(|(_,id,_)|id.clone()).collect();
+    let anidb_primary=anidb_ids.iter().any(|id|primary_hits.contains(id));
+    let anidb_rank=|id:&str|i32::from(anidb_primary&&!anidb_ids.contains(id)
+        &&!primary_hits.contains(id));
     let mut metadata=if ranked_groups.len()>4 {
         let ids=ranked_groups.iter().map(|(_,id,_)|id.clone()).collect::<Vec<_>>();
         Some(shortlist_metadata(db,&ids)?)
@@ -1158,10 +1179,11 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
         // Tantivy returns equally ranked aliases of one work in hash order.
         // Break the remaining tie by IMDb's own alias ordering and then the
         // text, so the published title is identical on every run.
+        let anidb=anidb_rank(&id);
         let (best,fit)=aliases.into_iter().min_by(|(a,fit_a),(b,fit_b)|
-            (*fit_a,rank_without_id(a,year,duplicates.contains(&a.clean),country,votes),
+            (*fit_a,rank_without_id(a,year,duplicates.contains(&a.clean),country,anidb,votes),
                 a.ordering,&a.title)
-            .cmp(&(*fit_b,rank_without_id(b,year,duplicates.contains(&b.clean),country,votes),
+            .cmp(&(*fit_b,rank_without_id(b,year,duplicates.contains(&b.clean),country,anidb,votes),
                 b.ordering,&b.title))
         ).unwrap();
         let ids=if let Some((_,ids))=prefetched{ids}else{
@@ -1177,7 +1199,7 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
             }
             ids
         };
-        let score=(fit,rank(&best,year,duplicates.contains(&best.clean),country,votes));
+        let score=(fit,rank(&best,year,duplicates.contains(&best.clean),country,anidb,votes));
         output.push((score,Match{imdb_id:id,title:best.title.clone(),year:best.year,
             category:best.category,matched_title:best.title,anime_ids:ids,media_type:best.media_type}));
     }
@@ -1542,6 +1564,51 @@ mod tests{
             .unwrap();
         assert_eq!(search_part()[0].imdb_id,"tt0000100",
             "ambiguous AniDB links cannot give arbitrary priority");
+    }
+
+    /// IMDb lists a renamed franchise season ("Pokémon Horizons: The
+    /// Series") as a US alias of the popular 1997 work while a separate 2023
+    /// work carries it as its primary title. An exact AniDB title that
+    /// crosswalks only to the 2023 work decides the tie before IMDb votes.
+    #[test]
+    fn exact_anidb_title_breaks_a_same_alias_tie_before_votes(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE seasons(imdb_id TEXT PRIMARY KEY,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
+            INSERT INTO titles VALUES
+                ('tt0000197','Example Monsters','examplemonsters',1997,'series','',0,0,'tvSeries'),
+                ('tt0000197','Example Monsters Horizons The Series','examplemonstershorizonstheseries',
+                    1997,'series','US',0,191,'tvSeries'),
+                ('tt0002023','Example Monsters Horizons The Series','examplemonstershorizonstheseries',
+                    2023,'series','',0,0,'tvSeries'),
+                ('tt0002023','Example Monsters Horizons The Series','examplemonstershorizonstheseries',
+                    2023,'series','US',0,19,'tvSeries');
+            INSERT INTO anidb_titles VALUES
+                ('17777','Example Monsters Horizons: The Series','examplemonstershorizonstheseries','official','en'),
+                ('230','Example Monsters','examplemonsters','official','en');
+            INSERT INTO anime_series_map VALUES('tt0002023','17777','76703',1),
+                ('tt0000197','230','76703',1);
+            INSERT INTO seasons VALUES('tt0000197',25),('tt0002023',8);
+            INSERT INTO season_episodes VALUES('tt0000197',1,82,82),('tt0002023',1,25,25);
+            INSERT INTO imdb_ratings VALUES('tt0000197',57801),('tt0002023',1940);").unwrap();
+        for strict in [false,true]{
+            let hits=search_inner_mode(&db,"Example Monsters Horizons The Series",None,true,1,
+                "Example.Monsters.Horizons.The.Series.S01.1080p",false,5,false,strict).unwrap().0;
+            assert_eq!(hits[0].imdb_id,"tt0002023","strict={strict}: {hits:?}");
+        }
+        // Without the AniDB evidence, votes still decide as before.
+        db.execute_batch("DELETE FROM anidb_titles WHERE anidb_id='17777'").unwrap();
+        let hits=search_inner_mode(&db,"Example Monsters Horizons The Series",None,true,1,
+            "Example.Monsters.Horizons.The.Series.S01.1080p",false,5,false,false).unwrap().0;
+        assert_eq!(hits[0].imdb_id,"tt0000197");
     }
 
     #[test]
@@ -2022,37 +2089,40 @@ mod tests{
         let no_exact=candidate("ttno",2020,"NO");
         let no_old=candidate("ttno",2018,"NO");
         // An explicit release year always beats popularity and region.
-        assert!(rank(&no_exact,Some(2020),true,None,1)
-            <rank(&us_old,Some(2020),true,None,1_000_000));
+        assert!(rank(&no_exact,Some(2020),true,None,0,1)
+            <rank(&us_old,Some(2020),true,None,0,1_000_000));
         // Region wins ahead of popularity even without a country marker.
-        assert!(rank(&us_old,Some(2018),true,None,1)
-            <rank(&no_old,Some(2018),true,None,1_000_000));
-        assert!(rank(&us_old,None,true,None,1)
-            <rank(&no_old,None,true,None,1_000_000));
+        assert!(rank(&us_old,Some(2018),true,None,0,1)
+            <rank(&no_old,Some(2018),true,None,0,1_000_000));
+        assert!(rank(&us_old,None,true,None,0,1)
+            <rank(&no_old,None,true,None,0,1_000_000));
         // Explicit country qualifier: prefer the requested region first.
-        assert!(rank(&us_old,Some(2018),true,Some("US"),1)
-            <rank(&no_old,Some(2018),true,Some("US"),1_000_000));
-        assert!(rank(&no_old,None,true,Some("NO"),1)
-            <rank(&us_old,None,true,Some("NO"),1_000_000));
+        assert!(rank(&us_old,Some(2018),true,Some("US"),0,1)
+            <rank(&no_old,Some(2018),true,Some("US"),0,1_000_000));
+        assert!(rank(&no_old,None,true,Some("NO"),0,1)
+            <rank(&us_old,None,true,Some("NO"),0,1_000_000));
         // British releases use IMDb's GB regional title code.
         let british=candidate("ttgb",2018,"GB");
-        assert!(rank(&british,None,true,Some("UK"),1)
-            <rank(&us_old,None,true,Some("UK"),1_000_000));
+        assert!(rank(&british,None,true,Some("UK"),0,1)
+            <rank(&us_old,None,true,Some("UK"),0,1_000_000));
+        // An exact AniDB title crosswalk outranks IMDb popularity.
+        assert!(rank(&us_old,None,true,None,0,1)
+            <rank(&no_old,None,false,None,1,1_000_000));
         // If region is not applicable, votes alone lead.
-        assert!(rank(&no_old,Some(2018),false,None,2)
-            <rank(&us_old,Some(2018),false,None,1));
+        assert!(rank(&no_old,Some(2018),false,None,0,2)
+            <rank(&us_old,Some(2018),false,None,0,1));
         // A complete vote/region/year-distance tie favors the earliest year.
-        assert!(rank(&us_old,None,true,None,100)
-            <rank(&candidate("ttnew",2020,"US"),None,true,None,100));
+        assert!(rank(&us_old,None,true,None,0,100)
+            <rank(&candidate("ttnew",2020,"US"),None,true,None,0,100));
         // The same applies when two years are equally close to the given year.
-        assert!(rank(&us_old,Some(2019),true,None,100)
-            <rank(&candidate("ttnew",2020,"US"),Some(2019),true,None,100));
+        assert!(rank(&us_old,Some(2019),true,None,0,100)
+            <rank(&candidate("ttnew",2020,"US"),Some(2019),true,None,0,100));
         // An unknown metadata year is not preferred as the earliest known.
-        assert!(rank(&us_old,None,true,None,100)
-            <rank(&candidate("ttmissing",0,"US"),None,true,None,100));
+        assert!(rank(&us_old,None,true,None,0,100)
+            <rank(&candidate("ttmissing",0,"US"),None,true,None,0,100));
         // IMDb ID makes exact ties deterministic, but is not a semantic score.
-        assert!(rank(&candidate("ttaaa",2020,"US"),None,true,None,100)
-            <rank(&candidate("ttbbb",2020,"US"),None,true,None,100));
+        assert!(rank(&candidate("ttaaa",2020,"US"),None,true,None,0,100)
+            <rank(&candidate("ttbbb",2020,"US"),None,true,None,0,100));
     }
 
     #[test]
