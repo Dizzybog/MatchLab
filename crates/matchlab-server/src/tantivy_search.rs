@@ -3,7 +3,7 @@
 use std::{collections::{HashMap,BTreeSet},fs::File,path::{Path,PathBuf},sync::{RwLock,OnceLock,atomic::{AtomicU64,Ordering}},time::{Duration,SystemTime,UNIX_EPOCH}};
 use crate::query_cache::QueryCache;
 use rusqlite::{Connection,OptionalExtension};
-use tantivy::{collector::DocSetCollector,doc,query::{BooleanQuery,Occur,Query,RegexQuery,TermQuery},schema::{Schema,STORED,STRING,Value,IndexRecordOption},Index,IndexReader,ReloadPolicy,Term};
+use tantivy::{collector::DocSetCollector,doc,query::{AutomatonWeight,BooleanQuery,EnableScoring,Occur,Query,TermQuery,Weight},schema::{Schema,STORED,STRING,Value,IndexRecordOption},Index,IndexReader,ReloadPolicy,Term};
 
 /// Documents containing any of the exact terms. `TermSetQuery` compiles the
 /// terms into an automaton whose doc set allocates and clears a bit set
@@ -14,6 +14,49 @@ fn term_union(terms:impl IntoIterator<Item=Term>)->BooleanQuery{
     BooleanQuery::new(terms.into_iter().map(|term|(Occur::Should,
         Box::new(TermQuery::new(term,IndexRecordOption::Basic)) as Box<dyn Query>))
         .collect())
+}
+
+use std::sync::Arc;
+
+/// Exact byte-prefix automaton over the term dictionary. A compiled regex
+/// such as `escaped_title.*` is bounded to 1000 states, so long release
+/// titles failed with `RegexQueryError`; this walks the FST with constant
+/// state and selects exactly the same terms.
+#[derive(Debug)]
+struct PrefixAutomaton(Box<[u8]>);
+
+impl tantivy_fst::Automaton for PrefixAutomaton {
+    type State=Option<usize>;
+    fn start(&self)->Option<usize>{Some(0)}
+    fn is_match(&self,state:&Option<usize>)->bool{*state==Some(self.0.len())}
+    fn can_match(&self,state:&Option<usize>)->bool{state.is_some()}
+    fn will_always_match(&self,state:&Option<usize>)->bool{self.is_match(state)}
+    fn accept(&self,state:&Option<usize>,byte:u8)->Option<usize>{
+        match *state {
+            Some(matched) if matched==self.0.len()=>Some(matched),
+            Some(matched) if self.0[matched]==byte=>Some(matched+1),
+            _=>None,
+        }
+    }
+}
+
+/// Every term of `field` starting with `prefix`.
+#[derive(Clone,Debug)]
+struct PrefixQuery {
+    field:tantivy::schema::Field,
+    prefix:Arc<PrefixAutomaton>,
+}
+
+impl PrefixQuery {
+    fn new(field:tantivy::schema::Field,prefix:&str)->PrefixQuery{
+        PrefixQuery{field,prefix:Arc::new(PrefixAutomaton(prefix.as_bytes().into()))}
+    }
+}
+
+impl Query for PrefixQuery {
+    fn weight(&self,_scoring:EnableScoring<'_>)->tantivy::Result<Box<dyn Weight>>{
+        Ok(Box::new(AutomatonWeight::<PrefixAutomaton>::new(self.field,Arc::clone(&self.prefix))))
+    }
 }
 
 #[derive(Clone)]
@@ -756,15 +799,7 @@ fn title_aliases_at_release_prefixes_uncached(
         return Ok(Vec::new());
     };
     let (search,memory_dir)=open_search(db)?;
-    // All keys are made from compact normalized title words, but escape
-    // regex operators defensively to avoid altering the lookup semantics.
-    let mut literal=String::new();
-    for ch in shortest.chars(){
-        if ".+*?()[]{}|^$\\".contains(ch){literal.push('\\');}
-        literal.push(ch);
-    }
-    let query=RegexQuery::from_pattern(&format!("{literal}.*"),search.forward)
-        .map_err(|e|e.to_string())?;
+    let query=PrefixQuery::new(search.forward,shortest);
     let reader=search.reader.searcher();
     let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
     let mut aliases=Vec::with_capacity(hits.len());
@@ -786,20 +821,12 @@ fn title_aliases_at_release_suffixes_uncached(
 )->Result<Vec<TitleAlias>,String>{
     if keys.is_empty(){return Ok(Vec::new());}
     let (search,memory_dir)=open_search(db)?;
-    let mut alternatives=Vec::with_capacity(keys.len());
-    for key in keys {
-        if key.is_empty(){continue;}
-        let mut escaped=String::new();
-        for ch in key.chars(){
-            if ".+*?()[]{}|^$\\".contains(ch){escaped.push('\\');}
-            escaped.push(ch);
-        }
-        alternatives.push(escaped);
-    }
+    let alternatives:Vec<(Occur,Box<dyn Query>)>=keys.iter()
+        .filter(|key|!key.is_empty())
+        .map(|key|(Occur::Should,Box::new(PrefixQuery::new(search.forward,key)) as Box<dyn Query>))
+        .collect();
     if alternatives.is_empty(){return Ok(Vec::new());}
-    let pattern=format!("({}).*",alternatives.join("|"));
-    let query=RegexQuery::from_pattern(&pattern,search.forward)
-        .map_err(|e|e.to_string())?;
+    let query=BooleanQuery::new(alternatives);
     let reader=search.reader.searcher();
     let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
     let mut aliases=Vec::with_capacity(hits.len());
@@ -949,12 +976,7 @@ fn title_aliases_uncached(db:&Connection,key:&str,suffix:bool)->Result<Vec<Title
     let (search,memory_dir)=open_search(db)?;
     let field=if suffix{search.backward}else{search.forward};
     let term=if suffix{key.chars().rev().collect::<String>()}else{key.to_string()};
-    let mut escaped=String::new();
-    for ch in term.chars(){
-        if ".+*?()[]{}|^$\\".contains(ch){escaped.push('\\');}
-        escaped.push(ch);
-    }
-    let query=RegexQuery::from_pattern(&format!("{escaped}.*"),field).map_err(|e|e.to_string())?;
+    let query=PrefixQuery::new(field,&term);
     let reader=search.reader.searcher();
     let hits=reader.search(&query,&DocSetCollector).map_err(|e|e.to_string())?;
     let mut aliases=Vec::with_capacity(hits.len());
@@ -1029,17 +1051,10 @@ fn candidates_internal(db:&Connection,key:&str,_year:Option<i32>,suffix:bool,lim
     let (search,memory_dir)=open_search(db)?;
     let field=if anime_only{search.anime}else if suffix{search.backward}else{search.forward};
     let term=if suffix{key.chars().rev().collect::<String>()}else{key.to_string()};
-    // Tantivy RegexQuery consumes a regex, not a literal string. Escape
-    // metacharacters so aliases never change the intended search semantics.
-    let mut literal=String::new();
-    for ch in term.chars() {
-        if ".+*?()[]{}|^$\\".contains(ch) {
-            literal.push('\\');
-        }
-        literal.push(ch);
-    }
-    let pattern=if anime_only{literal}else{format!("{}.*",literal)};
-    let query=RegexQuery::from_pattern(&pattern,field).map_err(|e|e.to_string())?;
+    // Anime aliases match the exact term; titles match every extension.
+    let query:Box<dyn Query>=if anime_only{
+        Box::new(TermQuery::new(Term::from_field_text(field,&term),IndexRecordOption::Basic))
+    }else{Box::new(PrefixQuery::new(field,&term))};
     let reader=search.reader.searcher();
     let mut ids=Vec::new();
     let mut seen=std::collections::HashSet::new();
@@ -1632,6 +1647,35 @@ mod persistence_tests {
             INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt1234567','a.b',2020);
             INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt7654321','axb',2020);").unwrap();
         assert_eq!(candidates(&db,"a.b",None,false,1).unwrap(),vec!["tt1234567"]);
+    }
+
+    #[test]
+    fn long_release_keys_do_not_hit_the_regex_state_limit() {
+        // A 150-character escaped `key.*` regex exceeded tantivy-fst's 1000
+        // state limit and turned /match into HTTP 400. Prefix lookups walk
+        // the term dictionary instead and keep exact prefix semantics.
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,clean_title TEXT,year INTEGER,
+                title TEXT NOT NULL DEFAULT '',category TEXT NOT NULL DEFAULT 'movie',
+                region TEXT NOT NULL DEFAULT '',original INTEGER NOT NULL DEFAULT 1,
+                ordering INTEGER NOT NULL DEFAULT 0,type TEXT NOT NULL DEFAULT 'movie');
+            INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt1234567','family tradition',2020);
+            INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt7654321','family traditions',2020);
+            INSERT INTO titles(imdb_id,clean_title,year) VALUES('tt1111111','familyx',2020);").unwrap();
+        let long="family tradition ".repeat(12);
+        assert!(candidates(&db,&long,None,false,1).unwrap().is_empty());
+        assert!(candidates(&db,&long,None,true,1).unwrap().is_empty());
+        assert!(title_aliases_at_release_prefixes(&db,&[long.clone()]).unwrap().is_empty());
+        assert!(title_aliases_at_release_suffixes(&db,&[long.clone(),long]).unwrap().is_empty());
+        let mut found=candidates(&db,"family tradition",None,false,1).unwrap();
+        found.sort();
+        assert_eq!(found,vec!["tt1234567","tt7654321"]);
+        let prefixes=title_aliases_at_release_prefixes(&db,&["family trad".into()]).unwrap();
+        assert_eq!(prefixes.len(),2);
+        let suffixes=title_aliases_at_release_suffixes(&db,&["familyx".into(),"family traditions".into()]).unwrap();
+        let mut ids:Vec<&str>=suffixes.iter().map(|alias|alias.imdb_id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids,vec!["tt1111111","tt7654321"]);
     }
 
     #[test]
