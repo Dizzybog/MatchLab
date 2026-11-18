@@ -1024,6 +1024,35 @@ fn reconcile_series_coordinates(
         winner["coordinate_fallback"]=json!("named_anidb_work");
     }
     reconcile_series_coordinates_inner(db,winner,parsed)?;
+    // Maintainer rule: an anime release naming its season and episode is
+    // imdb:S:E exactly as named, whatever the mapping or IMDb says. The ASID
+    // is then the mapping's AniDB episode for that coordinate, or counted
+    // across season boundaries from the last mapped point.
+    if let Some((season,episode))=release_season_episode(winner,parsed)
+        && (winner["season"].as_i64(),winner["episode"].as_i64())!=(Some(season),Some(episode))
+        && !named_part_coordinate(db,winner,parsed)?
+    {
+        let imdb=winner["imdb_id"].as_str().unwrap_or_default().to_owned();
+        winner["season"]=json!(season);
+        winner["episode"]=json!(episode);
+        winner["season_end"]=Value::Null;
+        winner["episode_end"]=Value::Null;
+        winner["sid"]=json!(format!("{imdb}:{season}:{episode}"));
+        winner["coordinate_fallback"]=json!("release_season_episode");
+        let mapped=episode_crosswalk::resolve_season(db,&imdb,season,episode).ok().flatten()
+            .map(|found|(found.anidb_id,found.anidb_episode,false));
+        let counted=match mapped {
+            Some(found)=>Some(found),
+            None=>anidb_from_imdb(db,&imdb,season,episode)?.map(|(id,ep)|(id,ep,true)),
+        };
+        winner["anime"]=match counted.and_then(|(id,ep,counted)|
+            episode_crosswalk::canonical_asid(&id,ep).map(|asid|(id,ep,asid,counted))) {
+            Some((id,ep,asid,true))=>json!({"anidb_id":id,"episode":ep,"asid":asid,
+                "counted_from_mapping":true}),
+            Some((id,ep,asid,false))=>json!({"anidb_id":id,"episode":ep,"asid":asid}),
+            None=>Value::Null,
+        };
+    }
     if let Some(absolute)=absolute
         && winner.pointer("/anime/asid").and_then(Value::as_str).is_none()
         && let Some(anidb)=named.or_else(||winner["anime_ids"]["anidb"].as_str().map(str::to_owned))
@@ -1046,6 +1075,60 @@ fn current_coordinate_is_impossible(db:&Connection,winner:&Value)->Result<bool,S
         Some(last)=>episode>last,
         None=>imdb_lacks_remapped_season(db,imdb,season,None)?,
     })
+}
+
+/// The title names a later AniDB part (JoJo Stone Ocean, Tokyo Revengers:
+/// Christmas Showdown) and the coordinate is that part's: the release's
+/// season counts within the part, so its IMDb season stays translated.
+fn named_part_coordinate(db:&Connection,winner:&Value,parsed:&serde_json::Map<String,Value>)
+    ->Result<bool,String>{
+    // A release whose own number the parser marked as absolute (Chinese
+    // "S02E41 第41集") is numbered across the series, not within S02.
+    if parsed.get("absolute_episode_candidate").and_then(Value::as_i64)
+        ==numbers(parsed.get("episodes")).first().copied(){return Ok(true);}
+    if numbers(parsed.get("seasons")).first()!=Some(&1){return Ok(false);}
+    // The part is named by the title, by the identified AniDB work, or by
+    // an ASID that carries the release's own local episode number
+    // (Alicization/S01E01 → 101:1). An ASID offset from a later cour (NieR
+    // S01E19 → 18134:7) does not name a part.
+    let release_episode=numbers(parsed.get("episodes")).first().copied();
+    let mut identities=Vec::new();
+    if let Some(named)=named_anidb_work(db,winner,parsed)?{identities.push(named);}
+    // The stored AniDB ID is often the latest season (Solo Leveling →
+    // season 2): it names a part only when the matched title is its title.
+    if let Some(id)=winner["anime_ids"]["anidb"].as_str()
+        && anidb_title_is(db,id,winner["matched_title"].as_str().unwrap_or_default())?{
+        identities.push(id.to_owned());
+    }
+    if winner.pointer("/anime/episode").and_then(Value::as_i64)==release_episode
+        && let Some(id)=winner.pointer("/anime/anidb_id").and_then(Value::as_str){
+        identities.push(id.to_owned());
+    }
+    for identity in identities {
+        if !starts_series(db,&identity)?{return Ok(true);}
+    }
+    Ok(false)
+}
+
+/// `title` is one of the AniDB work's own titles.
+fn anidb_title_is(db:&Connection,anidb:&str,title:&str)->Result<bool,String>{
+    let clean=imdb_matcher::clean_title(title);
+    if clean.is_empty(){return Ok(false);}
+    match db.query_row("SELECT EXISTS(SELECT 1 FROM anidb_titles WHERE anidb_id=?1 AND clean_title=?2)",
+        rusqlite::params![anidb,clean],|row|row.get::<_,bool>(0)) {
+        Ok(found)=>Ok(found),
+        Err(rusqlite::Error::SqliteFailure(..))=>Ok(false),
+        Err(error)=>Err(error.to_string()),
+    }
+}
+
+/// The release's own single season and episode (S02E01, "S2 - 01").
+fn release_season_episode(winner:&Value,parsed:&serde_json::Map<String,Value>)->Option<(i64,i64)>{
+    if winner.get("episode_range").is_some()
+        || !winner["anime_ids"].as_object().is_some_and(|ids|ids.contains_key("anidb")){return None;}
+    let (seasons,episodes)=(numbers(parsed.get("seasons")),numbers(parsed.get("episodes")));
+    let (&[season],&[episode])=(seasons.as_slice(),episodes.as_slice()) else{return None};
+    (season>0 && episode>0 && valid_sid_coordinate(season,episode)).then_some((season,episode))
 }
 
 /// The release's episode when it has no season: absolute anime numbering.
@@ -8276,8 +8359,10 @@ mod tests {
             "season":15,"episode":4,
             "anime":{"asid":"42:320"},"anime_ids":{"anidb":"42"}});
         reconcile_series_coordinates(&db,&mut verified,parsed.as_object().unwrap()).unwrap();
-        assert_eq!(verified["season"],15);
-        assert_eq!(verified["episode"],4);
+        // Maintainer rule: the release's own S01E320 is the IMDb coordinate.
+        assert_eq!(verified["season"],1);
+        assert_eq!(verified["episode"],320);
+        assert_eq!(verified["sid"],"tt1234567:1:320");
         let no_season=json!({"seasons":[],"episodes":[320]});
         let mut unsafe_absolute=json!({"imdb_id":"tt1234567","category":"series",
             "season":null,"episode":null,"anime_ids":{"anidb":"42"}});
@@ -8889,9 +8974,10 @@ mod tests {
         assert_eq!(unknown["imdb_id"],"tt0000201");
         assert_eq!(unknown["season"],1,
             "explicit S01 survives the missing IMDb episode table");
-        assert!(unknown["episode"].is_null(),
-            "an unverified episode outside bounded AniDB evidence is withheld");
-        assert_eq!(unknown["sid"],"tt0000201");
+        // Maintainer rule: a release's own SxxEyy is the IMDb coordinate,
+        // even outside the verified AniDB interval; only the ASID is withheld.
+        assert_eq!(unknown["episode"],99);
+        assert_eq!(unknown["sid"],"tt0000201:1:99");
         assert!(unknown["anime"].is_null());
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
