@@ -1017,9 +1017,9 @@ fn reconcile_series_coordinates(
                 winner.pointer("/anime/anidb_id").and_then(Value::as_str).unwrap_or_default(),
                 mapped_season,winner.pointer("/anime/episode").and_then(Value::as_i64))? {
                 MappingCoverage::Bounded=>false,
-                MappingCoverage::OpenEnded=>season_episode_end(
-                    db,winner["imdb_id"].as_str().unwrap_or_default(),mapped_season)?
-                    .is_some_and(|last|mapped_episode>last),
+                // Open-ended rows (defaulttvdbseason) are the reference too
+                // (maintainer: Black Clover 145 may be S01E145).
+                MappingCoverage::OpenEnded=>false,
                 MappingCoverage::None=>season_episode_end(
                     db,winner["imdb_id"].as_str().unwrap_or_default(),mapped_season)?
                     .is_some_and(|last|mapped_episode>last)
@@ -1286,10 +1286,9 @@ fn valid_sid_coordinate(season:i64,episode:i64)->bool{
 enum MappingCoverage {Bounded,OpenEnded,None}
 
 /// How the Anime-Lists mapping holds this AniDB episode in that season:
-/// a bounded row or explicit episode pairs (the reference), only an
-/// open-ended row (no last episode: the reference unless IMDb lists that
-/// season with fewer episodes, e.g. Black Clover 145 on a S1 default), or
-/// no row at all.
+/// a bounded row or explicit episode pairs, or only an open-ended row (no
+/// last episode, e.g. defaulttvdbseason: Black Clover 145 → S01E145), both
+/// the reference; or no row at all, which is counted.
 fn mapping_coverage(db:&Connection,anidb:&str,season:i64,anime_episode:Option<i64>)
     ->Result<MappingCoverage,String>{
     let Some(anime_episode)=anime_episode.filter(|episode|*episode>0) else{return Ok(MappingCoverage::Bounded)};
