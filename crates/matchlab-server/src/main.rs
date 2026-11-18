@@ -1025,7 +1025,9 @@ fn reconcile_series_coordinates(
                 // (maintainer: Black Clover 145 may be S01E145), unless a
                 // bounded row of ANOTHER AniDB work maps the episode (Frieren
                 // 33 → new work episode 5): checked below, kept otherwise.
-                MappingCoverage::OpenEnded=>season_episode_end(
+                // A row closed by a later mapped season (ClosedOpenEnded) is
+                // counted when the episode passes IMDb's season length.
+                MappingCoverage::OpenEnded|MappingCoverage::ClosedOpenEnded=>season_episode_end(
                     db,winner["imdb_id"].as_str().unwrap_or_default(),mapped_season)?
                     .is_some_and(|last|mapped_episode>last),
                 MappingCoverage::None=>season_episode_end(
@@ -1296,7 +1298,7 @@ fn valid_sid_coordinate(season:i64,episode:i64)->bool{
     (0..=9999).contains(&season)&&(0..=99999).contains(&episode)
 }
 #[derive(Debug,PartialEq)]
-enum MappingCoverage {Bounded,OpenEnded,None}
+enum MappingCoverage {Bounded,OpenEnded,ClosedOpenEnded,None}
 
 /// How the Anime-Lists mapping holds this AniDB episode in that season:
 /// a bounded row or explicit episode pairs, or only an open-ended row (no
@@ -1318,9 +1320,21 @@ fn mapping_coverage(db:&Connection,anidb:&str,season:i64,anime_episode:Option<i6
     };
     let covering:Vec<_>=rows.iter().filter(|(start,end,map)|!map.is_empty()
         || (*start<=anime_episode && (*end<=0 || *end>=anime_episode))).collect();
-    Ok(if covering.is_empty(){MappingCoverage::None}
-        else if covering.iter().any(|(_,end,map)|!map.is_empty()||*end>0){MappingCoverage::Bounded}
-        else{MappingCoverage::OpenEnded})
+    if covering.is_empty(){return Ok(MappingCoverage::None);}
+    if covering.iter().any(|(_,end,map)|!map.is_empty()||*end>0){return Ok(MappingCoverage::Bounded);}
+    // An open-ended row lasts until the mapping starts a later season of
+    // the same TVDB series (Bungou Stray Dogs: TVDB S1 ends where AniDB
+    // 14230 starts S2). Past that, the episode is not covered.
+    let closed=db.query_row("SELECT EXISTS(SELECT 1 FROM episode_map own
+            JOIN episode_map later ON later.tvdb_id=own.tvdb_id
+            WHERE own.anidb_id=?1 AND own.tvdb_season=?2
+                AND later.anidb_season>0 AND later.tvdb_season>?2)",
+        rusqlite::params![anidb,season],|row|row.get::<_,bool>(0));
+    Ok(match closed {
+        Ok(true)=>MappingCoverage::ClosedOpenEnded,
+        Ok(false)|Err(rusqlite::Error::SqliteFailure(..))=>MappingCoverage::OpenEnded,
+        Err(error)=>return Err(error.to_string()),
+    })
 }
 
 /// The crosswalk moved the coordinate to a season the IMDb work does not
@@ -7792,11 +7806,55 @@ mod tests {
             "anime":{"anidb_id":"12665","episode":145,"asid":"12665:145"}
         });
         reconcile_series_coordinates(&db,&mut ambiguous,&parsed).unwrap();
-        // Two works map S3, so no single bounded row replaces the open-ended
-        // S1 row: the mapping's S1E145 is kept (maintainer: S01E145 is fine).
+        // Two works map S3, so neither replaces the AniDB ID. The S3 rows
+        // still close the open-ended S1 row, so episode 145 is counted
+        // from IMDb's season lengths.
         assert_eq!(public_match_response(Some(ambiguous)),json!({
-            "sid_start":"tt7441658:1:145","sid_end":"tt7441658:1:145",
+            "sid_start":"tt7441658:3:43","sid_end":"tt7441658:3:43",
             "asid_start":"12665:145","asid_end":"12665:145"}));
+    }
+
+    #[test]
+    fn open_ended_row_ends_where_the_mapping_starts_a_later_season(){
+        // Bungou Stray Dogs: TVDB S1 holds AniDB 11523 (1-12) and 11965
+        // (open-ended from S1E13), and AniDB 14230 starts TVDB S2. IMDb
+        // splits the same episodes into one season per cour.
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE season_episodes(
+                imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(
+                anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            INSERT INTO season_episodes VALUES
+                ('tt5679720',1,12,12),('tt5679720',2,13,13),('tt5679720',3,12,12),
+                ('tt5679720',4,13,13),('tt5679720',5,11,11);
+            INSERT INTO anime_series_map VALUES
+                ('tt5679720','11523','305075',1),('tt5679720','11965','305075',0),
+                ('tt5679720','14230','305075',0),('tt5679720','16965','305075',0);
+            INSERT INTO episode_map VALUES
+                ('11523','305075',1,1,1,12,0,''),('11965','305075',1,1,1,0,12,''),
+                ('14230','305075',1,2,0,0,0,''),('16965','305075',1,3,1,13,0,'');")
+            .unwrap();
+        assert_eq!(mapping_coverage(&db,"11965",1,Some(31)).unwrap(),
+            MappingCoverage::ClosedOpenEnded);
+        assert_eq!(mapping_coverage(&db,"16965",3,Some(5)).unwrap(),MappingCoverage::Bounded);
+        let parsed=matchlab_parser::parse_title(
+            "[SubsPlease] Bungou Stray Dogs - 43 (1080p) [4A5F07E3].mkv",false).unwrap();
+        let mut winner=json!({
+            "imdb_id":"tt5679720","category":"series","title":"Bungou Stray Dogs",
+            "matched_title":"Bungou Stray Dogs","anime_ids":{"anidb":"11965"},
+            "season":1,"episode":43,
+            "anime":{"anidb_id":"11965","episode":31,"asid":"11965:31"},
+            "sid":"tt5679720:1:43"
+        });
+        reconcile_series_coordinates(&db,&mut winner,&parsed).unwrap();
+        // Absolute 43 is past the 12 + 12 TVDB S1 episodes: counted from
+        // IMDb, and the impossible 11965:31 is dropped.
+        assert_eq!(public_match_response(Some(winner)),json!({
+            "sid_start":"tt5679720:4:6","sid_end":"tt5679720:4:6",
+            "asid_start":null,"asid_end":null}));
     }
 
     #[test]
