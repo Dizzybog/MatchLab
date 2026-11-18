@@ -982,6 +982,11 @@ fn official_numbering_after_prologue(
 fn reconcile_series_coordinates(
     db:&Connection,winner:&mut Value,parsed:&serde_json::Map<String,Value>,
 )->Result<(),String>{
+    if winner["category"]!="series"
+        || !winner["imdb_id"].as_str().is_some_and(metadata_import::valid_imdb_id)
+        || parsed.get("half_episode").and_then(Value::as_bool)==Some(true){
+        return Ok(());
+    }
     // Maintainer rule: a release with only an absolute episode is identified
     // by AniDB first. The AniDB work its title names wins over the IMDb
     // record's stored AniDB ID, and the result always carries anidb:episode,
@@ -1100,8 +1105,8 @@ fn named_part_coordinate(db:&Connection,winner:&Value,parsed:&serde_json::Map<St
     ->Result<bool,String>{
     // A release whose own number the parser marked as absolute (Chinese
     // "S02E41 第41集") is numbered across the series, not within S02.
-    if parsed.get("absolute_episode_candidate").and_then(Value::as_i64)
-        ==numbers(parsed.get("episodes")).first().copied(){return Ok(true);}
+    if let Some(absolute)=parsed.get("absolute_episode_candidate").and_then(Value::as_i64)
+        && numbers(parsed.get("episodes")).first()==Some(&absolute){return Ok(true);}
     if numbers(parsed.get("seasons")).first()!=Some(&1){return Ok(false);}
     // The part is named by the title, by the identified AniDB work, or by
     // an ASID that carries the release's own local episode number
@@ -1215,14 +1220,13 @@ fn reconcile_series_coordinates_inner(
     // so neither the anime-priority nor IMDb fallback lane can publish it.
     // Unknown bounds retain verified crosswalk coverage. A contradiction
     // with known bounds must not fall through to a guessed raw coordinate.
-    // Maintainer rules: a coordinate the Anime-Lists mapping really holds is
-    // the reference even when IMDb lacks it (One Piece S22E15, Bleach S17).
-    // Only an open default row (defaulttvdbseason without bounds, e.g.
-    // Black Clover S01E145) is not a mapping of that episode: when IMDb
-    // contradicts it, the coordinate is counted instead. A release naming
+    // Maintainer rules: a coordinate the Anime-Lists mapping holds is the
+    // reference even when IMDb lacks it (One Piece S22E15, Bleach S17); see
+    // MappingCoverage for open-ended rows. Only a coordinate the mapping
+    // does not hold is counted from IMDb's season lengths. A release naming
     // its own season/episode keeps them when the mapping moved it to a
-    // season IMDb does not list and IMDb lists the release's own (rule 1;
-    // a named part such as JoJo Stone Ocean S01 → IMDb S5 is unaffected).
+    // season IMDb does not list and IMDb lists the release's own (a named
+    // part such as JoJo Stone Ocean S01 → IMDb S5 is unaffected).
     let coverage=match (season,winner.pointer("/anime/asid").and_then(Value::as_str)) {
         (Some(mapped_season),Some(_)) if mapped_season>0=>mapping_coverage(db,
             winner.pointer("/anime/anidb_id").and_then(Value::as_str).unwrap_or_default(),
@@ -1312,16 +1316,11 @@ fn reconcile_series_coordinates_inner(
             // identified AniDB work plus the parsed absolute episode
             // (Detective Conan - 1108 → 266:1108) does not depend on the
             // crosswalk. Keep it; drop any other ASID.
-            let imdb_id=winner["imdb_id"].as_str().unwrap_or_default();
-            let sole_anidb:i64=db.query_row(
-                "SELECT COUNT(DISTINCT anidb_id) FROM anime_series_map WHERE imdb_id=?1",
-                [imdb_id],|row|row.get(0)).unwrap_or(0);
-            // Maintainer rule 2: an absolute release keeps anidb:episode.
-            let _=sole_anidb;
             let independent=expected_asid.is_some()
                 && expected_asid.as_deref()==original_asid;
-            // IMDb numbering takes priority over the TVDB crosswalk.
-            let imdb_owned=imdb_id.to_owned();
+            // A release's own IMDb S:E, or its counted absolute number,
+            // replaces the rejected crosswalk coordinate.
+            let imdb_owned=winner["imdb_id"].as_str().unwrap_or_default().to_owned();
             if let Some((imdb_season,imdb_episode,keep_asid))=
                 imdb_numbering(db,winner,parsed,season,parsed_season,parsed_episode)?{
                 let keep_asid=keep_asid||(independent&&parsed_season.is_none());
@@ -1510,13 +1509,22 @@ fn candidate_has_episode(db:&Connection,imdb:&str,season:i64,episode:i64)->Resul
 fn valid_sid_coordinate(season:i64,episode:i64)->bool{
     (0..=9999).contains(&season)&&(0..=99999).contains(&episode)
 }
+/// How the Anime-Lists mapping holds an AniDB episode in a season.
 #[derive(Debug,PartialEq)]
-enum MappingCoverage {Bounded,OpenEnded,ClosedOpenEnded,None}
+enum MappingCoverage {
+    /// A bounded row or explicit episode pairs: always the reference.
+    Bounded,
+    /// Only an open-ended row (no last episode, e.g. defaulttvdbseason) in
+    /// the last mapped season: the reference (Black Clover 145 → S01E145).
+    OpenEnded,
+    /// An open-ended row the mapping closes by starting a later season of
+    /// the same TVDB series: the reference within IMDb's season length.
+    ClosedOpenEnded,
+    /// No row: the coordinate is counted.
+    None,
+}
 
-/// How the Anime-Lists mapping holds this AniDB episode in that season:
-/// a bounded row or explicit episode pairs, or only an open-ended row (no
-/// last episode, e.g. defaulttvdbseason: Black Clover 145 → S01E145), both
-/// the reference; or no row at all, which is counted.
+/// The mapping's coverage of `anime_episode` of `anidb` in TVDB `season`.
 fn mapping_coverage(db:&Connection,anidb:&str,season:i64,anime_episode:Option<i64>)
     ->Result<MappingCoverage,String>{
     let Some(anime_episode)=anime_episode.filter(|episode|*episode>0) else{return Ok(MappingCoverage::Bounded)};

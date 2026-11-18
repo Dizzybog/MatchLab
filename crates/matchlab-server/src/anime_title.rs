@@ -469,22 +469,23 @@ pub fn resolve_local_part(
         return Ok(Some(found));
     }
     let effective=if marker=="S" && local==base {1}else{local};
-    let resolved=match resolve_local_part_range(
-        db,imdb,title,effective,episode,episode)?.into_iter().next().flatten() {
-        Some(mapped) if within_known_season_bounds(db,imdb,mapped.season,mapped.episode)?=>{
-            let valid=if marker=="S" && local==base {
-                mapped.season==base
-            }else if marker=="S" {
-                base.checked_add(local-1)==Some(mapped.season)
-            }else{
-                // Parts can occupy the same IMDb season or different seasons.
-                mapped.season>=base
-            };
-            valid.then_some(LocalPartCoordinate{base_season:base,mapped})
-        }
-        _=>None,
+    let Some(mapped)=resolve_local_part_range(
+        db,imdb,title,effective,episode,episode)?
+            .into_iter().next().flatten() else{
+        return Ok(None);
     };
-    Ok(resolved)
+    if !within_known_season_bounds(db,imdb,mapped.season,mapped.episode)?{
+        return Ok(None);
+    }
+    let valid=if marker=="S" && local==base {
+        mapped.season==base
+    }else if marker=="S" {
+        base.checked_add(local-1)==Some(mapped.season)
+    }else{
+        // Parts can occupy the same IMDb season or different seasons.
+        mapped.season>=base
+    };
+    Ok(valid.then_some(LocalPartCoordinate{base_season:base,mapped}))
 }
 
 /// Local season `local` of a named part as a later part of the same IMDb
@@ -498,21 +499,28 @@ fn resolve_part_within_season(
         .collect::<BTreeSet<_>>();
     if named.len()!=1{return Ok(None);}
     let named=named.into_iter().next().expect("unique AniDB alias");
-    let mut stmt=db.prepare("SELECT m.anidb_id,MIN(m.start+m.offset),MIN(m.start),
-            MAX(m.end),MIN(m.offset),COUNT(*)
-        FROM episode_map m JOIN anime_series_map l ON l.anidb_id=m.anidb_id
-        WHERE l.imdb_id=?1 AND m.anidb_season>0 AND m.tvdb_season=?2 AND TRIM(m.map)=''
-        GROUP BY m.anidb_id ORDER BY MIN(m.start+m.offset),m.anidb_id")?;
-    let parts=stmt.query_map(params![imdb,base],|row|Ok((row.get::<_,String>(0)?,
-            row.get::<_,i64>(1)?,row.get::<_,i64>(2)?,row.get::<_,i64>(3)?,
-            row.get::<_,i64>(4)?,row.get::<_,i64>(5)?)))?
+    // Each linked part's rows in the season; a part with more than one row
+    // has no single offset and is skipped as a target.
+    let mut stmt=db.prepare("SELECT m.anidb_id,m.start,m.end,m.offset
+        FROM episode_map m
+        JOIN (SELECT DISTINCT anidb_id FROM anime_series_map WHERE imdb_id=?1) l
+            ON l.anidb_id=m.anidb_id
+        WHERE m.anidb_season>0 AND m.tvdb_season=?2 AND TRIM(m.map)=''
+        ORDER BY m.start+m.offset,m.anidb_id")?;
+    let rows=stmt.query_map(params![imdb,base],|row|Ok((row.get::<_,String>(0)?,
+            row.get::<_,i64>(1)?,row.get::<_,i64>(2)?,row.get::<_,i64>(3)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let Some(index)=parts.iter().position(|part|part.0==named) else{return Ok(None)};
-    let Some(target)=usize::try_from(local-1).ok().and_then(|step|parts.get(index+step))
+    let mut parts:Vec<&String>=Vec::new();
+    for (id,..) in &rows {
+        if !parts.contains(&id){parts.push(id);}
+    }
+    let Some(index)=parts.iter().position(|id|**id==named) else{return Ok(None)};
+    let Some(&target)=usize::try_from(local-1).ok().and_then(|step|parts.get(index+step))
         else{return Ok(None)};
-    let (anidb_id,_,start,end,offset,rows)=target.clone();
-    // One plain row per part: a single offset decides the episode.
-    if rows!=1 || episode<start || (end>0 && episode>end){return Ok(None);}
+    let target_rows:Vec<_>=rows.iter().filter(|(id,..)|id==target).collect();
+    let &[(anidb_id,start,end,offset)]=target_rows.as_slice() else{return Ok(None)};
+    let (anidb_id,start,end,offset)=(anidb_id.clone(),*start,*end,*offset);
+    if episode<start || (end>0 && episode>end){return Ok(None);}
     let mapped=episode_crosswalk::Episode{imdb_id:imdb.to_owned(),season:base,
         episode:episode+offset,anidb_id,anidb_episode:episode};
     if !within_known_season_bounds(db,imdb,mapped.season,mapped.episode)?{return Ok(None);}
