@@ -495,6 +495,27 @@ fn numbered_part_title(title:&str)->Option<(&str,i64)>{
 /// Return an IMDb identity only when the release title itself is an exact,
 /// unique AniDB alias. This is stricter than the prefix-based fallback used
 /// to rank title candidates and safe for season-pack inference.
+/// The title is exactly an AniDB-linked anime title, and `episode` is past
+/// IMDb's S1 for every such anime series with a known S1 (One Piece may name
+/// several IMDb series).
+fn anime_season_one_exceeded(db:&Connection,title:&str,episode:i64)->Result<bool,String>{
+    let key=imdb_matcher::clean_title(title);
+    if key.is_empty()||(!strict_match_mode()&&key.len()<4){return Ok(false);}
+    let aliases=if strict_match_mode(){
+        tantivy_search::anime_aliases_exact(db,title)?
+    }else{tantivy_search::anime_aliases(db,&key,4)?};
+    let ids=aliases.into_iter().filter(|alias|alias.clean_title==key)
+        .map(|alias|alias.imdb_id).collect::<std::collections::BTreeSet<_>>();
+    let mut known=false;
+    for imdb in ids {
+        if let Some(last)=season_episode_end(db,&imdb,1)? {
+            if episode<=last{return Ok(false);}
+            known=true;
+        }
+    }
+    Ok(known)
+}
+
 fn exact_anime_identity(db:&Connection,title:&str)->Result<Option<String>,String>{
     let key=imdb_matcher::clean_title(title);
     if key.is_empty()||(!strict_match_mode()&&key.len()<4){return Ok(None);}
@@ -1076,13 +1097,37 @@ fn reconcile_series_coordinates(
     };
     if let Some(absolute)=absolute
         && winner.pointer("/anime/asid").and_then(Value::as_str).is_none()
-        && let Some(anidb)=named.or_else(||winner["anime_ids"]["anidb"].as_str().map(str::to_owned))
+        && let Some(anidb)=match named {
+            Some(named)=>Some(named),
+            // An ambiguous title ("Gintama", "Gintama."): the work that
+            // begins the series' numbering, else the stored AniDB ID.
+            None=>series_start_work(db,winner)?
+                .or_else(||winner["anime_ids"]["anidb"].as_str().map(str::to_owned)),
+        }
         && let Some(asid)=episode_crosswalk::canonical_asid(&anidb,absolute)
     {
         winner["anime"]=json!({"anidb_id":anidb,"episode":absolute,"asid":asid,
             "from_release_number":true});
     }
     Ok(())
+}
+
+/// The one linked AniDB work that begins the IMDb series' numbering (TVDB
+/// S1 from episode 1): Gintama → 3468.
+fn series_start_work(db:&Connection,winner:&Value)->Result<Option<String>,String>{
+    let imdb=winner["imdb_id"].as_str().unwrap_or_default();
+    let ids=match db.prepare("SELECT DISTINCT anidb_id FROM anime_series_map WHERE imdb_id=?1")
+        .and_then(|mut stmt|stmt.query_map([imdb],|row|row.get::<_,String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()) {
+        Ok(ids)=>ids,
+        Err(rusqlite::Error::SqliteFailure(..))=>return Ok(None),
+        Err(error)=>return Err(error.to_string()),
+    };
+    let mut starts=Vec::new();
+    for id in ids {
+        if starts_series(db,&id)?{starts.push(id);}
+    }
+    Ok(if starts.len()==1{starts.pop()}else{None})
 }
 
 /// IMDb rules out the selected coordinate: no season and episode, or an
@@ -1236,7 +1281,8 @@ fn reconcile_series_coordinates_inner(
     if winner.pointer("/anime/asid").and_then(Value::as_str).is_some()
         && let (Some(mapped_season),Some(mapped_episode))=(season,episode)
         && mapped_season>0
-        && (match coverage {
+        && (season_beyond_imdb(db,winner["imdb_id"].as_str().unwrap_or_default(),mapped_season)?
+            || match coverage {
                 MappingCoverage::Bounded=>false,
                 // An open-ended row (defaulttvdbseason) is the reference too
                 // (maintainer: Black Clover 145 may be S01E145), unless a
@@ -1556,6 +1602,22 @@ fn mapping_coverage(db:&Connection,anidb:&str,season:i64,anime_episode:Option<i6
         Ok(false)|Err(rusqlite::Error::SqliteFailure(..))=>MappingCoverage::OpenEnded,
         Err(error)=>return Err(error.to_string()),
     })
+}
+
+/// The mapping's season is not an IMDb season of this series at all: more
+/// than one past the last season of an IMDb series that has seasons.
+/// Pokémon Horizons is TVDB S20 of the franchise but IMDb S1-S8 of its own
+/// series. A season just past IMDb's last (a newly aired one, Bleach S17)
+/// and a series IMDb keeps in one season (One Piece S22) are kept.
+fn season_beyond_imdb(db:&Connection,imdb:&str,season:i64)->Result<bool,String>{
+    match db.query_row("SELECT MAX(last) FROM (
+            SELECT MAX(season) AS last FROM season_episodes WHERE imdb_id=?1
+            UNION ALL SELECT MAX(max_season) FROM seasons WHERE imdb_id=?1)",[imdb],
+        |row|row.get::<_,Option<i64>>(0)) {
+        Ok(Some(last))=>Ok(last>1 && season>last+1),
+        Ok(None)|Err(rusqlite::Error::QueryReturnedNoRows|rusqlite::Error::SqliteFailure(..))=>Ok(false),
+        Err(error)=>Err(error.to_string()),
+    }
 }
 
 /// The crosswalk moved the coordinate to a season the IMDb work does not
@@ -2141,6 +2203,31 @@ fn diagnose_with_policy(
             parsed.insert("anime_part_title_recovered".into(),
                 json!("verified_misclassified_release_group"));
         }
+    }
+
+    // Maintainer rule: an anime release's S01 is absolute numbering.
+    // "Gintama S01E300" is read as "Gintama 300": the anime mapping then
+    // gives the IMDb ID and season/episode, or, when it cannot, the result
+    // is anidb:episode. Only an exact anime title qualifies, never a release
+    // with a year (a live-action adaptation's S01 is its own season), and
+    // only when IMDb's S1 cannot hold the episode: within S1, S01E05 and
+    // absolute 5 agree, and the release keeps its own identity evidence.
+    if req.series!=Some(false)
+        && parsed_value.get("seasons").and_then(Value::as_array)
+            .is_some_and(|seasons|seasons.len()==1 && seasons[0].as_i64()==Some(1))
+        && parsed_value.get("episode_start").is_none()
+        && let Some(episode)=parsed_value.get("episodes").and_then(Value::as_array)
+            .and_then(|episodes|match episodes.as_slice(){[one]=>one.as_i64(),_=>None})
+        && episode>0
+        && parsed_value.get("year").is_none()
+        && let Some(title)=parsed_value.get("title").and_then(Value::as_str).map(str::to_owned)
+        && anime_season_one_exceeded(&db,&title,episode)?
+        && let Some(parsed)=parsed_value.as_object_mut()
+    {
+        parsed.insert("seasons".into(),json!([]));
+        parsed.insert("anime_episode_candidate".into(),json!({
+            "title":title,"episode":episode,"numbering":"absolute","verified":false}));
+        parsed.insert("anime_season_one_absolute".into(),json!(true));
     }
 
     // "<first part> Part 2 - 01 ~ 12": a batch of a numbered part. Both
@@ -6898,6 +6985,7 @@ mod tests {
             title:"Dragon.Ball.Super.S01E03.DUBBED".into(),
             year:None,series:None}).unwrap();
         assert_eq!(dragon.parsed["title"],"Dragon Ball Super");
+        // Within IMDb's S1, S01E03 and absolute 3 agree: kept as parsed.
         assert_eq!(dragon.parsed["seasons"],json!([1]));
         assert_eq!(dragon.parsed["episodes"],json!([3]));
         assert_eq!(dragon.parsed["dubbed"],true);
@@ -6918,8 +7006,8 @@ mod tests {
         // an uncountable S01E999 keeps the IMDb ID only, plus anidb:episode.
         let unmatched=unavailable.selected.expect("retain unique anime identity");
         assert_eq!(unmatched["imdb_id"],"tt4644488");
-        assert_eq!(unmatched["season"],1,
-            "an explicit season survives when its episode is invalid");
+        assert!(unmatched["season"].is_null(),
+            "S01 is absolute: an unmapped episode has no IMDb season");
         assert!(unmatched["episode"].is_null(),
             "do not publish an unverified anime episode");
         assert_eq!(public_match_response(Some(unmatched)),json!({
@@ -8100,6 +8188,33 @@ mod tests {
         assert_eq!(count(1,17),(2,5),"runs on past the season end");
         assert_eq!(count(1,40),(1,40),"past the last season: as named");
         assert_eq!(count(3,2),(3,2),"a season IMDb lacks stays as named");
+    }
+
+    #[test]
+    fn mapped_season_far_past_imdb_is_not_found_and_asid_uses_the_series_start(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE season_episodes(
+                imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(
+                anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            INSERT INTO seasons VALUES('tt26692417',8),('tt0388629',1),('tt0434665',16);
+            INSERT INTO season_episodes VALUES('tt26692417',1,25,25),('tt0388629',1,1100,1100);
+            INSERT INTO anime_series_map VALUES
+                ('tt0988818','3468','79099',1),('tt0988818','9427','79099',0);
+            INSERT INTO episode_map VALUES
+                ('3468','79099',1,1,1,49,0,''),('9427','79099',1,6,0,0,0,'');").unwrap();
+        // Pokémon Horizons: the franchise's TVDB S20 is no IMDb season.
+        assert!(season_beyond_imdb(&db,"tt26692417",20).unwrap());
+        assert!(!season_beyond_imdb(&db,"tt26692417",9).unwrap(),"a newly aired season");
+        // One Piece keeps every episode in one IMDb season: S22 stands.
+        assert!(!season_beyond_imdb(&db,"tt0388629",22).unwrap());
+        assert!(!season_beyond_imdb(&db,"tt0434665",17).unwrap(),"Bleach TYBW");
+        assert_eq!(series_start_work(&db,&json!({"imdb_id":"tt0988818"})).unwrap(),
+            Some("3468".to_owned()));
     }
 
     #[test]
