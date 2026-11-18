@@ -1043,7 +1043,11 @@ fn reconcile_series_coordinates(
         && let Some((season,episode))=if release_season>1 {Some((release_season,release_episode))}
             else if winner["season"].as_i64().is_some_and(|season|season>0)
                 && winner["episode"].as_i64().is_some()
-                && winner.pointer("/anime/asid").and_then(Value::as_str).is_some(){None}
+                && winner.pointer("/anime/asid").and_then(Value::as_str).is_some()
+                // A mapped coordinate stands only where IMDb has it: Pokémon
+                // Horizons maps to TVDB S20 of the franchise, which its own
+                // IMDb series (S1-S8) does not have.
+                && !current_coordinate_is_impossible(db,winner)?{None}
             else{Some(count_past_season_end(db,&imdb,1,release_episode)?)}
         && (winner["season"].as_i64(),winner["episode"].as_i64())!=(Some(season),Some(episode))
     {
@@ -1053,19 +1057,37 @@ fn reconcile_series_coordinates(
         winner["episode_end"]=Value::Null;
         winner["sid"]=json!(format!("{imdb}:{season}:{episode}"));
         winner["coordinate_fallback"]=json!("release_season_episode");
-        let mapped=episode_crosswalk::resolve_season(db,&imdb,season,episode).ok().flatten()
-            .map(|found|(found.anidb_id,found.anidb_episode,false));
-        let counted=match mapped {
-            Some(found)=>Some(found),
-            None=>anidb_from_imdb(db,&imdb,season,episode)?.map(|(id,ep)|(id,ep,true)),
-        };
-        winner["anime"]=match counted.and_then(|(id,ep,counted)|
-            episode_crosswalk::canonical_asid(&id,ep).map(|asid|(id,ep,asid,counted))) {
-            Some((id,ep,asid,true))=>json!({"anidb_id":id,"episode":ep,"asid":asid,
-                "counted_from_mapping":true}),
-            Some((id,ep,asid,false))=>json!({"anidb_id":id,"episode":ep,"asid":asid}),
-            None=>Value::Null,
-        };
+        winner["anime"]=if release_season==1 && current_coordinate_is_impossible(db,winner)? {
+            // A season-1 (absolute) number IMDb's seasons cannot hold is not
+            // counted (Dragon Ball Super S01E999): the SID is the IMDb ID
+            // only, and the ASID is the release's own anidb:episode below.
+            winner["episode"]=Value::Null;
+            winner["sid"]=json!(imdb);
+            winner["coordinate_fallback_blocked"]=json!("absolute_episode_beyond_imdb_seasons");
+            Value::Null
+        }else{asid_for_imdb_episode(db,&imdb,season,episode)?};
+    }
+    // An absolute release numbered by the work that begins the series counts
+    // from IMDb S1 when nothing placed it (Gintama - 300 → S4E35, as
+    // Gintama S01E300).
+    if let Some(absolute)=absolute
+        && winner["episode"].is_null()
+        && named.is_none()
+        && let imdb=winner["imdb_id"].as_str().unwrap_or_default().to_owned()
+        && series_start_work(db,winner)?.is_some()
+        && let (season,episode)=count_past_season_end(db,&imdb,1,absolute)?
+        && season_episode_end(db,&imdb,season)?.is_some_and(|last|episode<=last)
+    {
+        winner["season"]=json!(season);
+        winner["episode"]=json!(episode);
+        winner["season_end"]=Value::Null;
+        winner["episode_end"]=Value::Null;
+        winner["sid"]=json!(format!("{imdb}:{season}:{episode}"));
+        winner["coordinate_fallback"]=json!("absolute_from_series_start");
+        if let Some(object)=winner.as_object_mut(){object.remove("coordinate_fallback_blocked");}
+        if winner.pointer("/anime/asid").and_then(Value::as_str).is_none(){
+            winner["anime"]=asid_for_imdb_episode(db,&imdb,season,episode)?;
+        }
     }
     // Season 1 is absolute numbering: it always carries anidb:episode.
     let absolute=absolute.or(release.filter(|(season,_)|*season==1).map(|(_,episode)|episode));
@@ -1074,15 +1096,62 @@ fn reconcile_series_coordinates(
         None if absolute.is_some()=>named_anidb_work(db,winner,parsed)?,
         None=>None,
     };
+    // The work for the release's own number: the one the title names, else
+    // the one that begins the series' numbering, else the stored AniDB ID.
+    let numbering=match (absolute,named) {
+        (Some(_),Some(named))=>Some(named),
+        (Some(_),None)=>match series_start_work(db,winner)? {
+            Some(start)=>Some(start),
+            None=>winner["anime_ids"]["anidb"].as_str().map(str::to_owned),
+        },
+        (None,_)=>None,
+    };
     if let Some(absolute)=absolute
         && winner.pointer("/anime/asid").and_then(Value::as_str).is_none()
-        && let Some(anidb)=named.or_else(||winner["anime_ids"]["anidb"].as_str().map(str::to_owned))
+        && let Some(anidb)=numbering
         && let Some(asid)=episode_crosswalk::canonical_asid(&anidb,absolute)
     {
         winner["anime"]=json!({"anidb_id":anidb,"episode":absolute,"asid":asid,
             "from_release_number":true});
     }
     Ok(())
+}
+
+/// The AniDB episode for an IMDb coordinate: the mapping's, or counted from
+/// the last mapped point. The mapping's seasons are TVDB's, so this needs
+/// TVDB and IMDb to split the seasons up to it alike (Gintama: TVDB S1-S4
+/// are IMDb's 201-episode S1); otherwise no ASID (Null).
+fn asid_for_imdb_episode(db:&Connection,imdb:&str,season:i64,episode:i64)->Result<Value,String>{
+    if !tvdb_seasons_match_imdb(db,imdb,season)?{return Ok(Value::Null);}
+    if let Some(found)=episode_crosswalk::resolve_season(db,imdb,season,episode).ok().flatten()
+        && let Some(asid)=episode_crosswalk::canonical_asid(&found.anidb_id,found.anidb_episode){
+        return Ok(json!({"anidb_id":found.anidb_id,"episode":found.anidb_episode,"asid":asid}));
+    }
+    Ok(match anidb_from_imdb(db,imdb,season,episode)? {
+        Some((id,ep))=>match episode_crosswalk::canonical_asid(&id,ep) {
+            Some(asid)=>json!({"anidb_id":id,"episode":ep,"asid":asid,"counted_from_mapping":true}),
+            None=>Value::Null,
+        },
+        None=>Value::Null,
+    })
+}
+
+/// The one linked AniDB work that begins the IMDb series' numbering (TVDB
+/// S1 from episode 1): Gintama → 3468.
+fn series_start_work(db:&Connection,winner:&Value)->Result<Option<String>,String>{
+    let imdb=winner["imdb_id"].as_str().unwrap_or_default();
+    let ids=match db.prepare("SELECT DISTINCT anidb_id FROM anime_series_map WHERE imdb_id=?1")
+        .and_then(|mut stmt|stmt.query_map([imdb],|row|row.get::<_,String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()) {
+        Ok(ids)=>ids,
+        Err(rusqlite::Error::SqliteFailure(..))=>return Ok(None),
+        Err(error)=>return Err(error.to_string()),
+    };
+    let mut starts=Vec::new();
+    for id in ids {
+        if starts_series(db,&id)?{starts.push(id);}
+    }
+    Ok(if starts.len()==1{starts.pop()}else{None})
 }
 
 /// IMDb rules out the selected coordinate: no season and episode, or an
@@ -1126,7 +1195,12 @@ fn named_part_coordinate(db:&Connection,winner:&Value,parsed:&serde_json::Map<St
         identities.push(id.to_owned());
     }
     for identity in identities {
-        if !starts_series(db,&identity)?{return Ok(true);}
+        if !starts_series(db,&identity)?{
+            // A part only names a later IMDb season the IMDb series has:
+            // Pokémon Horizons is TVDB S20 of the franchise, but S1-S8 of
+            // its own IMDb series.
+            return Ok(!current_coordinate_is_impossible(db,winner)?);
+        }
     }
     Ok(false)
 }
@@ -1141,6 +1215,28 @@ fn anidb_title_is(db:&Connection,anidb:&str,title:&str)->Result<bool,String>{
         Err(rusqlite::Error::SqliteFailure(..))=>Ok(false),
         Err(error)=>Err(error.to_string()),
     }
+}
+
+/// TVDB (the mapping) and IMDb split seasons 1..=`season` alike: no season
+/// whose bounded mapping rows end at a different episode than IMDb counts.
+/// Seasons either side does not know are not evidence of a difference.
+fn tvdb_seasons_match_imdb(db:&Connection,imdb:&str,season:i64)->Result<bool,String>{
+    let counts=imdb_episode_counts(db,imdb)?;
+    let rows=db.prepare("SELECT m.tvdb_season,MAX(m.end+m.offset) FROM episode_map m
+            JOIN (SELECT DISTINCT anidb_id FROM anime_series_map WHERE imdb_id=?1) l
+                ON l.anidb_id=m.anidb_id
+            WHERE m.anidb_season>0 AND m.tvdb_season BETWEEN 1 AND ?2 AND TRIM(m.map)=''
+            GROUP BY m.tvdb_season HAVING MIN(m.end)>0")
+        .and_then(|mut stmt|stmt.query_map(rusqlite::params![imdb,season],
+            |row|Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>());
+    let rows=match rows {
+        Ok(rows)=>rows,
+        Err(rusqlite::Error::SqliteFailure(..))=>return Ok(true),
+        Err(error)=>return Err(error.to_string()),
+    };
+    Ok(rows.iter().all(|(tvdb_season,last)|
+        counts.get(tvdb_season).is_none_or(|count|count==last)))
 }
 
 /// A season-1 release number past IMDb's season-1 count is absolute: it is
@@ -2771,6 +2867,12 @@ fn diagnose_with_policy(
         imdb.into_iter().filter_map(|candidate|{
             match candidate_has_episode(&db,&candidate.imdb_id,season,episode) {
                 Ok(true)=>Some(candidate),
+                // Anime season 1 is absolute numbering (maintainer rule):
+                // Gintama S01E300 is past IMDb's 201-episode S1, but it
+                // counts on into a later IMDb season, so keep the series.
+                Ok(false) if season==1 && candidate.anime_ids.contains_key("anidb")
+                    && count_past_season_end(&db,&candidate.imdb_id,1,episode)
+                        .is_ok_and(|counted|counted!=(1,episode))=>Some(candidate),
                 Ok(false)=>{
                     match verified_chinese_absolute_fallback(
                         &db,&candidate.imdb_id,season,episode,chinese_absolute_hint
@@ -8089,6 +8191,58 @@ mod tests {
     }
 
     #[test]
+    fn season_one_counts_from_imdb_where_tvdb_splits_seasons_differently(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE season_episodes(
+                imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE seasons(imdb_id TEXT,max_season INTEGER);
+            CREATE TABLE anime_series_map(
+                imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(
+                anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,tvdb_season INTEGER,
+                start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            -- Gintama: IMDb S1 is AniDB 3468's 201 episodes, TVDB S1-S4.
+            INSERT INTO season_episodes VALUES
+                ('tt0988818',1,201,201),('tt0988818',2,51,51),
+                ('tt0988818',3,13,13),('tt0988818',4,51,51);
+            INSERT INTO seasons VALUES('tt0988818',4);
+            INSERT INTO anime_series_map VALUES
+                ('tt0988818','3468','79099',1),('tt0988818','9427','79099',0);
+            INSERT INTO episode_map VALUES
+                ('3468','79099',1,1,1,49,0,''),('3468','79099',1,2,50,99,-49,''),
+                ('3468','79099',1,3,100,150,-99,''),('3468','79099',1,4,151,201,-150,''),
+                ('9427','79099',1,6,0,0,0,'');
+            -- Pokémon Horizons: TVDB S20 of the franchise, its own IMDb S1-S2.
+            INSERT INTO season_episodes VALUES
+                ('tt26692417',1,25,25),('tt26692417',2,20,20);
+            INSERT INTO seasons VALUES('tt26692417',2);
+            INSERT INTO anime_series_map VALUES('tt26692417','17777','76703',1);
+            INSERT INTO episode_map VALUES('17777','76703',1,20,1,103,0,'');").unwrap();
+        let run=|title:&str,mut winner:Value|{
+            let parsed=matchlab_parser::parse_title(title,false).unwrap();
+            reconcile_series_coordinates(&db,&mut winner,&parsed).unwrap();
+            public_match_response(Some(winner))
+        };
+        // S1 is absolute: 300 is past IMDb's 201-episode S1 and counts on
+        // to S4E35. TVDB's S4 is not IMDb's, so the ASID is the release's
+        // own number on the work that begins the series.
+        let gintama=json!({"imdb_id":"tt0988818","category":"series",
+            "season":1,"episode":null,"anime":null,"anime_ids":{"anidb":"9427"}});
+        for title in ["Gintama S01E300 1080p","Gintama - 300"]{
+            assert_eq!(run(title,gintama.clone()),json!({
+                "sid_start":"tt0988818:4:35","sid_end":"tt0988818:4:35",
+                "asid_start":"3468:300","asid_end":"3468:300"}),"{title}");
+        }
+        // The mapped TVDB S20 is not an IMDb season of Horizons: S1E30 counts.
+        let horizons=json!({"imdb_id":"tt26692417","category":"series",
+            "season":20,"episode":30,"anime":{"anidb_id":"17777","episode":30,"asid":"17777:30"},
+            "anime_ids":{"anidb":"17777"},"matched_title":"Pokemon Horizons The Series"});
+        assert_eq!(run("Pokemon Horizons The Series S01E30 1080p",horizons),json!({
+            "sid_start":"tt26692417:2:5","sid_end":"tt26692417:2:5",
+            "asid_start":"17777:30","asid_end":"17777:30"}));
+    }
+
+    #[test]
     fn season_one_release_number_is_counted_across_season_boundaries(){
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE season_episodes(
@@ -8439,10 +8593,19 @@ mod tests {
         let mut verified=json!({"imdb_id":"tt1234567","category":"series",
             "season":15,"episode":4,
             "anime":{"asid":"42:320"},"anime_ids":{"anidb":"42"}});
+        let mut unlisted=verified.clone();
+        reconcile_series_coordinates(&db,&mut unlisted,parsed.as_object().unwrap()).unwrap();
+        // Season 1 is absolute numbering. IMDb lists no S15 and its S1 cannot
+        // hold 320: the SID is the IMDb ID only, plus the release's own ASID.
+        assert_eq!(public_match_response(Some(unlisted)),json!({
+            "sid_start":"tt1234567","sid_end":"tt1234567",
+            "asid_start":"42:320","asid_end":"42:320"}));
+        // Where IMDb has the mapped season, the mapped coordinate stands.
+        db.execute("INSERT INTO season_episodes VALUES('tt1234567',15,26,26)",[]).unwrap();
         reconcile_series_coordinates(&db,&mut verified,parsed.as_object().unwrap()).unwrap();
-        // Season 1 is absolute numbering: the mapped coordinate stands.
         assert_eq!(verified["season"],15);
         assert_eq!(verified["episode"],4);
+        db.execute("DELETE FROM season_episodes WHERE season=15",[]).unwrap();
         let no_season=json!({"seasons":[],"episodes":[320]});
         let mut unsafe_absolute=json!({"imdb_id":"tt1234567","category":"series",
             "season":null,"episode":null,"anime_ids":{"anidb":"42"}});
