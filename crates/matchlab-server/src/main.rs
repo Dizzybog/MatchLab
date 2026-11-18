@@ -1028,11 +1028,12 @@ fn reconcile_series_coordinates(
     // imdb:S:E exactly as named, whatever the mapping or IMDb says. The ASID
     // is then the mapping's AniDB episode for that coordinate, or counted
     // across season boundaries from the last mapped point.
-    if let Some((season,episode))=release_season_episode(winner,parsed)
-        && (winner["season"].as_i64(),winner["episode"].as_i64())!=(Some(season),Some(episode))
+    if let Some((release_season,release_episode))=release_season_episode(winner,parsed)
         && !named_part_coordinate(db,winner,parsed)?
+        && let imdb=winner["imdb_id"].as_str().unwrap_or_default().to_owned()
+        && let (season,episode)=count_past_season_end(db,&imdb,release_season,release_episode)?
+        && (winner["season"].as_i64(),winner["episode"].as_i64())!=(Some(season),Some(episode))
     {
-        let imdb=winner["imdb_id"].as_str().unwrap_or_default().to_owned();
         winner["season"]=json!(season);
         winner["episode"]=json!(episode);
         winner["season_end"]=Value::Null;
@@ -1120,6 +1121,27 @@ fn anidb_title_is(db:&Connection,anidb:&str,title:&str)->Result<bool,String>{
         Err(rusqlite::Error::SqliteFailure(..))=>Ok(false),
         Err(error)=>Err(error.to_string()),
     }
+}
+
+/// A release episode past IMDb's count for its season is counted across
+/// the season boundary. A number that is absolute for the whole series and
+/// falls in the named season reads as such (SnK "S3 - 38" → S3E1, RANMA
+/// "S2 - 15" → S2E3); otherwise it runs on from the named season (Solo
+/// Leveling S01E17 → S2E5). Without IMDb counts the release's S:E stands.
+fn count_past_season_end(db:&Connection,imdb:&str,season:i64,episode:i64)
+    ->Result<(i64,i64),String>{
+    let counts=imdb_episode_counts(db,imdb)?;
+    if counts.get(&season).is_none_or(|count|episode<=*count){return Ok((season,episode));}
+    if (1..season).any(|earlier|!counts.contains_key(&earlier)){return Ok((season,episode));}
+    let before:i64=(1..season).map(|earlier|counts[&earlier]).sum();
+    if episode>before && episode-before<=counts[&season]{return Ok((season,episode-before));}
+    let (mut s,mut e)=(season,episode);
+    while let Some(&count)=counts.get(&s) {
+        if e<=count{return Ok((s,e));}
+        e-=count;
+        s+=1;
+    }
+    Ok((season,episode))
 }
 
 /// The release's own single season and episode (S02E01, "S2 - 01").
@@ -8019,6 +8041,24 @@ mod tests {
         assert!(current_coordinate_is_impossible(&db,&at(2,27)).unwrap());
         assert!(current_coordinate_is_impossible(&db,&at(6,27)).unwrap());
         assert!(current_coordinate_is_impossible(&db,&json!({"imdb_id":"tt11448214"})).unwrap());
+    }
+
+    #[test]
+    fn release_episode_past_its_imdb_season_is_counted_across_the_boundary(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE season_episodes(
+                imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
+            INSERT INTO season_episodes VALUES
+                ('tt2560140',1,25,25),('tt2560140',2,12,12),('tt2560140',3,22,22),
+                ('tt2560140',4,30,30),
+                ('tt21209876',1,12,12),('tt21209876',2,13,13);").unwrap();
+        let count=|imdb:&str,season,episode|count_past_season_end(&db,imdb,season,episode).unwrap();
+        assert_eq!(count("tt2560140",3,5),(3,5),"inside the season: as named");
+        assert_eq!(count("tt2560140",3,38),(3,1),"series-absolute number in the named season");
+        assert_eq!(count("tt21209876",1,17),(2,5),"runs on past the season end");
+        assert_eq!(count("tt21209876",2,20),(2,8),"series-absolute 20 is S2E8");
+        assert_eq!(count("tt21209876",2,40),(2,40),"nothing fits: as named");
+        assert_eq!(count("tt21209876",5,3),(5,3),"a season IMDb lacks stays as named");
     }
 
     #[test]
