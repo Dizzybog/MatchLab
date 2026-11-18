@@ -1010,16 +1010,24 @@ fn reconcile_series_coordinates(
     // its own season/episode keeps them when the mapping moved it to a
     // season IMDb does not list and IMDb lists the release's own (rule 1;
     // a named part such as JoJo Stone Ocean S01 → IMDb S5 is unaffected).
+    let coverage=match (season,winner.pointer("/anime/asid").and_then(Value::as_str)) {
+        (Some(mapped_season),Some(_)) if mapped_season>0=>mapping_coverage(db,
+            winner.pointer("/anime/anidb_id").and_then(Value::as_str).unwrap_or_default(),
+            mapped_season,winner.pointer("/anime/episode").and_then(Value::as_i64))?,
+        _=>MappingCoverage::Bounded,
+    };
     if winner.pointer("/anime/asid").and_then(Value::as_str).is_some()
         && let (Some(mapped_season),Some(mapped_episode))=(season,episode)
         && mapped_season>0
-        && (match mapping_coverage(db,
-                winner.pointer("/anime/anidb_id").and_then(Value::as_str).unwrap_or_default(),
-                mapped_season,winner.pointer("/anime/episode").and_then(Value::as_i64))? {
+        && (match coverage {
                 MappingCoverage::Bounded=>false,
-                // Open-ended rows (defaulttvdbseason) are the reference too
-                // (maintainer: Black Clover 145 may be S01E145).
-                MappingCoverage::OpenEnded=>false,
+                // An open-ended row (defaulttvdbseason) is the reference too
+                // (maintainer: Black Clover 145 may be S01E145), unless a
+                // bounded row of ANOTHER AniDB work maps the episode (Frieren
+                // 33 → new work episode 5): checked below, kept otherwise.
+                MappingCoverage::OpenEnded=>season_episode_end(
+                    db,winner["imdb_id"].as_str().unwrap_or_default(),mapped_season)?
+                    .is_some_and(|last|mapped_episode>last),
                 MappingCoverage::None=>season_episode_end(
                     db,winner["imdb_id"].as_str().unwrap_or_default(),mapped_season)?
                     .is_some_and(|last|mapped_episode>last)
@@ -1081,6 +1089,9 @@ fn reconcile_series_coordinates(
             winner["anime"]=Value::Null;
             winner["coordinate_fallback"]=json!("repaired_imdb_absolute_anime");
             winner["rejected_crosswalk"]=json!("anime_crosswalk_exceeds_known_imdb_bounds");
+        }else if coverage==MappingCoverage::OpenEnded && parsed_season.is_none() {
+            // No other work maps it: the open-ended row is the reference.
+            return Ok(());
         }else{
             // The IMDb coordinate is rejected, but an ASID that is the
             // identified AniDB work plus the parsed absolute episode
@@ -1109,6 +1120,8 @@ fn reconcile_series_coordinates(
                 winner["rejected_crosswalk"]=json!("anime_crosswalk_exceeds_known_imdb_bounds");
                 return Ok(());
             }
+            // An open-ended mapping row stays the reference (rule 1 aside).
+            if coverage==MappingCoverage::OpenEnded{return Ok(());}
             winner["season"]=Value::Null;
             winner["episode"]=Value::Null;
             winner["season_end"]=Value::Null;
@@ -7779,11 +7792,10 @@ mod tests {
             "anime":{"anidb_id":"12665","episode":145,"asid":"12665:145"}
         });
         reconcile_series_coordinates(&db,&mut ambiguous,&parsed).unwrap();
-        // Ambiguous season works: the mapped S1E145 is outside IMDb's range,
-        // so IMDb's episodes per season give S3E43; the ASID stays the
-        // release's own absolute AniDB episode (maintainer rule 2).
+        // Two works map S3, so no single bounded row replaces the open-ended
+        // S1 row: the mapping's S1E145 is kept (maintainer: S01E145 is fine).
         assert_eq!(public_match_response(Some(ambiguous)),json!({
-            "sid_start":"tt7441658:3:43","sid_end":"tt7441658:3:43",
+            "sid_start":"tt7441658:1:145","sid_end":"tt7441658:1:145",
             "asid_start":"12665:145","asid_end":"12665:145"}));
     }
 
