@@ -496,8 +496,10 @@ fn numbered_part_title(title:&str)->Option<(&str,i64)>{
 /// unique AniDB alias. This is stricter than the prefix-based fallback used
 /// to rank title candidates and safe for season-pack inference.
 /// The title is exactly an AniDB-linked anime title, and `episode` is past
-/// IMDb's S1 for every such anime series with a known S1 (One Piece may name
-/// several IMDb series).
+/// season 1 of every such anime series (One Piece may name several IMDb
+/// series). Season 1 is the mapping's (TVDB's: One Piece S1 is episodes
+/// 1-61, though IMDb keeps all of One Piece in S1); only a series the
+/// mapping has no season 1 for (Pokémon Horizons is TVDB S20) uses IMDb's.
 fn anime_season_one_exceeded(db:&Connection,title:&str,episode:i64)->Result<bool,String>{
     let key=imdb_matcher::clean_title(title);
     if key.is_empty()||(!strict_match_mode()&&key.len()<4){return Ok(false);}
@@ -508,12 +510,38 @@ fn anime_season_one_exceeded(db:&Connection,title:&str,episode:i64)->Result<bool
         .map(|alias|alias.imdb_id).collect::<std::collections::BTreeSet<_>>();
     let mut known=false;
     for imdb in ids {
-        if let Some(last)=season_episode_end(db,&imdb,1)? {
+        let last=match mapped_season_one_end(db,&imdb)? {
+            MappedSeasonOne::Ends(last)=>Some(last),
+            MappedSeasonOne::OpenEnded=>return Ok(false),
+            MappedSeasonOne::Unmapped=>season_episode_end(db,&imdb,1)?,
+        };
+        if let Some(last)=last {
             if episode<=last{return Ok(false);}
             known=true;
         }
     }
     Ok(known)
+}
+
+enum MappedSeasonOne {Ends(i64),OpenEnded,Unmapped}
+
+/// Where the mapping's (TVDB) season 1 of an IMDb series' anime ends.
+fn mapped_season_one_end(db:&Connection,imdb:&str)->Result<MappedSeasonOne,String>{
+    let rows=db.prepare("SELECT m.end,m.offset FROM episode_map m
+            JOIN (SELECT DISTINCT anidb_id FROM anime_series_map WHERE imdb_id=?1) l
+                ON l.anidb_id=m.anidb_id
+            WHERE m.anidb_season>0 AND m.tvdb_season=1 AND TRIM(m.map)=''")
+        .and_then(|mut stmt|stmt.query_map([imdb],
+            |row|Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>());
+    let rows=match rows {
+        Ok(rows)=>rows,
+        Err(rusqlite::Error::SqliteFailure(..))=>return Ok(MappedSeasonOne::Unmapped),
+        Err(error)=>return Err(error.to_string()),
+    };
+    if rows.is_empty(){return Ok(MappedSeasonOne::Unmapped);}
+    if rows.iter().any(|(end,_)|*end<=0){return Ok(MappedSeasonOne::OpenEnded);}
+    Ok(MappedSeasonOne::Ends(rows.iter().map(|(end,offset)|end+offset).max().unwrap_or(0)))
 }
 
 fn exact_anime_identity(db:&Connection,title:&str)->Result<Option<String>,String>{
@@ -2210,7 +2238,7 @@ fn diagnose_with_policy(
     // gives the IMDb ID and season/episode, or, when it cannot, the result
     // is anidb:episode. Only an exact anime title qualifies, never a release
     // with a year (a live-action adaptation's S01 is its own season), and
-    // only when IMDb's S1 cannot hold the episode: within S1, S01E05 and
+    // only when the episode is past season 1: within it, S01E05 and
     // absolute 5 agree, and the release keeps its own identity evidence.
     if req.series!=Some(false)
         && parsed_value.get("seasons").and_then(Value::as_array)
