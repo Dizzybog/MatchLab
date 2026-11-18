@@ -7242,6 +7242,15 @@ mod tests {
         assert_eq!(part["episode"],1);
         assert_eq!(part["anime"]["asid"],"101:1");
         assert_eq!(public_match_response(Some(part))["sid_start"],"tt0300001:3:1");
+        // A local season of a named part counts from that part's IMDb
+        // season: Alicization S02 is the next part, IMDb S4 (and Alicization
+        // S01 is IMDb S3), before the release's own S:E is kept.
+        let local=find("Sword.Art.Online.Alicization.S02E05.mkv").selected.unwrap();
+        assert_eq!(public_match_response(Some(local)),json!({
+            "sid_start":"tt0300001:4:5","sid_end":"tt0300001:4:5",
+            "asid_start":"102:5","asid_end":"102:5"}));
+        let first=find("Sword.Art.Online.Alicization.S01E05.mkv").selected.unwrap();
+        assert_eq!(public_match_response(Some(first))["sid_start"],"tt0300001:3:5");
 
         // A numeric video filename gets its identity from two independently
         // parsed parent folders, but only when the combined name resolves to
