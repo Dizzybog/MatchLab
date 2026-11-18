@@ -982,6 +982,105 @@ fn official_numbering_after_prologue(
 fn reconcile_series_coordinates(
     db:&Connection,winner:&mut Value,parsed:&serde_json::Map<String,Value>,
 )->Result<(),String>{
+    // Maintainer rule: a release with only an absolute episode is identified
+    // by AniDB first. The AniDB work its title names wins over the IMDb
+    // record's stored AniDB ID, and the result always carries anidb:episode,
+    // even when no IMDb season and episode can be given.
+    let absolute=absolute_release_episode(winner,parsed);
+    let named=match absolute {
+        Some(_)=>named_anidb_work(db,winner,parsed)?,
+        None=>None,
+    };
+    if let (Some(absolute),Some(named))=(absolute,named.as_deref())
+        && let Some(current)=winner.pointer("/anime/anidb_id").and_then(Value::as_str)
+        && current!=named
+        && winner.pointer("/anime/episode").and_then(Value::as_i64)==Some(absolute)
+        && current_coordinate_is_impossible(db,winner)?
+        && let Some(asid)=episode_crosswalk::canonical_asid(named,absolute)
+    {
+        // The stored ID plus the release's own number is not a mapping of
+        // the episode, and IMDb rules the coordinate out: count it from the
+        // named work instead. When the mapping gives that IMDb episode to
+        // another AniDB work, that work's episode is the ASID.
+        let imdb=winner["imdb_id"].as_str().unwrap_or_default().to_owned();
+        let counted=imdb_from_absolute(db,&imdb,named,absolute)?;
+        winner["anime"]=json!({"anidb_id":named,"episode":absolute,"asid":asid});
+        if let Some((s,e))=counted
+            && let Some(mapped)=episode_crosswalk::resolve_season(db,&imdb,s,e).ok().flatten()
+            && let Some(mapped_asid)=episode_crosswalk::canonical_asid(&mapped.anidb_id,mapped.anidb_episode)
+        {
+            winner["anime"]=json!({"anidb_id":mapped.anidb_id,
+                "episode":mapped.anidb_episode,"asid":mapped_asid});
+        }
+        if let Some(ids)=winner["anime_ids"].as_object_mut(){ids.insert("anidb".into(),json!(named));}
+        winner["season"]=counted.map_or(Value::Null,|(s,_)|json!(s));
+        winner["episode"]=counted.map_or(Value::Null,|(_,e)|json!(e));
+        winner["season_end"]=Value::Null;
+        winner["episode_end"]=Value::Null;
+        winner["sid"]=match counted {
+            Some((s,e))=>json!(format!("{imdb}:{s}:{e}")),
+            None=>json!(imdb),
+        };
+        winner["coordinate_fallback"]=json!("named_anidb_work");
+    }
+    reconcile_series_coordinates_inner(db,winner,parsed)?;
+    if let Some(absolute)=absolute
+        && winner.pointer("/anime/asid").and_then(Value::as_str).is_none()
+        && let Some(anidb)=named.or_else(||winner["anime_ids"]["anidb"].as_str().map(str::to_owned))
+        && let Some(asid)=episode_crosswalk::canonical_asid(&anidb,absolute)
+    {
+        winner["anime"]=json!({"anidb_id":anidb,"episode":absolute,"asid":asid,
+            "from_release_number":true});
+    }
+    Ok(())
+}
+
+/// IMDb rules out the selected coordinate: no season and episode, or an
+/// episode past IMDb's count for that season (or a season IMDb lacks).
+fn current_coordinate_is_impossible(db:&Connection,winner:&Value)->Result<bool,String>{
+    let (Some(season),Some(episode))=(winner["season"].as_i64(),winner["episode"].as_i64())
+        else{return Ok(true)};
+    if season<=0{return Ok(true);}
+    let imdb=winner["imdb_id"].as_str().unwrap_or_default();
+    Ok(match season_episode_end(db,imdb,season)? {
+        Some(last)=>episode>last,
+        None=>imdb_lacks_remapped_season(db,imdb,season,None)?,
+    })
+}
+
+/// The release's episode when it has no season: absolute anime numbering.
+fn absolute_release_episode(winner:&Value,parsed:&serde_json::Map<String,Value>)->Option<i64>{
+    if !numbers(parsed.get("seasons")).is_empty(){return None;}
+    let episodes=numbers(parsed.get("episodes"));
+    if episodes.len()!=1 || winner.get("episode_range").is_some(){return None;}
+    if !winner["anime_ids"].as_object().is_some_and(|ids|ids.contains_key("anidb")){return None;}
+    // Only the parser's own absolute anime number, not a year or a number
+    // that is part of the title ("91 Days").
+    let episode=episodes.first().copied()?;
+    match parsed.get("anime_episode_candidate") {
+        Some(candidate)=>if candidate["numbering"]!="absolute"
+            || candidate["episode"].as_i64()!=Some(episode){return None;},
+        None=>{
+            let title=parsed.get("title").and_then(Value::as_str).unwrap_or_default();
+            let number=episode.to_string();
+            if title.split(|c:char|!c.is_ascii_digit()).any(|word|word==number){return None;}
+        }
+    }
+    episodes.first().copied().filter(|e|*e>0 && valid_sid_coordinate(1,*e))
+}
+
+/// The AniDB work the release title names exactly, if exactly one.
+fn named_anidb_work(db:&Connection,winner:&Value,parsed:&serde_json::Map<String,Value>)
+    ->Result<Option<String>,String>{
+    let imdb=winner["imdb_id"].as_str().unwrap_or_default();
+    let Some(title)=parsed.get("title").and_then(Value::as_str) else{return Ok(None)};
+    // Optional evidence: a missing alias index leaves the stored AniDB ID.
+    Ok(anime_title::exact_alias_work(db,imdb,title).ok().flatten())
+}
+
+fn reconcile_series_coordinates_inner(
+    db:&Connection,winner:&mut Value,parsed:&serde_json::Map<String,Value>,
+)->Result<(),String>{
     if winner["category"]!="series"
         || !winner["imdb_id"].as_str().is_some_and(metadata_import::valid_imdb_id)
         || winner.get("episode_range").is_some()
@@ -5196,8 +5295,9 @@ mod tests {
         let selected=invalid.selected.expect("retain Bleach IMDb title only");
         assert_eq!(selected["imdb_id"],"tt0434665");
         let resp=public_match_response(Some(selected));
-        assert!(resp["asid_start"].is_null()&&resp["asid_end"].is_null(),
-            "out-of-range anime absolute episode must not publish ASID: {resp}");
+        // No IMDb coordinate, but an absolute release keeps anidb:episode.
+        assert_eq!(resp,json!({"sid_start":"tt0434665","sid_end":"tt0434665",
+            "asid_start":"2369:400","asid_end":"2369:400"}),"{resp}");
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir_all(format!("{}.tantivy",path.display())).unwrap();
     }
@@ -6711,7 +6811,8 @@ mod tests {
         assert_eq!(abs_response["sid_start"],"tt0388629:21:3");
         assert_eq!(abs_response["asid_start"],"69:894");
         // A local anime episode without a mapped AniDB episode retains a
-        // tentative S01 episode SID; never invent its ASID.
+        // tentative S01 episode SID, and as an absolute release it keeps
+        // anidb:episode (maintainer rule).
         let local=diagnose(&path,&MatchRequest{
             title:"[Commie] Psycho-Pass - 04 [F79C11D9].mkv".into(),
             year:None,series:None}).unwrap();
@@ -6720,7 +6821,7 @@ mod tests {
         let local_api=public_match_response(local.selected);
         assert_eq!(local_api["sid_start"],"tt2379308:1:4");
         assert_eq!(local_api["sid_end"],"tt2379308:1:4");
-        assert!(local_api["asid_start"].is_null());
+        assert_eq!(local_api["asid_start"],"777:4");
         // A 900+ absolute episode that does not have a crosswalk must never
         // be relabeled as a small local first-season episode.
         let mut extreme=json!({"imdb_id":"tt2379308","category":"series",
@@ -7640,7 +7741,8 @@ mod tests {
         assert_eq!(winner["episode"],5);
         assert_eq!(winner["sid"],"tt22248376:2:5");
         assert_eq!(winner["coordinate_fallback"],"complete_imdb_absolute_anime");
-        assert!(winner.pointer("/anime/asid").and_then(Value::as_str).is_none());
+        // Maintainer rule: an absolute release always keeps anidb:episode.
+        assert_eq!(winner["anime"]["from_release_number"],true);
         assert_eq!(public_match_response(Some(winner))["sid_start"],"tt22248376:2:5");
         // Missing numbers, stale counts and absent IMDb target episodes
         // must not produce a synthetic coordinate.
@@ -7736,10 +7838,10 @@ mod tests {
         assert_eq!(winner["episode"],43);
         assert_eq!(winner["sid"],"tt7441658:3:43");
         assert_eq!(winner["coordinate_fallback"],"repaired_imdb_absolute_anime");
-        assert!(winner.pointer("/anime/asid").and_then(Value::as_str).is_none());
+        // Maintainer rule: an absolute release always keeps anidb:episode.
         assert_eq!(public_match_response(Some(winner)),json!({
             "sid_start":"tt7441658:3:43","sid_end":"tt7441658:3:43",
-            "asid_start":null,"asid_end":null
+            "asid_start":"12665:145","asid_end":"12665:145"
         }));
     }
 
@@ -7815,6 +7917,28 @@ mod tests {
     }
 
     #[test]
+    fn absolute_release_always_keeps_anidb_episode_but_not_years_or_title_numbers(){
+        let winner=json!({"imdb_id":"tt5839706","category":"series",
+            "anime_ids":{"anidb":"12014"},"season":null,"episode":null});
+        let parsed=|title:&str|matchlab_parser::parse_title(title,false).unwrap();
+        assert_eq!(absolute_release_episode(&winner,&parsed("[SubsPlease] Ajin - 22 (1080p).mkv")),Some(22));
+        assert_eq!(absolute_release_episode(&winner,&parsed("Dragon Ball Super Episode 80 WEB-DL")),Some(80));
+        assert_eq!(absolute_release_episode(&winner,&parsed("91 Days [1080p] [Batch]")),None);
+        assert_eq!(absolute_release_episode(&winner,&parsed("1982.梅岭星火(珠江电影制片厂出品).mkv")),None);
+        assert_eq!(absolute_release_episode(&winner,&parsed("[Group] Ajin S01E05 [1080p].mkv")),None);
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE season_episodes(
+                imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
+            INSERT INTO season_episodes VALUES('tt11448214',1,12,12),('tt11448214',2,12,12);")
+            .unwrap();
+        let at=|season:i64,episode:i64|json!({"imdb_id":"tt11448214","season":season,"episode":episode});
+        assert!(!current_coordinate_is_impossible(&db,&at(2,9)).unwrap());
+        assert!(current_coordinate_is_impossible(&db,&at(2,27)).unwrap());
+        assert!(current_coordinate_is_impossible(&db,&at(6,27)).unwrap());
+        assert!(current_coordinate_is_impossible(&db,&json!({"imdb_id":"tt11448214"})).unwrap());
+    }
+
+    #[test]
     fn open_ended_row_ends_where_the_mapping_starts_a_later_season(){
         // Bungou Stray Dogs: TVDB S1 holds AniDB 11523 (1-12) and 11965
         // (open-ended from S1E13), and AniDB 14230 starts TVDB S2. IMDb
@@ -7851,10 +7975,11 @@ mod tests {
         });
         reconcile_series_coordinates(&db,&mut winner,&parsed).unwrap();
         // Absolute 43 is past the 12 + 12 TVDB S1 episodes: counted from
-        // IMDb, and the impossible 11965:31 is dropped.
+        // IMDb, and the impossible 11965:31 is dropped. Without an alias
+        // index the stored AniDB ID carries the release's own number.
         assert_eq!(public_match_response(Some(winner)),json!({
             "sid_start":"tt5679720:4:6","sid_end":"tt5679720:4:6",
-            "asid_start":null,"asid_end":null}));
+            "asid_start":"11965:43","asid_end":"11965:43"}));
     }
 
     #[test]
@@ -8306,10 +8431,12 @@ mod tests {
         reconcile_series_coordinates(&db,&mut impossible,parsed.as_object().unwrap()).unwrap();
         assert_eq!(impossible["coordinate_fallback_blocked"],
             "anime_crosswalk_exceeds_known_imdb_bounds");
+        // The rejected offset leaves the SID; the absolute release keeps its
+        // own anidb:episode (maintainer rule).
         assert_eq!(public_match_response(Some(impossible)),json!({
             "sid_start":"tt4958580","sid_end":"tt4958580",
-            "asid_start":null,"asid_end":null
-        }),"a rejected offset must not survive in either public endpoint or become guessed S1E17");
+            "asid_start":"11602:17","asid_end":"11602:17"
+        }),"a rejected offset must not survive in the SID or become guessed S1E17");
 
         let mut boundary=mapped(1,24);
         reconcile_series_coordinates(&db,&mut boundary,parsed.as_object().unwrap()).unwrap();
@@ -8891,7 +9018,7 @@ mod tests {
                 let result=diagnose(&path,&MatchRequest{title:raw.clone(),year:None,series:None}).unwrap();
                 assert_eq!(public_match_response(result.selected),json!({
                     "sid_start":"tt4644488","sid_end":"tt4644488",
-                    "asid_start":null,"asid_end":null
+                    "asid_start":format!("11210:{episode}"),"asid_end":format!("11210:{episode}")
                 }),"the exact sequel must not become original Dragon Ball: {raw}");
             }
         }
