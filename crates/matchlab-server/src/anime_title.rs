@@ -459,24 +459,64 @@ pub fn resolve_local_part(
     if local<2 || local>99 || episode<=0 || episode>99_999
         || !matches!(marker,"S"|"P"){return Ok(None);}
     let Some(base)=named_part_base(db,imdb,title)? else{return Ok(None)};
-    let effective=if marker=="S" && local==base {1}else{local};
-    let Some(mapped)=resolve_local_part_range(
-        db,imdb,title,effective,episode,episode)?
-            .into_iter().next().flatten() else{
-        return Ok(None);
-    };
-    if !within_known_season_bounds(db,imdb,mapped.season,mapped.episode)?{
-        return Ok(None);
+    // Several parts in one IMDb season (JoJo Stone Ocean: 16187, 17286 and
+    // 17664 are all IMDb S5; SAO War of Underworld: 14796 + 15146 in S4):
+    // local season N is first the N-th part of the named part's season.
+    // Past its last part there, the next part is in a later IMDb season
+    // (SAO Alicization S02 → War of Underworld, S4).
+    if marker=="S" && local!=base
+        && let Some(found)=resolve_part_within_season(db,imdb,title,base,local,episode)?{
+        return Ok(Some(found));
     }
-    let valid=if marker=="S" && local==base {
-        mapped.season==base
-    }else if marker=="S" {
-        base.checked_add(local-1)==Some(mapped.season)
-    }else{
-        // Parts can occupy the same IMDb season or different seasons.
-        mapped.season>=base
+    let effective=if marker=="S" && local==base {1}else{local};
+    let resolved=match resolve_local_part_range(
+        db,imdb,title,effective,episode,episode)?.into_iter().next().flatten() {
+        Some(mapped) if within_known_season_bounds(db,imdb,mapped.season,mapped.episode)?=>{
+            let valid=if marker=="S" && local==base {
+                mapped.season==base
+            }else if marker=="S" {
+                base.checked_add(local-1)==Some(mapped.season)
+            }else{
+                // Parts can occupy the same IMDb season or different seasons.
+                mapped.season>=base
+            };
+            valid.then_some(LocalPartCoordinate{base_season:base,mapped})
+        }
+        _=>None,
     };
-    Ok(valid.then_some(LocalPartCoordinate{base_season:base,mapped}))
+    Ok(resolved)
+}
+
+/// Local season `local` of a named part as a later part of the same IMDb
+/// season, ordered by where each part begins in that season.
+fn resolve_part_within_season(
+    db:&Connection,imdb:&str,title:&str,base:i64,local:i64,episode:i64,
+)->rusqlite::Result<Option<LocalPartCoordinate>>{
+    let key=imdb_matcher::clean_title(title);
+    let named=aliases(db,imdb,title)?.into_iter()
+        .filter_map(|(id,alias)|(alias==key).then_some(id))
+        .collect::<BTreeSet<_>>();
+    if named.len()!=1{return Ok(None);}
+    let named=named.into_iter().next().expect("unique AniDB alias");
+    let mut stmt=db.prepare("SELECT m.anidb_id,MIN(m.start+m.offset),MIN(m.start),
+            MAX(m.end),MIN(m.offset),COUNT(*)
+        FROM episode_map m JOIN anime_series_map l ON l.anidb_id=m.anidb_id
+        WHERE l.imdb_id=?1 AND m.anidb_season>0 AND m.tvdb_season=?2 AND TRIM(m.map)=''
+        GROUP BY m.anidb_id ORDER BY MIN(m.start+m.offset),m.anidb_id")?;
+    let parts=stmt.query_map(params![imdb,base],|row|Ok((row.get::<_,String>(0)?,
+            row.get::<_,i64>(1)?,row.get::<_,i64>(2)?,row.get::<_,i64>(3)?,
+            row.get::<_,i64>(4)?,row.get::<_,i64>(5)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let Some(index)=parts.iter().position(|part|part.0==named) else{return Ok(None)};
+    let Some(target)=usize::try_from(local-1).ok().and_then(|step|parts.get(index+step))
+        else{return Ok(None)};
+    let (anidb_id,_,start,end,offset,rows)=target.clone();
+    // One plain row per part: a single offset decides the episode.
+    if rows!=1 || episode<start || (end>0 && episode>end){return Ok(None);}
+    let mapped=episode_crosswalk::Episode{imdb_id:imdb.to_owned(),season:base,
+        episode:episode+offset,anidb_id,anidb_episode:episode};
+    if !within_known_season_bounds(db,imdb,mapped.season,mapped.episode)?{return Ok(None);}
+    Ok(Some(LocalPartCoordinate{base_season:base,mapped}))
 }
 
 // One prepared query and at most two DISTINCT rows are enough to

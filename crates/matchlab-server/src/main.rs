@@ -7203,15 +7203,18 @@ mod tests {
                 'series','',1,0,'tvSeries');
             INSERT INTO titles VALUES('tt0300002','Ordinary Show','ordinaryshow',2010,
                 'series','',1,0,'tvSeries');
-            INSERT INTO seasons VALUES('tt0300001',4);
+            INSERT INTO seasons VALUES('tt0300001',5);
             INSERT INTO seasons VALUES('tt0300002',3);
             INSERT INTO season_episodes VALUES('tt0300001',1,12,12);
             INSERT INTO season_episodes VALUES('tt0300001',3,25,25);
             INSERT INTO season_episodes VALUES('tt0300001',4,12,12);
+            INSERT INTO season_episodes VALUES('tt0300001',5,24,24);
             INSERT INTO season_episodes VALUES('tt0300002',1,12,12);
             INSERT INTO anime_series_map VALUES('tt0300001','100','456',0);
             INSERT INTO anime_series_map VALUES('tt0300001','101','456',0);
             INSERT INTO anime_series_map VALUES('tt0300001','102','456',0);
+            INSERT INTO anime_series_map VALUES('tt0300001','103','456',0);
+            INSERT INTO anime_series_map VALUES('tt0300001','104','456',0);
             INSERT INTO anime_ids VALUES('tt0300001','anidb','100');
             INSERT INTO anidb_titles VALUES('100','Sword Art Online','swordartonline','main','en');
             INSERT INTO anidb_titles VALUES('101','Sword Art Online Alicization',
@@ -7220,6 +7223,12 @@ mod tests {
                 'swordartonlinealicizationpart2','main','en');
             INSERT INTO episode_map VALUES('100','456',1,1,1,12,0,'');
             INSERT INTO episode_map VALUES('101','456',1,3,1,12,0,'');
+            INSERT INTO anidb_titles VALUES('103','Sword Art Online Unital Ring',
+                'swordartonlineunitalring','main','en');
+            INSERT INTO anidb_titles VALUES('104','Sword Art Online Unital Ring (2027)',
+                'swordartonlineunitalring2027','main','en');
+            INSERT INTO episode_map VALUES('103','456',1,5,1,12,0,'');
+            INSERT INTO episode_map VALUES('104','456',1,5,1,0,12,'');
             INSERT INTO episode_map VALUES('102','456',1,4,1,12,0,'');").unwrap();
         tantivy_search::warmup(&db).unwrap();
         drop(db);
@@ -7251,6 +7260,15 @@ mod tests {
             "asid_start":"102:5","asid_end":"102:5"}));
         let first=find("Sword.Art.Online.Alicization.S01E05.mkv").selected.unwrap();
         assert_eq!(public_match_response(Some(first))["sid_start"],"tt0300001:3:5");
+        // Two parts in one IMDb season: Unital Ring S02 is the second part
+        // of IMDb S5 (its episodes 13-24), not a later IMDb season.
+        let second=find("Sword.Art.Online.Unital.Ring.S02E05.mkv").selected.unwrap();
+        assert_eq!(public_match_response(Some(second)),json!({
+            "sid_start":"tt0300001:5:17","sid_end":"tt0300001:5:17",
+            "asid_start":"104:5","asid_end":"104:5"}));
+        let none=find("Sword.Art.Online.Unital.Ring.S03E05.mkv").selected.unwrap();
+        assert!(public_match_response(Some(none))["asid_start"].is_null(),
+            "no third part: never guessed");
 
         // A numeric video filename gets its identity from two independently
         // parsed parent folders, but only when the combined name resolves to
