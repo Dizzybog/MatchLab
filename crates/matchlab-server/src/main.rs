@@ -2890,10 +2890,21 @@ fn diagnose_with_policy(
     // A complete longer title found in the ORIGINAL torrent is stronger
     // identity evidence than a short anime alias created by a truncated
     // parser title. Preserve this across all episode/anime selection paths.
-    let full_release_imdb=imdb.first().and_then(|candidate|
-        imdb_matcher::has_longer_title_evidence_in_release(
-            title,&req.title,&candidate.matched_title)
-            .then_some(candidate.imdb_id.clone()));
+    // A later candidate qualifies too when its title is the parsed title
+    // continued by the words that follow it in the release: "Fairy Tail:
+    // 100 Years Quest 001" parses as "Fairy Tail", which ranks the old
+    // series first. That candidate moves to the front; the rest keep their
+    // order.
+    let mut imdb=imdb;
+    let full_release_position=imdb.iter().enumerate().position(|(index,candidate)|
+        if index==0 {
+            imdb_matcher::has_longer_title_evidence_in_release(
+                title,&req.title,&candidate.matched_title)
+        }else{
+            imdb_matcher::release_continues_title_with(title,&req.title,&candidate.matched_title)
+        });
+    if let Some(position)=full_release_position{imdb[..=position].rotate_right(1);}
+    let full_release_imdb=full_release_position.map(|_|imdb[0].imdb_id.clone());
     // A same-name older OVA may win an exact IMDb alias even though it
     // cannot contain S02E37. Prefer verified episode evidence only when
     // there is no more specific complete IMDb title in the original release.

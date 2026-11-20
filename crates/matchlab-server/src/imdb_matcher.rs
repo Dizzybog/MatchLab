@@ -536,6 +536,20 @@ pub fn has_longer_title_evidence_in_release(
         ||release_is_imdb_title_suffix_fit(&content,&candidate).is_some()
 }
 
+/// `candidate` is the parsed title continued by the words that follow it
+/// in the release ("Fairy Tail" + "100 Years Quest"): a strictly longer
+/// title whose words begin with the parsed title's and occur contiguously
+/// in the release, starting where the parsed title does.
+pub fn release_continues_title_with(parsed_title:&str,raw_release:&str,candidate:&str)->bool{
+    let parsed=semantic_words(parsed_title);
+    let candidate=semantic_words(candidate);
+    if parsed.is_empty() || candidate.len()<=parsed.len() || !candidate.starts_with(&parsed){
+        return false;
+    }
+    let release=semantic_words(release_component_for_title(raw_release,parsed_title));
+    release.windows(candidate.len()).any(|window|window==candidate.as_slice())
+}
+
 /// On a torrent hierarchy, title relevance belongs to ONE meaningful
 /// path component, never the concatenation of folder names, episode
 /// coordinates, and the file extension. The parser already extracts fields
@@ -1345,6 +1359,21 @@ pub fn prefer_verified_episode_identity(
 }
 #[cfg(test)]
 mod tests{
+    #[test]
+    fn a_later_candidate_must_continue_the_parsed_title_in_the_release(){
+        let release="Fairy Tail: 100 Years Quest 001";
+        assert!(super::release_continues_title_with(
+            "Fairy Tail",release,"Fairy Tail: 100 Years Quest"));
+        // Not strictly longer, not a continuation, or not in the release.
+        assert!(!super::release_continues_title_with("Fairy Tail",release,"Fairy Tail"));
+        assert!(!super::release_continues_title_with(
+            "The Last of Us","The.Last.of.Us.S02.720p","Making of: The Last of Us"));
+        assert!(!super::release_continues_title_with(
+            "Breaking Bad","Breaking Bad Season 2","Season 2"));
+        assert!(!super::release_continues_title_with(
+            "Fairy Tail","Fairy Tail - 001","Fairy Tail: 100 Years Quest"));
+    }
+
 
     fn bilingual_fixture()->Connection{
         let db=Connection::open_in_memory().unwrap();
