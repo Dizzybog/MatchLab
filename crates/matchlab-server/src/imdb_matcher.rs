@@ -536,6 +536,20 @@ pub fn has_longer_title_evidence_in_release(
         ||release_is_imdb_title_suffix_fit(&content,&candidate).is_some()
 }
 
+/// `candidate` is the parsed title continued by the words that follow it
+/// in the release ("Fairy Tail" + "100 Years Quest"): a strictly longer
+/// title whose words begin with the parsed title's and occur contiguously
+/// in the release, starting where the parsed title does.
+pub fn release_continues_title_with(parsed_title:&str,raw_release:&str,candidate:&str)->bool{
+    let parsed=semantic_words(parsed_title);
+    let candidate=semantic_words(candidate);
+    if parsed.is_empty() || candidate.len()<=parsed.len() || !candidate.starts_with(&parsed){
+        return false;
+    }
+    let release=semantic_words(release_component_for_title(raw_release,parsed_title));
+    release.windows(candidate.len()).any(|window|window==candidate.as_slice())
+}
+
 /// On a torrent hierarchy, title relevance belongs to ONE meaningful
 /// path component, never the concatenation of folder names, episode
 /// coordinates, and the file extension. The parser already extracts fields
@@ -801,6 +815,35 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
             rows.push(candidate);
         }
     }
+    // Strict retrieval stays exact, but the parser can stop a title early on
+    // a number ("Fairy Tail: 100 Years Quest 001" → "Fairy Tail"). Only then
+    // look up the parsed title continued by the words that follow it in the
+    // release, each as a complete exact IMDb title.
+    if strict && !semantic_release.is_empty()
+        && let Some(start)=semantic_full_release.windows(semantic_release.len())
+            .position(|window|window==semantic_release.as_slice())
+        // Only the parser's stop on a number: the next word is numeric.
+        && semantic_full_release.get(start+semantic_release.len())
+            .is_some_and(|next|next.starts_with(|c:char|c.is_ascii_digit()))
+    {
+        let first_end=start+semantic_release.len();
+        let last_end=semantic_full_release.len().min(first_end+8);
+        for end in first_end+1..=last_end {
+            let continued=&semantic_full_release[start..end];
+            // The release's own year is not a title word ("Amanda (2018)").
+            if let Some(year)=year
+                && continued[semantic_release.len()..]==[year.to_string()]{continue;}
+            let joined=continued.join(" ");
+            let continued_key=clean_title(&joined);
+            let word_count=crate::title_normalization::title_word_count(&joined);
+            for row in exact(db,&continued_key)?{
+                if complete_title_alias(&row,&continued_key,continued,word_count){
+                    extended_title_matches.insert((row.imdb_id.clone(),row.title.clone()));
+                    rows.push(row);
+                }
+            }
+        }
+    }
     // The same recovery strategy also applies to suffixes of the source's
     // content title, not only to the parser's already-truncated title.
     // Never search in technical metadata, require complete word edges, and
@@ -981,7 +1024,11 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
             let exact_country=country_title_matches.contains(&alias_key);
             let exact_anime=strict_anime_ids.contains(&row.imdb_id);
             let exact_bilingual=bilingual_title_matches.contains(&alias_key);
-            if !exact_imdb && !exact_country && !exact_anime && !exact_bilingual {continue;}
+            // An exact IMDb title that continues the parsed title in the
+            // release (see above); only strict lookups fill this set here.
+            let exact_continuation=extended_title_matches.contains(&alias_key);
+            if !exact_imdb && !exact_country && !exact_anime && !exact_bilingual
+                && !exact_continuation {continue;}
             // Prefer a unique exact AniDB identity: a named cour/season may
             // point to the correct parent IMDb series instead of a same-name
             // OVA. If the AniDB alias resolves to several eligible IMDb IDs,
@@ -1345,6 +1392,21 @@ pub fn prefer_verified_episode_identity(
 }
 #[cfg(test)]
 mod tests{
+    #[test]
+    fn a_later_candidate_must_continue_the_parsed_title_in_the_release(){
+        let release="Fairy Tail: 100 Years Quest 001";
+        assert!(super::release_continues_title_with(
+            "Fairy Tail",release,"Fairy Tail: 100 Years Quest"));
+        // Not strictly longer, not a continuation, or not in the release.
+        assert!(!super::release_continues_title_with("Fairy Tail",release,"Fairy Tail"));
+        assert!(!super::release_continues_title_with(
+            "The Last of Us","The.Last.of.Us.S02.720p","Making of: The Last of Us"));
+        assert!(!super::release_continues_title_with(
+            "Breaking Bad","Breaking Bad Season 2","Season 2"));
+        assert!(!super::release_continues_title_with(
+            "Fairy Tail","Fairy Tail - 001","Fairy Tail: 100 Years Quest"));
+    }
+
 
     fn bilingual_fixture()->Connection{
         let db=Connection::open_in_memory().unwrap();

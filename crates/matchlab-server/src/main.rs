@@ -832,7 +832,10 @@ fn verified_unmapped_anime_absolute_episode(
             // the generic parser does not name the group.
             || parsed.get("anime_episode_candidate")
                 .and_then(|hint|hint.get("bracketed"))
-                .and_then(Value::as_bool)==Some(true))
+                .and_then(Value::as_bool)==Some(true)
+            // An anime S01 past season 1 read as absolute: the S01 marker
+            // itself says the number is an episode, not part of the title.
+            || parsed.get("anime_season_one_absolute").and_then(Value::as_bool)==Some(true))
     {return Ok(None);}
     let Some(hint)=parsed.get("anime_episode_candidate") else{return Ok(None)};
     if hint["numbering"]!="absolute" || hint["path_part"]==true {
@@ -1510,16 +1513,26 @@ fn reconcile_series_coordinates_inner(
     // ASID null; never invent an AniDB episode number.
     let inferred=matches!(winner["coordinate_fallback"].as_str(),
         Some("complete_imdb_absolute_anime"|"repaired_imdb_absolute_anime"));
-    let enriched=enrich_selected_anime_episode(db,winner);
-    // The enrichment is additive for an already final coordinate: missing
-    // crosswalk tables mean "no ASID", not a failed match.
-    if inferred {enriched?;}
+    // A coordinate counted with IMDb's season lengths names an IMDb season;
+    // the mapping's seasons are TVDB's. Read it through the mapping only
+    // where both split the earlier seasons alike (Gintama: TVDB S1-S4 are
+    // IMDb's 201-episode S1, so IMDb S4E35 is not TVDB S4E35).
+    if !inferred || season.is_none_or(|season|tvdb_seasons_before_match_imdb(
+        db,winner["imdb_id"].as_str().unwrap_or_default(),season).unwrap_or(false)) {
+        let enriched=enrich_selected_anime_episode(db,winner);
+        // The enrichment is additive for an already final coordinate:
+        // missing crosswalk tables mean "no ASID", not a failed match.
+        if inferred {enriched?;}
+    }
     // The mapping has no entry for this IMDb episode: count the AniDB
     // episode from the last mapped point before it.
     if let (Some(season),Some(episode))=(season,episode)
         && season>0
         && winner.pointer("/anime/asid").and_then(Value::as_str).is_none()
         && winner["anime_ids"].as_object().is_some_and(|ids|ids.contains_key("anidb"))
+        // Mapping points are TVDB coordinates: count from them only where
+        // TVDB and IMDb split the earlier seasons alike.
+        && tvdb_seasons_before_match_imdb(db,winner["imdb_id"].as_str().unwrap_or_default(),season)?
         && let Some((anidb,anime_episode))=anidb_from_imdb(
             db,winner["imdb_id"].as_str().unwrap_or_default(),season,episode)?
         && let Some(asid)=episode_crosswalk::canonical_asid(&anidb,anime_episode)
@@ -1630,6 +1643,28 @@ fn mapping_coverage(db:&Connection,anidb:&str,season:i64,anime_episode:Option<i6
         Ok(false)|Err(rusqlite::Error::SqliteFailure(..))=>MappingCoverage::OpenEnded,
         Err(error)=>return Err(error.to_string()),
     })
+}
+
+/// TVDB (the mapping) and IMDb split the seasons before `season` alike: no
+/// earlier season whose bounded mapping rows end at another episode than
+/// IMDb counts. Seasons either side does not know are no evidence.
+fn tvdb_seasons_before_match_imdb(db:&Connection,imdb:&str,season:i64)->Result<bool,String>{
+    let counts=imdb_episode_counts(db,imdb)?;
+    let rows=db.prepare("SELECT m.tvdb_season,MAX(m.end+m.offset) FROM episode_map m
+            JOIN (SELECT DISTINCT anidb_id FROM anime_series_map WHERE imdb_id=?1) l
+                ON l.anidb_id=m.anidb_id
+            WHERE m.anidb_season>0 AND m.tvdb_season BETWEEN 1 AND ?2-1 AND TRIM(m.map)=''
+            GROUP BY m.tvdb_season HAVING MIN(m.end)>0")
+        .and_then(|mut stmt|stmt.query_map(rusqlite::params![imdb,season],
+            |row|Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>());
+    let rows=match rows {
+        Ok(rows)=>rows,
+        Err(rusqlite::Error::SqliteFailure(..))=>return Ok(true),
+        Err(error)=>return Err(error.to_string()),
+    };
+    Ok(rows.iter().all(|(tvdb_season,last)|
+        counts.get(tvdb_season).is_none_or(|count|count==last)))
 }
 
 /// The mapping's season is not an IMDb season of this series at all: more
@@ -2253,6 +2288,8 @@ fn diagnose_with_policy(
         && let Some(parsed)=parsed_value.as_object_mut()
     {
         parsed.insert("seasons".into(),json!([]));
+        // S01 is no longer a local season of a named part either.
+        parsed.remove("anime_local_part_candidate");
         parsed.insert("anime_episode_candidate".into(),json!({
             "title":title,"episode":episode,"numbering":"absolute","verified":false}));
         parsed.insert("anime_season_one_absolute".into(),json!(true));
@@ -2853,10 +2890,21 @@ fn diagnose_with_policy(
     // A complete longer title found in the ORIGINAL torrent is stronger
     // identity evidence than a short anime alias created by a truncated
     // parser title. Preserve this across all episode/anime selection paths.
-    let full_release_imdb=imdb.first().and_then(|candidate|
-        imdb_matcher::has_longer_title_evidence_in_release(
-            title,&req.title,&candidate.matched_title)
-            .then_some(candidate.imdb_id.clone()));
+    // A later candidate qualifies too when its title is the parsed title
+    // continued by the words that follow it in the release: "Fairy Tail:
+    // 100 Years Quest 001" parses as "Fairy Tail", which ranks the old
+    // series first. That candidate moves to the front; the rest keep their
+    // order.
+    let mut imdb=imdb;
+    let full_release_position=imdb.iter().enumerate().position(|(index,candidate)|
+        if index==0 {
+            imdb_matcher::has_longer_title_evidence_in_release(
+                title,&req.title,&candidate.matched_title)
+        }else{
+            imdb_matcher::release_continues_title_with(title,&req.title,&candidate.matched_title)
+        });
+    if let Some(position)=full_release_position{imdb[..=position].rotate_right(1);}
+    let full_release_imdb=full_release_position.map(|_|imdb[0].imdb_id.clone());
     // A same-name older OVA may win an exact IMDb alias even though it
     // cannot contain S02E37. Prefer verified episode evidence only when
     // there is no more specific complete IMDb title in the original release.
@@ -7994,6 +8042,20 @@ mod tests {
             "matched_title":"Sousou no Frieren","anime_ids":{"anidb":"12345"},
             "season":1,"episode":null,"anime":null,"sid":"tt22248376"
         });
+        // "Sousou no Frieren S01E33 1080p WEB" has no release group, but its
+        // S01 past season 1 is read as absolute: the S01 marker is the same
+        // structural evidence as a fansub group.
+        let mut from_season_one=winner.clone();
+        let season_one=json!({
+            "title":"Sousou no Frieren","seasons":[],"episodes":[33],
+            "anime_season_one_absolute":true,
+            "anime_episode_candidate":{
+                "title":"Sousou no Frieren","episode":33,
+                "numbering":"absolute","verified":false}
+        });
+        reconcile_series_coordinates(&db,&mut from_season_one,season_one.as_object().unwrap())
+            .unwrap();
+        assert_eq!(from_season_one["sid"],"tt22248376:2:5");
         let parsed=json!({
             "title":"Sousou no Frieren","group":"Kirinashi",
             "seasons":[],"episodes":[33],
