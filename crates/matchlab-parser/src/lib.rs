@@ -3294,6 +3294,36 @@ fn release_without_leading_site_banners(raw:&str)->Option<&str>{
     removed.then_some(remaining)
 }
 
+/// "[51 of 74]" / "(3 из 12)": on a torrent title it is a pack of episodes
+/// 1-51 out of 74 (the parse-torrent-title rule), but a single video file is
+/// episode 51 of 74. Only a component with a video extension whose parsed
+/// episodes are exactly 1..=X from that marker is narrowed to X.
+static X_OF_Y_RE:Lazy<regex::Regex>=Lazy::new(||{
+    regex::Regex::new(r"(?i)[\[(][\s_]*(\d{1,4})[\s_]+(?:of|из|iz)[\s_]+(\d{1,4})[\s_]*[\])]")
+        .expect("valid regex")
+});
+const VIDEO_FILE_EXTENSIONS:&[&str]=&[
+    "mkv","mp4","m4v","avi","mov","wmv","webm","ts","m2ts","mpg","mpeg","flv","ogm","divx","rmvb","3gp",
+];
+
+fn single_file_x_of_y_episode(raw:&str,result:&mut Map<String,Value>){
+    let video_file=result.get("extension").and_then(Value::as_str)
+        .is_some_and(|ext|VIDEO_FILE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()));
+    if !video_file{return;}
+    let Some(caps)=X_OF_Y_RE.captures(raw) else{return};
+    let (Some(episode),Some(total))=(
+        caps.get(1).and_then(|m|m.as_str().parse::<i64>().ok()),
+        caps.get(2).and_then(|m|m.as_str().parse::<i64>().ok()))
+    else{return};
+    if episode<1 || episode>total{return;}
+    let expanded=result.get("episodes").and_then(Value::as_array).is_some_and(|episodes|
+        episodes.len()==episode as usize
+            && episodes.iter().enumerate().all(|(i,value)|value.as_i64()==Some(i as i64+1)));
+    if expanded{
+        result.insert("episodes".into(),json!([episode]));
+    }
+}
+
 // Parse each directory entry independently. The path-level merge below
 // never concatenates release names (which could confuse episode coordinates).
 fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<String,Value>,ParseError> {
@@ -3343,6 +3373,7 @@ fn parse_path_component(raw: &str, translate_languages: bool) -> Result<Map<Stri
     {
         result.insert("extension".into(),json!(extension.as_str().to_ascii_lowercase()));
     }
+    single_file_x_of_y_episode(raw,&mut result);
     // The generic handler engine can miss non-ASCII release resolutions
     // even after normalization. Preserve the explicit numeric marker.
     if original_raw.contains(['р', 'Р'])
