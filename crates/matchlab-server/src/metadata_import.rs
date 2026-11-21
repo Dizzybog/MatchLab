@@ -320,8 +320,10 @@ pub fn import_anidb_titles(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error
     let input:Box<dyn Read>=if source.extension().is_some_and(|e|e=="gz"){
         Box::new(flate2::read::GzDecoder::new(BufReader::new(file)))
     }else{Box::new(BufReader::new(file))};
+    // Text is not trimmed per event: quick-xml delivers "Sun &amp; Moon" as
+    // the text "Sun ", a reference and the text " Moon". Trimming each piece
+    // would give "Sun&Moon"; the whole title is trimmed once instead.
     let mut xml=Reader::from_reader(BufReader::new(input));
-    xml.config_mut().trim_text(true);
     let mut db=Connection::open(db_path)?;
     let tx=db.transaction()?;
     let mut insert=tx.prepare_cached("INSERT OR IGNORE INTO anidb_titles VALUES(?1,?2,?3,?4,?5)")?;
@@ -330,6 +332,7 @@ pub fn import_anidb_titles(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error
     let mut title_type=String::new();
     let mut language=String::new();
     let mut inside_title=false;
+    let mut title_text=String::new();
     let mut count=0u64;
     let started=Instant::now();
     tracing::info!(source="anidb_titles","metadata import started");
@@ -345,6 +348,7 @@ pub fn import_anidb_titles(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error
             },
             Event::Start(ref e) if e.name().as_ref()==b"title"=>{
                 inside_title=true;
+                title_text.clear();
                 title_type.clear();
                 language.clear();
                 for attr in e.attributes().flatten(){
@@ -354,17 +358,34 @@ pub fn import_anidb_titles(db_path:&Path,source:&Path)->Result<u64,Box<dyn Error
                     else if key==b"lang" || key==b"xml:lang"{language=value;}
                 }
             },
-            Event::Text(ref e) if inside_title && anime_id.parse::<u64>().unwrap_or(0)>0=>{
+            Event::Text(ref e) if inside_title=>{
                 let decoded=String::from_utf8_lossy(e.as_ref());
-                let title=quick_xml::escape::unescape(&decoded)?.into_owned();
-                let key=clean(&title);
-                if !key.is_empty() && matches!(title_type.as_str(),"main"|"official"|"syn"|"synonym"|"short"){
+                title_text.push_str(&quick_xml::escape::unescape(&decoded)?);
+            },
+            // "&amp;", "&#38;": one title, not two ("Pocket Monsters Sun &
+            // Moon" was stored as "Pocket Monsters Sun" and "Moon").
+            Event::GeneralRef(ref e) if inside_title=>{
+                if let Some(character)=e.resolve_char_ref()?{
+                    title_text.push(character);
+                }else{
+                    let name=String::from_utf8_lossy(e.as_ref()).into_owned();
+                    match quick_xml::escape::resolve_predefined_entity(&name) {
+                        Some(resolved)=>title_text.push_str(resolved),
+                        None=>{title_text.push('&');title_text.push_str(&name);title_text.push(';');},
+                    }
+                }
+            },
+            Event::End(ref e) if e.name().as_ref()==b"title"=>{
+                inside_title=false;
+                let title=title_text.trim();
+                let key=clean(title);
+                if anime_id.parse::<u64>().unwrap_or(0)>0 && !key.is_empty()
+                    && matches!(title_type.as_str(),"main"|"official"|"syn"|"synonym"|"short"){
                     insert.execute(params![anime_id,title,key,title_type,language])?;
                     count+=1;
                     if count%100_000==0{log_progress("anidb_titles",count,started);}
                 }
             },
-            Event::End(ref e) if e.name().as_ref()==b"title"=>inside_title=false,
             Event::End(ref e) if e.name().as_ref()==b"anime"=>anime_id.clear(),
             Event::Eof=>break,
             _=>{}
@@ -848,6 +869,42 @@ pub fn refresh_from_files_with_ratings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anidb_titles_with_character_references_stay_one_title(){
+        let folder=std::env::temp_dir().join(format!("matchlab-anidb-titles-{}-{}",
+            std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&folder).unwrap();
+        let path=folder.join("metadata.sqlite3");
+        Connection::open(&path).unwrap().execute_batch("
+            CREATE TABLE anidb_titles(anidb_id TEXT NOT NULL,title TEXT NOT NULL,
+                clean_title TEXT NOT NULL,title_type TEXT NOT NULL,language TEXT NOT NULL,
+                PRIMARY KEY(anidb_id,clean_title,title_type,language));
+            CREATE TABLE metadata_state(source TEXT PRIMARY KEY,updated_at TEXT NOT NULL,
+                row_count INTEGER NOT NULL);").unwrap();
+        let xml=folder.join("anime-titles.xml");
+        fs::write(&xml,r#"<?xml version="1.0" encoding="UTF-8"?>
+<animetitles>
+  <anime aid="12407">
+    <title xml:lang="x-jat" type="main">Pocket Monsters Sun &amp; Moon</title>
+    <title xml:lang="en" type="official">Pokemon the Series: Sun &#38; Moon</title>
+  </anime>
+  <anime aid="11585">
+    <title xml:lang="x-jat" type="main">Pocket Monsters XY&amp;Z</title>
+  </anime>
+</animetitles>"#).unwrap();
+        assert_eq!(import_anidb_titles(&path,&xml).unwrap(),3);
+        let db=Connection::open(&path).unwrap();
+        let titles=db.prepare("SELECT anidb_id,title FROM anidb_titles ORDER BY anidb_id,title").unwrap()
+            .query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(titles,vec![
+            ("11585".to_owned(),"Pocket Monsters XY&Z".to_owned()),
+            ("12407".to_owned(),"Pocket Monsters Sun & Moon".to_owned()),
+            ("12407".to_owned(),"Pokemon the Series: Sun & Moon".to_owned()),
+        ]);
+        fs::remove_dir_all(&folder).unwrap();
+    }
 
     #[test]
     fn generic_inference_resolves_absolute_and_season_local_anime_without_exceptions(){
