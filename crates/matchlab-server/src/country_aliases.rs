@@ -41,9 +41,25 @@ fn is_stop(token:&str)->bool{
 }
 /// A country marker explicitly present at the end of the release title,
 /// before technical tags. This is independent of the host's locale.
+#[cfg(test)]
 pub fn qualified(raw:&str)->Option<(&'static str,Vec<String>)>{
+    qualified_after_title(raw,"")
+}
+
+/// [`qualified`], starting where the parsed title begins in the release:
+/// a leading site banner ("www.Torrenting.com - The.Traitors.UK.S03E05")
+/// is not part of the country-qualified title.
+pub fn qualified_after_title(raw:&str,parsed_title:&str)->Option<(&'static str,Vec<String>)>{
     let normalized=raw.replace(['.','_','-']," ");
-    let words:Vec<_>=normalized.split_whitespace().collect();
+    let mut words:Vec<_>=normalized.split_whitespace().collect();
+    let title_normalized=parsed_title.replace(['.','_','-',':']," ");
+    let title_words:Vec<_>=title_normalized.split_whitespace().collect();
+    if !title_words.is_empty()
+        && let Some(start)=words.windows(title_words.len()).position(|window|
+            window.iter().zip(&title_words).all(|(a,b)|a.eq_ignore_ascii_case(b)))
+    {
+        words.drain(..start);
+    }
     let stop=words.iter().position(|w|is_stop(w)).unwrap_or(words.len());
     let title=words[..stop].join(" ");
     let title=title.trim();
@@ -86,6 +102,14 @@ mod tests{
         assert_eq!(qualified("Example.MULTI.1080p"),None);
         assert_eq!(qualified("Norway.S01E01"),None,
             "a country alone is not an explicit title qualifier");
+    }
+    #[test]fn a_leading_site_banner_is_not_part_of_the_title(){
+        let (code,aliases)=qualified_after_title(
+            "www.Torrenting.com - The.Traitors.UK.S03E05.1080p.AV1.10bit-MeGusta","The Traitors").unwrap();
+        assert_eq!(code,"UK");
+        assert!(aliases.contains(&"thetraitorsuk".to_string()),"{aliases:?}");
+        // Without the parsed title the banner still ends up in the key.
+        assert!(!candidates("www.Torrenting.com - The.Traitors.UK.S03E05").contains(&"thetraitorsuk".to_string()));
     }
     #[test]fn ignores_language_tags(){assert!(candidates("The Voice MULTI S03E01").is_empty());}
     #[test]fn nordic(){assert!(candidates("The Voice Norge S01E01").contains(&"thevoiceno".to_string()));}
