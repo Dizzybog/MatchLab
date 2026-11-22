@@ -730,7 +730,7 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     let mut country_title_matches=HashSet::new();
     // An explicit country qualifier is a complete-title equivalence, not a
     // partial match. It is valid in strict mode as well.
-    let country_qualified=crate::country_aliases::qualified(release_title);
+    let country_qualified=crate::country_aliases::qualified_after_title(release_title,title);
     let country=country_qualified.as_ref().map(|(code,_)|*code);
     let semantic_release=semantic_words(title);
     let source_word_count=crate::title_normalization::title_word_count(title);
