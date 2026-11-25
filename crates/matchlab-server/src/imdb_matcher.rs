@@ -1210,8 +1210,17 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
             .any(|(row,fit)|fit==best_fit&&row.ordering==0))
         .map(|(_,id,_)|id.clone()).collect();
     let anidb_primary=anidb_ids.iter().any(|id|primary_hits.contains(id));
-    let anidb_rank=|id:&str|i32::from(anidb_primary&&!anidb_ids.contains(id)
-        &&!primary_hits.contains(id));
+    // IMDb also carries stray secondary aliases: The Sopranos has a US
+    // "Family Guy" alias, and both series are from 1999. After year
+    // distance and region, a work that holds the title as its primary IMDb
+    // title outranks one that reaches it only through a secondary alias,
+    // before votes. Works that share a primary title keep the vote order.
+    let any_primary=!primary_hits.is_empty();
+    let anidb_rank=|id:&str|{
+        let primary=primary_hits.contains(id);
+        let anidb=i32::from(anidb_primary&&!anidb_ids.contains(id)&&!primary);
+        anidb*2+i32::from(any_primary&&!primary)
+    };
     let mut metadata=if ranked_groups.len()>4 {
         let ids=ranked_groups.iter().map(|(_,id,_)|id.clone()).collect::<Vec<_>>();
         Some(shortlist_metadata(db,&ids)?)
@@ -1666,11 +1675,49 @@ mod tests{
                 "Example.Monsters.Horizons.The.Series.S01.1080p",false,5,false,strict).unwrap().0;
             assert_eq!(hits[0].imdb_id,"tt0002023","strict={strict}: {hits:?}");
         }
-        // Without the AniDB evidence, votes still decide as before.
+        // Without the AniDB evidence, the primary title still decides.
         db.execute_batch("DELETE FROM anidb_titles WHERE anidb_id='17777'").unwrap();
         let hits=search_inner_mode(&db,"Example Monsters Horizons The Series",None,true,1,
             "Example.Monsters.Horizons.The.Series.S01.1080p",false,5,false,false).unwrap().0;
-        assert_eq!(hits[0].imdb_id,"tt0000197");
+        assert_eq!(hits[0].imdb_id,"tt0002023");
+    }
+
+    /// IMDb lists a stray US "Family Guy" alias on The Sopranos; both
+    /// series are from 1999 and The Sopranos has more votes. The work whose
+    /// primary title it is wins. Works sharing a primary title keep votes.
+    #[test]
+    fn primary_title_outranks_a_stray_secondary_alias_before_votes(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,
+                tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE seasons(imdb_id TEXT PRIMARY KEY,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
+            INSERT INTO titles VALUES
+                ('tt0000101','Example Family','examplefamily',1999,'series','',0,0,'tvSeries'),
+                ('tt0000101','Example Family','examplefamily',1999,'series','US',0,20,'tvSeries'),
+                ('tt0000202','The Other Crew','theothercrew',1999,'series','',0,0,'tvSeries'),
+                ('tt0000202','Example Family','examplefamily',1999,'series','US',0,28,'tvSeries'),
+                ('tt0000303','Shared Name','sharedname',2001,'series','',0,0,'tvSeries'),
+                ('tt0000404','Shared Name','sharedname',2001,'series','',0,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt0000101',27),('tt0000202',6),('tt0000303',2),('tt0000404',2);
+            INSERT INTO season_episodes VALUES('tt0000101',1,7,7),('tt0000202',1,13,13),
+                ('tt0000303',1,10,10),('tt0000404',1,10,10);
+            INSERT INTO imdb_ratings VALUES('tt0000101',393880),('tt0000202',606170),
+                ('tt0000303',100),('tt0000404',5000);").unwrap();
+        for strict in [false,true]{
+            let hits=search_inner_mode(&db,"Example Family",None,true,1,
+                "Example.Family.S01.1080p",false,5,false,strict).unwrap().0;
+            assert_eq!(hits[0].imdb_id,"tt0000101","strict={strict}: {hits:?}");
+            let hits=search_inner_mode(&db,"Shared Name",None,true,1,
+                "Shared.Name.S01.1080p",false,5,false,strict).unwrap().0;
+            assert_eq!(hits[0].imdb_id,"tt0000404","strict={strict}: {hits:?}");
+        }
     }
 
     #[test]
@@ -2230,7 +2277,7 @@ mod tests{
             CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
             CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
             INSERT INTO titles VALUES
-                ('ttold','Example','example',2018,'movie','US',1,4,'movie'),
+                ('ttold','Example','example',2018,'movie','US',1,0,'movie'),
                 ('ttnew','Example','example',2020,'movie','US',0,0,'movie');
             INSERT INTO imdb_ratings VALUES('ttold',100),('ttnew',100);")
             .unwrap();
@@ -2259,13 +2306,13 @@ mod tests{
             CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT);
             INSERT INTO titles VALUES
                 ('ttmovie','Same','same',2020,'movie','US',1,0,'movie'),
-                ('tttv','Same','same',2020,'movie','US',0,99,'tvMovie');
+                ('tttv','Same','same',2020,'movie','US',0,0,'tvMovie');
             INSERT INTO imdb_ratings VALUES('ttmovie',10),('tttv',10000);")
             .unwrap();
         let found=search(&db,"Same",Some(2020),false,0,
             "Same.2020",false,1).unwrap();
         assert_eq!(found[0].imdb_id,"tttv",
-            "media type, original flag and alias order are not ranking factors");
+            "media type and original flag are not ranking factors");
     }
     #[test]
     fn bleach_s01_uses_canonical_title_not_shortened_sequel_aka(){
