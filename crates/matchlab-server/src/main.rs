@@ -1088,7 +1088,10 @@ fn reconcile_series_coordinates(
     // (Solo Leveling S01E17 → S2E5), and anidb:episode is always given.
     // The ASID is the mapping's AniDB episode for the final coordinate, or
     // counted from the last mapped point.
-    let release=release_season_episode(winner,parsed);
+    // A separate IMDb series already carries the release's own season and
+    // episode; the parsed (part-translated) coordinate belongs to the parent.
+    let release=release_season_episode(winner,parsed)
+        .filter(|_|winner["coordinate_fallback"]!="separate_imdb_series");
     if let Some((release_season,release_episode))=release
         && !named_part_coordinate(db,winner,parsed)?
         && let imdb=winner["imdb_id"].as_str().unwrap_or_default().to_owned()
@@ -1309,6 +1312,45 @@ fn reconcile_series_coordinates_inner(
             mapped_season,winner.pointer("/anime/episode").and_then(Value::as_i64))?,
         _=>MappingCoverage::Bounded,
     };
+    // Maintainer rule: the mapping moved a release that names its own
+    // season to a season the IMDb work does not list (Bleach Thousand-Year
+    // Blood War S01E01 → Bleach S17). That season of the PARENT series is
+    // another episode (Bleach S01E01 is the 2004 premiere): never fall back
+    // to it. A separate IMDb series carrying the release's full title and
+    // its own season/episode is the work (Thousand-Year Blood War S01E01,
+    // or S02E01 that the named-part crosswalk resolved to S17E14).
+    // Otherwise the mapped season stays the reference.
+    let local_part=parsed.get("anime_local_part_verified");
+    let own=local_part.map(|part|(numbers(part.get("original_seasons")),numbers(part.get("original_episodes"))))
+        .filter(|(seasons,episodes)|seasons.len()==1&&episodes.len()==1)
+        .map(|(seasons,episodes)|(Some(seasons[0]),Some(episodes[0])))
+        .unwrap_or((parsed_season,parsed_episode));
+    if winner.pointer("/anime/asid").and_then(Value::as_str).is_some()
+        && let (Some(mapped_season),Some(_),(Some(own_season),Some(own_episode)))=(season,episode,own)
+        && mapped_season>0 && own_season>0 && own_season!=mapped_season
+        && imdb_lacks_remapped_season(db,winner["imdb_id"].as_str().unwrap_or_default(),
+            mapped_season,Some(own_season))?
+    {
+        let parent=winner["imdb_id"].as_str().unwrap_or_default().to_owned();
+        let anidb=winner.pointer("/anime/anidb_id").and_then(Value::as_str).unwrap_or_default().to_owned();
+        let title=parsed.get("title").and_then(Value::as_str).unwrap_or_default();
+        if let Some(separate)=separate_imdb_series(db,title,&parent,&anidb,own_season,own_episode)? {
+            winner["imdb_id"]=json!(separate);
+            winner["season"]=json!(own_season);
+            winner["episode"]=json!(own_episode);
+            winner["season_end"]=Value::Null;
+            winner["episode_end"]=Value::Null;
+            winner["sid"]=json!(format!("{separate}:{own_season}:{own_episode}"));
+            winner["coordinate_fallback"]=json!("separate_imdb_series");
+            return Ok(());
+        }
+        // The parent's own season/episode belongs to another AniDB work:
+        // keep the mapped season instead of falling back to it.
+        if episode_crosswalk::resolve_season(db,&parent,own_season,own_episode).ok().flatten()
+            .is_some_and(|found|found.anidb_id!=anidb){
+            return Ok(());
+        }
+    }
     if winner.pointer("/anime/asid").and_then(Value::as_str).is_some()
         && let (Some(mapped_season),Some(mapped_episode))=(season,episode)
         && mapped_season>0
@@ -1863,6 +1905,31 @@ fn starts_series(db:&Connection,anidb:&str)->Result<bool,String>{
             AND anidb_season>0 AND tvdb_season=1 AND start<=1)",[anidb],|row|row.get::<_,i64>(0)){
         Ok(found)=>Ok(found==1),
         Err(rusqlite::Error::SqliteFailure(..))=>Ok(false),
+        Err(error)=>Err(error.to_string()),
+    }
+}
+
+/// The IMDb series whose title is exactly the release title and that lists
+/// the release's season/episode: the matched work itself, or a separate
+/// series the mapping does not tie to another AniDB work (Hunter x Hunter
+/// 1999 for a 2011 release).
+fn separate_imdb_series(db:&Connection,title:&str,parent:&str,anidb:&str,
+    season:i64,episode:i64)->Result<Option<String>,String>{
+    let key=imdb_matcher::clean_title(title);
+    if key.is_empty()||!valid_sid_coordinate(season,episode){return Ok(None);}
+    // The matched work itself qualifies when it carries the full title
+    // (Pokémon Horizons: The Series S01E05 stays tt26692417:1:5).
+    let result=db.query_row("SELECT t.imdb_id FROM (SELECT DISTINCT imdb_id FROM titles
+            WHERE clean_title=?1 AND type IN ('tvSeries','tvMiniSeries')) t
+        JOIN season_episodes e ON e.imdb_id=t.imdb_id AND e.season=?4 AND e.max_episode>=?5
+        LEFT JOIN imdb_ratings r ON r.imdb_id=t.imdb_id
+        WHERE t.imdb_id=?2 OR NOT EXISTS (SELECT 1 FROM anime_series_map m
+            WHERE m.imdb_id=t.imdb_id AND m.anidb_id!=?3)
+        ORDER BY t.imdb_id=?2 DESC,COALESCE(r.num_votes,0) DESC,t.imdb_id LIMIT 1",
+        rusqlite::params![key,parent,anidb,season,episode],|row|row.get::<_,String>(0));
+    match result {
+        Ok(id)=>Ok(Some(id)),
+        Err(rusqlite::Error::QueryReturnedNoRows|rusqlite::Error::SqliteFailure(..))=>Ok(None),
         Err(error)=>Err(error.to_string()),
     }
 }
@@ -8784,6 +8851,57 @@ mod tests {
         assert_eq!(run("[Group] Kimetsu no Yaiba S05E01 [1080p].mkv",
             "tt9335498","18067",5,1,1)["sid_start"],"tt9335498:5:1",
             "a release naming a season the IMDb snapshot lacks is unchanged");
+    }
+
+    /// Maintainer rule: Bleach Thousand-Year Blood War is mapped to Bleach
+    /// S17, which IMDb does not list. The parent's own S01 is the 2004
+    /// series, so never fall back to it: a separate IMDb series with the
+    /// full title and the release's season/episode wins, else the mapped
+    /// season stays.
+    #[test]
+    fn mapped_season_missing_from_imdb_uses_separate_series_or_mapping(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE seasons(imdb_id TEXT PRIMARY KEY,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,
+                tvdb_season INTEGER,start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            INSERT INTO titles VALUES
+                ('tt0434665','Bleach','bleach',2004,'series','',0,0,'tvSeries'),
+                ('tt14986406','Bleach: Thousand-Year Blood War','bleachthousandyearbloodwar',
+                    2022,'series','',0,0,'tvSeries');
+            INSERT INTO imdb_ratings VALUES('tt0434665',100000),('tt14986406',100000);
+            INSERT INTO seasons VALUES('tt0434665',16),('tt14986406',2);
+            INSERT INTO season_episodes VALUES('tt0434665',1,20,20),('tt0434665',16,24,24),
+                ('tt14986406',1,13,13),('tt14986406',2,13,13);
+            INSERT INTO anime_series_map VALUES('tt0434665','2369','74796',1),
+                ('tt0434665','15449','74796',2);
+            INSERT INTO episode_map VALUES
+                ('2369','74796',1,1,1,20,0,''),
+                ('15449','74796',1,17,1,13,0,'');").unwrap();
+        let run=|title:&str,season:i64,episode:i64,anime_episode:i64|{
+            let parsed=matchlab_parser::parse_title(title,false).unwrap();
+            let mut winner=json!({"imdb_id":"tt0434665","category":"series",
+                "title":"Bleach","matched_title":"Bleach","anime_ids":{"anidb":"2369"},
+                "season":season,"episode":episode,
+                "anime":{"anidb_id":"15449","episode":anime_episode,
+                    "asid":format!("15449:{anime_episode}")},
+                "sid":format!("tt0434665:{season}:{episode}")});
+            reconcile_series_coordinates(&db,&mut winner,&parsed).unwrap();
+            public_match_response(Some(winner))
+        };
+        assert_eq!(run("[Gotei13]_Bleach_Thousand-Year_Blood_War_S01E01_(367)_2160P_x264_VOSTFR.mp4",
+            17,1,1),json!({"sid_start":"tt14986406:1:1","sid_end":"tt14986406:1:1",
+            "asid_start":"15449:1","asid_end":"15449:1"}));
+        // Without the separate series, the mapped S17 stays: never Bleach S01.
+        db.execute_batch("DELETE FROM titles WHERE imdb_id='tt14986406'").unwrap();
+        assert_eq!(run("Bleach.Thousand-Year.Blood.War.S01E05.1080p",17,5,5),json!({
+            "sid_start":"tt0434665:17:5","sid_end":"tt0434665:17:5",
+            "asid_start":"15449:5","asid_end":"15449:5"}));
     }
 
     #[test]
