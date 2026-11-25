@@ -1215,11 +1215,26 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
     // distance and region, a work that holds the title as its primary IMDb
     // title outranks one that reaches it only through a secondary alias,
     // before votes. Works that share a primary title keep the vote order.
-    let any_primary=!primary_hits.is_empty();
-    let anidb_rank=|id:&str|{
+    // A foreign-language alias of a far more popular work ("Perdidos" for
+    // Lost, "Merlina" for Wednesday) must not go to an obscure work with
+    // that primary title: the rule applies only while the best such work
+    // has at least a quarter of the alias holder's votes.
+    let needs_primary_votes=!primary_hits.is_empty()
+        &&ranked_groups.iter().any(|(_,id,_)|!primary_hits.contains(id));
+    let primary_votes:i64=if needs_primary_votes {
+        let mut best=0;
+        for id in &primary_hits {
+            let votes:i64=db.query_row("SELECT num_votes FROM imdb_ratings WHERE imdb_id=?1",[id],|r|r.get(0))
+                .optional().unwrap_or(None).unwrap_or(0);
+            best=best.max(votes);
+        }
+        best
+    }else{0};
+    let anidb_rank=|id:&str,votes:i64|{
         let primary=primary_hits.contains(id);
         let anidb=i32::from(anidb_primary&&!anidb_ids.contains(id)&&!primary);
-        anidb*2+i32::from(any_primary&&!primary)
+        let secondary=needs_primary_votes&&!primary&&votes<=primary_votes.saturating_mul(4);
+        anidb*2+i32::from(secondary)
     };
     let mut metadata=if ranked_groups.len()>4 {
         let ids=ranked_groups.iter().map(|(_,id,_)|id.clone()).collect::<Vec<_>>();
@@ -1235,7 +1250,7 @@ fn search_inner_mode(db:&Connection,title:&str,year:Option<i32>,series:bool,requ
         // Tantivy returns equally ranked aliases of one work in hash order.
         // Break the remaining tie by IMDb's own alias ordering and then the
         // text, so the published title is identical on every run.
-        let anidb=anidb_rank(&id);
+        let anidb=anidb_rank(&id,votes);
         let (best,fit)=aliases.into_iter().min_by(|(a,fit_a),(b,fit_b)|
             (*fit_a,rank_without_id(a,year,duplicates.contains(&a.clean),country,anidb,votes),
                 a.ordering,&a.title)
@@ -1675,16 +1690,18 @@ mod tests{
                 "Example.Monsters.Horizons.The.Series.S01.1080p",false,5,false,strict).unwrap().0;
             assert_eq!(hits[0].imdb_id,"tt0002023","strict={strict}: {hits:?}");
         }
-        // Without the AniDB evidence, the primary title still decides.
+        // Without the AniDB evidence, votes decide: the primary-title work
+        // has under a quarter of the alias holder's votes.
         db.execute_batch("DELETE FROM anidb_titles WHERE anidb_id='17777'").unwrap();
         let hits=search_inner_mode(&db,"Example Monsters Horizons The Series",None,true,1,
             "Example.Monsters.Horizons.The.Series.S01.1080p",false,5,false,false).unwrap().0;
-        assert_eq!(hits[0].imdb_id,"tt0002023");
+        assert_eq!(hits[0].imdb_id,"tt0000197");
     }
 
     /// IMDb lists a stray US "Family Guy" alias on The Sopranos; both
     /// series are from 1999 and The Sopranos has more votes. The work whose
-    /// primary title it is wins. Works sharing a primary title keep votes.
+    /// primary title it is wins while it has at least a quarter of the
+    /// competitor's votes. Works sharing a primary title keep votes.
     #[test]
     fn primary_title_outranks_a_stray_secondary_alias_before_votes(){
         let db=Connection::open_in_memory().unwrap();
@@ -1717,6 +1734,14 @@ mod tests{
             let hits=search_inner_mode(&db,"Shared Name",None,true,1,
                 "Shared.Name.S01.1080p",false,5,false,strict).unwrap().0;
             assert_eq!(hits[0].imdb_id,"tt0000404","strict={strict}: {hits:?}");
+        }
+        // A far more popular alias holder keeps the title: the primary-title
+        // work has under a quarter of its votes (foreign-language alias).
+        db.execute("UPDATE imdb_ratings SET num_votes=90000 WHERE imdb_id='tt0000101'",[]).unwrap();
+        for strict in [false,true]{
+            let hits=search_inner_mode(&db,"Example Family",None,true,1,
+                "Example.Family.S01.1080p",false,5,false,strict).unwrap().0;
+            assert_eq!(hits[0].imdb_id,"tt0000202","strict={strict}: {hits:?}");
         }
     }
 
