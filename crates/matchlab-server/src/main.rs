@@ -2272,6 +2272,46 @@ fn verified_unmarked_single_anime_imdb(
 /// same normalized release title is not itself evidence that two different
 /// works share an identity. This function only guards *new* AniDB enrichment
 /// and never invalidates a pre-existing verified IMDb crosswalk.
+/// An IMDb series the mapping does not link to AniDB can be the separate
+/// series of a part the mapping puts in a season its parent IMDb work does
+/// not list (Bleach: Thousand-Year Blood War, tt14986406, is Bleach S17).
+/// A direct title match then has no ASID, while the anime lane of the same
+/// release reaches the same SID through that part (#179). Add the ASID only
+/// when an exact AniDB title's episode maps there: the SID is never changed.
+fn separate_series_asid(db:&Connection,winner:&mut Value,
+    parsed:&serde_json::Map<String,Value>)->Result<(),String>{
+    if winner["category"]!="series" || winner.get("episode_range").is_some()
+        || winner.pointer("/anime/asid").and_then(Value::as_str).is_some(){return Ok(());}
+    let (Some(imdb),Some(1),Some(episode))=(winner["imdb_id"].as_str().map(str::to_owned),
+        winner["season"].as_i64(),winner["episode"].as_i64()) else{return Ok(())};
+    if !metadata_import::valid_imdb_id(&imdb)
+        || winner["sid"].as_str()!=Some(format!("{imdb}:1:{episode}").as_str()){return Ok(());}
+    let linked:i64=db.query_row("SELECT EXISTS(SELECT 1 FROM anime_series_map WHERE imdb_id=?1)
+        OR EXISTS(SELECT 1 FROM anime_ids WHERE group_id=?1 AND type='anidb')",[&imdb],|r|r.get(0))
+        .unwrap_or(1);
+    if linked!=0{return Ok(());}
+    let title=parsed.get("title").and_then(Value::as_str).unwrap_or_default();
+    let key=imdb_matcher::clean_title(title);
+    if key.len()<4{return Ok(());}
+    let mut found=None;
+    for id in tantivy_search::anidb_ids_exact(db,&key)? {
+        for mapped in episode_crosswalk::resolve_anidb(db,&id,episode).map_err(|e|e.to_string())? {
+            if mapped.anidb_id!=id || mapped.anidb_episode!=episode
+                || !imdb_lacks_remapped_season(db,&mapped.imdb_id,mapped.season,Some(1))?
+                || separate_imdb_series(db,title,&mapped.imdb_id,&id,1,episode)?.as_deref()
+                    !=Some(imdb.as_str()){continue;}
+            let Some(asid)=episode_crosswalk::canonical_asid(&id,episode) else{continue};
+            if found.as_ref().is_some_and(|(other,_)|other!=&id){return Ok(());}
+            found=Some((id.clone(),asid));
+        }
+    }
+    if let Some((anidb,asid))=found {
+        winner["anime"]=json!({"anidb_id":anidb,"episode":episode,"asid":asid});
+        winner["anidb_separate_series"]=json!(true);
+    }
+    Ok(())
+}
+
 fn anidb_related_to_selected_imdb(
     db:&Connection,winner:&Value,anidb_id:&str,
 )->Result<bool,String>{
@@ -3780,6 +3820,7 @@ fn diagnose_with_policy(
     if let Some(winner)=selected.as_mut(){
         reconcile_series_coordinates(&db,winner,parsed)?;
         official_numbering_after_prologue(&db,winner,parsed)?;
+        separate_series_asid(&db,winner,parsed)?;
     }
     let reason = if rejected_future_airdate&&selected.is_none(){
         "Release date predates the series without a verified episode airdate"
@@ -8851,6 +8892,52 @@ mod tests {
         assert_eq!(run("[Group] Kimetsu no Yaiba S05E01 [1080p].mkv",
             "tt9335498","18067",5,1,1)["sid_start"],"tt9335498:5:1",
             "a release naming a season the IMDb snapshot lacks is unchanged");
+    }
+
+    /// A direct title match on Bleach: Thousand-Year Blood War (tt14986406,
+    /// not linked to AniDB) gets the ASID that the anime lane proves for the
+    /// same SID; the SID is never changed and an unrelated series gets none.
+    #[test]
+    fn separate_series_title_match_gets_the_proven_asid(){
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE titles(imdb_id TEXT,title TEXT,clean_title TEXT,
+                year INTEGER,category TEXT,region TEXT,original INTEGER,ordering INTEGER,type TEXT);
+            CREATE TABLE imdb_ratings(imdb_id TEXT PRIMARY KEY,num_votes INTEGER);
+            CREATE TABLE seasons(imdb_id TEXT PRIMARY KEY,max_season INTEGER);
+            CREATE TABLE season_episodes(imdb_id TEXT,season INTEGER,episode_count INTEGER,max_episode INTEGER);
+            CREATE TABLE anime_series_map(imdb_id TEXT,anidb_id TEXT,tvdb_id TEXT,trakt_season INTEGER);
+            CREATE TABLE episode_map(anidb_id TEXT,tvdb_id TEXT,anidb_season INTEGER,
+                tvdb_season INTEGER,start INTEGER,end INTEGER,offset INTEGER,map TEXT);
+            CREATE TABLE anime_ids(group_id TEXT,type TEXT,value TEXT);
+            CREATE TABLE anidb_titles(anidb_id TEXT,title TEXT,clean_title TEXT,
+                title_type TEXT,language TEXT);
+            INSERT INTO titles VALUES
+                ('tt0434665','Bleach','bleach',2004,'series','',0,0,'tvSeries'),
+                ('tt14986406','Bleach: Thousand-Year Blood War','bleachthousandyearbloodwar',
+                    2022,'series','',0,0,'tvSeries'),
+                ('tt0000777','Other Show','othershow',2020,'series','',0,0,'tvSeries');
+            INSERT INTO seasons VALUES('tt0434665',16),('tt14986406',2),('tt0000777',1);
+            INSERT INTO season_episodes VALUES('tt0434665',1,20,20),('tt0434665',16,24,24),
+                ('tt14986406',1,13,13),('tt14986406',2,13,13),('tt0000777',1,10,10);
+            INSERT INTO anime_series_map VALUES('tt0434665','2369','74796',1),
+                ('tt0434665','15449','74796',2);
+            INSERT INTO episode_map VALUES
+                ('2369','74796',1,1,1,20,0,''),
+                ('15449','74796',1,17,1,13,0,'');
+            INSERT INTO anidb_titles VALUES
+                ('15449','Bleach: Thousand-Year Blood War','bleachthousandyearbloodwar','official','en'),
+                ('2369','Bleach','bleach','main','x-jat');").unwrap();
+        let run=|title:&str,imdb:&str|{
+            let parsed=matchlab_parser::parse_title(title,false).unwrap();
+            let mut winner=json!({"imdb_id":imdb,"category":"series","season":1,"episode":5,
+                "sid":format!("{imdb}:1:5")});
+            separate_series_asid(&db,&mut winner,&parsed).unwrap();
+            public_match_response(Some(winner))
+        };
+        assert_eq!(run("Bleach.Thousand-Year.Blood.War.S01E05.1080p","tt14986406"),json!({
+            "sid_start":"tt14986406:1:5","sid_end":"tt14986406:1:5",
+            "asid_start":"15449:5","asid_end":"15449:5"}));
+        assert_eq!(run("Other.Show.S01E05.1080p","tt0000777")["asid_start"],Value::Null);
     }
 
     /// Maintainer rule: Bleach Thousand-Year Blood War is mapped to Bleach
