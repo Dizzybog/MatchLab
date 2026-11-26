@@ -17,7 +17,7 @@
        TheTVDB aired order splits the same run into S01:1-51, S02:52-102,
        S03:103-154 and S04:155-170. The upstream open-ended S01 default
        falsely interprets AniDB episode 145 as IMDb S01E145.
-       Keep the separate 2026 sequel (AniDB 19433) untouched. -->
+       The separate 2026 sequel (AniDB 19433) follows as S05. -->
   <anime anidbid="12665" tvdbid="331753" defaulttvdbseason="a">
     <name>Black Clover (2017)</name>
     <mapping-list>
@@ -26,6 +26,18 @@
       <mapping anidbseason="1" tvdbseason="3" start="103" end="154" offset="-102"/>
       <mapping anidbseason="1" tvdbseason="4" start="155" end="170" offset="-154"/>
       <mapping anidbseason="0" tvdbseason="0" start="2" end="16" offset="9">;1-2;</mapping>
+    </mapping-list>
+  </anime>
+  <!-- Black Clover 2nd Season (2026) is AniDB 19433. Upstream maps it to
+       TheTVDB S02 of a 170-episode S01, but the split above already uses
+       S02 for episodes 52-102. In the same numbering (and on IMDb) the
+       sequel is S05 and continues the absolute numbering at 171:
+       "Black Clover S05E01" and "Black Clover - 171" are AniDB 19433
+       episode 1, not AniDB 12665 episode 171. -->
+  <anime anidbid="19433" tvdbid="331753" imdbid="tt7441658" defaulttvdbseason="a" episodeoffset="170">
+    <name>Black Clover 2nd Season</name>
+    <mapping-list>
+      <mapping anidbseason="1" tvdbseason="5" start="1" offset="0"/>
     </mapping-list>
   </anime>
 
