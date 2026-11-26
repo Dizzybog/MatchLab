@@ -100,11 +100,29 @@ pub fn refresh_from_urls(target:&Path,urls:&[String])->Result<(u64,u64,u64,u64),
     let names=["basics.tsv.gz","akas.tsv.gz","episodes.tsv.gz","ratings.tsv.gz","animeapi.tsv","animelists.xml","anidb.xml.gz"];
     let paths:Vec<PathBuf>=names.iter().map(|name|dir.join(name)).collect();
     for (url,path) in urls.iter().zip(paths.iter()){download(&client,url,path)?;}
-    super::metadata_import::refresh_from_files_with_ratings(target,&paths[0],&paths[1],&paths[2],&paths[4],&paths[5],&paths[6],Some(&paths[3]))
+    // AniBridge refines the Anime-Lists episode mappings. It is optional:
+    // a failed download keeps the refresh on Anime-Lists alone.
+    let anibridge={
+        let path=dir.join("anibridge.json");
+        match download(&client,ANIBRIDGE_URL,&path) {
+            Ok(())=>Some(path),
+            Err(error)=>{tracing::warn!(%error,"AniBridge download failed; using Anime-Lists only");None},
+        }
+    };
+    super::metadata_import::refresh_from_files_with_ratings(target,&paths[0],&paths[1],&paths[2],
+        &paths[4],&paths[5],&paths[6],Some(&paths[3]),anibridge.as_deref())
 }
+
+/// Daily AniBridge release (https://github.com/anibridge/anibridge-mappings).
+const ANIBRIDGE_URL:&str=
+    "https://github.com/anibridge/anibridge-mappings/releases/download/v3/mappings.min.json";
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn anibridge_source_is_https(){
+        assert!(ANIBRIDGE_URL.starts_with("https://"));
+    }
     #[test]
     fn defaults_enable_zero_config_startup(){
         let urls=configured_urls(None).unwrap();

@@ -2,7 +2,6 @@
 .github
 target
 data/*
-!data/anime-list.override.xml
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm

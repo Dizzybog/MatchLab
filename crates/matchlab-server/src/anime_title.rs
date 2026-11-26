@@ -531,15 +531,27 @@ fn resolve_part_within_season(
 // prove a unique positive season. No per-request BTreeSet or full
 // result materialization is necessary.
 fn unique_mapped_season(db:&Connection,id:&str)->rusqlite::Result<Option<i64>>{
-    let mut stmt=db.prepare("SELECT DISTINCT tvdb_season FROM episode_map
-        WHERE anidb_id=?1 AND anidb_season>0 AND tvdb_season>0 LIMIT 2")?;
-    let mut rows=stmt.query([id])?;
-    let first=match rows.next()?{
-        Some(row)=>row.get::<_,i64>(0)?,
-        None=>return Ok(None),
+    // A work in one season, or one that runs through consecutive seasons in
+    // episode order (Pokémon Advanced Generation: S6-S9): the season where
+    // it begins. Seasons out of episode order are ambiguous.
+    let seasons=match db.prepare("SELECT tvdb_season,MIN(start) FROM episode_map
+        WHERE anidb_id=?1 AND anidb_season>0 AND tvdb_season>0
+        GROUP BY tvdb_season ORDER BY MIN(start),tvdb_season") {
+        Ok(mut stmt)=>stmt.query_map([id],|row|Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?,
+        // A minimal table without episode ranges: one season only.
+        Err(rusqlite::Error::SqlInputError{..}|rusqlite::Error::SqliteFailure(..))=>{
+            let mut stmt=db.prepare("SELECT DISTINCT tvdb_season FROM episode_map
+                WHERE anidb_id=?1 AND anidb_season>0 AND tvdb_season>0 LIMIT 2")?;
+            let seasons=stmt.query_map([id],|row|row.get::<_,i64>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            return Ok((seasons.len()==1).then(||seasons[0]));
+        },
+        Err(error)=>return Err(error),
     };
-    if rows.next()?.is_some(){return Ok(None);}
-    Ok(Some(first))
+    let Some(&(first,_))=seasons.first() else{return Ok(None)};
+    let consecutive=seasons.windows(2).all(|pair|pair[1].0==pair[0].0+1 && pair[1].1>pair[0].1);
+    Ok(consecutive.then_some(first))
 }
 
 /// Infer an IMDb/TVDB season from a title-specific AniDB alias without an episode.

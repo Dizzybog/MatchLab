@@ -544,6 +544,21 @@ fn mapped_season_one_end(db:&Connection,imdb:&str)->Result<MappedSeasonOne,Strin
     Ok(MappedSeasonOne::Ends(rows.iter().map(|(end,offset)|end+offset).max().unwrap_or(0)))
 }
 
+/// Where a later AniDB work of an IMDb series starts in its absolute
+/// numbering (Bleach: Thousand-Year Blood War: 366), when that is unique.
+fn anidb_absolute_offset(db:&Connection,imdb:&str,anidb:&str)->Result<Option<i64>,String>{
+    let offsets=db.prepare("SELECT DISTINCT e.offset FROM episode_map e
+            JOIN anime_series_map l ON l.tvdb_id=e.tvdb_id AND l.imdb_id=?1
+            WHERE e.anidb_id=?2 AND e.anidb_season=1 AND e.tvdb_season=-1 AND e.offset>0")
+        .and_then(|mut stmt|stmt.query_map(rusqlite::params![imdb,anidb],|row|row.get::<_,i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>());
+    match offsets {
+        Ok(offsets) if offsets.len()==1=>Ok(Some(offsets[0])),
+        Ok(_)|Err(rusqlite::Error::SqliteFailure(..))=>Ok(None),
+        Err(error)=>Err(error.to_string()),
+    }
+}
+
 fn exact_anime_identity(db:&Connection,title:&str)->Result<Option<String>,String>{
     let key=imdb_matcher::clean_title(title);
     if key.is_empty()||(!strict_match_mode()&&key.len()<4){return Ok(None);}
@@ -876,10 +891,17 @@ fn verified_unmapped_anime_absolute_episode(
         // bounds. Preserve every valid AniDB/TVDB absolute mapping.
         // The impossible crosswalk can sit in any season: an open-ended
         // later part also accepts an absolute number it cannot contain.
+        let within_imdb=season_episode_end(db,imdb,existing.season)?
+            .is_none_or(|max|existing.episode<=max);
+        // The parser left the release without episodes ("Kaiju No. 8 - 13":
+        // the "No. 8" is ambiguous), so no crosswalk ran yet: a valid
+        // absolute mapping is the coordinate (Kaiju No. 8 - 13 → S2E1).
+        if !allow_invalid_absolute_crosswalk && within_imdb
+            && parsed.get("episodes").and_then(Value::as_array).is_none_or(Vec::is_empty)
+        {return Ok(Some((existing.season,existing.episode)));}
         if !allow_invalid_absolute_crosswalk
             || existing.anidb_episode!=absolute
-            || season_episode_end(db,imdb,existing.season)?
-                .is_none_or(|max|existing.episode<=max)
+            || within_imdb
             || winner["anime_ids"]["anidb"].as_str()!=Some(existing.anidb_id.as_str())
         {return Ok(None);}
         // Anime-Lists' open-ended defaulttvdbseason=1 is a weak, unbounded
@@ -1079,6 +1101,27 @@ fn reconcile_series_coordinates(
             None=>json!(imdb),
         };
         winner["coordinate_fallback"]=json!("named_anidb_work");
+    }
+    // A later named part with its own episode number ("Pocket Monsters XY
+    // - 10"): the number counts that part's episodes, which continue the
+    // series' absolute numbering at the part's offset. Accept only when
+    // the mapping gives that absolute episode to the named part itself.
+    if let (Some(absolute),Some(named))=(absolute,named.as_deref())
+        && winner.pointer("/anime/anidb_id").and_then(Value::as_str)!=Some(named)
+        && let imdb=winner["imdb_id"].as_str().unwrap_or_default().to_owned()
+        && let Some(offset)=anidb_absolute_offset(db,&imdb,named)?
+        && let Some(found)=episode_crosswalk::resolve_absolute(db,&imdb,absolute+offset)
+            .map_err(|e|e.to_string())?
+        && found.anidb_id==named && found.anidb_episode==absolute
+        && let Some(asid)=episode_crosswalk::canonical_asid(named,absolute)
+    {
+        winner["season"]=json!(found.season);
+        winner["episode"]=json!(found.episode);
+        winner["season_end"]=Value::Null;
+        winner["episode_end"]=Value::Null;
+        winner["sid"]=json!(format!("{imdb}:{}:{}",found.season,found.episode));
+        winner["anime"]=json!({"anidb_id":named,"episode":absolute,"asid":asid});
+        winner["coordinate_fallback"]=json!("named_part_local_episode");
     }
     reconcile_series_coordinates_inner(db,winner,parsed)?;
     // Maintainer rule: an anime release naming season 2 or later keeps that
@@ -1453,8 +1496,10 @@ fn reconcile_series_coordinates_inner(
                 winner["rejected_crosswalk"]=json!("anime_crosswalk_exceeds_known_imdb_bounds");
                 return Ok(());
             }
-            // An open-ended mapping row stays the reference (rule 1 aside).
-            if coverage==MappingCoverage::OpenEnded{return Ok(());}
+            // A mapping row that holds the coordinate stays the reference
+            // (rule 1 aside): bounded rows are stronger evidence than the
+            // open-ended defaults (Black Butler: Emerald Witch Arc, TVDB S5).
+            if matches!(coverage,MappingCoverage::OpenEnded|MappingCoverage::Bounded){return Ok(());}
             winner["season"]=Value::Null;
             winner["episode"]=Value::Null;
             winner["season_end"]=Value::Null;
@@ -3644,7 +3689,26 @@ fn diagnose_with_policy(
                 }
             }else if verified_anime_range_imdb.as_ref()
                 .is_none_or(|verified|verified==&imdb_id) {
-                let mut range=mapped_absolute_range(&db,&imdb_id,start,end)?;
+                // A batch of a later named part ("Kimetsu no Yaiba: Hashira
+                // Geiko Hen - 01-12") counts that part's own episodes: shift
+                // them by where the part starts in the absolute numbering.
+                let named_work=match verified_anidb_range.as_ref() {
+                    Some(item)=>Some(item.anidb_id.clone()),
+                    None=>anime_title::exact_alias_work(&db,&imdb_id,title).ok().flatten(),
+                };
+                let named_offset=match named_work.as_deref() {
+                    Some(work)=>anidb_absolute_offset(&db,&imdb_id,work)?,
+                    None=>None,
+                };
+                let mut range=match named_offset {
+                    Some(offset)=>{
+                        let mut shifted=mapped_absolute_range(&db,&imdb_id,start+offset,end+offset)?;
+                        shifted["absolute_start"]=json!(start);
+                        shifted["absolute_end"]=json!(end);
+                        shifted
+                    },
+                    None=>mapped_absolute_range(&db,&imdb_id,start,end)?,
+                };
                 // Several AniDB works of one IMDb series can each claim the
                 // same absolute numbers ("Baki The Grappler 1-3" vs. its
                 // second series). The verified exact alias names one part;
@@ -4483,11 +4547,9 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         }
         let count=metadata_import::import_animelists(
             std::path::Path::new(&args[2]),std::path::Path::new(&args[3]))?;
-        let overrides=metadata_import::apply_bundled_animelists_overrides(
-            std::path::Path::new(&args[2]))?;
         let inferred=metadata_import::infer_implicit_animelists_crosswalks(
             std::path::Path::new(&args[2]))?;
-        tracing::info!("Anime-Lists mappings imported: {count}, bundled overrides: {overrides}, generic inferred: {inferred}");
+        tracing::info!("Anime-Lists mappings imported: {count}, generic inferred: {inferred}");
         return Ok(());
     }
     if args.get(1).is_some_and(|arg|arg=="refresh-metadata") {
@@ -4561,7 +4623,7 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
                         "SELECT 1 FROM metadata_state WHERE source=?1",
                         [&expected_override],|row|row.get::<_,i64>(0)).is_ok();
                     if !current {
-                        tracing::info!("bundled Anime-Lists mappings changed; scheduling full metadata refresh");
+                        tracing::info!("episode-mapping pipeline changed; scheduling full metadata refresh");
                         return None;
                     }
                     value.parse::<u64>().ok()
