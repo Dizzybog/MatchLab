@@ -7,6 +7,7 @@
 | `MATCHLAB_DB` | `/data/metadata.sqlite3` | Local metadata database |
 | `MATCHLAB_HOST` | `0.0.0.0:8765` in Docker | API listener |
 | `MATCHLAB_METADATA_REFRESH_HOURS` | `168` | Metadata refresh interval |
+| `MATCHLAB_ANIBRIDGE_URL` | AniBridge daily release | HTTPS source of the AniBridge episode mappings applied at each metadata refresh; `off` disables it |
 | `MATCHLAB_MAX_CONCURRENT_MATCHES` | `4` | Maximum concurrent matches (example uses 2) |
 | `MATCHLAB_ML_SIZE_GB` | `0` | Single local ML control: 0=off, 1–128 GiB total budget; automatically scales examples, cache and queue |
 | `MATCHLAB_ML_LIVE_REGEX_ENABLED` | `true` | Optional emergency opt-out: train without activating new regex rules |

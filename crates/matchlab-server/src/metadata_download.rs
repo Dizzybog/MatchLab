@@ -100,11 +100,48 @@ pub fn refresh_from_urls(target:&Path,urls:&[String])->Result<(u64,u64,u64,u64),
     let names=["basics.tsv.gz","akas.tsv.gz","episodes.tsv.gz","ratings.tsv.gz","animeapi.tsv","animelists.xml","anidb.xml.gz"];
     let paths:Vec<PathBuf>=names.iter().map(|name|dir.join(name)).collect();
     for (url,path) in urls.iter().zip(paths.iter()){download(&client,url,path)?;}
-    super::metadata_import::refresh_from_files_with_ratings(target,&paths[0],&paths[1],&paths[2],&paths[4],&paths[5],&paths[6],Some(&paths[3]))
+    // AniBridge refines the Anime-Lists episode mappings. It is optional:
+    // a failed download keeps the refresh on Anime-Lists alone.
+    let anibridge=anibridge_url()?.and_then(|url|{
+        let path=dir.join("anibridge.json");
+        match download(&client,&url,&path) {
+            Ok(())=>Some(path),
+            Err(error)=>{tracing::warn!(%error,"AniBridge download failed; using Anime-Lists only");None},
+        }
+    });
+    super::metadata_import::refresh_from_files_with_ratings(target,&paths[0],&paths[1],&paths[2],
+        &paths[4],&paths[5],&paths[6],Some(&paths[3]),anibridge.as_deref())
+}
+
+/// Daily AniBridge release (https://github.com/anibridge/anibridge-mappings).
+/// MATCHLAB_ANIBRIDGE_URL overrides it; "off" disables it.
+const DEFAULT_ANIBRIDGE_URL:&str=
+    "https://github.com/anibridge/anibridge-mappings/releases/download/v3/mappings.min.json";
+pub fn anibridge_url()->Result<Option<String>,Box<dyn Error>>{
+    parse_anibridge_url(std::env::var("MATCHLAB_ANIBRIDGE_URL").ok().as_deref())
+}
+fn parse_anibridge_url(raw:Option<&str>)->Result<Option<String>,Box<dyn Error>>{
+    let url=match raw.map(str::trim) {
+        None|Some("")=>DEFAULT_ANIBRIDGE_URL,
+        Some(value) if value.eq_ignore_ascii_case("off")=>return Ok(None),
+        Some(value)=>value,
+    };
+    if reqwest::Url::parse(url)?.scheme()!="https" {
+        return Err("MATCHLAB_ANIBRIDGE_URL must use HTTPS".into());
+    }
+    Ok(Some(url.to_owned()))
 }
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn anibridge_source_defaults_on_and_can_be_disabled(){
+        assert_eq!(parse_anibridge_url(None).unwrap().as_deref(),Some(DEFAULT_ANIBRIDGE_URL));
+        assert_eq!(parse_anibridge_url(Some("off")).unwrap(),None);
+        assert!(parse_anibridge_url(Some("http://example.org/m.json")).is_err());
+        assert_eq!(parse_anibridge_url(Some("https://example.org/m.json")).unwrap().as_deref(),
+            Some("https://example.org/m.json"));
+    }
     #[test]
     fn defaults_enable_zero_config_startup(){
         let urls=configured_urls(None).unwrap();

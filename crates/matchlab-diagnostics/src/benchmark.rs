@@ -46,14 +46,15 @@ CREATE INDEX episode_by_tvdb ON episode_map(tvdb_id,tvdb_season,offset,start);
 CREATE INDEX episode_by_anidb_order ON episode_map(anidb_id,tvdb_season,offset,start);
 ";
 
-/// Salt the server appends to the bundled override (see
+/// Salt the server appends to its mapping-pipeline revision (see
 /// `bundled_animelists_override_marker`); a mismatch forces a refresh.
 pub const OVERRIDE_SALT: &str = "generic-implicit-animelists-v1";
+/// The server's `MAPPING_PIPELINE_REVISION`.
+pub const MAPPING_PIPELINE_REVISION: &str = "anibridge-mappings-v1";
 
-/// FNV-1a over the bundled anime-list override, as the server records it.
-pub fn override_marker(root: &Path) -> Result<String> {
-    let path = root.join("data/anime-list.override.xml");
-    let mut bytes = std::fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+/// FNV-1a over the mapping-pipeline revision, as the server records it.
+pub fn override_marker(_root: &Path) -> Result<String> {
+    let mut bytes = MAPPING_PIPELINE_REVISION.as_bytes().to_vec();
     bytes.extend_from_slice(OVERRIDE_SALT.as_bytes());
     let mut value: u64 = 0xCBF2_9CE4_8422_2325;
     for byte in bytes {
@@ -584,6 +585,8 @@ mod tests {
         let start = server.find("fn bundled_animelists_override_marker").expect("server marker function");
         let body = &server[start..start + 600];
         assert!(body.contains(&format!("b\"{OVERRIDE_SALT}\"")), "server override salt changed: {body}");
+        assert!(server.contains(&format!("MAPPING_PIPELINE_REVISION:&str=\"{MAPPING_PIPELINE_REVISION}\"")),
+            "server mapping pipeline revision changed");
         assert!(override_marker(&root).unwrap().starts_with("animelists_override_"));
     }
 

@@ -47,7 +47,7 @@ last usable generation if downloading or indexing fails.
 Tantivy handles all title and anime-alias discovery. SQLite maintains relational
 primary keys for IMDb IDs, season boundaries, anime identities, and episode mapping.
 The full metadata refresh stages the SQLite database without redundant search indexes,
-builds `episode_lookup_idx` immediately before Anime-Lists mapping overrides
+builds `episode_lookup_idx` immediately before the Anime-Lists and AniBridge imports
 (which need efficient lookup while they update rows), and creates
 `anime_series_by_anidb`, `episode_by_tvdb`, and `episode_by_anidb_order`
 **after bulk ingestion** but **before** `ANALYZE`, integrity checks, Tantivy
@@ -93,12 +93,12 @@ Only two safe patterns are eligible:
   open-ended `defaulttvdbseason=1` does **not** imply that the AniDB work
   owns all later seasons.
 
-Explicit and finite upstream Anime-Lists mappings, and curated corrections,
+Explicit and finite upstream Anime-Lists and AniBridge mappings
 have priority; incomplete or conflicting evidence is never silently completed.
 The inferred ranges use the ordinary bidirectional
 `/episode/resolve` and `/match` crosswalk, with no title-specific runtime
 conditions. This covers **any anime with sufficient evidence**, not just the
-test examples. Some source gaps still need curated overrides or stronger
+test examples. Some source gaps still need upstream fixes (AniBridge or Anime-Lists) or stronger
 upstream AniDB episode-count evidence. In particular, IMDb season counts
 **alone** cannot prove which AniDB work owns a particular season.
 
@@ -109,11 +109,44 @@ the generic inference revision, so upgrading an old image schedules a full
 refresh. The importer also applies these rules after a manual
 `import-animelists` command.
 
-## Bundled Anime-Lists mapping corrections
+## AniBridge episode mappings
 
-The production Rust binary includes `data/anime-list.override.xml`. Every full metadata refresh imports the regular Anime-Lists feed first, then **replaces** `episode_map` rows for each AniDB ID listed in the bundled exceptions. It also updates any existing `anime_series_map` TVDB family references while preserving IMDb links. The ordinary episode crosswalk uses the resulting combined SQLite tables; there is no runtime override lookup or extra network request.
+Every full metadata refresh also downloads the daily
+[AniBridge mappings](https://github.com/anibridge/anibridge-mappings)
+release (`mappings.min.json`, about 10 MB). AniBridge merges Anime-Lists with
+other sources, validates every range against TVDB and TMDB metadata and adds
+thousands of manual corrections. After the regular Anime-Lists import,
+MatchLab replaces the regular-episode `episode_map` rows of every AniDB work
+that AniBridge maps to TVDB with AniBridge's bounded ranges. Anime-Lists stays
+the source for IMDb links, specials and every work AniBridge does not map.
 
-The override import is part of the staged database build and happens before Tantivy index generation and publication. If it fails, the current working database is preserved. The staging snapshot records `animelists_override` and a versioned fingerprint marker in `metadata_state`. On startup, a missing or outdated marker triggers an immediate full metadata refresh, even if the ordinary seven-day schedule has not elapsed. The existing database remains usable until the new generation is ready. The same embedded corrections are used for custom `MATCHLAB_METADATA_URLS` sources. Updating the list requires a new image; the service then refreshes it automatically.
+From these ranges the importer derives, without any hand-maintained list:
+
+- **Absolute numbering of later works.** The works of one TVDB family are
+  ordered by their TVDB position; each later work starts after the AniDB
+  episode count of the works before it (Bleach: Thousand-Year Blood War
+  starts at 367, Pokémon Journeys at 1089). A TVDB gap larger than a few
+  episodes, an overlap or an open-ended work ends the chain. A work in a
+  TVDB season that the crosswalk splits into Trakt cours gets no offset.
+- **IMDb's finer season split.** When IMDb divides the same run into more
+  seasons than TVDB, with every TVDB season boundary also an IMDb boundary
+  and the same total, the ranges are rewritten into IMDb seasons (Black
+  Clover: TVDB S1 1-170 is IMDb S1-S4; the sequel is IMDb S5). A coarser
+  IMDb split, or a single IMDb season, keeps the TVDB seasons.
+- **Leading episodes of a work that begins its TVDB season** but whose
+  AniBridge range starts later (Pokémon Diamond and Pearl from episode 49).
+
+Contradictory AniBridge ranges (one AniDB episode in two places) keep the
+Anime-Lists rows. A failed AniBridge download leaves the refresh on
+Anime-Lists alone. Set `MATCHLAB_ANIBRIDGE_URL` to use another HTTPS copy, or
+to `off` to disable it. `matchlab-server import-anibridge <database.sqlite3>
+<mappings.json>` applies a local file to an existing database.
+
+The snapshot records `anibridge` and a versioned mapping-pipeline marker in
+`metadata_state`. On startup, a missing or outdated marker triggers an
+immediate full metadata refresh, even if the ordinary seven-day schedule has
+not elapsed. The existing database remains usable until the new generation
+is ready.
 
 ## Verification
 
