@@ -891,10 +891,17 @@ fn verified_unmapped_anime_absolute_episode(
         // bounds. Preserve every valid AniDB/TVDB absolute mapping.
         // The impossible crosswalk can sit in any season: an open-ended
         // later part also accepts an absolute number it cannot contain.
+        let within_imdb=season_episode_end(db,imdb,existing.season)?
+            .is_none_or(|max|existing.episode<=max);
+        // The parser left the release without episodes ("Kaiju No. 8 - 13":
+        // the "No. 8" is ambiguous), so no crosswalk ran yet: a valid
+        // absolute mapping is the coordinate (Kaiju No. 8 - 13 → S2E1).
+        if !allow_invalid_absolute_crosswalk && within_imdb
+            && parsed.get("episodes").and_then(Value::as_array).is_none_or(Vec::is_empty)
+        {return Ok(Some((existing.season,existing.episode)));}
         if !allow_invalid_absolute_crosswalk
             || existing.anidb_episode!=absolute
-            || season_episode_end(db,imdb,existing.season)?
-                .is_none_or(|max|existing.episode<=max)
+            || within_imdb
             || winner["anime_ids"]["anidb"].as_str()!=Some(existing.anidb_id.as_str())
         {return Ok(None);}
         // Anime-Lists' open-ended defaulttvdbseason=1 is a weak, unbounded
@@ -1489,8 +1496,10 @@ fn reconcile_series_coordinates_inner(
                 winner["rejected_crosswalk"]=json!("anime_crosswalk_exceeds_known_imdb_bounds");
                 return Ok(());
             }
-            // An open-ended mapping row stays the reference (rule 1 aside).
-            if coverage==MappingCoverage::OpenEnded{return Ok(());}
+            // A mapping row that holds the coordinate stays the reference
+            // (rule 1 aside): bounded rows are stronger evidence than the
+            // open-ended defaults (Black Butler: Emerald Witch Arc, TVDB S5).
+            if matches!(coverage,MappingCoverage::OpenEnded|MappingCoverage::Bounded){return Ok(());}
             winner["season"]=Value::Null;
             winner["episode"]=Value::Null;
             winner["season_end"]=Value::Null;

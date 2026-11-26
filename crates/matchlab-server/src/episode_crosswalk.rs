@@ -36,9 +36,15 @@ fn links(db:&Connection,imdb:&str)->rusqlite::Result<Vec<Link>>{
     // the original source-row order exactly.
     let mut seen:Option<std::collections::HashSet<(String,String)>>=None;
     for tvdb in tvdbs {
+        // An IMDb title that begins later in a TVDB family (Pokémon
+        // Horizons is TVDB S20 of Pokémon) owns no earlier TVDB season:
+        // works that end before its first season are other IMDb titles.
+        // Optional evidence: a minimal table without seasons keeps all.
+        let ends_before=ends_before_direct_seasons(db,&out,&tvdb).unwrap_or_default();
         let mut stmt=db.prepare("SELECT DISTINCT anidb_id FROM episode_map WHERE tvdb_id=?1")?;
         for id in stmt.query_map([&tvdb],|r|r.get::<_,String>(0))? {
             let id=id?;
+            if ends_before.contains(&id) {continue;}
             let exists=if out.len()<8{
                 out.iter().any(|l|l.anidb==id&&l.tvdb==tvdb)
             }else{
@@ -52,6 +58,23 @@ fn links(db:&Connection,imdb:&str)->rusqlite::Result<Vec<Link>>{
         }
     }
     Ok(out)
+}
+/// AniDB works of a TVDB family whose last TVDB season ends before the
+/// first season of the IMDb title's own (direct) works.
+fn ends_before_direct_seasons(db:&Connection,links:&[Link],tvdb:&str)
+    ->rusqlite::Result<BTreeSet<String>>{
+    let mut first:Option<i64>=None;
+    let mut stmt=db.prepare("SELECT MIN(tvdb_season) FROM episode_map
+        WHERE anidb_id=?1 AND tvdb_id=?2 AND anidb_season>0 AND tvdb_season>0")?;
+    for link in links.iter().filter(|l|l.direct&&l.tvdb==tvdb){
+        let season:Option<i64>=stmt.query_row(rusqlite::params![&link.anidb,tvdb],|r|r.get(0))?;
+        first=match (first,season){(Some(a),Some(b))=>Some(a.min(b)),(a,b)=>a.or(b)};
+    }
+    let Some(first)=first.filter(|season|*season>1) else{return Ok(BTreeSet::new())};
+    let mut stmt=db.prepare("SELECT anidb_id FROM episode_map WHERE tvdb_id=?1 AND anidb_season>0
+        GROUP BY anidb_id HAVING MAX(tvdb_season)>0 AND MAX(tvdb_season)<?2")?;
+    let rows=stmt.query_map(rusqlite::params![tvdb,first],|r|r.get::<_,String>(0))?;
+    rows.collect()
 }
 fn mappings(db:&Connection,links:&[Link],include_absolute:bool)->rusqlite::Result<Vec<Mapping>>{
     let mut out=vec![];
