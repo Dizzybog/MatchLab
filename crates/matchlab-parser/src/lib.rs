@@ -1812,7 +1812,8 @@ fn normalize_mixed_script_title(mut title: String) -> String {
     }
 
     // For mixed slash titles like "Русский / English", keep Latin segments.
-    if title.contains('/') {
+    // ".hack//Roots" is one title, not two alternatives.
+    if title.contains('/') && !title.contains("//") {
         let latin_parts: Vec<String> = title
             .split('/')
             .map(str::trim)
@@ -3766,6 +3767,13 @@ fn normalize_slash_dates(input:&str)->Cow<'_,str>{
     if day==input {Cow::Borrowed(input)} else{Cow::Owned(day.into_owned())}
 }
 
+/// ".hack" in ".hack//Roots": a leading dot and 2–12 ASCII letters.
+fn dot_prefixed_title_word(part:&str)->bool{
+    let word=part.rsplit(|c:char|c.is_whitespace()||matches!(c,']'|')'|'}'|'】')).next().unwrap_or_default();
+    word.strip_prefix('.').is_some_and(|rest|(2..=12).contains(&rest.len())
+        &&rest.bytes().all(|b|b.is_ascii_alphabetic()))
+}
+
 /// Separate *actual* path levels without splitting URLs or alternate
 /// title text inside complete release annotations. An advertising banner
 /// such as `【site https://example.org/download】` is one lexical field,
@@ -3791,9 +3799,20 @@ fn split_release_path(raw:&str)->Vec<&str>{
         components.clear();
         let mut ignored=unmatched.iter().peekable();
         let mut start=0;
+        let mut title_slash=None;
         for (index,ch) in raw.char_indices(){
             if ignored.peek().copied()==Some(&index){
                 ignored.next();
+                continue;
+            }
+            if title_slash==Some(index){continue;}
+            // ".hack//Roots", ".hack//SIGN": a dot-prefixed word joined by a
+            // double slash is part of the title, not a folder.
+            if ch=='/' && raw[index+1..].starts_with('/')
+                && dot_prefixed_title_word(&raw[start..index])
+                && raw[index+2..].chars().next().is_some_and(char::is_alphanumeric)
+            {
+                title_slash=Some(index+1);
                 continue;
             }
             match ch {
@@ -4997,6 +5016,20 @@ mod tests {
             assert!(parse_title(release,false).unwrap().get("date").is_none(),
                 "numeric directories and invalid dates are not broadcast dates: {release}");
         }
+    }
+
+    #[test]
+    fn dot_hack_double_slash_is_part_of_the_title(){
+        for (raw,title) in [(".hack//Roots S01E01 1080p","hack//Roots"),
+            ("[Group] .hack//Roots - 01 [1080p]","hack//Roots"),
+            (".hack//SIGN - 05","hack//SIGN")]{
+            let parsed=parse_title(raw,false).unwrap();
+            assert_eq!(parsed["title"],title,"{raw}");
+        }
+        // Real folders and URLs are unaffected.
+        assert_eq!(split_release_path("Show/Season 1/Show.S01E01.mkv").len(),3);
+        assert_eq!(split_release_path(".hidden/Show.S01E01.mkv").len(),2);
+        assert_eq!(split_release_path("Show//Show.S01E01.mkv").len(),2);
     }
 
     #[test]
