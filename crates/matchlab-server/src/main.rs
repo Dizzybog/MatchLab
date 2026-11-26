@@ -4552,17 +4552,6 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
         tracing::info!("Anime-Lists mappings imported: {count}, generic inferred: {inferred}");
         return Ok(());
     }
-    if args.get(1).is_some_and(|arg|arg=="import-anibridge") {
-        if args.len()!=4 {
-            return Err("usage: matchlab-server import-anibridge <database.sqlite3> <mappings.json>".into());
-        }
-        let rows=metadata_import::import_anibridge(
-            std::path::Path::new(&args[2]),std::path::Path::new(&args[3]))?;
-        let inferred=metadata_import::infer_implicit_animelists_crosswalks(
-            std::path::Path::new(&args[2]))?;
-        tracing::info!("AniBridge mappings imported: {rows}, generic inferred: {inferred}");
-        return Ok(());
-    }
     if args.get(1).is_some_and(|arg|arg=="refresh-metadata") {
         if args.len()!=9 {
             return Err("usage: matchlab-server refresh-metadata <database.sqlite3> <title.basics.tsv.gz> <title.akas.tsv.gz> <title.episode.tsv.gz> <animeapi.tsv> <anime-list.xml> <anime-titles.xml.gz>".into());

@@ -138,9 +138,7 @@ From these ranges the importer derives, without any hand-maintained list:
 
 Contradictory AniBridge ranges (one AniDB episode in two places) keep the
 Anime-Lists rows. A failed AniBridge download leaves the refresh on
-Anime-Lists alone. Set `MATCHLAB_ANIBRIDGE_URL` to use another HTTPS copy, or
-to `off` to disable it. `matchlab-server import-anibridge <database.sqlite3>
-<mappings.json>` applies a local file to an existing database.
+Anime-Lists alone.
 
 The snapshot records `anibridge` and a versioned mapping-pipeline marker in
 `metadata_state`. On startup, a missing or outdated marker triggers an
